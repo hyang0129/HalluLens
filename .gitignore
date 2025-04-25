@@ -1,0 +1,17 @@
+development
+
+data/wikirank/*.txt
+data/wiki_data/*.jsonl
+# data/wiki_data/*.txt
+data/wiki_data/.cache/*
+data/nonexistent_refusal
+scripts/data_download-full.sh
+
+__pycache__/
+data/longwiki
+data/nonsense_all
+data/precise_qa
+
+debug.ipynb
+
+output/*

@@ -1,0 +1,20 @@
+# general
+jsonlines
+pandas
+
+# dataset
+requests
+datasets
+gdown
+
+# lm inference
+vllm
+openai
+
+# longwiki
+segtok
+sentence-transformers==3.3.1
+
+# refusal
+ratelimit
+retry
