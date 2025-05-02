@@ -7,9 +7,14 @@ from vllm.outputs import RequestOutput
 from typing import Any, Dict
 from activations_logger import ActivationsLogger
 import hashlib
+import os
 
 class ActivationLoggingHook(RequestOutputHook):
-    def __init__(self, lmdb_path: str = "lmdb_data/activations.lmdb"):
+    def __init__(self, lmdb_path: str = None):
+        # Allow LMDB path to be set via environment variable for experiment parameterization
+        env_path = os.environ.get("ACTIVATION_LMDB_PATH")
+        if lmdb_path is None:
+            lmdb_path = env_path if env_path is not None else "lmdb_data/activations.lmdb"
         self.logger = ActivationsLogger(lmdb_path)
 
     def _prompt_hash(self, prompt: str) -> str:
