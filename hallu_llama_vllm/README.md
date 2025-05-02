@@ -16,16 +16,16 @@ This project provides a vLLM-based inference server for Llama 3.3 Instruct, logg
 
 ## Usage
 
-- Start the vLLM OpenAI-compatible server with activation logging:
-  ```bash
-  vllm serve --model meta-llama/Meta-Llama-3-8B-Instruct --openai-api --trust-remote-code --hook hallu_llama_vllm/logging_hook.py:ActivationLoggingHook
-  ```
-
-   you can set the path as well for where to save activations. 
-  ```
-   set ACTIVATION_LMDB_PATH=lmdb_data/exp1_activations.lmdb
-   vllm serve --model ... --openai-api --trust-remote-code --hook hallu_llama_vllm/logging_hook.py:ActivationLoggingHook
-  ```
+- Start the vLLM OpenAI-compatible server with activation logging (vLLM 0.8.x+):
+  1. Edit `llm_server_config.yaml` if you want to change the model or logging hook.
+  2. (Optional) Set the LMDB path for experiment separation:
+     ```bash
+     set ACTIVATION_LMDB_PATH=lmdb_data/exp1_activations.lmdb
+     ```
+  3. Launch the OpenAI-compatible server:
+     ```bash
+     vllm-api-server --config hallu_llama_vllm/llm_server_config.yaml
+     ```
   - This will launch a server at `http://localhost:8000/v1/completions` (OpenAI API protocol).
   - All activation logging will be handled transparently for each request.
 

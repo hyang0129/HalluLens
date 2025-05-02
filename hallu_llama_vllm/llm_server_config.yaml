@@ -1,0 +1,6 @@
+model: meta-llama/Meta-Llama-3-8B-Instruct
+trust_remote_code: true
+api_server: true
+hooks:
+  request_output:
+    - dotted_path: hallu_llama_vllm.logging_hook.ActivationLoggingHook
