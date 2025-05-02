@@ -1,6 +1,6 @@
 vllm==0.4.0
 transformers
-torch>=2.2.0
+torch>=2.1.2
 fastapi
 uvicorn
 lmdb
