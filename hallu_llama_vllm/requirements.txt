@@ -1,0 +1,7 @@
+vllm
+transformers
+torch>=2.2.0
+fastapi
+uvicorn
+lmdb
+pydantic
