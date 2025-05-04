@@ -55,6 +55,7 @@ class CompletionRequest(BaseModel):
     temperature: float = 0.7
     top_p: float = 0.95
     stop: Optional[List[str]] = None
+    lmdb_path: Optional[str] = None  # New optional field for custom LMDB path
 
 class Choice(BaseModel):
     text: str
@@ -99,12 +100,20 @@ async def completions(request: CompletionRequest):
     activations = hidden_states[-len(gen_ids):].cpu().numpy()
     # Log to LMDB
     entry_key = prompt_hash(request.prompt)
-    activation_logger.log_entry(entry_key, {
+    # Use custom LMDB path if provided and non-empty, else use default
+    logger_to_use = activation_logger
+    custom_logger = None
+    if hasattr(request, 'lmdb_path') and request.lmdb_path and request.lmdb_path.strip():
+        custom_logger = ActivationsLogger(lmdb_path=request.lmdb_path)
+        logger_to_use = custom_logger
+    logger_to_use.log_entry(entry_key, {
         "prompt": request.prompt,
         "response": response_text,
         "activations": activations,
         "model": model_name,
     })
+    if custom_logger is not None:
+        custom_logger.close()
     # Build OpenAI-compatible response
     import time
     return CompletionResponse(

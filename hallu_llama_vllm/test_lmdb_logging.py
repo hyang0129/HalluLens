@@ -15,7 +15,9 @@ def main():
     payload = {
         "model": "NousResearch/Nous-Hermes-2-Mistral-7B-DPO",  # Use public default model for test
         "prompt": prompt,
-        "max_tokens": 5
+        "max_tokens": 5,
+        # Uncomment below to test custom LMDB path logging
+        # "lmdb_path": "lmdb_data/test_activations.lmdb"
     }
     print(f"Sending request to {url} ...")
     response = requests.post(url, json=payload)

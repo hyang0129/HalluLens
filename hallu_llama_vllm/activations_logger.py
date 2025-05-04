@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 import os
 
 class ActivationsLogger:
-    def __init__(self, lmdb_path: str = "lmdb_data/activations_lmdb", map_size: int = 1 << 30):
+    def __init__(self, lmdb_path: str = "lmdb_data/activations.lmdb", map_size: int = 1 << 30):
         # Replace periods in the filename with underscores for compatibility
         base, filename = os.path.split(lmdb_path)
         filename = filename.replace('.', '_')
