@@ -13,8 +13,8 @@ from hallu_llama_vllm.activations_logger import ActivationsLogger
 from loguru import logger
 import uvicorn
 
-DEFAULT_MODEL = os.environ.get("LLM_MODEL", "mistralai/Mistral-7B-Instruct-v0.2")  # Public, well-known instruct model under 10B
 
+DEFAULT_MODEL =  "mistralai/Mistral-7B-Instruct-v0.2"
 app = FastAPI()
 activation_logger = ActivationsLogger()
 
