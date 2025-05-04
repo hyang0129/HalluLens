@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from activations_logger import ActivationsLogger
+from hallu_llama_vllm.activations_logger import ActivationsLogger
 import uvicorn
 
 MODEL_NAME = os.environ.get("LLAMA_MODEL_PATH", "meta-llama/Meta-Llama-3-8B-Instruct")
