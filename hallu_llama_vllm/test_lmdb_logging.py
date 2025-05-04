@@ -13,7 +13,7 @@ def main():
     # Send OpenAI API request to FastAPI server
     url = "http://localhost:8000/v1/completions"
     payload = {
-        "model": "tiiuae/falcon-rw-1b",  # Use public default model for test
+        "model": "mistralai/Mistral-7B-Instruct-v0.2",  # Use public default model for test
         "prompt": prompt,
         "max_tokens": 5
     }
