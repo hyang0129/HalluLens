@@ -16,7 +16,7 @@ import uvicorn
 DEFAULT_MODEL = os.environ.get("LLM_MODEL", "mistralai/Mistral-7B-Instruct-v0.2")  # Public, well-known instruct model under 10B
 
 app = FastAPI()
-logger = ActivationsLogger()
+activation_logger = ActivationsLogger()
 
 # Model cache to avoid reloading for each request
 _model_cache = {}
@@ -99,7 +99,7 @@ async def completions(request: CompletionRequest):
     activations = hidden_states[-len(gen_ids):].cpu().numpy()
     # Log to LMDB
     entry_key = prompt_hash(request.prompt)
-    logger.log_entry(entry_key, {
+    activation_logger.log_entry(entry_key, {
         "prompt": request.prompt,
         "response": response_text,
         "activations": activations,
@@ -116,7 +116,7 @@ async def completions(request: CompletionRequest):
 
 @app.on_event("shutdown")
 def shutdown_event():
-    logger.close()
+    activation_logger.close()
 
 if __name__ == "__main__":
     uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=False)
