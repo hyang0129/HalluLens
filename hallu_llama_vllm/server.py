@@ -24,11 +24,18 @@ _tokenizer_cache = {}
 def get_model_and_tokenizer(model_name: str):
     if model_name not in _model_cache:
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        # Use GPU if available, else CPU
+        if torch.cuda.is_available():
+            device_map = "cuda"
+            torch_dtype = torch.float16
+        else:
+            device_map = "cpu"
+            torch_dtype = torch.float32
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             trust_remote_code=True,
-            torch_dtype=torch.float16,
-            device_map="auto",
+            torch_dtype=torch_dtype,
+            device_map=device_map,
             output_hidden_states=True
         )
         _model_cache[model_name] = model
@@ -66,7 +73,9 @@ async def completions(request: CompletionRequest):
     # Allow override of model via request, else use default
     model_name = request.model if request.model else DEFAULT_MODEL
     model, tokenizer = get_model_and_tokenizer(model_name)
-    input_ids = tokenizer(request.prompt, return_tensors="pt").input_ids.to(model.device)
+    # Ensure input_ids are on the same device as the model
+    device = next(model.parameters()).device
+    input_ids = tokenizer(request.prompt, return_tensors="pt").input_ids.to(device)
     with torch.no_grad():
         outputs = model.generate(
             input_ids,
