@@ -12,13 +12,28 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from hallu_llama_vllm.activations_logger import ActivationsLogger
 import uvicorn
 
-MODEL_NAME = os.environ.get("LLAMA_MODEL_PATH", "meta-llama/Meta-Llama-3-8B-Instruct")
+DEFAULT_MODEL = os.environ.get("LLM_MODEL", "tiiuae/falcon-rw-1b")  # Public, lightweight model
 
 app = FastAPI()
 logger = ActivationsLogger()
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, trust_remote_code=True, torch_dtype=torch.float16, device_map="auto", output_hidden_states=True)
+# Model cache to avoid reloading for each request
+_model_cache = {}
+_tokenizer_cache = {}
+
+def get_model_and_tokenizer(model_name: str):
+    if model_name not in _model_cache:
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            trust_remote_code=True,
+            torch_dtype=torch.float16,
+            device_map="auto",
+            output_hidden_states=True
+        )
+        _model_cache[model_name] = model
+        _tokenizer_cache[model_name] = tokenizer
+    return _model_cache[model_name], _tokenizer_cache[model_name]
 
 # OpenAI API request/response models
 class CompletionRequest(BaseModel):
@@ -48,6 +63,9 @@ def prompt_hash(prompt: str) -> str:
 
 @app.post("/v1/completions", response_model=CompletionResponse)
 async def completions(request: CompletionRequest):
+    # Allow override of model via request, else use default
+    model_name = request.model if request.model else DEFAULT_MODEL
+    model, tokenizer = get_model_and_tokenizer(model_name)
     input_ids = tokenizer(request.prompt, return_tensors="pt").input_ids.to(model.device)
     with torch.no_grad():
         outputs = model.generate(
@@ -70,12 +88,14 @@ async def completions(request: CompletionRequest):
         "prompt": request.prompt,
         "response": response_text,
         "activations": activations,
+        "model": model_name,
     })
     # Build OpenAI-compatible response
+    import time
     return CompletionResponse(
         id=entry_key,
-        created=int(torch.time.time()),
-        model=request.model,
+        created=int(time.time()),
+        model=model_name,
         choices=[Choice(text=response_text, index=0)]
     )
 
