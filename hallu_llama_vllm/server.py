@@ -10,6 +10,7 @@ from typing import List, Dict, Any, Optional
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from hallu_llama_vllm.activations_logger import ActivationsLogger
+from loguru import logger
 import uvicorn
 
 DEFAULT_MODEL = os.environ.get("LLM_MODEL", "mistralai/Mistral-7B-Instruct-v0.2")  # Public, well-known instruct model under 10B
@@ -23,14 +24,17 @@ _tokenizer_cache = {}
 
 def get_model_and_tokenizer(model_name: str):
     if model_name not in _model_cache:
+        logger.info(f"Loading model: {model_name}")
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         # Use GPU if available, else CPU
         if torch.cuda.is_available():
             device_map = "cuda"
             torch_dtype = torch.float16
+            logger.info("Using GPU for inference.")
         else:
             device_map = "cpu"
             torch_dtype = torch.float32
+            logger.info("Using CPU for inference.")
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             trust_remote_code=True,
@@ -38,6 +42,7 @@ def get_model_and_tokenizer(model_name: str):
             device_map=device_map,
             output_hidden_states=True
         )
+        logger.success(f"Model loaded: {model_name} on {device_map}")
         _model_cache[model_name] = model
         _tokenizer_cache[model_name] = tokenizer
     return _model_cache[model_name], _tokenizer_cache[model_name]
@@ -70,6 +75,7 @@ def prompt_hash(prompt: str) -> str:
 
 @app.post("/v1/completions", response_model=CompletionResponse)
 async def completions(request: CompletionRequest):
+    logger.info(f"Received completion request for model: {request.model if request.model else DEFAULT_MODEL}")
     # Allow override of model via request, else use default
     model_name = request.model if request.model else DEFAULT_MODEL
     model, tokenizer = get_model_and_tokenizer(model_name)
