@@ -12,7 +12,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from hallu_llama_vllm.activations_logger import ActivationsLogger
 import uvicorn
 
-DEFAULT_MODEL = os.environ.get("LLM_MODEL", "tiiuae/falcon-rw-1b")  # Public, lightweight model
+DEFAULT_MODEL = os.environ.get("LLM_MODEL", "mistralai/Mistral-7B-Instruct-v0.2")  # Public, well-known instruct model under 10B
 
 app = FastAPI()
 logger = ActivationsLogger()
