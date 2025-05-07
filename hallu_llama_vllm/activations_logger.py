@@ -12,7 +12,6 @@ class ActivationsLogger:
     def __init__(self, lmdb_path: str = "lmdb_data/activations.lmdb", map_size: int = 1 << 30):
         # Replace periods in the filename with underscores for compatibility
         base, filename = os.path.split(lmdb_path)
-        filename = filename.replace('.', '_')
         safe_lmdb_path = os.path.join(base, filename)
         lmdb_dir = os.path.dirname(safe_lmdb_path)
         if lmdb_dir and not os.path.exists(lmdb_dir):
