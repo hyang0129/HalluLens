@@ -5,8 +5,8 @@ import sys
 import subprocess
 
 def main():
-    # Set LMDB path (optional, for experiment separation)
-    os.environ["ACTIVATION_LMDB_PATH"] = "lmdb_data/test_activations.lmdb"
+    # Specify LMDB path directly in the request payload
+    lmdb_path = "lmdb_data/test_activations.lmdb"
     prompt = "Hello, world!"
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
@@ -16,8 +16,7 @@ def main():
         "model": "NousResearch/Nous-Hermes-2-Mistral-7B-DPO",  # Use public default model for test
         "prompt": prompt,
         "max_tokens": 5,
-        # Uncomment below to test custom LMDB path logging
-        # "lmdb_path": "lmdb_data/test_activations.lmdb"
+        "lmdb_path": lmdb_path  # Specify custom LMDB path for logging
     }
     print(f"Sending request to {url} ...")
     response = requests.post(url, json=payload)
