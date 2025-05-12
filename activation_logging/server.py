@@ -485,7 +485,8 @@ async def completions(request: CompletionRequest):
             temperature=params['temperature'],
             top_p=params['top_p'],
             return_dict_in_generate=True,
-            output_hidden_states=True
+            output_hidden_states=True,
+            do_sample=True if params['temperature'] > 0.0 else False
         )
     
     # Get generated tokens (excluding prompt)
@@ -559,7 +560,8 @@ async def chat_completions(request: ChatCompletionRequest):
             temperature=params['temperature'],
             top_p=params['top_p'],
             return_dict_in_generate=True,
-            output_hidden_states=True
+            output_hidden_states=True,
+            do_sample=True if params['temperature'] > 0.0 else False
         )
     
     # Get generated tokens (excluding prompt)
