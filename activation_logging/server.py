@@ -236,6 +236,15 @@ def apply_overwrites(request_params):
     # Create a copy to avoid modifying the original
     params = request_params.copy()
     
+    # Set default values for None parameters
+    if params.get('temperature') is None:
+        params['temperature'] = 0.0
+        logger.info(f"Using default temperature: 0.0 for None value in request")
+        
+    if params.get('top_p') is None:
+        params['top_p'] = 1.0
+        logger.info(f"Using default top_p: 1.0 for None value in request")
+    
     # Apply temperature overwrite if set
     if overwrite_temperature is not None:
         original_temp = params.get('temperature')

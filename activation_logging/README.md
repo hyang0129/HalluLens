@@ -237,10 +237,25 @@ payload = {
     "top_p": null  # null/None disables the overwrite
 }
 response = requests.post(url, json=payload)
+
+# 8. Send a request with None values for temperature and top_p
+# The server will use defaults: temperature=0.0 (deterministic) and top_p=1.0 (no filtering)
+url = "http://localhost:8000/v1/completions"
+payload = {
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "prompt": "Explain what hallucination means in the context of LLMs",
+    "max_tokens": 100,
+    "temperature": None,  # Server will use default 0.0
+    "top_p": None  # Server will use default 1.0
+}
+response = requests.post(url, json=payload)
+print(response.json())
 ```
 
 ## Notes
 - Python 3.10+ recommended
 - Always run the server before attempting to use the inference utils
 - Do not commit large LMDB files or model weights to version control
-- Never commit your HuggingFace authentication token to version control 
+- Never commit your HuggingFace authentication token to version control
+- When temperature is set to None, a default value of 0.0 (deterministic) is used
+- When top_p is set to None, a default value of 1.0 (no filtering) is used 

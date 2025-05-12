@@ -7,4 +7,3 @@ lmdb>=1.4.1
 pydantic>=2.4.2
 numpy>=1.26.0
 requests>=2.31.0
-vllm>=0.2.5 

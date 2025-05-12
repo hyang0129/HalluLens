@@ -117,8 +117,12 @@ class PreciseQAEval:
         self.output_path = f'output/{TASKNAME}/{self.model_name}'
         self.test_df = pd.read_json(generations_file_path, lines=True)
        
-        self.abtention_evaluator = 'meta-llama/Llama-3.1-70B-Instruct'
-        self.halu_evaluator = 'meta-llama/Llama-3.1-70B-Instruct'
+        # self.abtention_evaluator = 'meta-llama/Llama-3.1-70B-Instruct'
+        # self.halu_evaluator = 'meta-llama/Llama-3.1-70B-Instruct'
+
+        self.abtention_evaluator = 'meta-llama/Llama-3.3-8B-Instruct'
+        self.halu_evaluator = 'meta-llama/Llama-3.3-8B-Instruct'
+
 
     def eval_abstention(self, evaluator):
         print("Start abstantion evaluation")

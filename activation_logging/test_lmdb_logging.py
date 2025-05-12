@@ -238,6 +238,7 @@ def test_overwrite_generation_params(
     """
     Test overwrite functionality for temperature and top_p parameters.
     First checks deterministic output with default settings, then tests creative output with high temperature/low top_p.
+    Also tests handling of None values for temperature and top_p.
     
     Args:
         host: Server host
@@ -258,6 +259,7 @@ def test_overwrite_generation_params(
         "success": True,
         "deterministic_results": [],
         "creative_results": [],
+        "none_param_results": [],
         "message": "",
         "details": {}
     }
@@ -336,7 +338,47 @@ def test_overwrite_generation_params(
     results["deterministic_results"] = deterministic_responses
     results["details"]["deterministic_identical"] = deterministic_identical
     
-    # Step 3: Set overwrite parameters for creative output
+    # Step 3: Test handling of None values for temperature and top_p
+    print("\nTesting handling of None values for temperature and top_p...")
+    try:
+        response = requests.post(
+            completions_url,
+            json={
+                "model": model,
+                "prompt": prompt,
+                "max_tokens": max_tokens,
+                "temperature": None,  # Server should use default 0.0
+                "top_p": None  # Server should use default 1.0
+            }
+        )
+        
+        if response.status_code != 200:
+            results["success"] = False
+            results["message"] = f"Failed to get completions with None parameters. Status code: {response.status_code}"
+            return results
+        
+        completion_result = response.json()
+        none_param_text = completion_result["choices"][0]["text"]
+        results["none_param_results"].append(none_param_text)
+        print(f"None parameters response: {none_param_text}")
+        
+        # Check if the response with None parameters matches the deterministic response
+        # (they should match since default values should be used)
+        if none_param_text == deterministic_responses[0]:
+            print("✓ None parameters test passed: Response matches deterministic output")
+            none_params_match = True
+        else:
+            print("✗ None parameters test failed: Response differs from deterministic output")
+            none_params_match = False
+        
+        results["details"]["none_params_match"] = none_params_match
+        
+    except Exception as e:
+        results["success"] = False
+        results["message"] = f"Error testing None parameters: {e}"
+        return results
+    
+    # Step 4: Set overwrite parameters for creative output
     try:
         # Set high temperature (more randomness)
         temp_response = requests.post(
@@ -364,7 +406,7 @@ def test_overwrite_generation_params(
         results["message"] = f"Error setting creative parameters: {e}"
         return results
     
-    # Step 4: Send request with creative settings (should override the request settings)
+    # Step 5: Send request with creative settings (should override the request settings)
     print("\nTesting creative output with overwritten parameters...")
     try:
         # Note: We're still sending temperature=0.0 and top_p=1.0 in the request,
@@ -405,7 +447,7 @@ def test_overwrite_generation_params(
     
     results["details"]["creative_different"] = creative_different
     
-    # Step 5: Clean up - reset parameters to default
+    # Step 6: Clean up - reset parameters to default
     try:
         # Reset temperature to None (use default)
         temp_response = requests.post(
@@ -424,13 +466,15 @@ def test_overwrite_generation_params(
         print(f"Warning: Error resetting parameters: {e}")
     
     # Final success determination
-    if deterministic_identical and creative_different:
+    if deterministic_identical and creative_different and none_params_match:
         results["success"] = True
-        results["message"] = "Generation parameter overwrite test successful: deterministic output consistent and creative output differs."
+        results["message"] = "Generation parameter overwrite test successful: deterministic output consistent, None parameters handled correctly, and creative output differs."
     else:
         results["success"] = False
         if not deterministic_identical:
             results["message"] = "Generation parameter test failed: deterministic output inconsistent."
+        elif not none_params_match:
+            results["message"] = "Generation parameter test failed: None parameters not handled correctly."
         elif not creative_different:
             results["message"] = "Generation parameter test failed: creative output did not differ from deterministic output."
     
