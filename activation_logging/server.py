@@ -26,20 +26,44 @@ _model_cache = {}
 _tokenizer_cache = {}
 
 
-def get_model_and_tokenizer(model_name: str):
+def get_model_and_tokenizer(model_name: str, auth_token: Optional[str] = None):
     """
     Get model and tokenizer, loading them if not already in cache.
     Uses GPU if available, otherwise falls back to CPU.
     
     Args:
         model_name: Name of the model to load (HuggingFace model ID)
+        auth_token: HuggingFace authentication token for gated models
         
     Returns:
         Tuple of (model, tokenizer)
     """
-    if model_name not in _model_cache:
+    cache_key = f"{model_name}_{auth_token if auth_token else 'public'}"
+    
+    if cache_key not in _model_cache:
         logger.info(f"Loading model: {model_name}")
-        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        
+        # Check if auth token is provided or in environment
+        use_auth_token = auth_token
+        if not use_auth_token and "HF_TOKEN" in os.environ:
+            use_auth_token = os.environ["HF_TOKEN"]
+            logger.info("Using HF_TOKEN from environment")
+        
+        tokenizer_kwargs = {
+            "trust_remote_code": True
+        }
+        
+        model_kwargs = {
+            "trust_remote_code": True,
+            "output_hidden_states": True
+        }
+        
+        # Add auth token if available
+        if use_auth_token:
+            tokenizer_kwargs["use_auth_token"] = use_auth_token
+            model_kwargs["use_auth_token"] = use_auth_token
+            logger.info("Using authentication token for model access")
+        
         # Use GPU if available, else CPU
         if torch.cuda.is_available():
             device_map = "cuda"
@@ -49,17 +73,21 @@ def get_model_and_tokenizer(model_name: str):
             device_map = "cpu"
             torch_dtype = torch.float32
             logger.info("Using CPU for inference.")
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            trust_remote_code=True,
-            torch_dtype=torch_dtype,
-            device_map=device_map,
-            output_hidden_states=True
-        )
+            
+        model_kwargs["torch_dtype"] = torch_dtype
+        model_kwargs["device_map"] = device_map
+        
+        # First load tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(model_name, **tokenizer_kwargs)
+        
+        # Then load model
+        model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+        
         logger.success(f"Model loaded: {model_name} on {device_map}")
-        _model_cache[model_name] = model
-        _tokenizer_cache[model_name] = tokenizer
-    return _model_cache[model_name], _tokenizer_cache[model_name]
+        _model_cache[cache_key] = model
+        _tokenizer_cache[cache_key] = tokenizer
+    
+    return _model_cache[cache_key], _tokenizer_cache[cache_key]
 
 
 # OpenAI API request/response models for compatibility
@@ -71,6 +99,7 @@ class CompletionRequest(BaseModel):
     top_p: float = 0.95
     stop: Optional[List[str]] = None
     lmdb_path: Optional[str] = None  # Optional field for custom LMDB path
+    auth_token: Optional[str] = None  # Optional field for HuggingFace auth token
 
 
 class Choice(BaseModel):
@@ -102,6 +131,7 @@ class ChatCompletionRequest(BaseModel):
     top_p: float = 0.95
     stop: Optional[List[str]] = None
     lmdb_path: Optional[str] = None  # Optional field for custom LMDB path
+    auth_token: Optional[str] = None  # Optional field for HuggingFace auth token
 
 
 class ChatCompletionChoice(BaseModel):
@@ -160,7 +190,7 @@ async def completions(request: CompletionRequest):
     logger.info(f"Received completion request for model: {request.model if request.model else DEFAULT_MODEL}")
     # Allow override of model via request, else use default
     model_name = request.model if request.model else DEFAULT_MODEL
-    model, tokenizer = get_model_and_tokenizer(model_name)
+    model, tokenizer = get_model_and_tokenizer(model_name, request.auth_token)
     # Ensure input_ids are on the same device as the model
     device = next(model.parameters()).device
     input_ids = tokenizer(request.prompt, return_tensors="pt").input_ids.to(device)
@@ -221,7 +251,7 @@ async def chat_completions(request: ChatCompletionRequest):
     
     # Allow override of model via request, else use default
     model_name = request.model if request.model else DEFAULT_MODEL
-    model, tokenizer = get_model_and_tokenizer(model_name)
+    model, tokenizer = get_model_and_tokenizer(model_name, request.auth_token)
     
     # Ensure input_ids are on the same device as the model
     device = next(model.parameters()).device

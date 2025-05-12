@@ -5,7 +5,7 @@ This script serves as a wrapper around vllm serve to ensure the activations
 are properly logged.
 
 Usage:
-  python -m activation_logging.vllm_serve [--model MODEL] [--host HOST] [--port PORT] [--lmdb_path LMDB_PATH]
+  python -m activation_logging.vllm_serve [--model MODEL] [--host HOST] [--port PORT] [--lmdb_path LMDB_PATH] [--auth_token AUTH_TOKEN]
 """
 
 import argparse
@@ -23,11 +23,16 @@ def main():
                         help="Port to run server on (default: 8000)")
     parser.add_argument("--lmdb_path", type=str, default="lmdb_data/activations.lmdb",
                         help="Path to LMDB for storing activations (default: lmdb_data/activations.lmdb)")
+    parser.add_argument("--auth_token", type=str, default=None,
+                        help="HuggingFace authentication token for accessing gated models")
     
     args = parser.parse_args()
     
-    # Set LMDB path environment variable for server configuration
+    # Set environment variables for server configuration
     os.environ["ACTIVATION_LMDB_PATH"] = args.lmdb_path
+    if args.auth_token:
+        os.environ["HF_TOKEN"] = args.auth_token
+        print(f"Using provided HuggingFace token for model access")
     
     print(f"Starting vLLM server with activation logging")
     print(f"Model: {args.model}")
@@ -57,6 +62,10 @@ def main():
         "--port", str(args.port),
         "--tensor-parallel-size", "1",  # Adjust based on GPU count
     ]
+    
+    # Add auth token to vllm command if provided
+    if args.auth_token:
+        vllm_cmd.extend(["--use-auth-token", args.auth_token])
     
     try:
         # Use uvicorn in development (comment this out to use vllm serve instead)
