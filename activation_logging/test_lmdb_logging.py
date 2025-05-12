@@ -15,7 +15,7 @@ from typing import Optional, Dict, Any, Union
 
 
 def run_test(
-    model: str = "NousResearch/Nous-Hermes-2-Mistral-7B-DPO",
+    model: str = "meta-llama/Llama-3.1-8B-Instruct",
     prompt: str = "Hello, world!",
     lmdb_path: str = "lmdb_data/test_activations.lmdb",
     auth_token: Optional[str] = None,
@@ -111,7 +111,7 @@ def run_test(
 def test_default_lmdb_path_change(
     host: str = "localhost",
     port: int = 8000,
-    model: str = "NousResearch/Nous-Hermes-2-Mistral-7B-DPO",
+    model: str = "meta-llama/Llama-3.1-8B-Instruct",
     prompt: str = "Testing default LMDB path functionality",
     max_tokens: int = 5
 ) -> Dict[str, Any]:
@@ -228,6 +228,216 @@ def test_default_lmdb_path_change(
     }
 
 
+def test_overwrite_generation_params(
+    host: str = "localhost",
+    port: int = 8000,
+    model: str = "meta-llama/Llama-3.1-8B-Instruct",
+    prompt: str = "Continue the sentence: 'The sky cracked open and out fell…'",
+    max_tokens: int = 20
+) -> Dict[str, Any]:
+    """
+    Test overwrite functionality for temperature and top_p parameters.
+    First checks deterministic output with default settings, then tests creative output with high temperature/low top_p.
+    
+    Args:
+        host: Server host
+        port: Server port
+        model: Model to use for testing
+        prompt: Prompt to test with
+        max_tokens: Maximum number of tokens to generate
+        
+    Returns:
+        Dictionary containing test results
+    """
+    base_url = f"http://{host}:{port}"
+    completions_url = f"{base_url}/v1/completions"
+    set_temp_url = f"{base_url}/set_overwrite_temperature"
+    set_top_p_url = f"{base_url}/set_overwrite_top_p"
+    
+    results = {
+        "success": True,
+        "deterministic_results": [],
+        "creative_results": [],
+        "message": "",
+        "details": {}
+    }
+    
+    print(f"Testing generation parameter overwrites")
+    print(f"Using prompt: '{prompt}'")
+    
+    # Step 1: Clear any existing overwrites to ensure deterministic results
+    try:
+        # Reset temperature to None (use default)
+        temp_response = requests.post(
+            set_temp_url,
+            json={"temperature": None}
+        )
+        if temp_response.status_code != 200:
+            results["success"] = False
+            results["message"] = f"Failed to reset temperature overwrite. Status code: {temp_response.status_code}"
+            return results
+        
+        # Reset top_p to None (use default)
+        top_p_response = requests.post(
+            set_top_p_url,
+            json={"top_p": None}
+        )
+        if top_p_response.status_code != 200:
+            results["success"] = False
+            results["message"] = f"Failed to reset top_p overwrite. Status code: {top_p_response.status_code}"
+            return results
+        
+        print("Reset generation parameters to defaults")
+    except Exception as e:
+        results["success"] = False
+        results["message"] = f"Error resetting generation parameters: {e}"
+        return results
+    
+    # Step 2: Send two requests with default settings to verify deterministic output
+    print("\nTesting deterministic output with default parameters...")
+    deterministic_responses = []
+    
+    for i in range(2):
+        try:
+            response = requests.post(
+                completions_url,
+                json={
+                    "model": model,
+                    "prompt": prompt,
+                    "max_tokens": max_tokens,
+                    "temperature": 0.0,  # Deterministic
+                    "top_p": 1.0  # No nucleus sampling restriction
+                }
+            )
+            
+            if response.status_code != 200:
+                results["success"] = False
+                results["message"] = f"Failed to get completions. Status code: {response.status_code}"
+                return results
+            
+            completion_result = response.json()
+            generated_text = completion_result["choices"][0]["text"]
+            deterministic_responses.append(generated_text)
+            print(f"Deterministic response {i+1}: {generated_text}")
+            
+        except Exception as e:
+            results["success"] = False
+            results["message"] = f"Error getting deterministic completions: {e}"
+            return results
+    
+    # Check if both deterministic responses are the same (they should be)
+    if deterministic_responses[0] == deterministic_responses[1]:
+        print("✓ Deterministic test passed: Both responses are identical")
+        deterministic_identical = True
+    else:
+        print("✗ Deterministic test failed: Responses differ despite deterministic settings")
+        deterministic_identical = False
+    
+    results["deterministic_results"] = deterministic_responses
+    results["details"]["deterministic_identical"] = deterministic_identical
+    
+    # Step 3: Set overwrite parameters for creative output
+    try:
+        # Set high temperature (more randomness)
+        temp_response = requests.post(
+            set_temp_url,
+            json={"temperature": 1.5}
+        )
+        if temp_response.status_code != 200:
+            results["success"] = False
+            results["message"] = f"Failed to set temperature overwrite. Status code: {temp_response.status_code}"
+            return results
+        
+        # Set low top_p (more focused on fewer tokens)
+        top_p_response = requests.post(
+            set_top_p_url,
+            json={"top_p": 0.5}
+        )
+        if top_p_response.status_code != 200:
+            results["success"] = False
+            results["message"] = f"Failed to set top_p overwrite. Status code: {top_p_response.status_code}"
+            return results
+        
+        print("\nSet creative parameters: temperature=1.5, top_p=0.5")
+    except Exception as e:
+        results["success"] = False
+        results["message"] = f"Error setting creative parameters: {e}"
+        return results
+    
+    # Step 4: Send request with creative settings (should override the request settings)
+    print("\nTesting creative output with overwritten parameters...")
+    try:
+        # Note: We're still sending temperature=0.0 and top_p=1.0 in the request,
+        # but the server should use the overwrite values instead
+        response = requests.post(
+            completions_url,
+            json={
+                "model": model,
+                "prompt": prompt,
+                "max_tokens": max_tokens,
+                "temperature": 0.0,  # This should be ignored due to global overwrite
+                "top_p": 1.0  # This should be ignored due to global overwrite
+            }
+        )
+        
+        if response.status_code != 200:
+            results["success"] = False
+            results["message"] = f"Failed to get creative completion. Status code: {response.status_code}"
+            return results
+        
+        completion_result = response.json()
+        creative_text = completion_result["choices"][0]["text"]
+        results["creative_results"].append(creative_text)
+        print(f"Creative response: {creative_text}")
+        
+    except Exception as e:
+        results["success"] = False
+        results["message"] = f"Error getting creative completion: {e}"
+        return results
+    
+    # Check if creative response differs from deterministic responses
+    if creative_text != deterministic_responses[0]:
+        print("✓ Creative test passed: Response differs from deterministic output")
+        creative_different = True
+    else:
+        print("✗ Creative test failed: Response is identical to deterministic output")
+        creative_different = False
+    
+    results["details"]["creative_different"] = creative_different
+    
+    # Step 5: Clean up - reset parameters to default
+    try:
+        # Reset temperature to None (use default)
+        temp_response = requests.post(
+            set_temp_url,
+            json={"temperature": None}
+        )
+        
+        # Reset top_p to None (use default)
+        top_p_response = requests.post(
+            set_top_p_url,
+            json={"top_p": None}
+        )
+        
+        print("\nReset generation parameters to defaults")
+    except Exception as e:
+        print(f"Warning: Error resetting parameters: {e}")
+    
+    # Final success determination
+    if deterministic_identical and creative_different:
+        results["success"] = True
+        results["message"] = "Generation parameter overwrite test successful: deterministic output consistent and creative output differs."
+    else:
+        results["success"] = False
+        if not deterministic_identical:
+            results["message"] = "Generation parameter test failed: deterministic output inconsistent."
+        elif not creative_different:
+            results["message"] = "Generation parameter test failed: creative output did not differ from deterministic output."
+    
+    print(f"\nTest result: {results['message']}")
+    return results
+
+
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description="Test the activation logging feature")
@@ -237,8 +447,8 @@ def parse_args():
     
     # Basic test
     basic_parser = subparsers.add_parser("basic", help="Run basic activation logging test")
-    basic_parser.add_argument("--model", type=str, default="NousResearch/Nous-Hermes-2-Mistral-7B-DPO",
-                      help="Model to test with (default: NousResearch/Nous-Hermes-2-Mistral-7B-DPO)")
+    basic_parser.add_argument("--model", type=str, default="meta-llama/Llama-3.1-8B-Instruct",
+                      help="Model to test with (default: meta-llama/Llama-3.1-8B-Instruct)")
     basic_parser.add_argument("--prompt", type=str, default="Hello, world!",
                       help="Prompt to test with (default: 'Hello, world!')")
     basic_parser.add_argument("--lmdb_path", type=str, default="lmdb_data/test_activations.lmdb",
@@ -256,12 +466,26 @@ def parse_args():
                      help="Server host (default: localhost)")
     path_parser.add_argument("--port", type=int, default=8000,
                      help="Server port (default: 8000)")
-    path_parser.add_argument("--model", type=str, default="NousResearch/Nous-Hermes-2-Mistral-7B-DPO",
-                     help="Model to test with (default: NousResearch/Nous-Hermes-2-Mistral-7B-DPO)")
+    path_parser.add_argument("--model", type=str, default="meta-llama/Llama-3.1-8B-Instruct",
+                     help="Model to test with (default: meta-llama/Llama-3.1-8B-Instruct)")
     path_parser.add_argument("--prompt", type=str, default="Testing default LMDB path functionality",
                      help="Prompt to test with (default: 'Testing default LMDB path functionality')")
     path_parser.add_argument("--max_tokens", type=int, default=5,
                      help="Maximum number of tokens to generate (default: 5)")
+    
+    # Generation parameters test
+    params_parser = subparsers.add_parser("params", help="Test temperature and top_p overwrites")
+    params_parser.add_argument("--host", type=str, default="localhost",
+                     help="Server host (default: localhost)")
+    params_parser.add_argument("--port", type=int, default=8000,
+                     help="Server port (default: 8000)")
+    params_parser.add_argument("--model", type=str, default="meta-llama/Llama-3.1-8B-Instruct",
+                     help="Model to test with (default: meta-llama/Llama-3.1-8B-Instruct)")
+    params_parser.add_argument("--prompt", type=str, 
+                     default="Continue the sentence: 'The sky cracked open and out fell…'",
+                     help="Prompt to test with")
+    params_parser.add_argument("--max_tokens", type=int, default=20,
+                     help="Maximum number of tokens to generate (default: 20)")
     
     return parser.parse_args()
 
@@ -273,7 +497,7 @@ def main():
     # Default to basic test if not specified
     if not args.test_type or args.test_type == "basic":
         result = run_test(
-            model=getattr(args, "model", "NousResearch/Nous-Hermes-2-Mistral-7B-DPO"),
+            model=getattr(args, "model", "meta-llama/Llama-3.1-8B-Instruct"),
             prompt=getattr(args, "prompt", "Hello, world!"),
             lmdb_path=getattr(args, "lmdb_path", "lmdb_data/test_activations.lmdb"),
             auth_token=getattr(args, "auth_token", None),
@@ -282,6 +506,14 @@ def main():
         )
     elif args.test_type == "path":
         result = test_default_lmdb_path_change(
+            host=args.host,
+            port=args.port,
+            model=args.model,
+            prompt=args.prompt,
+            max_tokens=args.max_tokens
+        )
+    elif args.test_type == "params":
+        result = test_overwrite_generation_params(
             host=args.host,
             port=args.port,
             model=args.model,

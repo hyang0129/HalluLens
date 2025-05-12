@@ -86,19 +86,22 @@ To verify that activation logging is working correctly from the command line:
 
 ```bash
 # Basic logging test
-python activation_logging/test_lmdb_logging.py basic --model mistralai/Mistral-7B-Instruct-v0.3
+python activation_logging/test_lmdb_logging.py basic --model meta-llama/Llama-3.1-8B-Instruct
 
-# With authentication token
-python activation_logging/test_lmdb_logging.py basic --model mistralai/Mistral-7B-Instruct-v0.3 --auth_token your_huggingface_token
+# With authentication token (needed for meta-llama models)
+python activation_logging/test_lmdb_logging.py basic --model meta-llama/Llama-3.1-8B-Instruct --auth_token your_huggingface_token
 
 # With custom max tokens
-python activation_logging/test_lmdb_logging.py basic --model mistralai/Mistral-7B-Instruct-v0.3 --max_tokens 20
+python activation_logging/test_lmdb_logging.py basic --model meta-llama/Llama-3.1-8B-Instruct --max_tokens 20
 
 # Test changing the default LMDB path
 python activation_logging/test_lmdb_logging.py path
 
 # Test changing the default LMDB path with custom max tokens
 python activation_logging/test_lmdb_logging.py path --max_tokens 30
+
+# Test temperature and top_p overwrite functionality
+python activation_logging/test_lmdb_logging.py params
 ```
 
 ### Programmatic Testing
@@ -106,7 +109,7 @@ python activation_logging/test_lmdb_logging.py path --max_tokens 30
 You can also use the testing module programmatically in your own Python scripts:
 
 ```python
-from activation_logging.test_lmdb_logging import run_test, test_default_lmdb_path_change
+from activation_logging.test_lmdb_logging import run_test, test_default_lmdb_path_change, test_overwrite_generation_params
 
 # Basic test with default parameters
 result = run_test()
@@ -114,7 +117,7 @@ print(f"Test success: {result['success']}")
 
 # Test with custom parameters
 custom_result = run_test(
-    model="mistralai/Mistral-7B-Instruct-v0.3",
+    model="meta-llama/Llama-3.1-8B-Instruct",
     prompt="Explain the concept of hallucination in LLMs.",
     lmdb_path="lmdb_data/my_custom_test.lmdb",
     auth_token="your_huggingface_token",
@@ -124,10 +127,8 @@ custom_result = run_test(
 
 if custom_result["success"]:
     print("Activation logging is working correctly!")
-    # Proceed with your benchmark or analysis
 else:
     print(f"Test failed: {custom_result['message']}")
-    # Handle the error
     
 # Test changing the default LMDB path
 path_result = test_default_lmdb_path_change()
@@ -138,12 +139,21 @@ if path_result["success"]:
 path_result_custom = test_default_lmdb_path_change(
     host="localhost",
     port=8000,
-    model="mistralai/Mistral-7B-Instruct-v0.3",
+    model="meta-llama/Llama-3.1-8B-Instruct",
     prompt="Testing LMDB path with custom prompt",
     max_tokens=30
 )
 if path_result_custom["success"]:
     print("Default LMDB path change with custom prompt works correctly!")
+
+# Test overwriting generation parameters (temperature and top_p)
+params_result = test_overwrite_generation_params()
+if params_result["success"]:
+    print("Generation parameter overwrites are working correctly!")
+    print(f"Deterministic responses: {params_result['deterministic_results']}")
+    print(f"Creative response: {params_result['creative_results'][0]}")
+else:
+    print(f"Test failed: {params_result['message']}")
 ```
 
 ## API Client Usage
@@ -156,7 +166,7 @@ import requests
 # 1. Standard completion request with custom LMDB path
 url = "http://localhost:8000/v1/completions"
 payload = {
-    "model": "mistralai/Mistral-7B-Instruct-v0.3",
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
     "prompt": "Hello, world!",
     "max_tokens": 100,
     "auth_token": "your_huggingface_token",  # Include this for gated models
@@ -178,13 +188,55 @@ print(response.json())
 # 3. Now requests without a specified path will use the new default path
 url = "http://localhost:8000/v1/completions"
 payload = {
-    "model": "mistralai/Mistral-7B-Instruct-v0.3",
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
     "prompt": "Using the new default path",
     "max_tokens": 100
 }
 
 response = requests.post(url, json=payload)
 print(response.json())
+
+# 4. Set overwrite temperature for all requests
+url = "http://localhost:8000/set_overwrite_temperature"
+payload = {
+    "temperature": 1.2  # Higher temperature means more randomness
+}
+response = requests.post(url, json=payload)
+print(response.json())
+
+# 5. Set overwrite top_p for all requests
+url = "http://localhost:8000/set_overwrite_top_p"
+payload = {
+    "top_p": 0.7  # Lower top_p focuses on more likely tokens
+}
+response = requests.post(url, json=payload)
+print(response.json())
+
+# 6. Send a request with different temperature/top_p values, which will be ignored
+# due to the global overwrites
+url = "http://localhost:8000/v1/completions"
+payload = {
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "prompt": "The sky cracked open and out fell...",
+    "max_tokens": 100,
+    "temperature": 0.5,  # This will be ignored, using 1.2 instead
+    "top_p": 0.9  # This will be ignored, using 0.7 instead
+}
+response = requests.post(url, json=payload)
+print(response.json())
+
+# 7. Disable overwrites to go back to per-request values
+url = "http://localhost:8000/set_overwrite_temperature"
+payload = {
+    "temperature": null  # null/None disables the overwrite
+}
+response = requests.post(url, json=payload)
+
+url = "http://localhost:8000/set_overwrite_top_p"
+payload = {
+    "top_p": null  # null/None disables the overwrite
+}
+response = requests.post(url, json=payload)
 ```
 
 ## Notes

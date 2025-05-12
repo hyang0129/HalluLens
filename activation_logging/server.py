@@ -31,6 +31,9 @@ overwrite_temperature = None
 # LMDB path overwrite variable, None means use the default path in activation_logger
 overwrite_lmdb_path = None
 
+# Top-p overwrite variable, None means use request top_p
+overwrite_top_p = None
+
 
 def get_model_and_tokenizer(model_name: str, auth_token: Optional[str] = None):
     """
@@ -193,6 +196,19 @@ class SetOverwriteTemperatureResponse(BaseModel):
     message: str
 
 
+class SetOverwriteTopPRequest(BaseModel):
+    """Request model for setting the overwrite top_p."""
+    top_p: Optional[float] = None
+
+
+class SetOverwriteTopPResponse(BaseModel):
+    """Response model for the set overwrite top_p endpoint."""
+    success: bool
+    previous_value: Optional[float]
+    current_value: Optional[float]
+    message: str
+
+
 # Utility for hashing prompt
 def prompt_hash(prompt: str) -> str:
     """
@@ -225,6 +241,12 @@ def apply_overwrites(request_params):
         original_temp = params.get('temperature')
         params['temperature'] = overwrite_temperature
         logger.info(f"Using overwrite temperature: {overwrite_temperature} instead of request temperature: {original_temp}")
+    
+    # Apply top_p overwrite if set
+    if overwrite_top_p is not None:
+        original_top_p = params.get('top_p')
+        params['top_p'] = overwrite_top_p
+        logger.info(f"Using overwrite top_p: {overwrite_top_p} instead of request top_p: {original_top_p}")
     
     # Apply LMDB path overwrite if set
     if overwrite_lmdb_path is not None:
@@ -388,6 +410,37 @@ async def set_overwrite_temperature(request: SetOverwriteTemperatureRequest):
     )
 
 
+@app.post("/set_overwrite_top_p", response_model=SetOverwriteTopPResponse)
+async def set_overwrite_top_p(request: SetOverwriteTopPRequest):
+    """
+    Set the overwrite top_p for all completion requests.
+    When set, this top_p will override any top_p in completion requests.
+    Set to None to use the top_p specified in each request.
+    
+    Args:
+        request: SetOverwriteTopPRequest with the new top_p value
+        
+    Returns:
+        SetOverwriteTopPResponse with status and top_p information
+    """
+    global overwrite_top_p
+    
+    # Store the previous value
+    previous_value = overwrite_top_p
+    
+    # Update the global variable
+    overwrite_top_p = request.top_p
+    
+    logger.info(f"Overwrite top_p changed from {previous_value} to {overwrite_top_p}")
+    
+    return SetOverwriteTopPResponse(
+        success=True,
+        previous_value=previous_value,
+        current_value=overwrite_top_p,
+        message="Overwrite top_p successfully updated"
+    )
+
+
 @app.post("/v1/completions", response_model=CompletionResponse)
 async def completions(request: CompletionRequest):
     """
@@ -408,6 +461,7 @@ async def completions(request: CompletionRequest):
     # Apply any overwrites to request parameters
     params = apply_overwrites({
         'temperature': request.temperature,
+        'top_p': request.top_p,
         'lmdb_path': request.lmdb_path if hasattr(request, 'lmdb_path') else None
     })
     
@@ -420,7 +474,7 @@ async def completions(request: CompletionRequest):
             input_ids,
             max_new_tokens=request.max_tokens,
             temperature=params['temperature'],
-            top_p=request.top_p,
+            top_p=params['top_p'],
             return_dict_in_generate=True,
             output_hidden_states=True
         )
@@ -481,6 +535,7 @@ async def chat_completions(request: ChatCompletionRequest):
     # Apply any overwrites to request parameters
     params = apply_overwrites({
         'temperature': request.temperature,
+        'top_p': request.top_p,
         'lmdb_path': request.lmdb_path if hasattr(request, 'lmdb_path') else None
     })
     
@@ -493,7 +548,7 @@ async def chat_completions(request: ChatCompletionRequest):
             input_ids,
             max_new_tokens=request.max_tokens,
             temperature=params['temperature'],
-            top_p=request.top_p,
+            top_p=params['top_p'],
             return_dict_in_generate=True,
             output_hidden_states=True
         )
