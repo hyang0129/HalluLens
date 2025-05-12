@@ -10,6 +10,7 @@ import requests
 import sys
 import subprocess
 import argparse
+import time
 from typing import Optional, Dict, Any, Union
 
 
@@ -105,19 +106,151 @@ def run_test(
     }
 
 
+def test_default_lmdb_path_change(
+    host: str = "localhost",
+    port: int = 8000,
+    model: str = "NousResearch/Nous-Hermes-2-Mistral-7B-DPO"
+) -> Dict[str, Any]:
+    """
+    Test changing the default LMDB path and verify activations are logged properly.
+    This test confirms we can change the default path without specifying a path in each request.
+
+    Args:
+        host: Server host
+        port: Server port
+        model: Model to use for testing
+
+    Returns:
+        Dictionary containing test results
+    """
+    base_url = f"http://{host}:{port}"
+    default_path_url = f"{base_url}/set_default_lmdb_path"
+    completions_url = f"{base_url}/v1/completions"
+    
+    # Create a unique test LMDB path
+    test_lmdb_path = f"lmdb_data/test_default_path_{int(time.time())}.lmdb"
+    
+    print(f"Testing default LMDB path change functionality")
+    print(f"Setting default LMDB path to: {test_lmdb_path}")
+    
+    # 1. Change the default LMDB path
+    try:
+        response = requests.post(
+            default_path_url, 
+            json={"lmdb_path": test_lmdb_path}
+        )
+        
+        if response.status_code != 200:
+            return {
+                "success": False,
+                "message": f"Failed to change default LMDB path. Status code: {response.status_code}",
+                "response": response.json() if response.headers.get("content-type") == "application/json" else None
+            }
+        
+        path_change_result = response.json()
+        print(f"Default LMDB path change result: {path_change_result}")
+        
+        if not path_change_result.get("success", False):
+            return {
+                "success": False,
+                "message": f"Server reported failure changing default LMDB path: {path_change_result.get('message')}",
+                "response": path_change_result
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Error changing default LMDB path: {e}",
+            "error": str(e)
+        }
+    
+    # 2. Now send a completion request WITHOUT specifying an LMDB path
+    # It should use the default path we just set
+    prompt = f"Testing default LMDB path at {test_lmdb_path}"
+    prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    
+    try:
+        # Send request without lmdb_path in payload
+        response = requests.post(
+            completions_url,
+            json={
+                "model": model,
+                "prompt": prompt,
+                "max_tokens": 5
+            }
+        )
+        
+        if response.status_code != 200:
+            return {
+                "success": False,
+                "message": f"Failed to get completions. Status code: {response.status_code}",
+                "response": response.json() if response.headers.get("content-type") == "application/json" else None
+            }
+        
+        completions_result = response.json()
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Error getting completions: {e}",
+            "error": str(e)
+        }
+    
+    # 3. Check that the activations were logged to the new default path
+    print(f"\nChecking for activations in new default LMDB path: {test_lmdb_path}")
+    result = subprocess.run(
+        [sys.executable, "activation_logging/test_check_lmdb.py", prompt_hash, test_lmdb_path], 
+        capture_output=True, 
+        text=True
+    )
+    
+    print(result.stdout)
+    
+    # Determine test success
+    success = result.returncode == 0
+    message = (
+        "Default LMDB path change test successful. Activations are being properly logged to the new path." 
+        if success 
+        else "Default LMDB path change test failed: No activation found in the new path."
+    )
+    print(message)
+    
+    return {
+        "success": success,
+        "path_change_response": path_change_result,
+        "completions_response": completions_result,
+        "prompt_hash": prompt_hash,
+        "lmdb_result": result.stdout,
+        "message": message
+    }
+
+
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description="Test the activation logging feature")
-    parser.add_argument("--model", type=str, default="NousResearch/Nous-Hermes-2-Mistral-7B-DPO",
+    
+    # Add subparsers for different test types
+    subparsers = parser.add_subparsers(dest="test_type", help="Type of test to run")
+    
+    # Basic test
+    basic_parser = subparsers.add_parser("basic", help="Run basic activation logging test")
+    basic_parser.add_argument("--model", type=str, default="NousResearch/Nous-Hermes-2-Mistral-7B-DPO",
                       help="Model to test with (default: NousResearch/Nous-Hermes-2-Mistral-7B-DPO)")
-    parser.add_argument("--prompt", type=str, default="Hello, world!",
+    basic_parser.add_argument("--prompt", type=str, default="Hello, world!",
                       help="Prompt to test with (default: 'Hello, world!')")
-    parser.add_argument("--lmdb_path", type=str, default="lmdb_data/test_activations.lmdb",
+    basic_parser.add_argument("--lmdb_path", type=str, default="lmdb_data/test_activations.lmdb",
                       help="Path to LMDB for storing activations (default: lmdb_data/test_activations.lmdb)")
-    parser.add_argument("--auth_token", type=str, default=None,
+    basic_parser.add_argument("--auth_token", type=str, default=None,
                       help="HuggingFace authentication token for accessing gated models")
-    parser.add_argument("--server_url", type=str, default="http://localhost:8000/v1/completions",
+    basic_parser.add_argument("--server_url", type=str, default="http://localhost:8000/v1/completions",
                       help="URL of the inference server (default: http://localhost:8000/v1/completions)")
+    
+    # Default path change test
+    path_parser = subparsers.add_parser("path", help="Test changing default LMDB path")
+    path_parser.add_argument("--host", type=str, default="localhost",
+                     help="Server host (default: localhost)")
+    path_parser.add_argument("--port", type=int, default=8000,
+                     help="Server port (default: 8000)")
+    path_parser.add_argument("--model", type=str, default="NousResearch/Nous-Hermes-2-Mistral-7B-DPO",
+                     help="Model to test with (default: NousResearch/Nous-Hermes-2-Mistral-7B-DPO)")
     
     return parser.parse_args()
 
@@ -126,14 +259,24 @@ def main():
     """Main entry point when script is run from command line"""
     args = parse_args()
     
-    # Run the test with command line arguments
-    result = run_test(
-        model=args.model,
-        prompt=args.prompt,
-        lmdb_path=args.lmdb_path,
-        auth_token=args.auth_token,
-        server_url=args.server_url
-    )
+    # Default to basic test if not specified
+    if not args.test_type or args.test_type == "basic":
+        result = run_test(
+            model=getattr(args, "model", "NousResearch/Nous-Hermes-2-Mistral-7B-DPO"),
+            prompt=getattr(args, "prompt", "Hello, world!"),
+            lmdb_path=getattr(args, "lmdb_path", "lmdb_data/test_activations.lmdb"),
+            auth_token=getattr(args, "auth_token", None),
+            server_url=getattr(args, "server_url", "http://localhost:8000/v1/completions")
+        )
+    elif args.test_type == "path":
+        result = test_default_lmdb_path_change(
+            host=args.host,
+            port=args.port,
+            model=args.model
+        )
+    else:
+        print(f"Unknown test type: {args.test_type}")
+        sys.exit(1)
     
     # Exit with appropriate status code
     sys.exit(0 if result["success"] else 1)

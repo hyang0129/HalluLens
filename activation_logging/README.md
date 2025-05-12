@@ -85,11 +85,14 @@ python tasks/refusal_test/nonsense_mixed_entities.py --do_inference --do_eval --
 To verify that activation logging is working correctly from the command line:
 
 ```bash
-# For open models
-python activation_logging/test_lmdb_logging.py
+# Basic logging test
+python activation_logging/test_lmdb_logging.py basic --model mistralai/Mistral-7B-Instruct-v0.3
 
-# For gated models requiring authentication
-python activation_logging/test_lmdb_logging.py --model mistralai/Mistral-7B-Instruct-v0.2 --auth_token your_huggingface_token
+# With authentication token
+python activation_logging/test_lmdb_logging.py basic --model mistralai/Mistral-7B-Instruct-v0.3 --auth_token your_huggingface_token
+
+# Test changing the default LMDB path
+python activation_logging/test_lmdb_logging.py path
 ```
 
 ### Programmatic Testing
@@ -97,7 +100,7 @@ python activation_logging/test_lmdb_logging.py --model mistralai/Mistral-7B-Inst
 You can also use the testing module programmatically in your own Python scripts:
 
 ```python
-from activation_logging.test_lmdb_logging import run_test
+from activation_logging.test_lmdb_logging import run_test, test_default_lmdb_path_change
 
 # Basic test with default parameters
 result = run_test()
@@ -105,7 +108,7 @@ print(f"Test success: {result['success']}")
 
 # Test with custom parameters
 custom_result = run_test(
-    model="mistralai/Mistral-7B-Instruct-v0.2",
+    model="mistralai/Mistral-7B-Instruct-v0.3",
     prompt="Explain the concept of hallucination in LLMs.",
     lmdb_path="lmdb_data/my_custom_test.lmdb",
     auth_token="your_huggingface_token",
@@ -118,6 +121,11 @@ if custom_result["success"]:
 else:
     print(f"Test failed: {custom_result['message']}")
     # Handle the error
+    
+# Test changing the default LMDB path
+path_result = test_default_lmdb_path_change()
+if path_result["success"]:
+    print("Default LMDB path change works correctly!")
 ```
 
 ## API Client Usage
@@ -127,12 +135,34 @@ When using the API directly, you can include the HuggingFace authentication toke
 ```python
 import requests
 
+# 1. Standard completion request with custom LMDB path
 url = "http://localhost:8000/v1/completions"
 payload = {
-    "model": "mistralai/Mistral-7B-Instruct-v0.2",
+    "model": "mistralai/Mistral-7B-Instruct-v0.3",
     "prompt": "Hello, world!",
     "max_tokens": 100,
-    "auth_token": "your_huggingface_token"  # Include this for gated models
+    "auth_token": "your_huggingface_token",  # Include this for gated models
+    "lmdb_path": "lmdb_data/custom_path.lmdb"  # Optional: specify custom LMDB path
+}
+
+response = requests.post(url, json=payload)
+print(response.json())
+
+# 2. Change the default LMDB path for all subsequent requests
+url = "http://localhost:8000/set_default_lmdb_path"
+payload = {
+    "lmdb_path": "lmdb_data/new_default_path.lmdb"
+}
+
+response = requests.post(url, json=payload)
+print(response.json())
+
+# 3. Now requests without a specified path will use the new default path
+url = "http://localhost:8000/v1/completions"
+payload = {
+    "model": "mistralai/Mistral-7B-Instruct-v0.3",
+    "prompt": "Using the new default path",
+    "max_tokens": 100
 }
 
 response = requests.post(url, json=payload)
