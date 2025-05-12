@@ -23,3 +23,5 @@ Use branching (main for stable, dev or feature branches for experiments).
 Write basic unit tests or checks to catch silent errors.
 Avoid editing files with Copyright (c) Meta Platforms, Inc. and affiliates, unless specifically instructed to do so.
 
+
+For this project, there are two readme files. The readme in the repository root refers to the hallulens package. The readme in activation_logging is the actual research project. 

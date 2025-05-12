@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pkl
+*.pt
+*.db
+*.mdb
+*.log
+.env/
+venv/
+.cache/
+.DS_Store
+lmdb_data/ 
