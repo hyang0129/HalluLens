@@ -25,6 +25,9 @@ activation_logger = ActivationsLogger()
 _model_cache = {}
 _tokenizer_cache = {}
 
+# Temperature overwrite variable, None means use request temperature
+overwrite_temperature = None
+
 
 def get_model_and_tokenizer(model_name: str, auth_token: Optional[str] = None):
     """
@@ -161,6 +164,19 @@ class SetDefaultLMDBPathResponse(BaseModel):
     message: str
 
 
+class SetOverwriteTemperatureRequest(BaseModel):
+    """Request model for setting the overwrite temperature."""
+    temperature: Optional[float] = None
+
+
+class SetOverwriteTemperatureResponse(BaseModel):
+    """Response model for the set overwrite temperature endpoint."""
+    success: bool
+    previous_value: Optional[float]
+    current_value: Optional[float]
+    message: str
+
+
 # Utility for hashing prompt
 def prompt_hash(prompt: str) -> str:
     """
@@ -243,6 +259,37 @@ async def set_default_lmdb_path(request: SetDefaultLMDBPathRequest):
         )
 
 
+@app.post("/set_overwrite_temperature", response_model=SetOverwriteTemperatureResponse)
+async def set_overwrite_temperature(request: SetOverwriteTemperatureRequest):
+    """
+    Set the overwrite temperature for all completion requests.
+    When set, this temperature will override any temperature in completion requests.
+    Set to None to use the temperature specified in each request.
+    
+    Args:
+        request: SetOverwriteTemperatureRequest with the new temperature value
+        
+    Returns:
+        SetOverwriteTemperatureResponse with status and temperature information
+    """
+    global overwrite_temperature
+    
+    # Store the previous value
+    previous_value = overwrite_temperature
+    
+    # Update the global variable
+    overwrite_temperature = request.temperature
+    
+    logger.info(f"Overwrite temperature changed from {previous_value} to {overwrite_temperature}")
+    
+    return SetOverwriteTemperatureResponse(
+        success=True,
+        previous_value=previous_value,
+        current_value=overwrite_temperature,
+        message="Overwrite temperature successfully updated"
+    )
+
+
 @app.post("/v1/completions", response_model=CompletionResponse)
 async def completions(request: CompletionRequest):
     """
@@ -258,6 +305,12 @@ async def completions(request: CompletionRequest):
     # Allow override of model via request, else use default
     model_name = request.model if request.model else DEFAULT_MODEL
     model, tokenizer = get_model_and_tokenizer(model_name, request.auth_token)
+    
+    # Use overwrite temperature if set, otherwise use request temperature
+    temperature = overwrite_temperature if overwrite_temperature is not None else request.temperature
+    if overwrite_temperature is not None:
+        logger.info(f"Using overwrite temperature: {temperature} instead of request temperature: {request.temperature}")
+    
     # Ensure input_ids are on the same device as the model
     device = next(model.parameters()).device
     input_ids = tokenizer(request.prompt, return_tensors="pt").input_ids.to(device)
@@ -265,7 +318,7 @@ async def completions(request: CompletionRequest):
         outputs = model.generate(
             input_ids,
             max_new_tokens=request.max_tokens,
-            temperature=request.temperature,
+            temperature=temperature,
             top_p=request.top_p,
             return_dict_in_generate=True,
             output_hidden_states=True
@@ -320,6 +373,11 @@ async def chat_completions(request: ChatCompletionRequest):
     model_name = request.model if request.model else DEFAULT_MODEL
     model, tokenizer = get_model_and_tokenizer(model_name, request.auth_token)
     
+    # Use overwrite temperature if set, otherwise use request temperature
+    temperature = overwrite_temperature if overwrite_temperature is not None else request.temperature
+    if overwrite_temperature is not None:
+        logger.info(f"Using overwrite temperature: {temperature} instead of request temperature: {request.temperature}")
+    
     # Ensure input_ids are on the same device as the model
     device = next(model.parameters()).device
     input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
@@ -328,7 +386,7 @@ async def chat_completions(request: ChatCompletionRequest):
         outputs = model.generate(
             input_ids,
             max_new_tokens=request.max_tokens,
-            temperature=request.temperature,
+            temperature=temperature,
             top_p=request.top_p,
             return_dict_in_generate=True,
             output_hidden_states=True
