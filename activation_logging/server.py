@@ -28,6 +28,9 @@ _tokenizer_cache = {}
 # Temperature overwrite variable, None means use request temperature
 overwrite_temperature = None
 
+# LMDB path overwrite variable, None means use the default path in activation_logger
+overwrite_lmdb_path = None
+
 
 def get_model_and_tokenizer(model_name: str, auth_token: Optional[str] = None):
     """
@@ -164,6 +167,19 @@ class SetDefaultLMDBPathResponse(BaseModel):
     message: str
 
 
+class SetOverwriteLMDBPathRequest(BaseModel):
+    """Request model for setting the overwrite LMDB path."""
+    lmdb_path: Optional[str] = None
+
+
+class SetOverwriteLMDBPathResponse(BaseModel):
+    """Response model for the set overwrite LMDB path endpoint."""
+    success: bool
+    previous_value: Optional[str]
+    current_value: Optional[str]
+    message: str
+
+
 class SetOverwriteTemperatureRequest(BaseModel):
     """Request model for setting the overwrite temperature."""
     temperature: Optional[float] = None
@@ -189,6 +205,57 @@ def prompt_hash(prompt: str) -> str:
         SHA256 hash of the prompt
     """
     return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+
+def apply_overwrites(request_params):
+    """
+    Apply global overwrites to request parameters.
+    
+    Args:
+        request_params: Dictionary containing original request parameters
+        
+    Returns:
+        Dictionary with overwritten parameters where applicable
+    """
+    # Create a copy to avoid modifying the original
+    params = request_params.copy()
+    
+    # Apply temperature overwrite if set
+    if overwrite_temperature is not None:
+        original_temp = params.get('temperature')
+        params['temperature'] = overwrite_temperature
+        logger.info(f"Using overwrite temperature: {overwrite_temperature} instead of request temperature: {original_temp}")
+    
+    # Apply LMDB path overwrite if set
+    if overwrite_lmdb_path is not None:
+        params['lmdb_path'] = overwrite_lmdb_path
+        logger.info(f"Using overwrite LMDB path: {overwrite_lmdb_path}")
+        
+    return params
+
+
+def get_logger_for_request(request_params):
+    """
+    Determine which logger to use based on request parameters and overwrites.
+    
+    Args:
+        request_params: Dictionary containing request parameters (with overwrites applied)
+        
+    Returns:
+        Tuple of (logger_to_use, custom_logger, used_custom_path)
+        - logger_to_use: Logger to use for this request
+        - custom_logger: Custom logger instance if created (to be closed after use)
+        - used_custom_path: Boolean indicating if a custom path was used
+    """
+    lmdb_path = request_params.get('lmdb_path')
+    
+    if lmdb_path and lmdb_path.strip():
+        # Create and use a custom logger with the specified path
+        custom_logger = ActivationsLogger(lmdb_path=lmdb_path)
+        return custom_logger, custom_logger, True
+    else:
+        # Use the default logger
+        return activation_logger, None, False
 
 
 @app.get("/health")
@@ -259,6 +326,37 @@ async def set_default_lmdb_path(request: SetDefaultLMDBPathRequest):
         )
 
 
+@app.post("/set_overwrite_lmdb_path", response_model=SetOverwriteLMDBPathResponse)
+async def set_overwrite_lmdb_path(request: SetOverwriteLMDBPathRequest):
+    """
+    Set the overwrite LMDB path for all completion requests.
+    When set, this path will override any path in completion requests.
+    Set to None to use the path specified in each request or the default path.
+    
+    Args:
+        request: SetOverwriteLMDBPathRequest with the new LMDB path
+        
+    Returns:
+        SetOverwriteLMDBPathResponse with status and path information
+    """
+    global overwrite_lmdb_path
+    
+    # Store the previous value
+    previous_value = overwrite_lmdb_path
+    
+    # Update the global variable
+    overwrite_lmdb_path = request.lmdb_path
+    
+    logger.info(f"Overwrite LMDB path changed from {previous_value} to {overwrite_lmdb_path}")
+    
+    return SetOverwriteLMDBPathResponse(
+        success=True,
+        previous_value=previous_value,
+        current_value=overwrite_lmdb_path,
+        message="Overwrite LMDB path successfully updated"
+    )
+
+
 @app.post("/set_overwrite_temperature", response_model=SetOverwriteTemperatureResponse)
 async def set_overwrite_temperature(request: SetOverwriteTemperatureRequest):
     """
@@ -302,49 +400,55 @@ async def completions(request: CompletionRequest):
         CompletionResponse with generated text
     """
     logger.info(f"Received completion request for model: {request.model if request.model else DEFAULT_MODEL}")
+    
     # Allow override of model via request, else use default
     model_name = request.model if request.model else DEFAULT_MODEL
     model, tokenizer = get_model_and_tokenizer(model_name, request.auth_token)
     
-    # Use overwrite temperature if set, otherwise use request temperature
-    temperature = overwrite_temperature if overwrite_temperature is not None else request.temperature
-    if overwrite_temperature is not None:
-        logger.info(f"Using overwrite temperature: {temperature} instead of request temperature: {request.temperature}")
+    # Apply any overwrites to request parameters
+    params = apply_overwrites({
+        'temperature': request.temperature,
+        'lmdb_path': request.lmdb_path if hasattr(request, 'lmdb_path') else None
+    })
     
     # Ensure input_ids are on the same device as the model
     device = next(model.parameters()).device
     input_ids = tokenizer(request.prompt, return_tensors="pt").input_ids.to(device)
+    
     with torch.no_grad():
         outputs = model.generate(
             input_ids,
             max_new_tokens=request.max_tokens,
-            temperature=temperature,
+            temperature=params['temperature'],
             top_p=request.top_p,
             return_dict_in_generate=True,
             output_hidden_states=True
         )
+    
     # Get generated tokens (excluding prompt)
     gen_ids = outputs.sequences[0][input_ids.shape[1]:]
     response_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
+    
     # Get last layer activations for generated tokens
     hidden_states = outputs.hidden_states[-1][0]  # (seq, hidden)
     activations = hidden_states[-len(gen_ids):].cpu().numpy()
+    
     # Log to LMDB
     entry_key = prompt_hash(request.prompt)
-    # Use custom LMDB path if provided and non-empty, else use default
-    logger_to_use = activation_logger
-    custom_logger = None
-    if hasattr(request, 'lmdb_path') and request.lmdb_path and request.lmdb_path.strip():
-        custom_logger = ActivationsLogger(lmdb_path=request.lmdb_path)
-        logger_to_use = custom_logger
+    
+    # Get appropriate logger based on parameters with overwrites
+    logger_to_use, custom_logger, _ = get_logger_for_request(params)
+    
     logger_to_use.log_entry(entry_key, {
         "prompt": request.prompt,
         "response": response_text,
         "activations": activations,
         "model": model_name,
     })
+    
     if custom_logger is not None:
         custom_logger.close()
+    
     # Build OpenAI-compatible response
     return CompletionResponse(
         id=entry_key,
@@ -366,6 +470,7 @@ async def chat_completions(request: ChatCompletionRequest):
         ChatCompletionResponse with generated message
     """
     logger.info(f"Received chat completion request for model: {request.model if request.model else DEFAULT_MODEL}")
+    
     # Convert chat messages to a single prompt - simplified for most models
     prompt = "\n".join([f"{msg.role}: {msg.content}" for msg in request.messages])
     
@@ -373,10 +478,11 @@ async def chat_completions(request: ChatCompletionRequest):
     model_name = request.model if request.model else DEFAULT_MODEL
     model, tokenizer = get_model_and_tokenizer(model_name, request.auth_token)
     
-    # Use overwrite temperature if set, otherwise use request temperature
-    temperature = overwrite_temperature if overwrite_temperature is not None else request.temperature
-    if overwrite_temperature is not None:
-        logger.info(f"Using overwrite temperature: {temperature} instead of request temperature: {request.temperature}")
+    # Apply any overwrites to request parameters
+    params = apply_overwrites({
+        'temperature': request.temperature,
+        'lmdb_path': request.lmdb_path if hasattr(request, 'lmdb_path') else None
+    })
     
     # Ensure input_ids are on the same device as the model
     device = next(model.parameters()).device
@@ -386,7 +492,7 @@ async def chat_completions(request: ChatCompletionRequest):
         outputs = model.generate(
             input_ids,
             max_new_tokens=request.max_tokens,
-            temperature=temperature,
+            temperature=params['temperature'],
             top_p=request.top_p,
             return_dict_in_generate=True,
             output_hidden_states=True
@@ -403,12 +509,8 @@ async def chat_completions(request: ChatCompletionRequest):
     # Log to LMDB
     entry_key = prompt_hash(prompt)
     
-    # Use custom LMDB path if provided and non-empty, else use default
-    logger_to_use = activation_logger
-    custom_logger = None
-    if hasattr(request, 'lmdb_path') and request.lmdb_path and request.lmdb_path.strip():
-        custom_logger = ActivationsLogger(lmdb_path=request.lmdb_path)
-        logger_to_use = custom_logger
+    # Get appropriate logger based on parameters with overwrites
+    logger_to_use, custom_logger, _ = get_logger_for_request(params)
     
     logger_to_use.log_entry(entry_key, {
         "prompt": prompt,
