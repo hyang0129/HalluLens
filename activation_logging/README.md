@@ -126,6 +126,16 @@ else:
 path_result = test_default_lmdb_path_change()
 if path_result["success"]:
     print("Default LMDB path change works correctly!")
+
+# Test changing the default LMDB path with custom prompt
+path_result_custom = test_default_lmdb_path_change(
+    host="localhost",
+    port=8000,
+    model="mistralai/Mistral-7B-Instruct-v0.3",
+    prompt="Testing LMDB path with custom prompt"
+)
+if path_result_custom["success"]:
+    print("Default LMDB path change with custom prompt works correctly!")
 ```
 
 ## API Client Usage

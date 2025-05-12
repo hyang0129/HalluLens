@@ -109,7 +109,8 @@ def run_test(
 def test_default_lmdb_path_change(
     host: str = "localhost",
     port: int = 8000,
-    model: str = "NousResearch/Nous-Hermes-2-Mistral-7B-DPO"
+    model: str = "NousResearch/Nous-Hermes-2-Mistral-7B-DPO",
+    prompt: str = "Testing default LMDB path functionality"
 ) -> Dict[str, Any]:
     """
     Test changing the default LMDB path and verify activations are logged properly.
@@ -119,6 +120,7 @@ def test_default_lmdb_path_change(
         host: Server host
         port: Server port
         model: Model to use for testing
+        prompt: Prompt to test with
 
     Returns:
         Dictionary containing test results
@@ -165,7 +167,6 @@ def test_default_lmdb_path_change(
     
     # 2. Now send a completion request WITHOUT specifying an LMDB path
     # It should use the default path we just set
-    prompt = f"Testing default LMDB path at {test_lmdb_path}"
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     
     try:
@@ -251,6 +252,8 @@ def parse_args():
                      help="Server port (default: 8000)")
     path_parser.add_argument("--model", type=str, default="NousResearch/Nous-Hermes-2-Mistral-7B-DPO",
                      help="Model to test with (default: NousResearch/Nous-Hermes-2-Mistral-7B-DPO)")
+    path_parser.add_argument("--prompt", type=str, default="Testing default LMDB path functionality",
+                     help="Prompt to test with (default: 'Testing default LMDB path functionality')")
     
     return parser.parse_args()
 
@@ -272,7 +275,8 @@ def main():
         result = test_default_lmdb_path_change(
             host=args.host,
             port=args.port,
-            model=args.model
+            model=args.model,
+            prompt=args.prompt
         )
     else:
         print(f"Unknown test type: {args.test_type}")
