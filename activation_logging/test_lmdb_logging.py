@@ -19,7 +19,8 @@ def run_test(
     prompt: str = "Hello, world!",
     lmdb_path: str = "lmdb_data/test_activations.lmdb",
     auth_token: Optional[str] = None,
-    server_url: str = "http://localhost:8000/v1/completions"
+    server_url: str = "http://localhost:8000/v1/completions",
+    max_tokens: int = 5
 ) -> Dict[str, Any]:
     """
     Run a test of the activation logging system.
@@ -30,6 +31,7 @@ def run_test(
         lmdb_path: Path to store activations in LMDB
         auth_token: HuggingFace authentication token (for gated models)
         server_url: URL of the inference server
+        max_tokens: Maximum number of tokens to generate
         
     Returns:
         Dictionary containing test results with keys:
@@ -52,7 +54,7 @@ def run_test(
     payload = {
         "model": model,
         "prompt": prompt,
-        "max_tokens": 5,
+        "max_tokens": max_tokens,
         "lmdb_path": lmdb_path
     }
     
@@ -110,7 +112,8 @@ def test_default_lmdb_path_change(
     host: str = "localhost",
     port: int = 8000,
     model: str = "NousResearch/Nous-Hermes-2-Mistral-7B-DPO",
-    prompt: str = "Testing default LMDB path functionality"
+    prompt: str = "Testing default LMDB path functionality",
+    max_tokens: int = 5
 ) -> Dict[str, Any]:
     """
     Test changing the default LMDB path and verify activations are logged properly.
@@ -121,6 +124,7 @@ def test_default_lmdb_path_change(
         port: Server port
         model: Model to use for testing
         prompt: Prompt to test with
+        max_tokens: Maximum number of tokens to generate
 
     Returns:
         Dictionary containing test results
@@ -176,7 +180,7 @@ def test_default_lmdb_path_change(
             json={
                 "model": model,
                 "prompt": prompt,
-                "max_tokens": 5
+                "max_tokens": max_tokens
             }
         )
         
@@ -243,6 +247,8 @@ def parse_args():
                       help="HuggingFace authentication token for accessing gated models")
     basic_parser.add_argument("--server_url", type=str, default="http://localhost:8000/v1/completions",
                       help="URL of the inference server (default: http://localhost:8000/v1/completions)")
+    basic_parser.add_argument("--max_tokens", type=int, default=5,
+                      help="Maximum number of tokens to generate (default: 5)")
     
     # Default path change test
     path_parser = subparsers.add_parser("path", help="Test changing default LMDB path")
@@ -254,6 +260,8 @@ def parse_args():
                      help="Model to test with (default: NousResearch/Nous-Hermes-2-Mistral-7B-DPO)")
     path_parser.add_argument("--prompt", type=str, default="Testing default LMDB path functionality",
                      help="Prompt to test with (default: 'Testing default LMDB path functionality')")
+    path_parser.add_argument("--max_tokens", type=int, default=5,
+                     help="Maximum number of tokens to generate (default: 5)")
     
     return parser.parse_args()
 
@@ -269,14 +277,16 @@ def main():
             prompt=getattr(args, "prompt", "Hello, world!"),
             lmdb_path=getattr(args, "lmdb_path", "lmdb_data/test_activations.lmdb"),
             auth_token=getattr(args, "auth_token", None),
-            server_url=getattr(args, "server_url", "http://localhost:8000/v1/completions")
+            server_url=getattr(args, "server_url", "http://localhost:8000/v1/completions"),
+            max_tokens=args.max_tokens
         )
     elif args.test_type == "path":
         result = test_default_lmdb_path_change(
             host=args.host,
             port=args.port,
             model=args.model,
-            prompt=args.prompt
+            prompt=args.prompt,
+            max_tokens=args.max_tokens
         )
     else:
         print(f"Unknown test type: {args.test_type}")

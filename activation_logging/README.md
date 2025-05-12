@@ -91,8 +91,14 @@ python activation_logging/test_lmdb_logging.py basic --model mistralai/Mistral-7
 # With authentication token
 python activation_logging/test_lmdb_logging.py basic --model mistralai/Mistral-7B-Instruct-v0.3 --auth_token your_huggingface_token
 
+# With custom max tokens
+python activation_logging/test_lmdb_logging.py basic --model mistralai/Mistral-7B-Instruct-v0.3 --max_tokens 20
+
 # Test changing the default LMDB path
 python activation_logging/test_lmdb_logging.py path
+
+# Test changing the default LMDB path with custom max tokens
+python activation_logging/test_lmdb_logging.py path --max_tokens 30
 ```
 
 ### Programmatic Testing
@@ -112,7 +118,8 @@ custom_result = run_test(
     prompt="Explain the concept of hallucination in LLMs.",
     lmdb_path="lmdb_data/my_custom_test.lmdb",
     auth_token="your_huggingface_token",
-    server_url="http://localhost:8000/v1/completions"
+    server_url="http://localhost:8000/v1/completions",
+    max_tokens=20
 )
 
 if custom_result["success"]:
@@ -127,12 +134,13 @@ path_result = test_default_lmdb_path_change()
 if path_result["success"]:
     print("Default LMDB path change works correctly!")
 
-# Test changing the default LMDB path with custom prompt
+# Test changing the default LMDB path with custom prompt and max tokens
 path_result_custom = test_default_lmdb_path_change(
     host="localhost",
     port=8000,
     model="mistralai/Mistral-7B-Instruct-v0.3",
-    prompt="Testing LMDB path with custom prompt"
+    prompt="Testing LMDB path with custom prompt",
+    max_tokens=30
 )
 if path_result_custom["success"]:
     print("Default LMDB path change with custom prompt works correctly!")
