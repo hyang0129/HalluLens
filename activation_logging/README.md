@@ -80,7 +80,9 @@ python tasks/refusal_test/nonsense_mixed_entities.py --do_inference --do_eval --
 
 ## Testing the Setup
 
-To verify that activation logging is working correctly:
+### Command Line Testing
+
+To verify that activation logging is working correctly from the command line:
 
 ```bash
 # For open models
@@ -90,7 +92,33 @@ python activation_logging/test_lmdb_logging.py
 python activation_logging/test_lmdb_logging.py --model mistralai/Mistral-7B-Instruct-v0.2 --auth_token your_huggingface_token
 ```
 
-This will send a test request to the server and check if activations were properly logged to LMDB.
+### Programmatic Testing
+
+You can also use the testing module programmatically in your own Python scripts:
+
+```python
+from activation_logging.test_lmdb_logging import run_test
+
+# Basic test with default parameters
+result = run_test()
+print(f"Test success: {result['success']}")
+
+# Test with custom parameters
+custom_result = run_test(
+    model="mistralai/Mistral-7B-Instruct-v0.2",
+    prompt="Explain the concept of hallucination in LLMs.",
+    lmdb_path="lmdb_data/my_custom_test.lmdb",
+    auth_token="your_huggingface_token",
+    server_url="http://localhost:8000/v1/completions"
+)
+
+if custom_result["success"]:
+    print("Activation logging is working correctly!")
+    # Proceed with your benchmark or analysis
+else:
+    print(f"Test failed: {custom_result['message']}")
+    # Handle the error
+```
 
 ## API Client Usage
 
