@@ -201,7 +201,7 @@ class WikiQA:
         print("Generating questions...")
         results = thread_map(lambda p: lm.call_vllm_api(p, self.q_generator, temperature=0.7, top_p=0.9),
                                 Q_MAKING_PROMPTS,
-                                max_workers=50,
+                                max_workers=1,
                                 desc=f"using {self.q_generator}")
         for i, r in enumerate(results):
             all_data[i]['prompt'] = r
@@ -215,7 +215,7 @@ class WikiQA:
         print("Generating answers...")
         ans_results = thread_map(lambda p: lm.generate(p, self.q_generator),
                                     prompts_answerability,
-                                    max_workers=50,
+                                    max_workers=1,
                                     desc=f"using {self.q_generator}")
         filter_count = 0
         print("Filtering out unanswerable questions...")
