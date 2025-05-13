@@ -142,7 +142,7 @@ class PreciseQAEval:
             abstains_eval_raw = thread_map(
                 lambda p: lm.generate(p, evaluator),
                 abstain_prompts,
-                max_workers=32,
+                max_workers=1,
                 desc=f"using {evaluator}")
             
             eval_utils.save_eval_raw(abstains_eval_raw, abs_path)
@@ -175,7 +175,7 @@ class PreciseQAEval:
             halu_eval_raw = thread_map(
                 lambda p: lm.generate(p, evaluator),
                 halu_prompts,
-                max_workers=64,
+                max_workers=1,
                 desc=f"using {evaluator}"
             )
         else:
@@ -303,7 +303,7 @@ if __name__ == '__main__':
                     all_prompts=QAs_df, 
                     inference_method=args.inference_method, \
                     max_tokens=args.max_inference_tokens,
-                    max_workers=args.inf_batch_size)
+                    max_workers=1)
         print('Inference completed')
 
     if args.do_eval:
