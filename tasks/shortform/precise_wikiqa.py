@@ -191,6 +191,7 @@ class PreciseQAEval:
                 abstantion_res.append(json.loads(x)['is_abstaining'])
             except:
                 print(x)
+                raise
         # abstantion_res = [json.loads(x)['is_abstaining'] for x in abstantion_res_raw]
         
         halu_test_res = []
@@ -211,8 +212,8 @@ class PreciseQAEval:
         else:
             hallu_rate_not_abstain = sum([1 for is_abstaining, is_hallucinated in zip(abstantion_res, halu_test_res) \
                                 if is_abstaining == False and is_hallucinated == True])/not_abstained
-        refusal_rate = sum([1 for is_abstaining in abstantion_res if is_abstaining == True])/len(abstantion_res)
-        correct_rate = sum([1 for is_hallucinated in halu_test_res if is_hallucinated == False])/len(halu_test_res)
+        refusal_rate = sum([1 for is_abstaining in abstantion_res if is_abstaining == True])/ (len(abstantion_res) + 1e-8)
+        correct_rate = sum([1 for is_hallucinated in halu_test_res if is_hallucinated == False])/ (len(halu_test_res) + 1e-8)
 
         res = {
             'model': self.model_name,
