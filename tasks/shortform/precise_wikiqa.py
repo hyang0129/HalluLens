@@ -184,7 +184,15 @@ class PreciseQAEval:
         return halu_eval_raw
 
     def process_res(self, abstantion_res_raw, halu_eval_raw):
-        abstantion_res = [json.loads(x)['is_abstaining'] for x in abstantion_res_raw]
+        
+        abstantion_res = [] 
+        for x in abstantion_res_raw: 
+            try:
+                abstantion_res.append(json.loads(x)['is_abstaining'])
+            except:
+                print(x)
+        # abstantion_res = [json.loads(x)['is_abstaining'] for x in abstantion_res_raw]
+        
         halu_test_res = []
         for txt in halu_eval_raw:
             if txt.lower() not in ['correct', 'incorrect', 'unverifiable']: print(txt)
