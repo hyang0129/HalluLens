@@ -637,21 +637,24 @@ async def completions(request: CompletionRequest):
         auth_token=request.auth_token
     )
     
-    # Log to LMDB
+    # Log to LMDB only if not a GGUF model (which doesn't provide activations)
     entry_key = prompt_hash(request.prompt)
     
-    # Get appropriate logger based on parameters with overwrites
-    logger_to_use, custom_logger, _ = get_logger_for_request(params)
-    
-    logger_to_use.log_entry(entry_key, {
-        "prompt": request.prompt,
-        "response": response_text,
-        "activations": activations,
-        "model": model_name,
-    })
-    
-    if custom_logger is not None:
-        custom_logger.close()
+    if not model_name.endswith('.gguf') and activations is not None:
+        # Get appropriate logger based on parameters with overwrites
+        logger_to_use, custom_logger, _ = get_logger_for_request(params)
+        
+        logger_to_use.log_entry(entry_key, {
+            "prompt": request.prompt,
+            "response": response_text,
+            "activations": activations,
+            "model": model_name,
+        })
+        
+        if custom_logger is not None:
+            custom_logger.close()
+    else:
+        logger.info(f"Skipping activation logging for GGUF model: {model_name}")
     
     # Build OpenAI-compatible response
     return CompletionResponse(
@@ -697,22 +700,25 @@ async def chat_completions(request: ChatCompletionRequest):
         auth_token=request.auth_token
     )
     
-    # Log to LMDB
+    # Log to LMDB only if not a GGUF model (which doesn't provide activations)
     entry_key = prompt_hash(prompt)
     
-    # Get appropriate logger based on parameters with overwrites
-    logger_to_use, custom_logger, _ = get_logger_for_request(params)
-    
-    logger_to_use.log_entry(entry_key, {
-        "prompt": prompt,
-        "response": response_text,
-        "activations": activations,
-        "model": model_name,
-        "messages": [msg.dict() for msg in request.messages]
-    })
-    
-    if custom_logger is not None:
-        custom_logger.close()
+    if not model_name.endswith('.gguf') and activations is not None:
+        # Get appropriate logger based on parameters with overwrites
+        logger_to_use, custom_logger, _ = get_logger_for_request(params)
+        
+        logger_to_use.log_entry(entry_key, {
+            "prompt": prompt,
+            "response": response_text,
+            "activations": activations,
+            "model": model_name,
+            "messages": [msg.dict() for msg in request.messages]
+        })
+        
+        if custom_logger is not None:
+            custom_logger.close()
+    else:
+        logger.info(f"Skipping activation logging for GGUF model: {model_name}")
     
     # Build OpenAI-compatible response
     return ChatCompletionResponse(
