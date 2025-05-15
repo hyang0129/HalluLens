@@ -43,6 +43,10 @@ model_map = {   'meta-llama/Llama-3.1-405B-Instruct-FP8': {'name': 'llama3.1_405
                 "mistralai/Mistral-Nemo-Instruct-2407": {'name': 'Mistral-Nemo-Instruct-2407',
                                                         'server_urls': [f"http://{CUSTOM_SERVER}:8000/v1"],
                                                     },
+                "Llama-3.3-70B-Instruct-IQ3_M.gguf": {'name': 'Llama-3.3-70B-Instruct-IQ3_M.gguf',
+                                                        'server_urls': [f"http://{CUSTOM_SERVER}:8000/v1"],
+                                                    },
+
                                                     
             }
 ########################################################################################################
