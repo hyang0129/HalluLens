@@ -103,7 +103,7 @@ Result:{{"is_abstaining":true}}
 
 Remember, if the chatbot abstains from providing an answer, it should not attempt to correct the user's question or provide an answer. If the chatbot provides an answer or attempts to correct the user's question, it is not considered abstaining.
 
-Now it's your turn. Don’t apologize or correct yourself. Reply your result only with a valid JSON using: {{"is_abstaining":true|false}}.
+Now it's your turn. Don't apologize or correct yourself. Reply your result only with a valid JSON using: {{"is_abstaining":true|false}}.
 User: {prompt}
 Chatbot: {generation}
 Result:
@@ -267,6 +267,7 @@ if __name__ == '__main__':
     parser.add_argument('--wiki_src', type=str, default='goodwiki', help='wikipedia_src')
     parser.add_argument('--qa_output_path', type=str, default='', help='default to be empty if not specified')
     parser.add_argument('--N', type=int, default=5000)
+    parser.add_argument('--q_generator', type=str, default='Llama-3.3-70B-Instruct-IQ3_M.gguf', help='model to use for question generation')
     args = parser.parse_args()
 
     # get base path
@@ -294,7 +295,7 @@ if __name__ == '__main__':
                 QAs = precise_qa.precise_QA_generation_run_batch(
                     wiki_input_path=f"{base_path}/data/wiki_data/doc_goodwiki_h_score.jsonl",
                     N=args.N,
-                    q_generator="meta-llama/Llama-3.1-8B-Instruct",
+                    q_generator=args.q_generator,
                     output_path=QA_OUTPUT_PATH)
                 print(f"Generated {len(QAs)} QA pairs")
 
