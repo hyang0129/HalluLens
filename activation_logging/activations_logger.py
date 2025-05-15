@@ -18,6 +18,13 @@ class ActivationsLogger:
             lmdb_path: Path to the LMDB file to store activations
             map_size: Maximum size of the LMDB file in bytes (default: 1GB)
         """
+        self.lmdb_path = lmdb_path
+        self.env = None
+        
+        # Skip opening LMDB if path is empty
+        if not lmdb_path or lmdb_path.strip() == "":
+            return
+            
         # Replace periods in the filename with underscores for compatibility
         base, filename = os.path.split(lmdb_path)
         safe_lmdb_path = os.path.join(base, filename)
@@ -34,6 +41,10 @@ class ActivationsLogger:
             key: Unique identifier for the entry (typically a hash of the prompt)
             entry: Dictionary containing the data to log (prompt, response, activations, etc.)
         """
+        # Skip logging if LMDB is not initialized
+        if self.env is None:
+            return
+            
         with self.env.begin(write=True) as txn:
             txn.put(key.encode("utf-8"), pickle.dumps(entry))
 
@@ -47,6 +58,10 @@ class ActivationsLogger:
         Returns:
             Dictionary containing the entry data if found, None otherwise
         """
+        # Return None if LMDB is not initialized
+        if self.env is None:
+            return None
+            
         with self.env.begin(write=False) as txn:
             value = txn.get(key.encode("utf-8"))
             if value is not None:
@@ -55,4 +70,6 @@ class ActivationsLogger:
 
     def close(self):
         """Close the LMDB environment."""
-        self.env.close() 
+        if self.env is not None:
+            self.env.close()
+            self.env = None 

@@ -99,6 +99,54 @@ def get_model_and_tokenizer(model_name: str, auth_token: Optional[str] = None):
     return _model_cache[cache_key], _tokenizer_cache[cache_key]
 
 
+# New function to extract inference functionality
+def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MODEL, auth_token=None):
+    """
+    Run inference using the model and tokenizer.
+    
+    Args:
+        prompt: The input prompt text
+        max_tokens: Maximum number of tokens to generate
+        temperature: Sampling temperature
+        top_p: Top-p sampling parameter
+        model_name: Name of the model to use (HuggingFace model ID)
+        auth_token: HuggingFace authentication token for gated models
+        
+    Returns:
+        Tuple of (response_text, activations, input_length)
+        - response_text: Generated text
+        - activations: Model activations for generated tokens
+        - input_length: Length of input tokens
+    """
+    # Get model and tokenizer
+    model, tokenizer = get_model_and_tokenizer(model_name, auth_token)
+    
+    # Ensure input_ids are on the same device as the model
+    device = next(model.parameters()).device
+    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+    
+    with torch.no_grad():
+        outputs = model.generate(
+            input_ids,
+            max_new_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            return_dict_in_generate=True,
+            output_hidden_states=True,
+            do_sample=True if temperature > 0.0 else False
+        )
+    
+    # Get generated tokens (excluding prompt)
+    gen_ids = outputs.sequences[0][input_ids.shape[1]:]
+    response_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
+    
+    # Get last layer activations for generated tokens
+    hidden_states = outputs.hidden_states[-1][0]  # (seq, hidden)
+    activations = hidden_states[-len(gen_ids):].cpu().numpy()
+    
+    return response_text, activations, input_ids.shape[1]
+
+
 # OpenAI API request/response models for compatibility
 class CompletionRequest(BaseModel):
     model: str
@@ -461,11 +509,9 @@ async def completions(request: CompletionRequest):
     Returns:
         CompletionResponse with generated text
     """
-    logger.info(f"Received completion request for model: {request.model if request.model else DEFAULT_MODEL}")
-    
     # Allow override of model via request, else use default
     model_name = request.model if request.model else DEFAULT_MODEL
-    model, tokenizer = get_model_and_tokenizer(model_name, request.auth_token)
+    logger.info(f"Received completion request for model: {model_name}")
     
     # Apply any overwrites to request parameters
     params = apply_overwrites({
@@ -474,28 +520,15 @@ async def completions(request: CompletionRequest):
         'lmdb_path': request.lmdb_path if hasattr(request, 'lmdb_path') else None
     })
     
-    # Ensure input_ids are on the same device as the model
-    device = next(model.parameters()).device
-    input_ids = tokenizer(request.prompt, return_tensors="pt").input_ids.to(device)
-    
-    with torch.no_grad():
-        outputs = model.generate(
-            input_ids,
-            max_new_tokens=request.max_tokens,
-            temperature=params['temperature'],
-            top_p=params['top_p'],
-            return_dict_in_generate=True,
-            output_hidden_states=True,
-            do_sample=True if params['temperature'] > 0.0 else False
-        )
-    
-    # Get generated tokens (excluding prompt)
-    gen_ids = outputs.sequences[0][input_ids.shape[1]:]
-    response_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
-    
-    # Get last layer activations for generated tokens
-    hidden_states = outputs.hidden_states[-1][0]  # (seq, hidden)
-    activations = hidden_states[-len(gen_ids):].cpu().numpy()
+    # Use the extracted inference function
+    response_text, activations, _ = run_inference(
+        prompt=request.prompt,
+        max_tokens=request.max_tokens,
+        temperature=params['temperature'],
+        top_p=params['top_p'],
+        model_name=model_name,
+        auth_token=request.auth_token
+    )
     
     # Log to LMDB
     entry_key = prompt_hash(request.prompt)
@@ -533,14 +566,12 @@ async def chat_completions(request: ChatCompletionRequest):
     Returns:
         ChatCompletionResponse with generated message
     """
-    logger.info(f"Received chat completion request for model: {request.model if request.model else DEFAULT_MODEL}")
+    # Allow override of model via request, else use default
+    model_name = request.model if request.model else DEFAULT_MODEL
+    logger.info(f"Received chat completion request for model: {model_name}")
     
     # Convert chat messages to a single prompt - simplified for most models
     prompt = "\n".join([f"{msg.role}: {msg.content}" for msg in request.messages])
-    
-    # Allow override of model via request, else use default
-    model_name = request.model if request.model else DEFAULT_MODEL
-    model, tokenizer = get_model_and_tokenizer(model_name, request.auth_token)
     
     # Apply any overwrites to request parameters
     params = apply_overwrites({
@@ -549,28 +580,15 @@ async def chat_completions(request: ChatCompletionRequest):
         'lmdb_path': request.lmdb_path if hasattr(request, 'lmdb_path') else None
     })
     
-    # Ensure input_ids are on the same device as the model
-    device = next(model.parameters()).device
-    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
-    
-    with torch.no_grad():
-        outputs = model.generate(
-            input_ids,
-            max_new_tokens=request.max_tokens,
-            temperature=params['temperature'],
-            top_p=params['top_p'],
-            return_dict_in_generate=True,
-            output_hidden_states=True,
-            do_sample=True if params['temperature'] > 0.0 else False
-        )
-    
-    # Get generated tokens (excluding prompt)
-    gen_ids = outputs.sequences[0][input_ids.shape[1]:]
-    response_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
-    
-    # Get last layer activations for generated tokens
-    hidden_states = outputs.hidden_states[-1][0]  # (seq, hidden)
-    activations = hidden_states[-len(gen_ids):].cpu().numpy()
+    # Use the extracted inference function
+    response_text, activations, _ = run_inference(
+        prompt=prompt,
+        max_tokens=request.max_tokens,
+        temperature=params['temperature'],
+        top_p=params['top_p'],
+        model_name=model_name,
+        auth_token=request.auth_token
+    )
     
     # Log to LMDB
     entry_key = prompt_hash(prompt)
