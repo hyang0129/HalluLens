@@ -94,7 +94,9 @@ class WikiQA:
         self.Q_GENERATION_PROMPT = PRECISE_Q_GENERATION_PROMPT if task == 'precise' else LONGFORM_Q_GENERATION_PROMPT
         self.ANSWERABILITY_PROMPT = PRECISE_ANSWERABILITY_PROMPT if task == 'precise' else LONGFORM_ANSWERABILITY_PROMPT
 
-        self.encoding = AutoTokenizer.from_pretrained(q_generator_path, trust_remote_code=True)
+        self.encoding = AutoTokenizer.from_pretrained('meta-llama/Llama-3.1-70B-Instruct', trust_remote_code=True)
+
+        
 
     def generate_QA_with_doc(self, title, document, language='en', min_len=500, max_len=750, only_one_doc=False):
         sections = split_doc(document, language, self.encoding, keep_end=False, keep_colon=False, MIN_LEN=min_len, MAX_LEN=max_len)
