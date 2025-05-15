@@ -162,10 +162,16 @@ def run_inference_llamacpp(prompt, max_tokens, temperature, top_p, model_path):
         - activations: None (activations not available in llama.cpp)
         - input_length: Approximate input length (estimated)
     """
+    logger.info(f"Starting llama.cpp inference with model: {model_path}")
+    logger.info(f"Inference parameters: max_tokens={max_tokens}, temperature={temperature}, top_p={top_p}")
+    
+    start_time = time.time()
+    
     # Get model from cache or load it
     llm = get_llamacpp_model(model_path)
     
     # Run inference
+    logger.info(f"Running llama.cpp inference with prompt of length {len(prompt)} characters")
     output = llm(
         prompt=prompt,
         max_tokens=max_tokens,
@@ -173,6 +179,9 @@ def run_inference_llamacpp(prompt, max_tokens, temperature, top_p, model_path):
         top_p=top_p,
         echo=False,  # Don't include prompt in output
     )
+    
+    inference_time = time.time() - start_time
+    logger.info(f"llama.cpp inference completed in {inference_time:.2f} seconds")
     
     # Extract the generated text
     if isinstance(output, dict):
@@ -191,6 +200,8 @@ def run_inference_llamacpp(prompt, max_tokens, temperature, top_p, model_path):
     
     # llama.cpp doesn't provide activations, so return None
     activations = None
+    
+    logger.info(f"Generated {len(response_text)} characters of response")
     
     return response_text, activations, input_length
 
@@ -214,8 +225,14 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
         - activations: Model activations for generated tokens
         - input_length: Length of input tokens
     """
+    logger.info(f"Starting inference with model: {model_name}")
+    logger.info(f"Inference parameters: max_tokens={max_tokens}, temperature={temperature}, top_p={top_p}")
+    
+    start_time = time.time()
+    
     # Check if this is a GGUF model path for llama.cpp
     if model_name.endswith('.gguf'):
+        logger.info(f"Detected GGUF model, using llama.cpp for inference")
         return run_inference_llamacpp(
             prompt=prompt,
             max_tokens=max_tokens,
@@ -225,13 +242,18 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
         )
     
     # Otherwise use the standard Hugging Face model loading
+    logger.info(f"Using Hugging Face transformers for inference")
+    
     # Get model and tokenizer
     model, tokenizer = get_model_and_tokenizer(model_name, auth_token)
     
     # Ensure input_ids are on the same device as the model
     device = next(model.parameters()).device
     input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+    logger.info(f"Input tokenized to {input_ids.shape[1]} tokens")
     
+    # Start generation
+    logger.info(f"Starting generation with {model_name}")
     with torch.no_grad():
         outputs = model.generate(
             input_ids,
@@ -243,13 +265,20 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
             do_sample=True if temperature > 0.0 else False
         )
     
+    inference_time = time.time() - start_time
+    logger.info(f"Inference completed in {inference_time:.2f} seconds")
+    
     # Get generated tokens (excluding prompt)
     gen_ids = outputs.sequences[0][input_ids.shape[1]:]
     response_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
     
+    logger.info(f"Generated {len(gen_ids)} new tokens ({len(response_text)} characters)")
+    
     # Get last layer activations for generated tokens
     hidden_states = outputs.hidden_states[-1][0]  # (seq, hidden)
     activations = hidden_states[-len(gen_ids):].cpu().numpy()
+    
+    logger.info(f"Extracted activations of shape {activations.shape}")
     
     return response_text, activations, input_ids.shape[1]
 
