@@ -14,6 +14,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from loguru import logger
 import uvicorn
 from activation_logging.activations_logger import ActivationsLogger
+from llama_cpp import Llama  # Import for llama.cpp Python bindings
 
 
 # Default model if none specified in request
@@ -24,6 +25,7 @@ activation_logger = ActivationsLogger()
 # Model cache to avoid reloading for each request
 _model_cache = {}
 _tokenizer_cache = {}
+_llamacpp_model_cache = {}  # Cache for llama.cpp models
 
 # Temperature overwrite variable, None means use request temperature
 overwrite_temperature = None
@@ -33,6 +35,9 @@ overwrite_lmdb_path = None
 
 # Top-p overwrite variable, None means use request top_p
 overwrite_top_p = None
+
+# Default path for GGUF models
+GGUF_MODELS_DIR = os.environ.get("GGUF_MODELS_DIR", "")
 
 
 def get_model_and_tokenizer(model_name: str, auth_token: Optional[str] = None):
@@ -99,6 +104,97 @@ def get_model_and_tokenizer(model_name: str, auth_token: Optional[str] = None):
     return _model_cache[cache_key], _tokenizer_cache[cache_key]
 
 
+def get_llamacpp_model(model_path):
+    """
+    Get or load a llama.cpp model from cache.
+    
+    Args:
+        model_path: Path to the GGUF model file
+        
+    Returns:
+        Loaded llama.cpp model instance
+    """
+    # Check if the model path is relative and if so, join with models directory
+    if not os.path.isabs(model_path):
+        full_model_path = os.path.join(GGUF_MODELS_DIR, model_path)
+    else:
+        full_model_path = model_path
+    
+    # Cache model by full path
+    if full_model_path not in _llamacpp_model_cache:
+        logger.info(f"Loading llama.cpp model: {full_model_path}")
+        
+        # Check if model file exists
+        if not os.path.exists(full_model_path):
+            raise FileNotFoundError(f"Model file not found: {full_model_path}")
+        
+        try:
+            # Initialize the model
+            llm = Llama(
+                model_path=full_model_path,
+                n_gpu_layers=-1,  # Use all GPU layers available
+                verbose=False,
+                n_ctx=4096 * 4,   # 16K context
+            )
+            logger.success(f"Loaded llama.cpp model: {full_model_path}")
+            _llamacpp_model_cache[full_model_path] = llm
+        except Exception as e:
+            logger.error(f"Failed to load llama.cpp model: {e}")
+            raise
+    
+    return _llamacpp_model_cache[full_model_path]
+
+
+def run_inference_llamacpp(prompt, max_tokens, temperature, top_p, model_path):
+    """
+    Run inference using llama.cpp Python bindings.
+    
+    Args:
+        prompt: The input prompt text
+        max_tokens: Maximum number of tokens to generate
+        temperature: Sampling temperature
+        top_p: Top-p sampling parameter
+        model_path: Path to the GGUF model file
+        
+    Returns:
+        Tuple of (response_text, activations, input_length)
+        - response_text: Generated text
+        - activations: None (activations not available in llama.cpp)
+        - input_length: Approximate input length (estimated)
+    """
+    # Get model from cache or load it
+    llm = get_llamacpp_model(model_path)
+    
+    # Run inference
+    output = llm(
+        prompt=prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        echo=False,  # Don't include prompt in output
+    )
+    
+    # Extract the generated text
+    if isinstance(output, dict):
+        # Single response format
+        response_text = output.get("choices", [{}])[0].get("text", "")
+    elif isinstance(output, list) and len(output) > 0:
+        # List format
+        response_text = output[0].get("choices", [{}])[0].get("text", "")
+    else:
+        response_text = ""
+        logger.warning("Unexpected output format from llama.cpp")
+    
+    # Approximate the input length (llama.cpp doesn't easily expose this)
+    # This is a rough estimate based on characters
+    input_length = len(prompt) // 4  # Very rough approximation
+    
+    # llama.cpp doesn't provide activations, so return None
+    activations = None
+    
+    return response_text, activations, input_length
+
+
 # New function to extract inference functionality
 def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MODEL, auth_token=None):
     """
@@ -118,6 +214,17 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
         - activations: Model activations for generated tokens
         - input_length: Length of input tokens
     """
+    # Check if this is a GGUF model path for llama.cpp
+    if model_name.endswith('.gguf'):
+        return run_inference_llamacpp(
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            model_path=model_name
+        )
+    
+    # Otherwise use the standard Hugging Face model loading
     # Get model and tokenizer
     model, tokenizer = get_model_and_tokenizer(model_name, auth_token)
     
