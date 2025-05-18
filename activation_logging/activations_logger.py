@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 
 
 class ActivationsLogger:
-    def __init__(self, lmdb_path: str = "lmdb_data/activations.lmdb", map_size: int = 1 << 30):
+    def __init__(self, lmdb_path: str = "lmdb_data/activations.lmdb", map_size: int = 16 << 30):
         """
         Initialize the LMDB-based activations logger.
         

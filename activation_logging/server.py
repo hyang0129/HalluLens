@@ -157,9 +157,9 @@ def run_inference_llamacpp(prompt, max_tokens, temperature, top_p, model_path):
         model_path: Path to the GGUF model file
         
     Returns:
-        Tuple of (response_text, activations, input_length)
+        Tuple of (response_text, all_layers_activations, input_length)
         - response_text: Generated text
-        - activations: None (activations not available in llama.cpp)
+        - all_layers_activations: None (activations not available in llama.cpp)
         - input_length: Approximate input length (estimated)
     """
     logger.info(f"Starting llama.cpp inference with model: {model_path}")
@@ -199,11 +199,11 @@ def run_inference_llamacpp(prompt, max_tokens, temperature, top_p, model_path):
     input_length = len(prompt) // 4  # Very rough approximation
     
     # llama.cpp doesn't provide activations, so return None
-    activations = None
+    all_layers_activations = None
     
     logger.info(f"Generated {len(response_text)} characters of response")
     
-    return response_text, activations, input_length
+    return response_text, all_layers_activations, input_length
 
 
 # New function to extract inference functionality
@@ -274,13 +274,18 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
     
     logger.info(f"Generated {len(gen_ids)} new tokens ({len(response_text)} characters)")
     
-    # Get last layer activations for generated tokens
-    hidden_states = outputs.hidden_states[-1][0]  # (seq, hidden)
-    activations = hidden_states[-len(gen_ids):].cpu().numpy()
+    # Get activations from all layers for generated tokens
+    all_layers_activations = {}
+    for layer_idx, layer_hidden_states in enumerate(outputs.hidden_states):
+        # Extract activations for this layer (shape: batch_size, seq_len, hidden_dim)
+        layer_activations = layer_hidden_states[0]  # Get first batch item
+        # Only keep activations for generated tokens (not prompt tokens)
+        generated_tokens_activations = layer_activations[-len(gen_ids):].cpu().numpy()
+        all_layers_activations[f"layer_{layer_idx}"] = generated_tokens_activations
     
-    logger.info(f"Extracted activations of shape {activations.shape}")
+    logger.info(f"Extracted activations from {len(all_layers_activations)} layers")
     
-    return response_text, activations, input_ids.shape[1]
+    return response_text, all_layers_activations, input_ids.shape[1]
 
 
 # OpenAI API request/response models for compatibility
@@ -657,7 +662,7 @@ async def completions(request: CompletionRequest):
     })
     
     # Use the extracted inference function
-    response_text, activations, _ = run_inference(
+    response_text, all_layers_activations, _ = run_inference(
         prompt=request.prompt,
         max_tokens=request.max_tokens,
         temperature=params['temperature'],
@@ -669,14 +674,14 @@ async def completions(request: CompletionRequest):
     # Log to LMDB only if not a GGUF model (which doesn't provide activations)
     entry_key = prompt_hash(request.prompt)
     
-    if not model_name.endswith('.gguf') and activations is not None:
+    if not model_name.endswith('.gguf') and all_layers_activations is not None:
         # Get appropriate logger based on parameters with overwrites
         logger_to_use, custom_logger, _ = get_logger_for_request(params)
         
         logger_to_use.log_entry(entry_key, {
             "prompt": request.prompt,
             "response": response_text,
-            "activations": activations,
+            "all_layers_activations": all_layers_activations,
             "model": model_name,
         })
         
@@ -720,7 +725,7 @@ async def chat_completions(request: ChatCompletionRequest):
     })
     
     # Use the extracted inference function
-    response_text, activations, _ = run_inference(
+    response_text, all_layers_activations, _ = run_inference(
         prompt=prompt,
         max_tokens=request.max_tokens,
         temperature=params['temperature'],
@@ -732,14 +737,14 @@ async def chat_completions(request: ChatCompletionRequest):
     # Log to LMDB only if not a GGUF model (which doesn't provide activations)
     entry_key = prompt_hash(prompt)
     
-    if not model_name.endswith('.gguf') and activations is not None:
+    if not model_name.endswith('.gguf') and all_layers_activations is not None:
         # Get appropriate logger based on parameters with overwrites
         logger_to_use, custom_logger, _ = get_logger_for_request(params)
         
         logger_to_use.log_entry(entry_key, {
             "prompt": prompt,
             "response": response_text,
-            "activations": activations,
+            "all_layers_activations": all_layers_activations,
             "model": model_name,
             "messages": [msg.dict() for msg in request.messages]
         })
