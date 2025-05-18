@@ -96,6 +96,14 @@ def get_model_and_tokenizer(model_name: str, auth_token: Optional[str] = None):
         # First load tokenizer
         tokenizer = AutoTokenizer.from_pretrained(model_name, **tokenizer_kwargs)
         
+        
+        if not tokenizer.pad_token or tokenizer.pad_token == "":
+            logger.info("Pad token not set or empty. Setting pad token to eos token.")
+            tokenizer.pad_token = tokenizer.eos_token
+        else:
+            logger.info(f"Pad token is already set: {tokenizer.pad_token}")
+
+
         # Then load model
         model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
         
@@ -251,7 +259,10 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
     
     # Ensure input_ids are on the same device as the model
     device = next(model.parameters()).device
-    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+    tokens = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True).to(device)
+    input_ids = tokens.input_ids
+    attention_mask = tokens.attention_mask
+
     logger.info(f"Input tokenized to {input_ids.shape[1]} tokens")
     
     # Start generation
@@ -259,12 +270,14 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
     with torch.no_grad():
         outputs = model.generate(
             input_ids,
+            attention_mask=attention_mask, 
             max_new_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
             return_dict_in_generate=True,
             output_hidden_states=True,
-            do_sample=True if temperature > 0.0 else False
+            do_sample=True if temperature > 0.0 else False, 
+            pad_token_id=tokenizer.pad_token_id
         )
     
     inference_time = time.time() - start_time
