@@ -124,9 +124,25 @@ class ZstdCompression(BaseCompressor):
                 # Create a compressor with the specified level
                 compressor = zstd.ZstdCompressor(level=self.level)
                 
-                # Pickle and compress the activations
-                pickled_data = pickle.dumps(result["all_layers_activations"])
-                compressed_data = compressor.compress(pickled_data)
+                # Convert tensors to numpy arrays and collect metadata
+                tensor_metadata = []
+                all_hidden_np = []
+                
+                for i, tensor in enumerate(result["all_layers_activations"]):
+                    # Store tensor metadata
+                    tensor_metadata.append({
+                        "shape": list(tensor.shape),
+                        "dtype": str(tensor.dtype),
+                        "device": str(tensor.device)
+                    })
+                    # Convert to numpy and store
+                    all_hidden_np.append(tensor.cpu().numpy())
+                
+                # Join all numpy arrays into a single bytes object
+                data_bytes = b"".join(t.tobytes() for t in all_hidden_np)
+                
+                # Compress the bytes
+                compressed_data = compressor.compress(data_bytes)
                 
                 # Replace the activations with the compressed version
                 result["all_layers_activations"] = compressed_data
@@ -135,9 +151,10 @@ class ZstdCompression(BaseCompressor):
                 return result, {
                     "compression": "zstd",
                     "level": self.level,
-                    "original_size": len(pickled_data),
+                    "original_size": len(data_bytes),
                     "compressed_size": len(compressed_data),
-                    "ratio": len(pickled_data) / max(1, len(compressed_data))
+                    "ratio": len(data_bytes) / max(1, len(compressed_data)),
+                    "tensor_metadata": tensor_metadata
                 }
             except Exception as e:
                 logger.error(f"Error during zstd compression: {e}")
@@ -178,13 +195,41 @@ class ZstdCompression(BaseCompressor):
                 # Create a decompressor
                 decompressor = zstd.ZstdDecompressor()
                 
-                # Decompress and unpickle the activations
+                # Decompress the data
                 compressed_data = result["all_layers_activations"]
                 decompressed_data = decompressor.decompress(compressed_data)
-                activations = pickle.loads(decompressed_data)
                 
-                # Replace the compressed activations with the decompressed version
-                result["all_layers_activations"] = activations
+                # Get tensor metadata
+                tensor_metadata = metadata.get("tensor_metadata", [])
+                if not tensor_metadata:
+                    raise ValueError("No tensor metadata found for decompression")
+                
+                # Reconstruct tensors from decompressed data
+                reconstructed_tensors = []
+                offset = 0
+                
+                for meta in tensor_metadata:
+                    # Calculate size of this tensor in bytes
+                    shape = tuple(meta["shape"])
+                    dtype = np.dtype(meta["dtype"].split(".")[-1])  # Convert torch dtype string to numpy dtype
+                    tensor_size = int(np.prod(shape) * dtype.itemsize)
+                    
+                    # Extract bytes for this tensor
+                    tensor_bytes = decompressed_data[offset:offset + tensor_size]
+                    offset += tensor_size
+                    
+                    # Convert bytes to numpy array
+                    tensor_np = np.frombuffer(tensor_bytes, dtype=dtype).reshape(shape)
+                    
+                    # Convert to torch tensor
+                    tensor = torch.from_numpy(tensor_np)
+                    if meta["device"] != "cpu":
+                        tensor = tensor.to(meta["device"])
+                    
+                    reconstructed_tensors.append(tensor)
+                
+                # Replace the compressed activations with the reconstructed tensors
+                result["all_layers_activations"] = reconstructed_tensors
                 
                 return result
             except Exception as e:
@@ -193,7 +238,7 @@ class ZstdCompression(BaseCompressor):
                 return data
         else:
             # No compressed activations found
-            return result
+            raise ValueError("No compressed activations found in data")
 
 
 class ActivationsLogger:
@@ -523,7 +568,7 @@ class ActivationsLogger:
         """Close the LMDB environments."""
         if self.env is not None:
             self.env.close()
-            self.env = None
+            self.env = None 
             
         if self.metadata_env is not None:
             self.metadata_env.close()
