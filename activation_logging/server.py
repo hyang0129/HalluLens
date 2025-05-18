@@ -348,19 +348,6 @@ class ChatCompletionResponse(BaseModel):
     choices: List[ChatCompletionChoice]
 
 
-class SetDefaultLMDBPathRequest(BaseModel):
-    """Request model for changing the default LMDB path."""
-    lmdb_path: str
-
-
-class SetDefaultLMDBPathResponse(BaseModel):
-    """Response model for the change default LMDB path endpoint."""
-    success: bool
-    previous_path: str
-    current_path: str
-    message: str
-
-
 class SetOverwriteLMDBPathRequest(BaseModel):
     """Request model for setting the overwrite LMDB path."""
     lmdb_path: Optional[str] = None
@@ -500,58 +487,6 @@ async def health_check():
         "status": "ok",
         "timestamp": time.time()
     }
-
-
-@app.post("/set_default_lmdb_path", response_model=SetDefaultLMDBPathResponse)
-async def set_default_lmdb_path(request: SetDefaultLMDBPathRequest):
-    """
-    Set the default LMDB path for activation logging.
-    This will be used when no path is specified in completion requests.
-    
-    Args:
-        request: SetDefaultLMDBPathRequest with the new LMDB path
-        
-    Returns:
-        SetDefaultLMDBPathResponse with status and path information
-    """
-    # Store the previous path
-    previous_path = os.environ.get("ACTIVATION_LMDB_PATH", DEFAULT_LMDB_PATH)
-    
-    try:
-        new_path = request.lmdb_path
-        
-        # Create directory if it doesn't exist
-        lmdb_dir = os.path.dirname(new_path)
-        if lmdb_dir and not os.path.exists(lmdb_dir):
-            os.makedirs(lmdb_dir, exist_ok=True)
-            logger.info(f"Created LMDB directory: {lmdb_dir}")
-        
-        # Update the environment variable
-        os.environ["ACTIVATION_LMDB_PATH"] = new_path
-        
-        # Update the default path constant
-        global DEFAULT_LMDB_PATH
-        DEFAULT_LMDB_PATH = new_path
-        
-        logger.info(f"Default LMDB path changed from {previous_path} to {new_path}")
-        
-        return SetDefaultLMDBPathResponse(
-            success=True,
-            previous_path=previous_path,
-            current_path=new_path,
-            message=f"Default LMDB path successfully changed to {new_path}"
-        )
-    except Exception as e:
-        # If there's an error, revert to the previous path
-        os.environ["ACTIVATION_LMDB_PATH"] = previous_path
-        logger.error(f"Error changing default LMDB path: {e}")
-        
-        return SetDefaultLMDBPathResponse(
-            success=False,
-            previous_path=previous_path,
-            current_path=previous_path,
-            message=f"Error changing default LMDB path: {str(e)}"
-        )
 
 
 @app.post("/set_overwrite_lmdb_path", response_model=SetOverwriteLMDBPathResponse)

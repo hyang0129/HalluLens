@@ -94,12 +94,6 @@ python activation_logging/test_lmdb_logging.py basic --model meta-llama/Llama-3.
 # With custom max tokens
 python activation_logging/test_lmdb_logging.py basic --model meta-llama/Llama-3.1-8B-Instruct --max_tokens 20
 
-# Test changing the default LMDB path
-python activation_logging/test_lmdb_logging.py path
-
-# Test changing the default LMDB path with custom max tokens
-python activation_logging/test_lmdb_logging.py path --max_tokens 30
-
 # Test temperature and top_p overwrite functionality
 python activation_logging/test_lmdb_logging.py params
 ```
@@ -109,7 +103,7 @@ python activation_logging/test_lmdb_logging.py params
 You can also use the testing module programmatically in your own Python scripts:
 
 ```python
-from activation_logging.test_lmdb_logging import run_test, test_default_lmdb_path_change, test_overwrite_generation_params
+from activation_logging.test_lmdb_logging import run_test, test_overwrite_generation_params
 
 # Basic test with default parameters
 result = run_test()
@@ -129,22 +123,6 @@ if custom_result["success"]:
     print("Activation logging is working correctly!")
 else:
     print(f"Test failed: {custom_result['message']}")
-    
-# Test changing the default LMDB path
-path_result = test_default_lmdb_path_change()
-if path_result["success"]:
-    print("Default LMDB path change works correctly!")
-
-# Test changing the default LMDB path with custom prompt and max tokens
-path_result_custom = test_default_lmdb_path_change(
-    host="localhost",
-    port=8000,
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    prompt="Testing LMDB path with custom prompt",
-    max_tokens=30
-)
-if path_result_custom["success"]:
-    print("Default LMDB path change with custom prompt works correctly!")
 
 # Test overwriting generation parameters (temperature and top_p)
 params_result = test_overwrite_generation_params()
@@ -176,21 +154,22 @@ payload = {
 response = requests.post(url, json=payload)
 print(response.json())
 
-# 2. Change the default LMDB path for all subsequent requests
-url = "http://localhost:8000/set_default_lmdb_path"
+# 2. Set overwrite LMDB path for all requests
+url = "http://localhost:8000/set_overwrite_lmdb_path"
 payload = {
-    "lmdb_path": "lmdb_data/new_default_path.lmdb"
+    "lmdb_path": "lmdb_data/overwrite_path.lmdb"
 }
 
 response = requests.post(url, json=payload)
 print(response.json())
 
-# 3. Now requests without a specified path will use the new default path
+# 3. Now requests will use the overwrite path regardless of what's specified in the request
 url = "http://localhost:8000/v1/completions"
 payload = {
     "model": "meta-llama/Llama-3.1-8B-Instruct",
-    "prompt": "Using the new default path",
-    "max_tokens": 100
+    "prompt": "Using the overwrite path",
+    "max_tokens": 100,
+    "lmdb_path": "lmdb_data/this_will_be_ignored.lmdb"  # This will be ignored
 }
 
 response = requests.post(url, json=payload)
@@ -235,6 +214,12 @@ response = requests.post(url, json=payload)
 url = "http://localhost:8000/set_overwrite_top_p"
 payload = {
     "top_p": null  # null/None disables the overwrite
+}
+response = requests.post(url, json=payload)
+
+url = "http://localhost:8000/set_overwrite_lmdb_path"
+payload = {
+    "lmdb_path": null  # null/None disables the overwrite
 }
 response = requests.post(url, json=payload)
 

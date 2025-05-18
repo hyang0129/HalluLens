@@ -116,9 +116,8 @@ def test_default_lmdb_path_change(
     max_tokens: int = 5
 ) -> Dict[str, Any]:
     """
-    Test changing the default LMDB path and verify activations are logged properly.
-    This test confirms we can change the default path without specifying a path in each request.
-
+    Test changing the default LMDB path functionality.
+    
     Args:
         host: Server host
         port: Server port
@@ -129,102 +128,13 @@ def test_default_lmdb_path_change(
     Returns:
         Dictionary containing test results
     """
-    base_url = f"http://{host}:{port}"
-    default_path_url = f"{base_url}/set_default_lmdb_path"
-    completions_url = f"{base_url}/v1/completions"
-    
-    # Create a unique test LMDB path
-    test_lmdb_path = f"lmdb_data/test_default_path_{int(time.time())}.lmdb"
-    
-    print(f"Testing default LMDB path change functionality")
-    print(f"Setting default LMDB path to: {test_lmdb_path}")
-    
-    # 1. Change the default LMDB path
-    try:
-        response = requests.post(
-            default_path_url, 
-            json={"lmdb_path": test_lmdb_path}
-        )
-        
-        if response.status_code != 200:
-            return {
-                "success": False,
-                "message": f"Failed to change default LMDB path. Status code: {response.status_code}",
-                "response": response.json() if response.headers.get("content-type") == "application/json" else None
-            }
-        
-        path_change_result = response.json()
-        print(f"Default LMDB path change result: {path_change_result}")
-        
-        if not path_change_result.get("success", False):
-            return {
-                "success": False,
-                "message": f"Server reported failure changing default LMDB path: {path_change_result.get('message')}",
-                "response": path_change_result
-            }
-    except Exception as e:
-        return {
-            "success": False,
-            "message": f"Error changing default LMDB path: {e}",
-            "error": str(e)
-        }
-    
-    # 2. Now send a completion request WITHOUT specifying an LMDB path
-    # It should use the default path we just set
-    prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-    
-    try:
-        # Send request without lmdb_path in payload
-        response = requests.post(
-            completions_url,
-            json={
-                "model": model,
-                "prompt": prompt,
-                "max_tokens": max_tokens
-            }
-        )
-        
-        if response.status_code != 200:
-            return {
-                "success": False,
-                "message": f"Failed to get completions. Status code: {response.status_code}",
-                "response": response.json() if response.headers.get("content-type") == "application/json" else None
-            }
-        
-        completions_result = response.json()
-    except Exception as e:
-        return {
-            "success": False,
-            "message": f"Error getting completions: {e}",
-            "error": str(e)
-        }
-    
-    # 3. Check that the activations were logged to the new default path
-    print(f"\nChecking for activations in new default LMDB path: {test_lmdb_path}")
-    result = subprocess.run(
-        [sys.executable, "activation_logging/test_check_lmdb.py", prompt_hash, test_lmdb_path], 
-        capture_output=True, 
-        text=True
-    )
-    
-    print(result.stdout)
-    
-    # Determine test success
-    success = result.returncode == 0
-    message = (
-        "Default LMDB path change test successful. Activations are being properly logged to the new path." 
-        if success 
-        else "Default LMDB path change test failed: No activation found in the new path."
-    )
-    print(message)
+    # This endpoint has been removed, return a message indicating it's no longer supported
+    print("The set_default_lmdb_path endpoint has been removed.")
+    print("LMDB path is now controlled via the ACTIVATION_LMDB_PATH environment variable.")
     
     return {
-        "success": success,
-        "path_change_response": path_change_result,
-        "completions_response": completions_result,
-        "prompt_hash": prompt_hash,
-        "lmdb_result": result.stdout,
-        "message": message
+        "success": False,
+        "message": "The set_default_lmdb_path endpoint has been removed. LMDB path is now controlled via the ACTIVATION_LMDB_PATH environment variable."
     }
 
 
@@ -504,19 +414,6 @@ def parse_args():
     basic_parser.add_argument("--max_tokens", type=int, default=5,
                       help="Maximum number of tokens to generate (default: 5)")
     
-    # Default path change test
-    path_parser = subparsers.add_parser("path", help="Test changing default LMDB path")
-    path_parser.add_argument("--host", type=str, default="localhost",
-                     help="Server host (default: localhost)")
-    path_parser.add_argument("--port", type=int, default=8000,
-                     help="Server port (default: 8000)")
-    path_parser.add_argument("--model", type=str, default="meta-llama/Llama-3.1-8B-Instruct",
-                     help="Model to test with (default: meta-llama/Llama-3.1-8B-Instruct)")
-    path_parser.add_argument("--prompt", type=str, default="Testing default LMDB path functionality",
-                     help="Prompt to test with (default: 'Testing default LMDB path functionality')")
-    path_parser.add_argument("--max_tokens", type=int, default=5,
-                     help="Maximum number of tokens to generate (default: 5)")
-    
     # Generation parameters test
     params_parser = subparsers.add_parser("params", help="Test temperature and top_p overwrites")
     params_parser.add_argument("--host", type=str, default="localhost",
@@ -546,14 +443,6 @@ def main():
             lmdb_path=getattr(args, "lmdb_path", "lmdb_data/test_activations.lmdb"),
             auth_token=getattr(args, "auth_token", None),
             server_url=getattr(args, "server_url", "http://localhost:8000/v1/completions"),
-            max_tokens=args.max_tokens
-        )
-    elif args.test_type == "path":
-        result = test_default_lmdb_path_change(
-            host=args.host,
-            port=args.port,
-            model=args.model,
-            prompt=args.prompt,
             max_tokens=args.max_tokens
         )
     elif args.test_type == "params":
