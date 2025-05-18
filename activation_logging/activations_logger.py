@@ -7,23 +7,31 @@ import lmdb
 import pickle
 import os
 import numpy as np
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Callable, Tuple
 from loguru import logger
+import torch 
 
 
 class ActivationsLogger:
-    def __init__(self, lmdb_path: str = "lmdb_data/activations.lmdb", map_size: int = 16 << 30):
+    def __init__(self, lmdb_path: str = "lmdb_data/activations.lmdb", map_size: int = 16 << 30,
+                 compress_fn: Optional[Callable] = None, decompress_fn: Optional[Callable] = None):
         """
         Initialize the LMDB-based activations logger.
         
         Args:
             lmdb_path: Path to the LMDB file to store activations
             map_size: Maximum size of the LMDB file in bytes (default: 16GB)
+            compress_fn: Optional function to compress activations before storage
+            decompress_fn: Optional function to decompress activations after retrieval
         """
         self.lmdb_path = lmdb_path
         self.env = None
         self.map_size = map_size
         self.last_threshold_logged = 0  # Track the last threshold percentage logged
+        
+        # Set compression functions (use defaults if None provided)
+        self.compress_fn = compress_fn if compress_fn is not None else self.default_compress
+        self.decompress_fn = decompress_fn if decompress_fn is not None else self.default_decompress
         
         # Skip opening LMDB if path is empty
         if not lmdb_path or lmdb_path.strip() == "":
@@ -37,6 +45,39 @@ class ActivationsLogger:
         if lmdb_dir and not os.path.exists(lmdb_dir):
             os.makedirs(lmdb_dir, exist_ok=True)
         self.env = lmdb.open(safe_lmdb_path, map_size=map_size, subdir=True, create=True, readonly=False, lock=True)
+
+    @staticmethod
+    def default_compress(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        Default compression function that doesn't actually compress.
+        This serves as a placeholder for future compression implementations.
+        
+        Args:
+            data: Dictionary containing the data to be compressed
+            
+        Returns:
+            Tuple of (uncompressed_data, metadata)
+            - uncompressed_data: The original data unchanged
+            - metadata: Dictionary with metadata about the compression (empty for default)
+        """
+        # No compression, just return the original data and empty metadata
+        return data, {"compression": "none"}
+    
+    @staticmethod
+    def default_decompress(data: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Default decompression function that doesn't do anything.
+        This serves as a placeholder for future decompression implementations.
+        
+        Args:
+            data: Dictionary containing the data to be decompressed
+            metadata: Dictionary with metadata about how the data was compressed
+            
+        Returns:
+            The original data unchanged
+        """
+        # No decompression needed, just return the original data
+        return data
 
     def check_lmdb_size(self):
         """
@@ -84,26 +125,28 @@ class ActivationsLogger:
             logger.info("No hidden states found in model outputs")
             return None
             
-        all_layers_activations = {}
         
         # Get the generated tokens (excluding prompt)
         gen_sequence = model_outputs.sequences[0]
         gen_ids = gen_sequence[input_length:]
         
-        logger.info(model_outputs.hidden_states)
-        # Extract activations from all layers for generated tokens
-        for layer_idx, layer_hidden_states in enumerate(model_outputs.hidden_states):
-            # Extract activations for this layer (shape: batch_size, seq_len, hidden_dim)
-            layer_activations = layer_hidden_states[0]  # Get first batch item
-            
-            # Only keep activations for generated tokens (not prompt tokens)
-            # We need to ensure we're getting the right tokens based on the model output format
-            if len(layer_activations) >= len(gen_ids):
-                generated_tokens_activations = layer_activations[-len(gen_ids):].cpu().numpy()
-                all_layers_activations[f"layer_{layer_idx}"] = generated_tokens_activations
-        
-        logger.info(f"Extracted activations for {len(all_layers_activations)} layers")
-        return all_layers_activations
+        all_hidden_states = model_outputs.hidden_states
+        prompt_hidden = all_hidden_states[0]
+        gen_hiddens = all_hidden_states[1:]
+
+        gen_hidden_per_layer = [
+            torch.cat([step[layer_idx] for step in gen_hiddens], dim=1)
+            for layer_idx in range(len(prompt_hidden))
+        ]
+
+        full_hidden_states = [
+            torch.cat([prompt_hidden[layer_idx], gen_hidden_per_layer[layer_idx]], dim=1)
+            for layer_idx in range(len(prompt_hidden))
+        ]
+
+
+
+        return full_hidden_states
 
     def log_entry(self, key: str, entry: Dict[str, Any]):
         """
@@ -131,9 +174,28 @@ class ActivationsLogger:
                 
             # Remove the large model_outputs object to save space
             entry.pop("model_outputs", None)
+        
+        # Log size before compression for debugging
+        entry_size_before = len(pickle.dumps(entry))
+        logger.debug(f"Compressing entry with key {key[:8]}... (size before: {entry_size_before / (1024**2):.2f} MB)")
+        
+        # Apply compression to the entry
+        compressed_entry, compression_metadata = self.compress_fn(entry)
+        
+        # Log compression results
+        entry_size_after = len(pickle.dumps(compressed_entry))
+        compression_ratio = entry_size_before / max(1, entry_size_after)
+        logger.debug(f"Compression complete: {entry_size_after / (1024**2):.2f} MB, " 
+                    f"ratio: {compression_ratio:.2f}x, method: {compression_metadata.get('compression', 'unknown')}")
+        
+        # Add compression metadata to the entry
+        final_entry = {
+            "data": compressed_entry,
+            "metadata": compression_metadata
+        }
             
         with self.env.begin(write=True) as txn:
-            txn.put(key.encode("utf-8"), pickle.dumps(entry))
+            txn.put(key.encode("utf-8"), pickle.dumps(final_entry))
             
         # Check LMDB size after writing
         self.check_lmdb_size()
@@ -155,7 +217,29 @@ class ActivationsLogger:
         with self.env.begin(write=False) as txn:
             value = txn.get(key.encode("utf-8"))
             if value is not None:
-                return pickle.loads(value)
+                stored_entry = pickle.loads(value)
+                
+                # Check if the entry uses the new format with compression
+                if isinstance(stored_entry, dict) and "data" in stored_entry and "metadata" in stored_entry:
+                    # Log before decompression
+                    compressed_size = len(pickle.dumps(stored_entry["data"]))
+                    compression_method = stored_entry["metadata"].get("compression", "unknown")
+                    logger.debug(f"Decompressing entry with key {key[:8]}... "
+                               f"(compressed size: {compressed_size / (1024**2):.2f} MB, method: {compression_method})")
+                    
+                    # Apply decompression
+                    decompressed_data = self.decompress_fn(stored_entry["data"], stored_entry["metadata"])
+                    
+                    # Log after decompression
+                    decompressed_size = len(pickle.dumps(decompressed_data))
+                    logger.debug(f"Decompression complete: {decompressed_size / (1024**2):.2f} MB, "
+                               f"ratio: {decompressed_size / max(1, compressed_size):.2f}x")
+                    
+                    return decompressed_data
+                else:
+                    # Handle legacy format (no compression)
+                    logger.debug(f"Retrieved legacy entry with key {key[:8]} (no compression)")
+                    return stored_entry
             return None
 
     def close(self):
