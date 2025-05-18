@@ -283,12 +283,13 @@ if __name__ == '__main__':
     print(f"Running {TASKNAME} with model {model_name}")
 
     QAs_df = None
-    if args.do_generate_prompt:
-        # 1. Generate QA pairs
-        QA_OUTPUT_PATH = f'data/precise_qa/save/qa_{args.wiki_src}_{model_name}_{args.mode}.jsonl'\
+    QA_OUTPUT_PATH = f'data/precise_qa/save/qa_{args.wiki_src}_{model_name}_{args.mode}.jsonl'\
                             if args.qa_output_path == "" \
                                 else args.qa_output_path
-        print(QA_OUTPUT_PATH)
+    print(QA_OUTPUT_PATH)
+
+    if args.do_generate_prompt:
+        # 1. Generate QA pairs
 
         if os.path.exists(QA_OUTPUT_PATH):
             QAs = [line for line in jsonlines.open(QA_OUTPUT_PATH, 'r')]
