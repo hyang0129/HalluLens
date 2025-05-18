@@ -7,14 +7,15 @@ import lmdb
 import pickle
 import os
 import numpy as np
-from typing import Any, Dict, Optional, List, Callable, Tuple
+from typing import Any, Dict, Optional, List, Callable, Tuple, Union
 from loguru import logger
 import torch 
 
 
 class ActivationsLogger:
     def __init__(self, lmdb_path: str = "lmdb_data/activations.lmdb", map_size: int = 16 << 30,
-                 compress_fn: Optional[Callable] = None, decompress_fn: Optional[Callable] = None):
+                 compress_fn: Optional[Callable] = None, decompress_fn: Optional[Callable] = None, 
+                 read_only: bool = False):
         """
         Initialize the LMDB-based activations logger.
         
@@ -23,9 +24,11 @@ class ActivationsLogger:
             map_size: Maximum size of the LMDB file in bytes (default: 16GB)
             compress_fn: Optional function to compress activations before storage
             decompress_fn: Optional function to decompress activations after retrieval
+            read_only: if True, the LMDB will be opened in read-only mode
         """
         self.lmdb_path = lmdb_path
         self.env = None
+        self.metadata_env = None  # Separate environment for metadata
         self.map_size = map_size
         self.last_threshold_logged = 0  # Track the last threshold percentage logged
         
@@ -37,14 +40,25 @@ class ActivationsLogger:
         if not lmdb_path or lmdb_path.strip() == "":
             return
             
-        # Replace periods in the filename with underscores for compatibility
-        base, filename = os.path.split(lmdb_path)
-        safe_lmdb_path = os.path.join(base, filename)
+        safe_lmdb_path = lmdb_path
         self.safe_lmdb_path = safe_lmdb_path
         lmdb_dir = os.path.dirname(safe_lmdb_path)
         if lmdb_dir and not os.path.exists(lmdb_dir):
             os.makedirs(lmdb_dir, exist_ok=True)
-        self.env = lmdb.open(safe_lmdb_path, map_size=map_size, subdir=True, create=True, readonly=False, lock=True)
+            
+        # Open main LMDB for activations (large map size)
+        self.env = lmdb.open(safe_lmdb_path, map_size=map_size, subdir=True, create=True, readonly=read_only, lock=True)
+        
+        # Open separate LMDB for metadata (smaller map size)
+        metadata_path = os.path.join(os.path.dirname(safe_lmdb_path), f"{os.path.basename(safe_lmdb_path)}_metadata")
+        os.makedirs(metadata_path, exist_ok=True)
+        self.metadata_env = lmdb.open(metadata_path, map_size, subdir=True, create=True, readonly=read_only, lock=True)
+        logger.info(f"Opened metadata store at {metadata_path}")
+
+        self.read_only = True
+
+        if self.read_only:
+            self.keys = self.list_entries()
 
     @staticmethod
     def default_compress(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -125,7 +139,6 @@ class ActivationsLogger:
             logger.info("No hidden states found in model outputs")
             return None
             
-        
         # Get the generated tokens (excluding prompt)
         gen_sequence = model_outputs.sequences[0]
         gen_ids = gen_sequence[input_length:]
@@ -144,8 +157,6 @@ class ActivationsLogger:
             for layer_idx in range(len(prompt_hidden))
         ]
 
-
-
         return full_hidden_states
 
     def log_entry(self, key: str, entry: Dict[str, Any]):
@@ -157,9 +168,12 @@ class ActivationsLogger:
             entry: Dictionary containing the data to log (prompt, response, model_outputs, etc.)
         """
         # Skip logging if LMDB is not initialized
-        if self.env is None:
+        if self.env is None or self.metadata_env is None:
             return
             
+        # Create a metadata copy without activations for easier searching
+        
+        
         # Process model outputs if present
         if "model_outputs" in entry and "input_length" in entry:
             model_outputs = entry["model_outputs"]
@@ -168,12 +182,20 @@ class ActivationsLogger:
             # Extract activations from model outputs
             all_layers_activations = self.extract_activations(model_outputs, input_length)
             
+            entry.pop("model_outputs", None)
+            metadata_entry = entry.copy()
+            metadata_entry.pop("all_layers_activations", None)
+
             if all_layers_activations:
                 # Replace model_outputs with extracted activations to save space
                 entry["all_layers_activations"] = all_layers_activations
                 
-            # Remove the large model_outputs object to save space
-            entry.pop("model_outputs", None)
+
+        else: 
+            raise ValueError("No model_outputs or input_length found in entry")
+        
+        import time
+        metadata_entry["timestamp"] = time.time()
         
         # Log size before compression for debugging
         entry_size_before = len(pickle.dumps(entry))
@@ -188,32 +210,73 @@ class ActivationsLogger:
         logger.debug(f"Compression complete: {entry_size_after / (1024**2):.2f} MB, " 
                     f"ratio: {compression_ratio:.2f}x, method: {compression_metadata.get('compression', 'unknown')}")
         
-        # Add compression metadata to the entry
+        # Add compression metadata to both entries
         final_entry = {
             "data": compressed_entry,
             "metadata": compression_metadata
         }
+        
+        # Add reference to the main data in metadata entry
+        metadata_entry["has_activations"] = True
+        metadata_entry["compression_metadata"] = compression_metadata
             
         with self.env.begin(write=True) as txn:
             txn.put(key.encode("utf-8"), pickle.dumps(final_entry))
             
+        # Store metadata separately without the large activations
+        with self.metadata_env.begin(write=True) as txn:
+            txn.put(key.encode("utf-8"), pickle.dumps(metadata_entry))
+            
         # Check LMDB size after writing
         self.check_lmdb_size()
 
-    def get_entry(self, key: str) -> Optional[Dict[str, Any]]:
+    def get_entry(self, lookup: Union[str,int]) -> Dict[str, Any]:
+        """
+        Retrieve an entry from the LMDB.
+        
+        Args:
+            lookup: either a key or an index
+        """
+
+        if isinstance(lookup, int):
+            if lookup >= len(self.keys):
+                raise ValueError(f"Index {lookup} is out of range for {len(self.keys)} entries")
+            if self.read_only:
+                key = self.keys[lookup]
+            else:
+                logger.warning("LMDB is not read-only, listing entries to find key")
+                key = self.list_entries()[lookup]
+        else:
+            key = lookup
+
+        return self.get_entry_by_key(key)
+
+
+    def get_entry_by_key(self, key: str, metadata_only: bool = False) -> Optional[Dict[str, Any]]:
         """
         Retrieve an entry from the LMDB.
         
         Args:
             key: Unique identifier for the entry to retrieve
+            metadata_only: If True, only retrieve metadata without activations
             
         Returns:
             Dictionary containing the entry data if found, None otherwise
         """
-        # Return None if LMDB is not initialized
+        # Raise an error if LMDB is not initialized
         if self.env is None:
-            return None
+            raise ValueError("LMDB is not initialized")
             
+        # If only metadata is requested and metadata store is available
+        if metadata_only and self.metadata_env is not None:
+            with self.metadata_env.begin(write=False) as txn:
+                value = txn.get(key.encode("utf-8"))
+                if value is not None:
+                    return pickle.loads(value)
+                else:
+                    raise ValueError("No metadata found for key")
+        
+        # Otherwise retrieve full entry including activations
         with self.env.begin(write=False) as txn:
             value = txn.get(key.encode("utf-8"))
             if value is not None:
@@ -240,10 +303,56 @@ class ActivationsLogger:
                     # Handle legacy format (no compression)
                     logger.debug(f"Retrieved legacy entry with key {key[:8]} (no compression)")
                     return stored_entry
-            return None
+            else:
+                raise ValueError("No entry found for key")
+
+    def list_entries(self) -> List[str]:
+        """
+        List all entry keys in the metadata store.
+        
+        Returns:
+            List of entry keys as strings
+        """
+        if self.metadata_env is None:
+            return []
+            
+        keys = []
+        with self.metadata_env.begin(write=False) as txn:
+            cursor = txn.cursor()
+            # Use iternext with keys=True, values=False to avoid reading values
+            for key in cursor.iternext(keys=True, values=False):
+                keys.append(key.decode("utf-8"))
+        return keys
+
+    def search_metadata(self, filter_fn: Callable[[Dict[str, Any]], bool]) -> List[Tuple[str, Dict[str, Any]]]:
+        """
+        Search through metadata entries using a filter function.
+        
+        Args:
+            filter_fn: Function that takes a metadata entry and returns True if it matches the search criteria
+            
+        Returns:
+            List of tuples containing (key, metadata_entry) for matching entries
+        """
+        if self.metadata_env is None:
+            return []
+            
+        results = []
+        with self.metadata_env.begin(write=False) as txn:
+            cursor = txn.cursor()
+            for key_bytes, value in cursor:
+                key = key_bytes.decode("utf-8")
+                metadata = pickle.loads(value)
+                if filter_fn(metadata):
+                    results.append((key, metadata))
+        return results
 
     def close(self):
-        """Close the LMDB environment."""
+        """Close the LMDB environments."""
         if self.env is not None:
             self.env.close()
-            self.env = None 
+            self.env = None
+            
+        if self.metadata_env is not None:
+            self.metadata_env.close()
+            self.metadata_env = None
