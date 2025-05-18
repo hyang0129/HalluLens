@@ -8,6 +8,7 @@ import pickle
 import os
 import numpy as np
 from typing import Any, Dict, Optional, List
+from loguru import logger
 
 
 class ActivationsLogger:
@@ -21,6 +22,8 @@ class ActivationsLogger:
         """
         self.lmdb_path = lmdb_path
         self.env = None
+        self.map_size = map_size
+        self.last_threshold_logged = 0  # Track the last threshold percentage logged
         
         # Skip opening LMDB if path is empty
         if not lmdb_path or lmdb_path.strip() == "":
@@ -29,10 +32,41 @@ class ActivationsLogger:
         # Replace periods in the filename with underscores for compatibility
         base, filename = os.path.split(lmdb_path)
         safe_lmdb_path = os.path.join(base, filename)
+        self.safe_lmdb_path = safe_lmdb_path
         lmdb_dir = os.path.dirname(safe_lmdb_path)
         if lmdb_dir and not os.path.exists(lmdb_dir):
             os.makedirs(lmdb_dir, exist_ok=True)
         self.env = lmdb.open(safe_lmdb_path, map_size=map_size, subdir=True, create=True, readonly=False, lock=True)
+
+    def check_lmdb_size(self):
+        """
+        Check the current size of the LMDB file and log warnings when it passes
+        certain thresholds (10%, 20%, ..., 90%) of its maximum map size.
+        """
+        if self.env is None or not hasattr(self, 'safe_lmdb_path'):
+            return
+            
+        # Get the current size of the LMDB data file
+        data_path = os.path.join(self.safe_lmdb_path, "data.mdb")
+        if not os.path.exists(data_path):
+            return
+            
+        current_size = os.path.getsize(data_path)
+        size_percentage = (current_size / self.map_size) * 100
+        
+        # Check if we've passed a new 10% threshold
+        current_threshold = int(size_percentage / 10) * 10
+        
+        if current_threshold > self.last_threshold_logged and current_threshold <= 90:
+            logger.warning(f"LMDB file has reached {current_threshold}% of its maximum size "
+                          f"({current_size / (1024**3):.2f}GB / {self.map_size / (1024**3):.2f}GB)")
+            self.last_threshold_logged = current_threshold
+            
+        # Extra warning at 95%
+        if size_percentage >= 95 and self.last_threshold_logged < 95:
+            logger.critical(f"LMDB file is at {size_percentage:.1f}% of its maximum size! "
+                           f"({current_size / (1024**3):.2f}GB / {self.map_size / (1024**3):.2f}GB)")
+            self.last_threshold_logged = 95
 
     def extract_activations(self, model_outputs, input_length):
         """
@@ -47,6 +81,7 @@ class ActivationsLogger:
         """
         # If model_outputs is None or doesn't have hidden_states, return None
         if model_outputs is None or not hasattr(model_outputs, 'hidden_states'):
+            logger.info("No hidden states found in model outputs")
             return None
             
         all_layers_activations = {}
@@ -66,6 +101,7 @@ class ActivationsLogger:
                 generated_tokens_activations = layer_activations[-len(gen_ids):].cpu().numpy()
                 all_layers_activations[f"layer_{layer_idx}"] = generated_tokens_activations
         
+        logger.info(f"Extracted activations for {len(all_layers_activations)} layers")
         return all_layers_activations
 
     def log_entry(self, key: str, entry: Dict[str, Any]):
@@ -97,6 +133,9 @@ class ActivationsLogger:
             
         with self.env.begin(write=True) as txn:
             txn.put(key.encode("utf-8"), pickle.dumps(entry))
+            
+        # Check LMDB size after writing
+        self.check_lmdb_size()
 
     def get_entry(self, key: str) -> Optional[Dict[str, Any]]:
         """
