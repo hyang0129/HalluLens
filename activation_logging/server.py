@@ -20,7 +20,9 @@ from llama_cpp import Llama  # Import for llama.cpp Python bindings
 # Default model if none specified in request
 DEFAULT_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
 app = FastAPI()
-activation_logger = ActivationsLogger()
+
+# Default LMDB path
+DEFAULT_LMDB_PATH = os.environ.get("ACTIVATION_LMDB_PATH", "lmdb_data/activations.lmdb")
 
 # Model cache to avoid reloading for each request
 _model_cache = {}
@@ -30,7 +32,7 @@ _llamacpp_model_cache = {}  # Cache for llama.cpp models
 # Temperature overwrite variable, None means use request temperature
 overwrite_temperature = None
 
-# LMDB path overwrite variable, None means use the default path in activation_logger
+# LMDB path overwrite variable, None means use the default path from environment
 overwrite_lmdb_path = None
 
 # Top-p overwrite variable, None means use request top_p
@@ -450,13 +452,17 @@ def apply_overwrites(request_params):
     if overwrite_lmdb_path is not None:
         params['lmdb_path'] = overwrite_lmdb_path
         logger.info(f"Using overwrite LMDB path: {overwrite_lmdb_path}")
+    elif 'lmdb_path' not in params or not params.get('lmdb_path'):
+        # If no path specified and no overwrite, use the environment variable
+        params['lmdb_path'] = os.environ.get("ACTIVATION_LMDB_PATH", DEFAULT_LMDB_PATH)
+        logger.info(f"Using default LMDB path from environment: {params['lmdb_path']}")
         
     return params
 
 
 def get_logger_for_request(request_params):
     """
-    Determine which logger to use based on request parameters and overwrites.
+    Create a new logger instance for each request to avoid LMDB assertion errors.
     
     Args:
         request_params: Dictionary containing request parameters (with overwrites applied)
@@ -469,13 +475,17 @@ def get_logger_for_request(request_params):
     """
     lmdb_path = request_params.get('lmdb_path')
     
+    # Always create a new logger instance to avoid LMDB assertion errors
     if lmdb_path and lmdb_path.strip():
         # Create and use a custom logger with the specified path
         custom_logger = ActivationsLogger(lmdb_path=lmdb_path)
         return custom_logger, custom_logger, True
     else:
-        # Use the default logger
-        return activation_logger, None, False
+        # Create a new logger with the default path from environment
+        # This avoids the 'Assertion mp->mp_pgno != pgno failed in mdb_page_touch()' error
+        default_path = os.environ.get("ACTIVATION_LMDB_PATH", DEFAULT_LMDB_PATH)
+        new_logger = ActivationsLogger(lmdb_path=default_path)
+        return new_logger, new_logger, False
 
 
 @app.get("/health")
@@ -504,15 +514,9 @@ async def set_default_lmdb_path(request: SetDefaultLMDBPathRequest):
     Returns:
         SetDefaultLMDBPathResponse with status and path information
     """
-    global activation_logger
-    
     # Store the previous path
-    previous_path = activation_logger.env.path()
+    previous_path = os.environ.get("ACTIVATION_LMDB_PATH", DEFAULT_LMDB_PATH)
     
-    # Close the current logger
-    activation_logger.close()
-    
-    # Create a new logger with the new path
     try:
         new_path = request.lmdb_path
         
@@ -522,20 +526,24 @@ async def set_default_lmdb_path(request: SetDefaultLMDBPathRequest):
             os.makedirs(lmdb_dir, exist_ok=True)
             logger.info(f"Created LMDB directory: {lmdb_dir}")
         
-        # Create new logger
-        activation_logger = ActivationsLogger(lmdb_path=new_path)
+        # Update the environment variable
+        os.environ["ACTIVATION_LMDB_PATH"] = new_path
+        
+        # Update the default path constant
+        global DEFAULT_LMDB_PATH
+        DEFAULT_LMDB_PATH = new_path
         
         logger.info(f"Default LMDB path changed from {previous_path} to {new_path}")
         
         return SetDefaultLMDBPathResponse(
             success=True,
             previous_path=previous_path,
-            current_path=activation_logger.env.path(),
+            current_path=new_path,
             message=f"Default LMDB path successfully changed to {new_path}"
         )
     except Exception as e:
-        # If there's an error, try to recreate the original logger
-        activation_logger = ActivationsLogger(lmdb_path=previous_path)
+        # If there's an error, revert to the previous path
+        os.environ["ACTIVATION_LMDB_PATH"] = previous_path
         logger.error(f"Error changing default LMDB path: {e}")
         
         return SetDefaultLMDBPathResponse(
@@ -567,7 +575,11 @@ async def set_overwrite_lmdb_path(request: SetOverwriteLMDBPathRequest):
     # Update the global variable
     overwrite_lmdb_path = request.lmdb_path
     
-    logger.info(f"Overwrite LMDB path changed from {previous_value} to {overwrite_lmdb_path}")
+    # If overwrite is None, we'll use the environment variable
+    if overwrite_lmdb_path is None:
+        logger.info(f"Overwrite LMDB path removed. Will use ACTIVATION_LMDB_PATH={os.environ.get('ACTIVATION_LMDB_PATH', DEFAULT_LMDB_PATH)}")
+    else:
+        logger.info(f"Overwrite LMDB path set to: {overwrite_lmdb_path}")
     
     return SetOverwriteLMDBPathResponse(
         success=True,
@@ -676,17 +688,18 @@ async def completions(request: CompletionRequest):
     
     if not model_name.endswith('.gguf') and all_layers_activations is not None:
         # Get appropriate logger based on parameters with overwrites
-        logger_to_use, custom_logger, _ = get_logger_for_request(params)
+        logger_to_use, _, _ = get_logger_for_request(params)
         
-        logger_to_use.log_entry(entry_key, {
-            "prompt": request.prompt,
-            "response": response_text,
-            "all_layers_activations": all_layers_activations,
-            "model": model_name,
-        })
-        
-        if custom_logger is not None:
-            custom_logger.close()
+        try:
+            logger_to_use.log_entry(entry_key, {
+                "prompt": request.prompt,
+                "response": response_text,
+                "all_layers_activations": all_layers_activations,
+                "model": model_name,
+            })
+        finally:
+            # Always close the logger to free up resources
+            logger_to_use.close()
     else:
         logger.info(f"Skipping activation logging for GGUF model: {model_name}")
     
@@ -739,18 +752,19 @@ async def chat_completions(request: ChatCompletionRequest):
     
     if not model_name.endswith('.gguf') and all_layers_activations is not None:
         # Get appropriate logger based on parameters with overwrites
-        logger_to_use, custom_logger, _ = get_logger_for_request(params)
+        logger_to_use, _, _ = get_logger_for_request(params)
         
-        logger_to_use.log_entry(entry_key, {
-            "prompt": prompt,
-            "response": response_text,
-            "all_layers_activations": all_layers_activations,
-            "model": model_name,
-            "messages": [msg.dict() for msg in request.messages]
-        })
-        
-        if custom_logger is not None:
-            custom_logger.close()
+        try:
+            logger_to_use.log_entry(entry_key, {
+                "prompt": prompt,
+                "response": response_text,
+                "all_layers_activations": all_layers_activations,
+                "model": model_name,
+                "messages": [msg.dict() for msg in request.messages]
+            })
+        finally:
+            # Always close the logger to free up resources
+            logger_to_use.close()
     else:
         logger.info(f"Skipping activation logging for GGUF model: {model_name}")
     
@@ -766,12 +780,6 @@ async def chat_completions(request: ChatCompletionRequest):
             )
         ]
     )
-
-
-@app.on_event("shutdown")
-def shutdown_event():
-    """Clean up resources when shutting down the server."""
-    activation_logger.close()
 
 
 if __name__ == "__main__":
