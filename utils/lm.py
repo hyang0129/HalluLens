@@ -61,7 +61,9 @@ def call_vllm_api(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512, por
     )
     chat_completion = client.chat.completions.create(
         model=model,
-        messages=[{"role": "user","content": prompt}],
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant. Please answer questions directly and clearly without adding any extra punctuation or filler characters and without multiple choice options."},
+            {"role": "user","content": prompt}],
         max_tokens=max_tokens,
         temperature=temperature,
         top_p=top_p
