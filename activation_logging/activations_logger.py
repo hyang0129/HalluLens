@@ -90,6 +90,7 @@ class ActivationsLogger:
         gen_sequence = model_outputs.sequences[0]
         gen_ids = gen_sequence[input_length:]
         
+        logger.info(model_outputs.hidden_states)
         # Extract activations from all layers for generated tokens
         for layer_idx, layer_hidden_states in enumerate(model_outputs.hidden_states):
             # Extract activations for this layer (shape: batch_size, seq_len, hidden_dim)
