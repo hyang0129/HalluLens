@@ -159,9 +159,9 @@ def run_inference_llamacpp(prompt, max_tokens, temperature, top_p, model_path):
         model_path: Path to the GGUF model file
         
     Returns:
-        Tuple of (response_text, all_layers_activations, input_length)
+        Tuple of (response_text, model_outputs, input_length)
         - response_text: Generated text
-        - all_layers_activations: None (activations not available in llama.cpp)
+        - model_outputs: None for llama.cpp models (activations not available)
         - input_length: Approximate input length (estimated)
     """
     logger.info(f"Starting llama.cpp inference with model: {model_path}")
@@ -200,12 +200,12 @@ def run_inference_llamacpp(prompt, max_tokens, temperature, top_p, model_path):
     # This is a rough estimate based on characters
     input_length = len(prompt) // 4  # Very rough approximation
     
-    # llama.cpp doesn't provide activations, so return None
-    all_layers_activations = None
+    # llama.cpp doesn't provide activations, so return None for model_outputs
+    model_outputs = None
     
     logger.info(f"Generated {len(response_text)} characters of response")
     
-    return response_text, all_layers_activations, input_length
+    return response_text, model_outputs, input_length
 
 
 # New function to extract inference functionality
@@ -222,9 +222,9 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
         auth_token: HuggingFace authentication token for gated models
         
     Returns:
-        Tuple of (response_text, activations, input_length)
+        Tuple of (response_text, model_outputs, input_length)
         - response_text: Generated text
-        - activations: Model activations for generated tokens
+        - model_outputs: Raw model outputs for the activation logger to process
         - input_length: Length of input tokens
     """
     logger.info(f"Starting inference with model: {model_name}")
@@ -276,18 +276,9 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
     
     logger.info(f"Generated {len(gen_ids)} new tokens ({len(response_text)} characters)")
     
-    # Get activations from all layers for generated tokens
-    all_layers_activations = {}
-    for layer_idx, layer_hidden_states in enumerate(outputs.hidden_states):
-        # Extract activations for this layer (shape: batch_size, seq_len, hidden_dim)
-        layer_activations = layer_hidden_states[0]  # Get first batch item
-        # Only keep activations for generated tokens (not prompt tokens)
-        generated_tokens_activations = layer_activations[-len(gen_ids):].cpu().numpy()
-        all_layers_activations[f"layer_{layer_idx}"] = generated_tokens_activations
-    
-    logger.info(f"Extracted activations from {len(all_layers_activations)} layers")
-    
-    return response_text, all_layers_activations, input_ids.shape[1]
+    # Return the full outputs object for the activation logger to process
+    # instead of extracting activations here
+    return response_text, outputs, input_ids.shape[1]
 
 
 # OpenAI API request/response models for compatibility
@@ -609,7 +600,7 @@ async def completions(request: CompletionRequest):
     })
     
     # Use the extracted inference function
-    response_text, all_layers_activations, _ = run_inference(
+    response_text, model_outputs, input_length = run_inference(
         prompt=request.prompt,
         max_tokens=request.max_tokens,
         temperature=params['temperature'],
@@ -621,15 +612,17 @@ async def completions(request: CompletionRequest):
     # Log to LMDB only if not a GGUF model (which doesn't provide activations)
     entry_key = prompt_hash(request.prompt)
     
-    if not model_name.endswith('.gguf') and all_layers_activations is not None:
+    if not model_name.endswith('.gguf') and model_outputs is not None:
         # Get appropriate logger based on parameters with overwrites
         logger_to_use, _, _ = get_logger_for_request(params)
         
         try:
+            # Pass the model outputs directly to the logger
             logger_to_use.log_entry(entry_key, {
                 "prompt": request.prompt,
                 "response": response_text,
-                "all_layers_activations": all_layers_activations,
+                "model_outputs": model_outputs,  # Pass the full model outputs
+                "input_length": input_length,    # Pass the input length for reference
                 "model": model_name,
             })
         finally:
@@ -673,7 +666,7 @@ async def chat_completions(request: ChatCompletionRequest):
     })
     
     # Use the extracted inference function
-    response_text, all_layers_activations, _ = run_inference(
+    response_text, model_outputs, input_length = run_inference(
         prompt=prompt,
         max_tokens=request.max_tokens,
         temperature=params['temperature'],
@@ -685,15 +678,17 @@ async def chat_completions(request: ChatCompletionRequest):
     # Log to LMDB only if not a GGUF model (which doesn't provide activations)
     entry_key = prompt_hash(prompt)
     
-    if not model_name.endswith('.gguf') and all_layers_activations is not None:
+    if not model_name.endswith('.gguf') and model_outputs is not None:
         # Get appropriate logger based on parameters with overwrites
         logger_to_use, _, _ = get_logger_for_request(params)
         
         try:
+            # Pass the model outputs directly to the logger
             logger_to_use.log_entry(entry_key, {
                 "prompt": prompt,
                 "response": response_text,
-                "all_layers_activations": all_layers_activations,
+                "model_outputs": model_outputs,  # Pass the full model outputs
+                "input_length": input_length,    # Pass the input length for reference
                 "model": model_name,
                 "messages": [msg.dict() for msg in request.messages]
             })
