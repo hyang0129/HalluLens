@@ -110,12 +110,16 @@ Result:
 """
 
 class PreciseQAEval:
-    def __init__(self, model_path, TASKNAME):
+    def __init__(self, model_path, TASKNAME, generations_file_path=None):
         self.model_name = model_path.split("/")[-1]
-        generations_file_path = f'output/{TASKNAME}/{self.model_name}/generation.jsonl'
+        
+        if generations_file_path:
+            self.generations_file_path = generations_file_path
+        else:
+            self.generations_file_path = f'output/{TASKNAME}/{self.model_name}/generation.jsonl'
         
         self.output_path = f'output/{TASKNAME}/{self.model_name}'
-        self.test_df = pd.read_json(generations_file_path, lines=True)
+        self.test_df = pd.read_json(self.generations_file_path, lines=True)
        
         # self.abtention_evaluator = 'meta-llama/Llama-3.1-70B-Instruct'
         # self.halu_evaluator = 'meta-llama/Llama-3.1-70B-Instruct'
@@ -266,6 +270,7 @@ if __name__ == '__main__':
     
     parser.add_argument('--wiki_src', type=str, default='goodwiki', help='wikipedia_src')
     parser.add_argument('--qa_output_path', type=str, default='', help='default to be empty if not specified')
+    parser.add_argument('--generations_file_path', type=str, default='', help='path to save the model-generated outputs; if not specified, outputs will be saved to output/{TASKNAME}/{model_name}/generation.jsonl')
     parser.add_argument('--N', type=int, default=5000)
     parser.add_argument('--q_generator', type=str, default='Llama-3.3-70B-Instruct-IQ3_M.gguf', help='model to use for question generation')
     args = parser.parse_args()
@@ -306,11 +311,16 @@ if __name__ == '__main__':
         QAs = [line for line in jsonlines.open(QA_OUTPUT_PATH, 'r')][:args.N]
         QAs_df = pd.DataFrame(QAs)
 
+        # remove answers that are empty or contain something like "answer is in reference document"
+        QAs_df =  QAs_df[~(QAs_df.answer.str.contains('reference document', case = False))]
+        QAs_df = QAs_df[~(QAs_df.answer == '')]
+
         print(f"Starting Inference for [{args.model}], Testset_N: {QAs_df.shape}")
         exp.run_exp(
                     task=f"{TASKNAME}", 
                     model_path=args.model, 
                     all_prompts=QAs_df, 
+                    generations_file_path=args.generations_file_path if args.generations_file_path else None,
                     inference_method=args.inference_method, \
                     max_tokens=args.max_inference_tokens,
                     max_workers=1)
@@ -318,5 +328,5 @@ if __name__ == '__main__':
 
     if args.do_eval:
         print(f"Starting Evaluation for {args.model}")
-        PreciseQAEval(model_path=args.model, TASKNAME=TASKNAME).run_eval()
+        PreciseQAEval(model_path=args.model, TASKNAME=TASKNAME, generations_file_path=args.generations_file_path).run_eval()
         print(f'{TASKNAME} Evaluation completed')
