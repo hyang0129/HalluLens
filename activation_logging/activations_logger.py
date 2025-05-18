@@ -7,14 +7,198 @@ import lmdb
 import pickle
 import os
 import numpy as np
-from typing import Any, Dict, Optional, List, Callable, Tuple, Union
+from typing import Any, Dict, Optional, List, Callable, Tuple, Union, Type
 from loguru import logger
 import torch 
+try:
+    import zstandard as zstd
+    ZSTD_AVAILABLE = True
+except ImportError:
+    ZSTD_AVAILABLE = False
+    logger.warning("zstandard module not found. Install with 'pip install zstandard' to enable compression.")
+
+
+class BaseCompressor:
+    """Base class for compression implementations."""
+    
+    @staticmethod
+    def compress(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        Compress data.
+        
+        Args:
+            data: Dictionary containing the data to be compressed
+            
+        Returns:
+            Tuple of (compressed_data, metadata)
+        """
+        raise NotImplementedError("Subclasses must implement compress method")
+    
+    @staticmethod
+    def decompress(data: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Decompress data.
+        
+        Args:
+            data: Dictionary containing the compressed data
+            metadata: Dictionary with metadata about how the data was compressed
+            
+        Returns:
+            Dictionary with decompressed data
+        """
+        raise NotImplementedError("Subclasses must implement decompress method")
+
+
+class NoCompression(BaseCompressor):
+    """No compression, just passes data through."""
+    
+    @staticmethod
+    def compress(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        Default compression function that doesn't actually compress.
+        
+        Args:
+            data: Dictionary containing the data to be compressed
+            
+        Returns:
+            Tuple of (uncompressed_data, metadata)
+            - uncompressed_data: The original data unchanged
+            - metadata: Dictionary with metadata about the compression (empty for default)
+        """
+        # No compression, just return the original data and empty metadata
+        return data, {"compression": "none"}
+    
+    @staticmethod
+    def decompress(data: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Default decompression function that doesn't do anything.
+        
+        Args:
+            data: Dictionary containing the data to be decompressed
+            metadata: Dictionary with metadata about how the data was compressed
+            
+        Returns:
+            The original data unchanged
+        """
+        # No decompression needed, just return the original data
+        return data
+
+
+class ZstdCompression(BaseCompressor):
+    """Zstandard compression with configurable level."""
+    
+    def __init__(self, level: int = 19):
+        """
+        Initialize ZstdCompression with the specified compression level.
+        
+        Args:
+            level: Compression level (1-22, higher = better compression but slower)
+        """
+        self.level = level
+        if not ZSTD_AVAILABLE:
+            logger.warning("zstandard module not available, compression will fail")
+    
+    def compress(self, data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        Compress data using zstandard with the configured level.
+        Only compresses the 'all_layers_activations' field to save space.
+        
+        Args:
+            data: Dictionary containing the data to be compressed
+            
+        Returns:
+            Tuple of (compressed_data, metadata)
+            - compressed_data: Dictionary with compressed activations
+            - metadata: Dictionary with metadata about the compression
+        """
+        if not ZSTD_AVAILABLE:
+            logger.warning("zstandard module not available, skipping compression")
+            return data, {"compression": "none", "error": "zstandard not available"}
+            
+        # Create a copy of the data to avoid modifying the original
+        result = data.copy()
+        
+        # Only compress the activations if present
+        if "all_layers_activations" in result:
+            try:
+                # Create a compressor with the specified level
+                compressor = zstd.ZstdCompressor(level=self.level)
+                
+                # Pickle and compress the activations
+                pickled_data = pickle.dumps(result["all_layers_activations"])
+                compressed_data = compressor.compress(pickled_data)
+                
+                # Replace the activations with the compressed version
+                result["all_layers_activations"] = compressed_data
+                
+                # Return the compressed data and metadata
+                return result, {
+                    "compression": "zstd",
+                    "level": self.level,
+                    "original_size": len(pickled_data),
+                    "compressed_size": len(compressed_data),
+                    "ratio": len(pickled_data) / max(1, len(compressed_data))
+                }
+            except Exception as e:
+                logger.error(f"Error during zstd compression: {e}")
+                # Return the original data if compression fails
+                return data, {"compression": "none", "error": str(e)}
+        else:
+            # No activations to compress
+            return result, {"compression": "none", "reason": "no activations found"}
+    
+    @staticmethod
+    def decompress(data: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Decompress data that was compressed with zstandard.
+        
+        Args:
+            data: Dictionary containing the compressed data
+            metadata: Dictionary with metadata about how the data was compressed
+            
+        Returns:
+            Dictionary with decompressed data
+        """
+        if not ZSTD_AVAILABLE:
+            logger.error("zstandard module not available, cannot decompress")
+            raise ImportError("zstandard module not available, cannot decompress")
+            
+        # Create a copy of the data to avoid modifying the original
+        result = data.copy()
+        
+        # Check if this data was compressed with zstd
+        compression = metadata.get("compression", "none")
+        if compression != "zstd":
+            # Data wasn't compressed with zstd, return as is
+            return result
+            
+        # Decompress the activations if present
+        if "all_layers_activations" in result and isinstance(result["all_layers_activations"], bytes):
+            try:
+                # Create a decompressor
+                decompressor = zstd.ZstdDecompressor()
+                
+                # Decompress and unpickle the activations
+                compressed_data = result["all_layers_activations"]
+                decompressed_data = decompressor.decompress(compressed_data)
+                activations = pickle.loads(decompressed_data)
+                
+                # Replace the compressed activations with the decompressed version
+                result["all_layers_activations"] = activations
+                
+                return result
+            except Exception as e:
+                logger.error(f"Error during zstd decompression: {e}")
+                # Return the original data if decompression fails
+                return data
+        else:
+            # No compressed activations found
+            return result
 
 
 class ActivationsLogger:
     def __init__(self, lmdb_path: str = "lmdb_data/activations.lmdb", map_size: int = 16 << 30,
-                 compress_fn: Optional[Callable] = None, decompress_fn: Optional[Callable] = None, 
+                 compression: Union[str, BaseCompressor, None] = 'zstd', 
                  read_only: bool = False):
         """
         Initialize the LMDB-based activations logger.
@@ -22,8 +206,7 @@ class ActivationsLogger:
         Args:
             lmdb_path: Path to the LMDB file to store activations
             map_size: Maximum size of the LMDB file in bytes (default: 16GB)
-            compress_fn: Optional function to compress activations before storage
-            decompress_fn: Optional function to decompress activations after retrieval
+            compression: Compression method ('zstd', None) or a BaseCompressor instance
             read_only: if True, the LMDB will be opened in read-only mode
         """
         self.lmdb_path = lmdb_path
@@ -32,9 +215,8 @@ class ActivationsLogger:
         self.map_size = map_size
         self.last_threshold_logged = 0  # Track the last threshold percentage logged
         
-        # Set compression functions (use defaults if None provided)
-        self.compress_fn = compress_fn if compress_fn is not None else self.default_compress
-        self.decompress_fn = decompress_fn if decompress_fn is not None else self.default_decompress
+        # Set up the compressor based on the compression parameter
+        self.compressor = self._get_compressor(compression)
         
         # Skip opening LMDB if path is empty
         if not lmdb_path or lmdb_path.strip() == "":
@@ -59,39 +241,32 @@ class ActivationsLogger:
 
         if self.read_only:
             self.keys = self.list_entries()
-
-    @staticmethod
-    def default_compress(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """
-        Default compression function that doesn't actually compress.
-        This serves as a placeholder for future compression implementations.
-        
-        Args:
-            data: Dictionary containing the data to be compressed
-            
-        Returns:
-            Tuple of (uncompressed_data, metadata)
-            - uncompressed_data: The original data unchanged
-            - metadata: Dictionary with metadata about the compression (empty for default)
-        """
-        # No compression, just return the original data and empty metadata
-        return data, {"compression": "none"}
     
-    @staticmethod
-    def default_decompress(data: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, Any]:
+    def _get_compressor(self, compression: Union[str, BaseCompressor, None]) -> BaseCompressor:
         """
-        Default decompression function that doesn't do anything.
-        This serves as a placeholder for future decompression implementations.
+        Get the appropriate compressor based on the compression parameter.
         
         Args:
-            data: Dictionary containing the data to be decompressed
-            metadata: Dictionary with metadata about how the data was compressed
+            compression: Compression method ('zstd', None) or a BaseCompressor instance
             
         Returns:
-            The original data unchanged
+            BaseCompressor instance to use for compression/decompression
         """
-        # No decompression needed, just return the original data
-        return data
+        if isinstance(compression, BaseCompressor):
+            # Use the provided compressor
+            return compression
+        elif compression is None:
+            # Use no compression
+            return NoCompression()
+        elif compression == 'zstd':
+            # Use zstandard compression if available
+            if ZSTD_AVAILABLE:
+                return ZstdCompression(level=19)
+            else:
+                raise ImportError("zstandard module not available, cannot compress")
+        else:
+            # Unknown compression method, fall back to no compression
+            raise ValueError(f"Unknown compression method '{compression}', must be 'zstd' or a BaseCompressor instance")
 
     def check_lmdb_size(self):
         """
@@ -171,9 +346,6 @@ class ActivationsLogger:
         if self.env is None or self.metadata_env is None:
             return
             
-        # Create a metadata copy without activations for easier searching
-        
-        
         # Process model outputs if present
         if "model_outputs" in entry and "input_length" in entry:
             model_outputs = entry["model_outputs"]
@@ -201,8 +373,8 @@ class ActivationsLogger:
         entry_size_before = len(pickle.dumps(entry))
         logger.debug(f"Compressing entry with key {key[:8]}... (size before: {entry_size_before / (1024**2):.2f} MB)")
         
-        # Apply compression to the entry
-        compressed_entry, compression_metadata = self.compress_fn(entry)
+        # Apply compression to the entry using the compressor
+        compressed_entry, compression_metadata = self.compressor.compress(entry)
         
         # Log compression results
         entry_size_after = len(pickle.dumps(compressed_entry))
@@ -290,8 +462,8 @@ class ActivationsLogger:
                     logger.debug(f"Decompressing entry with key {key[:8]}... "
                                f"(compressed size: {compressed_size / (1024**2):.2f} MB, method: {compression_method})")
                     
-                    # Apply decompression
-                    decompressed_data = self.decompress_fn(stored_entry["data"], stored_entry["metadata"])
+                    # Apply decompression using the compressor
+                    decompressed_data = self.compressor.decompress(stored_entry["data"], stored_entry["metadata"])
                     
                     # Log after decompression
                     decompressed_size = len(pickle.dumps(decompressed_data))
