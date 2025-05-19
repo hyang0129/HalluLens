@@ -253,6 +253,8 @@ def trim_response(tokenizer, gen_ids, response_text):
         for i, token_id in enumerate(gen_ids[10:], start=10):
             if token_id.item() in tokenizer.trim_token_ids:
                 trim_pos = i
+                token_str = tokenizer.decode([token_id.item()], skip_special_tokens=False)
+                logger.debug(f"Found trim token at position {i}: ID={token_id.item()}, str={repr(token_str)}")
                 break
         
         if trim_pos is not None:
