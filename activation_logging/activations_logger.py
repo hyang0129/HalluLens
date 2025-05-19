@@ -244,7 +244,9 @@ class ZstdCompression(BaseCompressor):
 class ActivationsLogger:
     def __init__(self, lmdb_path: str = "lmdb_data/activations.lmdb", map_size: int = 16 << 30,
                  compression: Union[str, BaseCompressor, None] = None, 
-                 read_only: bool = False):
+                 read_only: bool = False,
+                 target_layers: str = 'all',
+                 sequence_mode: str = 'all'):
         """
         Initialize the LMDB-based activations logger.
         
@@ -253,7 +255,17 @@ class ActivationsLogger:
             map_size: Maximum size of the LMDB file in bytes (default: 16GB)
             compression: Compression method ('zstd', None) or a BaseCompressor instance
             read_only: if True, the LMDB will be opened in read-only mode
+            target_layers: Which layers to extract activations from ('all', 'first_half', or 'second_half')
+            sequence_mode: Which tokens to extract activations for ('all' for full sequence or 'prompt' for prompt tokens only)
         """
+        if target_layers not in ['all', 'first_half', 'second_half']:
+            raise ValueError("target_layers must be one of: 'all', 'first_half', 'second_half'")
+        if sequence_mode not in ['all', 'prompt']:
+            raise ValueError("sequence_mode must be either 'all' or 'prompt'")
+            
+        self.target_layers = target_layers
+        self.sequence_mode = sequence_mode
+        logger.info(f"ActivationsLogger initialized to target '{target_layers}' layers with '{sequence_mode}' sequence mode")
         self.lmdb_path = lmdb_path
         self.env = None
         self.metadata_env = None  # Separate environment for metadata
@@ -352,7 +364,14 @@ class ActivationsLogger:
             input_length: The length of the input prompt in tokens
             
         Returns:
-            Dictionary containing activations from all layers
+            List of tensors containing activations from the specified layers based on target_layers setting:
+            - 'all': all layers
+            - 'first_half': first half of the model's layers
+            - 'second_half': second half of the model's layers
+            
+            For each layer, activations are extracted based on sequence_mode:
+            - 'all': activations for both prompt and generated tokens
+            - 'prompt': activations for prompt tokens only
         """
         # If model_outputs is None or doesn't have hidden_states, return None
         if model_outputs is None or not hasattr(model_outputs, 'hidden_states'):
@@ -364,18 +383,38 @@ class ActivationsLogger:
         gen_ids = gen_sequence[input_length:]
         
         all_hidden_states = model_outputs.hidden_states
-        prompt_hidden = all_hidden_states[0]
-        gen_hiddens = all_hidden_states[1:]
+        prompt_hidden = all_hidden_states[0]  # first set of tokens, the prompt tokens. It has len = num_layers
+        gen_hiddens = all_hidden_states[1:]  # all subsequent sets of tokens, the generated tokens
 
-        gen_hidden_per_layer = [
-            torch.cat([step[layer_idx] for step in gen_hiddens], dim=1)
-            for layer_idx in range(len(prompt_hidden))
-        ]
+        # Determine which layers to extract based on target_layers setting
+        num_layers = len(prompt_hidden)
+        if self.target_layers == 'first_half':
+            target_layer_indices = range(num_layers // 2)
+            logger.debug(f"Extracting first {num_layers // 2} layers")
+        elif self.target_layers == 'second_half':
+            start_idx = num_layers // 2
+            target_layer_indices = range(start_idx, num_layers)
+            logger.debug(f"Extracting second half of layers ({start_idx} to {num_layers-1})")
+        else:  # 'all'
+            target_layer_indices = range(num_layers)
+            logger.debug(f"Extracting all {num_layers} layers")
 
-        full_hidden_states = [
-            torch.cat([prompt_hidden[layer_idx], gen_hidden_per_layer[layer_idx]], dim=1)
-            for layer_idx in range(len(prompt_hidden))
-        ]
+        if self.sequence_mode == 'prompt':
+            # Only return prompt activations
+            logger.debug("Extracting activations for prompt tokens only")
+            full_hidden_states = [prompt_hidden[layer_idx] for layer_idx in target_layer_indices]
+        else:  # 'all'
+            # Concatenate prompt and generated token activations
+            logger.debug("Extracting activations for full sequence (prompt + generated tokens)")
+            gen_hidden_per_layer = [
+                torch.cat([step[layer_idx] for step in gen_hiddens], dim=1)
+                for layer_idx in target_layer_indices
+            ]
+
+            full_hidden_states = [
+                torch.cat([prompt_hidden[layer_idx], gen_hidden_per_layer[i]], dim=1)
+                for i, layer_idx in enumerate(target_layer_indices)
+            ]
 
         return full_hidden_states
 
