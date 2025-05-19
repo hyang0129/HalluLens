@@ -309,12 +309,13 @@ if __name__ == '__main__':
                 raise NotImplementedError(f"mode {args.wiki_src} not implemented")
             
     if args.do_inference:
-        QAs = [line for line in jsonlines.open(QA_OUTPUT_PATH, 'r')][:args.N]
+        QAs = [line for line in jsonlines.open(QA_OUTPUT_PATH, 'r')]
         QAs_df = pd.DataFrame(QAs)
 
         # remove answers that are empty or contain something like "answer is in reference document"
         QAs_df =  QAs_df[~(QAs_df.answer.str.contains('reference document', case = False))]
         QAs_df = QAs_df[~(QAs_df.answer == '')]
+        QAs_df = QAs_df.head(args.N)
 
         print(f"Starting Inference for [{args.model}], Testset_N: {QAs_df.shape}")
         exp.run_exp(

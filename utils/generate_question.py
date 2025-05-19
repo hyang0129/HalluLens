@@ -254,7 +254,7 @@ def precise_QA_generation_run_batch(
     wiki_data_all = pd.read_json(wiki_input_path, orient='records', lines=True)
 
     # level set up
-    low_level, high_level = 0, 10
+    low_level, high_level = 7, 10
     per_level_count = N//(high_level-low_level)
 
     print()
