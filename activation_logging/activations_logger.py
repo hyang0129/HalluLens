@@ -384,8 +384,16 @@ class ActivationsLogger:
         
         all_hidden_states = model_outputs.hidden_states
         prompt_hidden = all_hidden_states[0]  # first set of tokens, the prompt tokens. It has len = num_layers
-        gen_hiddens = all_hidden_states[1:]  # all subsequent sets of tokens, the generated tokens
+        gen_hiddens = all_hidden_states[1:]  # all subsequent sets of tokens, the generated tokens. The structure of this list is [token_num, layer_num, ...]
 
+        # If there's a trim position, only use activations up to that point
+        trim_pos = None
+        if hasattr(model_outputs, 'trim_position'):
+            trim_pos = model_outputs.trim_position
+            if trim_pos is not None:
+                logger.info(f"Trimming activations at position {trim_pos}")
+                gen_hiddens = gen_hiddens[:trim_pos]
+                        
         # Determine which layers to extract based on target_layers setting
         num_layers = len(prompt_hidden)
         if self.target_layers == 'first_half':
@@ -406,6 +414,8 @@ class ActivationsLogger:
         else:  # 'all'
             # Concatenate prompt and generated token activations
             logger.debug("Extracting activations for full sequence (prompt + generated tokens)")
+
+            
             gen_hidden_per_layer = [
                 torch.cat([step[layer_idx] for step in gen_hiddens], dim=1)
                 for layer_idx in target_layer_indices
@@ -434,6 +444,10 @@ class ActivationsLogger:
         if "model_outputs" in entry and "input_length" in entry:
             model_outputs = entry["model_outputs"]
             input_length = entry["input_length"]
+            
+            # Add trim position to model_outputs for use in extract_activations
+            if "trim_position" in entry:
+                model_outputs.trim_position = entry["trim_position"]
             
             # Extract activations from model outputs
             all_layers_activations = self.extract_activations(model_outputs, input_length)

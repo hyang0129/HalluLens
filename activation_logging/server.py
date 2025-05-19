@@ -96,13 +96,23 @@ def get_model_and_tokenizer(model_name: str, auth_token: Optional[str] = None):
         # First load tokenizer
         tokenizer = AutoTokenizer.from_pretrained(model_name, **tokenizer_kwargs)
         
-        
         if not tokenizer.pad_token or tokenizer.pad_token == "":
             logger.info("Pad token not set or empty. Setting pad token to eos token.")
             tokenizer.pad_token = tokenizer.eos_token
         else:
             logger.info(f"Pad token is already set: {tokenizer.pad_token}")
 
+        # Cache trim token IDs if TRIM_OUTPUT_AT is set
+        trim_at = os.environ.get("TRIM_OUTPUT_AT")
+        if trim_at is not None:
+            logger.info(f"Caching token IDs for trim sequence: {repr(trim_at)}")
+            trim_token_ids = []
+            for token_id in range(tokenizer.vocab_size):
+                token_str = tokenizer.decode([token_id], skip_special_tokens=False)
+                if trim_at in token_str:
+                    trim_token_ids.append(token_id)
+            tokenizer.trim_token_ids = trim_token_ids
+            logger.info(f"Found {len(trim_token_ids)} tokens containing trim sequence")
 
         # Then load model
         model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
@@ -212,11 +222,46 @@ def run_inference_llamacpp(prompt, max_tokens, temperature, top_p, model_path):
     model_outputs = None
     
     logger.info(f"Generated {len(response_text)} characters of response")
+    trim_pos = None # llama.cpp doesn't provide trim position and we want to stay consistent with the other models
+    return response_text, model_outputs, input_length, trim_pos
+
+
+def trim_response(tokenizer, gen_ids, response_text):
+    """
+    Trim the response text at a specific sequence if TRIM_OUTPUT_AT is set.
     
-    return response_text, model_outputs, input_length
+    Args:
+        tokenizer: The tokenizer used for decoding
+        gen_ids: Generated token IDs
+        response_text: Original response text
+        
+    Returns:
+        Tuple of (trimmed_text, trim_position)
+        - trimmed_text: The response text, possibly trimmed
+        - trim_position: Position where response was trimmed (or None if no trimming)
+    """
+    trim_at = os.environ.get("TRIM_OUTPUT_AT")
+    trim_pos = None
+    
+    if trim_at is not None:
+        if not hasattr(tokenizer, 'trim_token_ids'):
+            raise RuntimeError(f"Tokenizer does not have cached trim token IDs for sequence: {repr(trim_at)}")
+        
+        # Find first occurrence of any trim token in the generated sequence
+        for i, token_id in enumerate(gen_ids):
+            if token_id.item() in tokenizer.trim_token_ids:
+                trim_pos = i
+                break
+        
+        if trim_pos is not None:
+            original_length = len(response_text)
+            # Decode only up to the trim position
+            response_text = tokenizer.decode(gen_ids[:trim_pos], skip_special_tokens=True)
+            logger.info(f"Trimmed output at token position {trim_pos} from {original_length} to {len(response_text)} characters")
+    
+    return response_text, trim_pos
 
 
-# New function to extract inference functionality
 def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MODEL, auth_token=None):
     """
     Run inference using the model and tokenizer.
@@ -230,10 +275,11 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
         auth_token: HuggingFace authentication token for gated models
         
     Returns:
-        Tuple of (response_text, model_outputs, input_length)
+        Tuple of (response_text, model_outputs, input_length, trim_position)
         - response_text: Generated text
         - model_outputs: Raw model outputs for the activation logger to process
         - input_length: Length of input tokens
+        - trim_position: Position where response was trimmed (or None if no trimming)
     """
     logger.info(f"Starting inference with model: {model_name}")
     logger.info(f"Inference parameters: max_tokens={max_tokens}, temperature={temperature}, top_p={top_p}")
@@ -287,11 +333,13 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
     gen_ids = outputs.sequences[0][input_ids.shape[1]:]
     response_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
     
+    # Trim the response if needed
+    response_text, trim_pos = trim_response(tokenizer, gen_ids, response_text)
+    
     logger.info(f"Generated {len(gen_ids)} new tokens ({len(response_text)} characters)")
     
     # Return the full outputs object for the activation logger to process
-    # instead of extracting activations here
-    return response_text, outputs, input_ids.shape[1]
+    return response_text, outputs, input_ids.shape[1], trim_pos
 
 
 # OpenAI API request/response models for compatibility
@@ -613,7 +661,7 @@ async def completions(request: CompletionRequest):
     })
     
     # Use the extracted inference function
-    response_text, model_outputs, input_length = run_inference(
+    response_text, model_outputs, input_length, trim_pos = run_inference(
         prompt=request.prompt,
         max_tokens=request.max_tokens,
         temperature=params['temperature'],
@@ -637,6 +685,7 @@ async def completions(request: CompletionRequest):
                 "model_outputs": model_outputs,  # Pass the full model outputs
                 "input_length": input_length,    # Pass the input length for reference
                 "model": model_name,
+                "trim_position": trim_pos,       # Pass the trim position
             })
         finally:
             # Always close the logger to free up resources
@@ -679,7 +728,7 @@ async def chat_completions(request: ChatCompletionRequest):
     })
     
     # Use the extracted inference function
-    response_text, model_outputs, input_length = run_inference(
+    response_text, model_outputs, input_length, trim_pos = run_inference(
         prompt=prompt,
         max_tokens=request.max_tokens,
         temperature=params['temperature'],
@@ -703,7 +752,8 @@ async def chat_completions(request: ChatCompletionRequest):
                 "model_outputs": model_outputs,  # Pass the full model outputs
                 "input_length": input_length,    # Pass the input length for reference
                 "model": model_name,
-                "messages": [msg.dict() for msg in request.messages]
+                "messages": [msg.dict() for msg in request.messages],
+                "trim_position": trim_pos,       # Pass the trim position
             })
         finally:
             # Always close the logger to free up resources
