@@ -250,7 +250,7 @@ def trim_response(tokenizer, gen_ids, response_text):
         # Find first occurrence of any trim token in the generated sequence
         for i, token_id in enumerate(gen_ids):
             if token_id.item() in tokenizer.trim_token_ids:
-                trim_pos = i
+                trim_pos = max(1, i)  # Ensure trim_pos is at least 1
                 break
         
         if trim_pos is not None:

@@ -26,7 +26,7 @@ def main():
     parser.add_argument("--auth_token", type=str, default=None,
                         help="HuggingFace authentication token for accessing gated models")
     parser.add_argument("--trim-output-at", type=str, default=None,
-                        help="Sequence at which to trim model output (e.g. '\\n')")
+                        help="Sequence at which to trim model output (e.g. '\\n'). Note that you need to escape this in linux so it's --trim-output-at $'\\n'")
     
     args = parser.parse_args()
     
