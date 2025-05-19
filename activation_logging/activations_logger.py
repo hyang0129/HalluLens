@@ -243,7 +243,7 @@ class ZstdCompression(BaseCompressor):
 
 class ActivationsLogger:
     def __init__(self, lmdb_path: str = "lmdb_data/activations.lmdb", map_size: int = 16 << 30,
-                 compression: Union[str, BaseCompressor, None] = 'zstd', 
+                 compression: Union[str, BaseCompressor, None] = None, 
                  read_only: bool = False):
         """
         Initialize the LMDB-based activations logger.
