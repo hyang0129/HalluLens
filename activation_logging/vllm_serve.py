@@ -5,7 +5,7 @@ This script serves as a wrapper around vllm serve to ensure the activations
 are properly logged.
 
 Usage:
-  python -m activation_logging.vllm_serve [--model MODEL] [--host HOST] [--port PORT] [--lmdb_path LMDB_PATH] [--auth_token AUTH_TOKEN]
+  python -m activation_logging.vllm_serve [--model MODEL] [--host HOST] [--port PORT] [--lmdb_path LMDB_PATH] [--auth_token AUTH_TOKEN] [--trim-output-at TRIM_SEQUENCE]
 """
 
 import argparse
@@ -25,6 +25,8 @@ def main():
                         help="Path to LMDB for storing activations (default: lmdb_data/activations.lmdb)")
     parser.add_argument("--auth_token", type=str, default=None,
                         help="HuggingFace authentication token for accessing gated models")
+    parser.add_argument("--trim-output-at", type=str, default=None,
+                        help="Sequence at which to trim model output (e.g. '\\n')")
     
     args = parser.parse_args()
     
@@ -33,6 +35,11 @@ def main():
     if args.auth_token:
         os.environ["HF_TOKEN"] = args.auth_token
         print(f"Using provided HuggingFace token for model access")
+    
+    # Set trim sequence if provided
+    if args.trim_output_at:
+        os.environ["TRIM_OUTPUT_AT"] = args.trim_output_at
+        print(f"Will trim output at sequence: {repr(args.trim_output_at)}")
     
     print(f"Starting vLLM server with activation logging")
     print(f"Model: {args.model}")
