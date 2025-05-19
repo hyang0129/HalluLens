@@ -229,6 +229,8 @@ def run_inference_llamacpp(prompt, max_tokens, temperature, top_p, model_path):
 def trim_response(tokenizer, gen_ids, response_text):
     """
     Trim the response text at a specific sequence if TRIM_OUTPUT_AT is set.
+    Starts checking for trim tokens only after the first 10 tokens to ensure
+    a reasonable amount of content.
     
     Args:
         tokenizer: The tokenizer used for decoding
@@ -247,10 +249,10 @@ def trim_response(tokenizer, gen_ids, response_text):
         if not hasattr(tokenizer, 'trim_token_ids'):
             raise RuntimeError(f"Tokenizer does not have cached trim token IDs for sequence: {repr(trim_at)}")
         
-        # Find first occurrence of any trim token in the generated sequence
-        for i, token_id in enumerate(gen_ids):
+        # Find first occurrence of any trim token in the generated sequence, starting after 10 tokens
+        for i, token_id in enumerate(gen_ids[10:], start=10):
             if token_id.item() in tokenizer.trim_token_ids:
-                trim_pos = max(1, i)  # Ensure trim_pos is at least 1
+                trim_pos = i
                 break
         
         if trim_pos is not None:
