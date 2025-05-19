@@ -124,8 +124,8 @@ class PreciseQAEval:
         # self.abtention_evaluator = 'meta-llama/Llama-3.1-70B-Instruct'
         # self.halu_evaluator = 'meta-llama/Llama-3.1-70B-Instruct'
 
-        self.abtention_evaluator = 'meta-llama/Llama-3.1-8B-Instruct'
-        self.halu_evaluator = 'meta-llama/Llama-3.1-8B-Instruct'
+        self.abtention_evaluator = 'Llama-3.3-70B-Instruct-IQ3_M.gguf'
+        self.halu_evaluator = 'Llama-3.3-70B-Instruct-IQ3_M.gguf'
 
 
     def eval_abstention(self, evaluator):
@@ -205,7 +205,7 @@ class PreciseQAEval:
             halu_test_res.append(hallucinated_judge)
         return abstantion_res, halu_test_res
 
-    def run_eval(self):
+    def run_eval(self, eval_results_path=None):
         abstantion_res, abstantion_raw_gen = self.eval_abstention(self.abtention_evaluator)
         halu_test_raw_gen = self.judge_hallucination(self.halu_evaluator)
         abstantion_res, halu_test_res = self.process_res(abstantion_raw_gen, halu_test_raw_gen)
@@ -235,7 +235,7 @@ class PreciseQAEval:
         }
 
         # save the results
-        res_path = f'output/{TASKNAME}/{self.model_name}/eval_results.json'
+        res_path = eval_results_path if eval_results_path else f'output/{TASKNAME}/{self.model_name}/eval_results.json'
         with open(res_path, 'w') as f:
             json.dump(res, f, indent=4)   
 
@@ -271,6 +271,7 @@ if __name__ == '__main__':
     parser.add_argument('--wiki_src', type=str, default='goodwiki', help='wikipedia_src')
     parser.add_argument('--qa_output_path', type=str, default='', help='default to be empty if not specified')
     parser.add_argument('--generations_file_path', type=str, default='', help='path to save the model-generated outputs; if not specified, outputs will be saved to output/{TASKNAME}/{model_name}/generation.jsonl')
+    parser.add_argument('--eval_results_path', type=str, default='', help='path to save the evaluation results; if not specified, results will be saved to output/{TASKNAME}/{model_name}/eval_results.json')
     parser.add_argument('--N', type=int, default=5000)
     parser.add_argument('--q_generator', type=str, default='Llama-3.3-70B-Instruct-IQ3_M.gguf', help='model to use for question generation')
     args = parser.parse_args()
@@ -331,5 +332,5 @@ if __name__ == '__main__':
 
     if args.do_eval:
         print(f"Starting Evaluation for {args.model}")
-        PreciseQAEval(model_path=args.model, TASKNAME=TASKNAME, generations_file_path=args.generations_file_path).run_eval()
+        PreciseQAEval(model_path=args.model, TASKNAME=TASKNAME, generations_file_path=args.generations_file_path).run_eval(eval_results_path=args.eval_results_path)
         print(f'{TASKNAME} Evaluation completed')
