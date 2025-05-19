@@ -11,6 +11,7 @@ import jsonlines
 from tqdm.contrib.concurrent import thread_map
 import os
 import argparse
+import logging
 
 from utils import exp, lm, eval_utils
 import utils.generate_question as precise_qa
@@ -110,7 +111,7 @@ Result:
 """
 
 class PreciseQAEval:
-    def __init__(self, model_path, TASKNAME, generations_file_path=None):
+    def __init__(self, model_path, TASKNAME, generations_file_path=None, quick_debug_mode=False):
         self.model_name = model_path.split("/")[-1]
         
         if generations_file_path:
@@ -127,6 +128,10 @@ class PreciseQAEval:
         self.abtention_evaluator = 'Llama-3.3-70B-Instruct-IQ3_M.gguf'
         self.halu_evaluator = 'Llama-3.3-70B-Instruct-IQ3_M.gguf'
 
+        # If in quick debug mode, only use first 50 questions
+        if quick_debug_mode:
+            logger.info("Quick debug mode enabled - using only first 50 questions")
+            self.test_df = self.test_df.head(50)
 
     def eval_abstention(self, evaluator):
         print("Start abstantion evaluation")
@@ -175,7 +180,7 @@ class PreciseQAEval:
             ) for _, g in self.test_df.iterrows()
         ]
 
-        if evaluator == "meta-llama/Llama-3.1-8B-Instruct":
+        if evaluator == "meta-llama/Llama-3.1-8B-Instruct" or evaluator == "Llama-3.3-70B-Instruct-IQ3_M.gguf":
             halu_eval_raw = thread_map(
                 lambda p: lm.generate(p, evaluator),
                 halu_prompts,
@@ -273,6 +278,7 @@ if __name__ == '__main__':
     parser.add_argument('--generations_file_path', type=str, default='', help='path to save the model-generated outputs; if not specified, outputs will be saved to output/{TASKNAME}/{model_name}/generation.jsonl')
     parser.add_argument('--eval_results_path', type=str, default='', help='path to save the evaluation results; if not specified, results will be saved to output/{TASKNAME}/{model_name}/eval_results.json')
     parser.add_argument('--N', type=int, default=5000)
+    parser.add_argument('--quick_debug_mode', action='store_true', default=False, help='if True, only evaluate first 50 questions')
     parser.add_argument('--q_generator', type=str, default='Llama-3.3-70B-Instruct-IQ3_M.gguf', help='model to use for question generation')
     args = parser.parse_args()
 
@@ -332,5 +338,10 @@ if __name__ == '__main__':
 
     if args.do_eval:
         print(f"Starting Evaluation for {args.model}")
-        PreciseQAEval(model_path=args.model, TASKNAME=TASKNAME, generations_file_path=args.generations_file_path).run_eval(eval_results_path=args.eval_results_path)
+        PreciseQAEval(
+            model_path=args.model, 
+            TASKNAME=TASKNAME, 
+            generations_file_path=args.generations_file_path,
+            quick_debug_mode=args.quick_debug_mode
+        ).run_eval(eval_results_path=args.eval_results_path)
         print(f'{TASKNAME} Evaluation completed')
