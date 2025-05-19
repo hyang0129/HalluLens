@@ -315,7 +315,8 @@ if __name__ == '__main__':
         # remove answers that are empty or contain something like "answer is in reference document"
         QAs_df =  QAs_df[~(QAs_df.answer.str.contains('reference document', case = False))]
         QAs_df = QAs_df[~(QAs_df.answer == '')]
-        QAs_df = QAs_df.head(args.N)
+        QAs_df = QAs_df[(QAs_df.h_score_cat > 6)]
+        QAs_df = QAs_df.sample(args.N)
 
         print(f"Starting Inference for [{args.model}], Testset_N: {QAs_df.shape}")
         exp.run_exp(
