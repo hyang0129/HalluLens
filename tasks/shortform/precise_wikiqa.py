@@ -169,6 +169,8 @@ class PreciseQAEval:
         for response in abstains_eval:
             response_str = json.dumps(response)
             
+            print(response_str)
+
             # Check if response starts with valid format
             if not (response_str.startswith('{"is_abstaining":true}') or response_str.startswith('{"is_abstaining":false}')):
                 raise ValueError(f"Invalid response format. Expected {{'is_abstaining':true|false}} but got: {response_str}")
