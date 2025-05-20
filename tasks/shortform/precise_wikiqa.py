@@ -167,8 +167,7 @@ class PreciseQAEval:
         # Validate and clean up JSON responses
         cleaned_abstains_eval = []
         for response in abstains_eval:
-            print(response)
-            response_str = response
+            response_str = json.dumps(response)
             
             # Check if response starts with valid format
             if not (response_str.startswith('{"is_abstaining":true}') or response_str.startswith('{"is_abstaining":false}')):
@@ -178,11 +177,11 @@ class PreciseQAEval:
             if response_str.startswith('{"is_abstaining":true}'):
                 if len(response_str) > len('{"is_abstaining":true}'):
                     logger.debug(f"Truncating response. Original: {response_str}")
-                cleaned_response = '{"is_abstaining": True}'
+                cleaned_response = {"is_abstaining": True}
             else:
                 if len(response_str) > len('{"is_abstaining":false}'):
                     logger.debug(f"Truncating response. Original: {response_str}")
-                cleaned_response = '{"is_abstaining": False}'
+                cleaned_response = {"is_abstaining": False}
             
             cleaned_abstains_eval.append(cleaned_response)
         
