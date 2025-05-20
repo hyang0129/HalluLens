@@ -130,8 +130,8 @@ class PreciseQAEval:
 
         # If in quick debug mode, only use first 50 questions
         if quick_debug_mode:
-            logger.info("Quick debug mode enabled - using only first 50 questions")
-            self.test_df = self.test_df.head(50)
+            logger.info("Quick debug mode enabled - using only first 5 questions")
+            self.test_df = self.test_df.head(5)
 
     def eval_abstention(self, evaluator):
         print("Start abstantion evaluation")
@@ -143,18 +143,18 @@ class PreciseQAEval:
                 for _, g in self.test_df.iterrows()
             ]
         
-        if os.path.exists(abs_path):
-                # read from jsonl abspath
-                with open(abs_path, "r") as f:
-                    abstains_eval_raw = [json.loads(line)["eval_res"] for line in f]
-        else:
-            abstains_eval_raw = thread_map(
-                lambda p: lm.generate(p, evaluator),
-                abstain_prompts,
-                max_workers=1,
-                desc=f"using {evaluator}")
-            
-            eval_utils.save_eval_raw(abstains_eval_raw, abs_path)
+        # if os.path.exists(abs_path):
+        #         # read from jsonl abspath
+        #         with open(abs_path, "r") as f:
+        #             abstains_eval_raw = [json.loads(line)["eval_res"] for line in f]
+        # else:
+        abstains_eval_raw = thread_map(
+            lambda p: lm.generate(p, evaluator),
+            abstain_prompts,
+            max_workers=1,
+            desc=f"using {evaluator}")
+        
+        eval_utils.save_eval_raw(abstains_eval_raw, abs_path)
         
         ABSTAIN_JSON_KEY = 'is_abstaining'
         abstains_eval = eval_utils.jsonify_ans(raw_responses=abstains_eval_raw, \
@@ -213,6 +213,8 @@ class PreciseQAEval:
     def run_eval(self, eval_results_path=None):
         abstantion_res, abstantion_raw_gen = self.eval_abstention(self.abtention_evaluator)
         halu_test_raw_gen = self.judge_hallucination(self.halu_evaluator)
+
+
         abstantion_res, halu_test_res = self.process_res(abstantion_raw_gen, halu_test_raw_gen)
 
         not_abstained = sum([1 for x in abstantion_res if x == False])
