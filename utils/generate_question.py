@@ -254,7 +254,7 @@ def precise_QA_generation_run_batch(
     wiki_data_all = pd.read_json(wiki_input_path, orient='records', lines=True)
 
     # level set up
-    low_level, high_level = 7, 10
+    low_level, high_level = 8, 10
     per_level_count = N//(high_level-low_level)
 
     print()
@@ -264,7 +264,7 @@ def precise_QA_generation_run_batch(
     for bin in range(low_level,high_level):
 
         level_wiki = wiki_data_all[wiki_data_all['h_score_cat'] == bin]
-        level_wiki = level_wiki.sample(frac=1) 
+        level_wiki = level_wiki.sample(n=per_level_count, replace=True) 
         wiki_data = level_wiki.to_dict(orient='records')
         random.shuffle(wiki_data)
 
