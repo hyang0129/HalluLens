@@ -241,7 +241,7 @@ class PreciseQAEval:
         
         halu_test_res = []
         for txt in halu_eval_raw:
-            if not any([x in txt.lower() for x in ['correct', 'incorrect', 'unverifiable']]): logger.debug(txt)
+            if not any([x in txt.lower()[:12] for x in ['correct', 'incorrect', 'unverifiable']]): logger.debug(txt)
             hallucinated_judge = False if txt.lower() == 'correct' or txt.lower() ==  'yes' else True
             halu_test_res.append(hallucinated_judge)
         return abstantion_res, halu_test_res
