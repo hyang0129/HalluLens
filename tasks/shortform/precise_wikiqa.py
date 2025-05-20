@@ -136,6 +136,7 @@ class PreciseQAEval:
     def eval_abstention(self, evaluator):
         print("Start abstantion evaluation")
         abs_path = f'{self.output_path}/abstain_eval_raw.jsonl'
+        
         abstain_prompts = [
                 ABSTAIN_PROMPT_UPDATED.format(
                     prompt=g.prompt, generation=g.generation
@@ -143,11 +144,6 @@ class PreciseQAEval:
                 for _, g in self.test_df.iterrows()
             ]
         
-        # if os.path.exists(abs_path):
-        #         # read from jsonl abspath
-        #         with open(abs_path, "r") as f:
-        #             abstains_eval_raw = [json.loads(line)["eval_res"] for line in f]
-        # else:
         abstains_eval_raw = thread_map(
             lambda p: lm.generate(p, evaluator),
             abstain_prompts,
@@ -161,6 +157,36 @@ class PreciseQAEval:
                                                 eval_prompts=abstain_prompts, \
                                                 evaluator_model=evaluator,\
                                                 key=ABSTAIN_JSON_KEY)
+        
+        # Save original responses
+        with open(abs_path, 'w') as f:
+            for response in abstains_eval:
+                json.dump({"eval_res": response}, f)
+                f.write('\n')
+
+        # Validate and clean up JSON responses
+        cleaned_abstains_eval = []
+        for response in abstains_eval:
+            response_str = response
+            
+            # Check if response starts with valid format
+            if not (response_str.startswith('{"is_abstaining":true}') or response_str.startswith('{"is_abstaining":false}')):
+                raise ValueError(f"Invalid response format. Expected {{'is_abstaining':true|false}} but got: {response_str}")
+            
+            # If there's extra content after valid JSON, truncate it
+            if response_str.startswith('{"is_abstaining":true}'):
+                if len(response_str) > len('{"is_abstaining":true}'):
+                    logger.debug(f"Truncating response. Original: {response_str}")
+                cleaned_response = '{"is_abstaining": True}'
+            else:
+                if len(response_str) > len('{"is_abstaining":false}'):
+                    logger.debug(f"Truncating response. Original: {response_str}")
+                cleaned_response = '{"is_abstaining": False}'
+            
+            cleaned_abstains_eval.append(cleaned_response)
+        
+        abstains_eval = cleaned_abstains_eval
+        
         refusal_res = []
         for o in abstains_eval:
             if ABSTAIN_JSON_KEY in o:
@@ -174,6 +200,7 @@ class PreciseQAEval:
     def judge_hallucination(self, evaluator):
         print("Starting Hallucination Evaluation")
 
+        halu_path = f'{self.output_path}/halu_eval_raw.jsonl'
         halu_prompts = [
             IS_HALLUCINATION_RESPONSE.format(
                 prompt=g.prompt, generation=g.generation, gold_answer=g.answer
@@ -187,6 +214,13 @@ class PreciseQAEval:
                 max_workers=1,
                 desc=f"using {evaluator}"
             )
+
+            # Save raw hallucination evaluation responses
+            with open(halu_path, 'w') as f:
+                for response in halu_eval_raw:
+                    json.dump({"eval_res": response}, f)
+                    f.write('\n')
+
         else:
             raise ValueError(f"Invalid evaluator: {evaluator}")
 
