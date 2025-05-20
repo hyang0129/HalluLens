@@ -235,13 +235,13 @@ class PreciseQAEval:
             try:
                 abstantion_res.append(json.loads(x)['is_abstaining'])
             except:
-                print(x)
+                logger.error(x)
                 raise
         # abstantion_res = [json.loads(x)['is_abstaining'] for x in abstantion_res_raw]
         
         halu_test_res = []
         for txt in halu_eval_raw:
-            if txt.lower() not in ['correct', 'incorrect', 'unverifiable']: print(txt)
+            if not any([x in txt.lower() for x in ['correct', 'incorrect', 'unverifiable']]): logger.debug(txt)
             hallucinated_judge = False if txt.lower() == 'correct' or txt.lower() ==  'yes' else True
             halu_test_res.append(hallucinated_judge)
         return abstantion_res, halu_test_res
