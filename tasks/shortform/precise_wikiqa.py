@@ -172,16 +172,16 @@ class PreciseQAEval:
             print(response_str)
 
             # Check if response starts with valid format
-            if not (response_str.startswith('{"is_abstaining":true}') or response_str.startswith('{"is_abstaining":false}')):
+            if not (response_str.startswith('{"is_abstaining": false}') or response_str.startswith('{"is_abstaining": false}')):
                 raise ValueError(f"Invalid response format. Expected {{'is_abstaining':true|false}} but got: {response_str}")
             
             # If there's extra content after valid JSON, truncate it
-            if response_str.startswith('{"is_abstaining":true}'):
-                if len(response_str) > len('{"is_abstaining":true}'):
+            if response_str.startswith('{{"is_abstaining": true}}'):
+                if len(response_str) > len('{{"is_abstaining": true}'):
                     logger.debug(f"Truncating response. Original: {response_str}")
                 cleaned_response = {"is_abstaining": True}
             else:
-                if len(response_str) > len('{"is_abstaining":false}'):
+                if len(response_str) > len('{"is_abstaining": false}'):
                     logger.debug(f"Truncating response. Original: {response_str}")
                 cleaned_response = {"is_abstaining": False}
             
