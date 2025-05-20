@@ -11,7 +11,7 @@ import jsonlines
 from tqdm.contrib.concurrent import thread_map
 import os
 import argparse
-import logging
+from loguru import logger
 
 from utils import exp, lm, eval_utils
 import utils.generate_question as precise_qa
@@ -321,6 +321,8 @@ if __name__ == '__main__':
 
         # remove answers that are empty or contain something like "answer is in reference document"
         QAs_df =  QAs_df[~(QAs_df.answer.str.contains('reference document', case = False))]
+        QAs_df =  QAs_df[~(QAs_df.answer.str.contains('Please answer according', case = False))]
+        QAs_df =  QAs_df[~(QAs_df.answer.str.contains('answer based on your response', case = False))]
         QAs_df = QAs_df[~(QAs_df.answer == '')]
         QAs_df = QAs_df[(QAs_df.h_score_cat > 6)]
         QAs_df = QAs_df.sample(args.N)
