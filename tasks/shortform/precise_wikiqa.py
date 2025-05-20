@@ -167,6 +167,7 @@ class PreciseQAEval:
         # Validate and clean up JSON responses
         cleaned_abstains_eval = []
         for response in abstains_eval:
+            print(response)
             response_str = response
             
             # Check if response starts with valid format
