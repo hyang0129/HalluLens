@@ -324,7 +324,7 @@ if __name__ == '__main__':
         QAs_df = QAs_df[~(QAs_df.answer == '')]
         QAs_df = QAs_df[(QAs_df.h_score_cat > 6)]
         QAs_df = QAs_df.sample(args.N)
-        QAs_df.prompt.apply(lambda x : f'Provide only one answer. Q:{x}\n A:')
+        QAs_df['prompt'] = QAs_df.prompt.apply(lambda x : f'Answer in one sentence. Q:{x}\n A:')
 
         print(f"Starting Inference for [{args.model}], Testset_N: {QAs_df.shape}")
         exp.run_exp(
