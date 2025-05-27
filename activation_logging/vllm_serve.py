@@ -5,13 +5,14 @@ This script serves as a wrapper around vllm serve to ensure the activations
 are properly logged.
 
 Usage:
-  python -m activation_logging.vllm_serve [--model MODEL] [--host HOST] [--port PORT] [--lmdb_path LMDB_PATH] [--auth_token AUTH_TOKEN] [--trim-output-at TRIM_SEQUENCE]
+  python -m activation_logging.vllm_serve [--model MODEL] [--host HOST] [--port PORT] [--lmdb_path LMDB_PATH] [--auth_token AUTH_TOKEN] [--trim-output-at TRIM_SEQUENCE] [--map-size-gb MAP_SIZE_GB]
 """
 
 import argparse
 import os
 import subprocess
 import sys
+from loguru import logger
 
 def main():
     parser = argparse.ArgumentParser(description="Run vLLM server with activation logging")
@@ -27,31 +28,47 @@ def main():
                         help="HuggingFace authentication token for accessing gated models")
     parser.add_argument("--trim-output-at", type=str, default=None,
                         help="Sequence at which to trim model output (e.g. '\\n'). Note that you need to escape this in linux so it's --trim-output-at $'\\n'")
+    parser.add_argument("--map-size-gb", type=int, default=64,
+                        help="Size of LMDB map in gigabytes (default: 64)")
+    parser.add_argument("--log-file", type=str, default="server.log",
+                        help="Path to log file (default: server.log)")
     
     args = parser.parse_args()
+
+    # Configure loguru logger
+    logger.remove()  # Remove default handler
+    logger.add(
+        args.log_file,
+        rotation="10 MB",
+        retention="1 week",
+        level="INFO",
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}"
+    )
     
     # Set environment variables for server configuration
     os.environ["ACTIVATION_LMDB_PATH"] = args.lmdb_path
+    os.environ["ACTIVATION_LMDB_MAP_SIZE"] = str(args.map_size_gb * (1 << 30))  # Convert GB to bytes
     if args.auth_token:
         os.environ["HF_TOKEN"] = args.auth_token
-        print(f"Using provided HuggingFace token for model access")
+        logger.info("Using provided HuggingFace token for model access")
     
     # Set trim sequence if provided
     if args.trim_output_at:
         os.environ["TRIM_OUTPUT_AT"] = args.trim_output_at
-        print(f"Will trim output at sequence: {repr(args.trim_output_at)}")
+        logger.info(f"Will trim output at sequence: {repr(args.trim_output_at)}")
     
-    print(f"Starting vLLM server with activation logging")
-    print(f"Model: {args.model}")
-    print(f"Host: {args.host}")
-    print(f"Port: {args.port}")
-    print(f"LMDB Path: {args.lmdb_path}")
+    logger.info(f"Starting vLLM server with activation logging")
+    logger.info(f"Model: {args.model}")
+    logger.info(f"Host: {args.host}")
+    logger.info(f"Port: {args.port}")
+    logger.info(f"LMDB Path: {args.lmdb_path}")
+    logger.info(f"LMDB Map Size: {args.map_size_gb} GB")
     
     # Create LMDB directory if it doesn't exist
     lmdb_dir = os.path.dirname(args.lmdb_path)
     if lmdb_dir and not os.path.exists(lmdb_dir):
         os.makedirs(lmdb_dir, exist_ok=True)
-        print(f"Created LMDB directory: {lmdb_dir}")
+        logger.info(f"Created LMDB directory: {lmdb_dir}")
     
     # Two server options:
     # 1. Using uvicorn directly (easier for debugging)
@@ -81,9 +98,9 @@ def main():
         # Use vllm serve in production (uncomment to use)
         # subprocess.run(vllm_cmd)
     except KeyboardInterrupt:
-        print("\nServer stopped by user")
+        logger.info("Server stopped by user")
     except Exception as e:
-        print(f"Error starting server: {e}")
+        logger.error(f"Error starting server: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":

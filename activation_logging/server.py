@@ -24,6 +24,9 @@ app = FastAPI()
 # Default LMDB path
 DEFAULT_LMDB_PATH = os.environ.get("ACTIVATION_LMDB_PATH", "lmdb_data/activations.lmdb")
 
+# Default LMDB map size (16GB if not specified)
+DEFAULT_MAP_SIZE = int(os.environ.get("ACTIVATION_LMDB_MAP_SIZE", 16 * (1 << 30)))
+
 # Model cache to avoid reloading for each request
 _model_cache = {}
 _tokenizer_cache = {}
@@ -521,13 +524,13 @@ def get_logger_for_request(request_params):
     # Always create a new logger instance to avoid LMDB assertion errors
     if lmdb_path and lmdb_path.strip():
         # Create and use a custom logger with the specified path
-        custom_logger = ActivationsLogger(lmdb_path=lmdb_path)
+        custom_logger = ActivationsLogger(lmdb_path=lmdb_path, map_size=DEFAULT_MAP_SIZE)
         return custom_logger, custom_logger, True
     else:
         # Create a new logger with the default path from environment
         # This avoids the 'Assertion mp->mp_pgno != pgno failed in mdb_page_touch()' error
         default_path = os.environ.get("ACTIVATION_LMDB_PATH", DEFAULT_LMDB_PATH)
-        new_logger = ActivationsLogger(lmdb_path=default_path)
+        new_logger = ActivationsLogger(lmdb_path=default_path, map_size=DEFAULT_MAP_SIZE)
         return new_logger, new_logger, False
 
 
