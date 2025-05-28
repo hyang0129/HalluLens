@@ -48,6 +48,7 @@ def main():
     # Set environment variables for server configuration
     os.environ["ACTIVATION_LMDB_PATH"] = args.lmdb_path
     os.environ["ACTIVATION_LMDB_MAP_SIZE"] = str(args.map_size_gb * (1 << 30))  # Convert GB to bytes
+    os.environ["SERVER_LOG_FILE"] = args.log_file  # Add log file path to environment
     if args.auth_token:
         os.environ["HF_TOKEN"] = args.auth_token
         logger.info("Using provided HuggingFace token for model access")

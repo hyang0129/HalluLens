@@ -16,6 +16,16 @@ import uvicorn
 from activation_logging.activations_logger import ActivationsLogger
 from llama_cpp import Llama  # Import for llama.cpp Python bindings
 
+# Configure logger to use the same log file as parent process if specified
+if "SERVER_LOG_FILE" in os.environ:
+    logger.remove()  # Remove default handler
+    logger.add(
+        os.environ["SERVER_LOG_FILE"],
+        rotation="10 MB",
+        retention="1 week",
+        level="INFO",
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}"
+    )
 
 # Default model if none specified in request
 DEFAULT_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
