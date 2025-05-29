@@ -232,11 +232,14 @@ class PreciseQAEval:
         
         abstantion_res = [] 
         for x in abstantion_res_raw: 
+
             try:
                 abstantion_res.append(json.loads(x)['is_abstaining'])
             except:
                 logger.error(x)
-                raise
+                abstantion_res.append(prev_x)
+                
+            prev_x  = x 
         # abstantion_res = [json.loads(x)['is_abstaining'] for x in abstantion_res_raw]
         
         halu_test_res = []
