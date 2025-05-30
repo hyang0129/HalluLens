@@ -176,8 +176,8 @@ class PreciseQAEval:
                 raise ValueError(f"Invalid response format. Expected {{'is_abstaining':true|false}} but got: {response_str}")
             
             # If there's extra content after valid JSON, truncate it
-            if response_str.startswith('{{"is_abstaining": true}}'):
-                if len(response_str) > len('{{"is_abstaining": true}'):
+            if response_str.startswith('{"is_abstaining": true}'):
+                if len(response_str) > len('{"is_abstaining": true}'):
                     logger.debug(f"Truncating response. Original: {response_str}")
                 cleaned_response = {"is_abstaining": True}
             else:
@@ -187,6 +187,16 @@ class PreciseQAEval:
             
             cleaned_abstains_eval.append(cleaned_response)
         
+        for x in cleaned_abstains_eval:
+            try: 
+                if x['is_abstaining']:
+                    pass
+                else:
+                    pass
+            except:
+                logger.error(f"We expect the response to be a valid JSON. But we got: {x}")
+                pass
+
         abstains_eval = cleaned_abstains_eval
         
         refusal_res = []
