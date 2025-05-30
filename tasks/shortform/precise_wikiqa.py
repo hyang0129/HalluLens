@@ -187,13 +187,14 @@ class PreciseQAEval:
             
             cleaned_abstains_eval.append(cleaned_response)
         
-        for x in cleaned_abstains_eval:
+        for i, x in enumerate(cleaned_abstains_eval):
             try: 
                 if x['is_abstaining']:
                     pass
                 else:
                     pass
             except:
+                logger.error(f"Error at index {i}")
                 logger.error(f"We expect the response to be a valid JSON. But we got: {x}")
                 pass
 
