@@ -4,17 +4,60 @@ Handles parsing of metadata from JSON files and looking up corresponding activat
 """
 import json
 import hashlib
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Literal
 from pathlib import Path
 from loguru import logger
 import pandas as pd 
 import json 
 from loguru import logger
 from sklearn.model_selection import train_test_split
+import torch
+from torch.utils.data import Dataset
 
 
 
 from .activations_logger import ActivationsLogger
+
+class ActivationDataset(Dataset):
+    """PyTorch Dataset for loading activation data."""
+    
+    def __init__(self, parser: 'ActivationParser', split: Literal['train', 'test']):
+        """
+        Initialize the dataset.
+        
+        Args:
+            parser: ActivationParser instance containing the data
+            split: Which split to use ('train' or 'test')
+        """
+        self.parser = parser
+        self.split = split
+        self.df = parser.df[parser.df['split'] == split].reset_index(drop=True)
+        
+    def __len__(self) -> int:
+        return len(self.df)
+        
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        """
+        Get a single data point.
+        
+        Args:
+            idx: Index of the data point
+            
+        Returns:
+            Dictionary containing:
+            - hashkey: The prompt hash
+            - halu: Whether this is a hallucination
+            - activations: The neural activations
+        """
+        row, result, activations = self.parser.get_activations(idx)
+        return {
+            'hashkey': row['prompt_hash'],
+            'halu': torch.tensor(row['halu'], dtype=torch.float32),
+            'activations': activations
+        }
+    
+    
+
 
 class ActivationParser:
     def __init__(self, inference_json: str, eval_json: str, lmdb_path: str):
@@ -97,10 +140,24 @@ class ActivationParser:
     def get_activations(self, idx) -> Optional[Dict[str, Any]]:
 
         row = self.df.iloc[idx]
-        activations = self.activation_logger.get_entry(row['prompt_hash'])
-        return row, activations
+        result = self.activation_logger.get_entry(row['prompt_hash'])
+        activations = result['all_layers_activations']
+        return row, result, activations
 
+    def get_dataset(self, split: Literal['train', 'test']) -> ActivationDataset:
+        """
+        Get a PyTorch Dataset for the specified split.
+        
+        Args:
+            split: Which split to use ('train' or 'test')
             
+        Returns:
+            ActivationDataset instance for the specified split
+        """
+        return ActivationDataset(self, split)
+
     def close(self):
         """Close the LMDB connection."""
         self.logger.close() 
+
+
