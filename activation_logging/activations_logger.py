@@ -296,7 +296,7 @@ class ActivationsLogger:
         self.metadata_env = lmdb.open(metadata_path, map_size, subdir=True, create=True, readonly=read_only, lock=True)
         logger.info(f"Opened metadata store at {metadata_path}")
 
-        self.read_only = True
+        self.read_only = read_only
 
         if self.read_only:
             self.keys = self.list_entries()
@@ -656,42 +656,42 @@ class ActivationsLogger:
                         
                     stored_entry = pickle.loads(value)
                     
-                    # Check if this is a compressed entry
-                    if isinstance(stored_entry, dict) and "data" in stored_entry and "metadata" in stored_entry:
-                        data = stored_entry["data"]
-                        metadata = stored_entry["metadata"]
+                # Check if this is a compressed entry
+                if isinstance(stored_entry, dict) and "data" in stored_entry and "metadata" in stored_entry:
+                    data = stored_entry["data"]
+                    metadata = stored_entry["metadata"]
+                    
+                    # Check if this has activations
+                    if "all_layers_activations" in data:
+                        # Decompress if needed
+                        if metadata.get("compression") == "zstd":
+                            data = self.compressor.decompress(data, metadata)
                         
-                        # Check if this has activations
-                        if "all_layers_activations" in data:
-                            # Decompress if needed
-                            if metadata.get("compression") == "zstd":
-                                data = self.compressor.decompress(data, metadata)
-                            
-                            # Fix tensors
-                            fixed_tensors = []
-                            for tensor in data["all_layers_activations"]:
-                                if isinstance(tensor, torch.Tensor):
-                                    fixed_tensors.append(tensor.cpu())
-                                else:
-                                    fixed_tensors.append(tensor)
-                            
-                            # Update the data
-                            data["all_layers_activations"] = fixed_tensors
-                            
-                            # Recompress
-                            compressed_data, compression_metadata = self.compressor.compress(data)
-                            
-                            # Create new entry
-                            new_entry = {
-                                "data": compressed_data,
-                                "metadata": compression_metadata
-                            }
-                            
-                            # Save back to LMDB
-                            with self.env.begin(write=True) as write_txn:
-                                write_txn.put(key.encode("utf-8"), pickle.dumps(new_entry))
-                            
-                            fixed_count += 1
+                        # Fix tensors
+                        fixed_tensors = []
+                        for tensor in data["all_layers_activations"]:
+                            if isinstance(tensor, torch.Tensor):
+                                fixed_tensors.append(tensor.cpu())
+                            else:
+                                fixed_tensors.append(tensor)
+                        
+                        # Update the data
+                        data["all_layers_activations"] = fixed_tensors
+                        
+                        # Recompress
+                        compressed_data, compression_metadata = self.compressor.compress(data)
+                        
+                        # Create new entry
+                        new_entry = {
+                            "data": compressed_data,
+                            "metadata": compression_metadata
+                        }
+                        
+                        # Save back to LMDB
+                        with self.env.begin(write=True) as write_txn:
+                            write_txn.put(key.encode("utf-8"), pickle.dumps(new_entry))
+                        
+                        fixed_count += 1
                                 
             except Exception as e:
                 logger.error(f"Error fixing entry {key[:8]}: {e}")
