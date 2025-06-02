@@ -13,15 +13,14 @@ from loguru import logger
 from sklearn.model_selection import train_test_split
 import torch
 from torch.utils.data import Dataset
-
-
+import random
 
 from .activations_logger import ActivationsLogger
 
 class ActivationDataset(Dataset):
     """PyTorch Dataset for loading activation data."""
     
-    def __init__(self, parser: 'ActivationParser', split: Literal['train', 'test']):
+    def __init__(self, parser: 'ActivationParser', split: Literal['train', 'test'], relevant_layers: List[int] = None):
         """
         Initialize the dataset.
         
@@ -32,7 +31,11 @@ class ActivationDataset(Dataset):
         self.parser = parser
         self.split = split
         self.df = parser.df[parser.df['split'] == split].reset_index(drop=True)
-        
+
+        self.relevant_layers = relevant_layers if relevant_layers is not None else list(range(16,30))
+        self.pad_length = 63 
+
+
     def __len__(self) -> int:
         return len(self.df)
         
@@ -47,13 +50,46 @@ class ActivationDataset(Dataset):
             Dictionary containing:
             - hashkey: The prompt hash
             - halu: Whether this is a hallucination
-            - activations: The neural activations
+            - all_activations: All padded activations
+            - layer1_activations: Activations from first randomly selected layer
+            - layer2_activations: Activations from second randomly selected layer
+            - layer1_idx: Index of first selected layer
+            - layer2_idx: Index of second selected layer
+            - input_length: Length of the input prompt
         """
         row, result, activations, input_length = self.parser.get_activations(idx)
+        
+        # Filter to relevant layers and pad if necessary
+        padded_activations = []
+        for layer_idx in self.relevant_layers:
+            act = activations[layer_idx]
+            seq_len = act.shape[1]
+            
+            if seq_len < self.pad_length:
+                # Generate random noise with same shape as activations
+                noise = torch.randn(act.shape[0], self.pad_length - seq_len, act.shape[2], 
+                                  device=act.device, dtype=act.dtype)
+                # Concatenate original activations with noise
+                act = torch.cat([act, noise], dim=1)
+            elif seq_len > self.pad_length:
+                # Truncate if longer than pad_length
+                act = act[:, :self.pad_length, :]
+                
+            padded_activations.append(act)
+            
+        # Randomly select two different layers
+        layer1_idx, layer2_idx = random.sample(range(len(padded_activations)), 2)
+        layer1_activations = padded_activations[layer1_idx]
+        layer2_activations = padded_activations[layer2_idx]
+            
         return {
             'hashkey': row['prompt_hash'],
             'halu': torch.tensor(row['halu'], dtype=torch.float32),
-            'activations': activations,
+            'all_activations': padded_activations,
+            'layer1_activations': layer1_activations,
+            'layer2_activations': layer2_activations,
+            'layer1_idx': layer1_idx,
+            'layer2_idx': layer2_idx,
             'input_length': input_length
         }
     
