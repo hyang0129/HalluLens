@@ -221,10 +221,8 @@ class ZstdCompression(BaseCompressor):
                     # Convert bytes to numpy array
                     tensor_np = np.frombuffer(tensor_bytes, dtype=dtype).reshape(shape)
                     
-                    # Convert to torch tensor
+                    # Convert to torch tensor and always place on CPU
                     tensor = torch.from_numpy(tensor_np)
-                    if meta["device"] != "cpu":
-                        tensor = tensor.to(meta["device"])
                     
                     reconstructed_tensors.append(tensor)
                 
