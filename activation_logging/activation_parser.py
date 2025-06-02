@@ -49,14 +49,15 @@ class ActivationDataset(Dataset):
             - halu: Whether this is a hallucination
             - activations: The neural activations
         """
-        row, result, activations = self.parser.get_activations(idx)
+        row, result, activations, input_length = self.parser.get_activations(idx)
         return {
             'hashkey': row['prompt_hash'],
             'halu': torch.tensor(row['halu'], dtype=torch.float32),
-            'activations': activations
+            'activations': activations,
+            'input_length': input_length
         }
     
-    
+
 
 
 class ActivationParser:
@@ -122,6 +123,10 @@ class ActivationParser:
         logger.info(f"Found {gendf['halu'].sum()/len(gendf)}% hallucinations")
         logger.info(f"Train set size: {len(train_df)}, Test set size: {len(test_df)}")
 
+        # gen df contains these columns ['index', 'title', 'h_score_cat', 'pageid', 'revid', 'description',
+        # 'categories', 'reference', 'prompt', 'answer', 'generation', 'abstain',
+        # 'halu', 'prompt_hash', 'split'] 
+
         return gendf
 
             
@@ -141,8 +146,12 @@ class ActivationParser:
 
         row = self.df.iloc[idx]
         result = self.activation_logger.get_entry(row['prompt_hash'])
-        activations = result['all_layers_activations']
-        return row, result, activations
+        input_length = result['input_length']
+        
+        # Trim activations to only include generated tokens
+        activations = [act[:, input_length:, :] for act in result['all_layers_activations']]
+    
+        return row, result, activations, input_length
 
     def get_dataset(self, split: Literal['train', 'test']) -> ActivationDataset:
         """
