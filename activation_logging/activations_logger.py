@@ -10,6 +10,7 @@ import numpy as np
 from typing import Any, Dict, Optional, List, Callable, Tuple, Union, Type
 from loguru import logger
 import torch 
+from tqdm.autonotebook import tqdm
 try:
     import zstandard as zstd
     ZSTD_AVAILABLE = True
@@ -129,14 +130,17 @@ class ZstdCompression(BaseCompressor):
                 all_hidden_np = []
                 
                 for i, tensor in enumerate(result["all_layers_activations"]):
+                    # Ensure tensor is on CPU
+                    tensor = tensor.cpu()
+                    
                     # Store tensor metadata
                     tensor_metadata.append({
                         "shape": list(tensor.shape),
                         "dtype": str(tensor.dtype),
-                        "device": str(tensor.device)
+                        "device": "cpu"  # Always store as CPU
                     })
                     # Convert to numpy and store
-                    all_hidden_np.append(tensor.cpu().numpy())
+                    all_hidden_np.append(tensor.numpy())
                 
                 # Join all numpy arrays into a single bytes object
                 data_bytes = b"".join(t.tobytes() for t in all_hidden_np)
@@ -569,8 +573,8 @@ class ActivationsLogger:
                     return decompressed_data
                 else:
                     # Handle legacy format (no compression)
-                    logger.debug(f"Retrieved legacy entry with key {key[:8]} (no compression)")
-                    return stored_entry
+                    raise ValueError("No compression metadata found for key")
+                    
             else:
                 raise ValueError("No entry found for key")
 
@@ -624,3 +628,73 @@ class ActivationsLogger:
         if self.metadata_env is not None:
             self.metadata_env.close()
             self.metadata_env = None
+
+    def fix_cuda_tensors(self):
+        """
+        Fix existing entries by ensuring all tensors are on CPU.
+        This is useful for entries that were saved with CUDA tensors.
+        """
+        if self.env is None:
+            raise ValueError("LMDB is not initialized")
+            
+        logger.info("Starting to fix CUDA tensors in existing entries...")
+        fixed_count = 0
+        error_count = 0
+        
+        # Get all keys
+        keys = self.list_entries()
+        total_entries = len(keys)
+        logger.info(f"Found {total_entries} entries to process")
+        
+        for key in tqdm(keys, desc="Fixing CUDA tensors"):
+            try:
+                # Get the entry
+                with self.env.begin(write=False) as txn:
+                    value = txn.get(key.encode("utf-8"))
+                    if value is None:
+                        continue
+                        
+                    stored_entry = pickle.loads(value)
+                    
+                    # Check if this is a compressed entry
+                    if isinstance(stored_entry, dict) and "data" in stored_entry and "metadata" in stored_entry:
+                        data = stored_entry["data"]
+                        metadata = stored_entry["metadata"]
+                        
+                        # Check if this has activations
+                        if "all_layers_activations" in data:
+                            # Decompress if needed
+                            if metadata.get("compression") == "zstd":
+                                data = self.compressor.decompress(data, metadata)
+                            
+                            # Fix tensors
+                            fixed_tensors = []
+                            for tensor in data["all_layers_activations"]:
+                                if isinstance(tensor, torch.Tensor):
+                                    fixed_tensors.append(tensor.cpu())
+                                else:
+                                    fixed_tensors.append(tensor)
+                            
+                            # Update the data
+                            data["all_layers_activations"] = fixed_tensors
+                            
+                            # Recompress
+                            compressed_data, compression_metadata = self.compressor.compress(data)
+                            
+                            # Create new entry
+                            new_entry = {
+                                "data": compressed_data,
+                                "metadata": compression_metadata
+                            }
+                            
+                            # Save back to LMDB
+                            with self.env.begin(write=True) as write_txn:
+                                write_txn.put(key.encode("utf-8"), pickle.dumps(new_entry))
+                            
+                            fixed_count += 1
+                                
+            except Exception as e:
+                logger.error(f"Error fixing entry {key[:8]}: {e}")
+                error_count += 1
+                
+        logger.info(f"Finished fixing CUDA tensors. Fixed {fixed_count} entries, encountered {error_count} errors")
