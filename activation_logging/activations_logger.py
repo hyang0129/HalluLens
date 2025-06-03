@@ -413,6 +413,7 @@ class ActivationsLogger:
             
         logger.info("Starting to fix CUDA tensors in existing entries...")
         fixed_count = 0
+        skipped_count = 0
         error_count = 0
         
         # Get all keys
@@ -441,33 +442,42 @@ class ActivationsLogger:
                             if metadata.get("compression") == "zstd":
                                 data = self.compressor.decompress(data, metadata)
                             
-                            # Fix tensors
+                            # Check if any tensors need to be moved to CPU
+                            needs_fixing = False
                             fixed_tensors = []
                             for tensor in data["all_layers_activations"]:
                                 if isinstance(tensor, torch.Tensor):
-                                    fixed_tensors.append(tensor.cpu())
+                                    if tensor.device.type != 'cpu':
+                                        needs_fixing = True
+                                        fixed_tensors.append(tensor.cpu())
+                                    else:
+                                        fixed_tensors.append(tensor)
                                 else:
                                     fixed_tensors.append(tensor)
                             
-                            # Update the data
-                            data["all_layers_activations"] = fixed_tensors
-                            
-                            # Recompress
-                            compressed_data, compression_metadata = self.compressor.compress(data)
-                            
-                            # Create new entry
-                            new_entry = {
-                                "data": compressed_data,
-                                "metadata": compression_metadata
-                            }
-                            
-                            # Save back to LMDB using the same transaction
-                            txn.put(key.encode("utf-8"), pickle.dumps(new_entry))
-                            
-                            fixed_count += 1
+                            # Only write back if tensors needed fixing
+                            if needs_fixing:
+                                # Update the data
+                                data["all_layers_activations"] = fixed_tensors
+                                
+                                # Recompress
+                                compressed_data, compression_metadata = self.compressor.compress(data)
+                                
+                                # Create new entry
+                                new_entry = {
+                                    "data": compressed_data,
+                                    "metadata": compression_metadata
+                                }
+                                
+                                # Save back to LMDB using the same transaction
+                                txn.put(key.encode("utf-8"), pickle.dumps(new_entry))
+                                
+                                fixed_count += 1
+                            else:
+                                skipped_count += 1
                                 
             except Exception as e:
                 logger.error(f"Error fixing entry {key[:8]}: {e}")
                 error_count += 1
                 
-        logger.info(f"Finished fixing CUDA tensors. Fixed {fixed_count} entries, encountered {error_count} errors")
+        logger.info(f"Finished fixing CUDA tensors. Fixed {fixed_count} entries, skipped {skipped_count} entries (already on CPU), encountered {error_count} errors")
