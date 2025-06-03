@@ -59,12 +59,14 @@ class ActivationsLogger:
             os.makedirs(lmdb_dir, exist_ok=True)
             
         # Open main LMDB for activations (large map size)
-        self.env = lmdb.open(safe_lmdb_path, map_size=map_size, subdir=True, create=True, readonly=read_only, lock=True)
+        self.env = lmdb.open(safe_lmdb_path, map_size=map_size, subdir=True, create=True, readonly=read_only, lock=True, max_readers=2048)
+        self.env.reader_check()
         
         # Open separate LMDB for metadata (smaller map size)
         metadata_path = os.path.join(os.path.dirname(safe_lmdb_path), f"{os.path.basename(safe_lmdb_path)}_metadata")
         os.makedirs(metadata_path, exist_ok=True)
-        self.metadata_env = lmdb.open(metadata_path, map_size, subdir=True, create=True, readonly=read_only, lock=True)
+        self.metadata_env = lmdb.open(metadata_path, map_size, subdir=True, create=True, readonly=read_only, lock=True, max_readers=2048)
+        self.metadata_env.reader_check()
         logger.info(f"Opened metadata store at {metadata_path}")
 
         self.read_only = read_only
