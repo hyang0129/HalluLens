@@ -20,17 +20,20 @@ from .activations_logger import ActivationsLogger
 class ActivationDataset(Dataset):
     """PyTorch Dataset for loading activation data."""
     
-    def __init__(self, parser: 'ActivationParser', split: Literal['train', 'test'], relevant_layers: List[int] = None):
+    def __init__(self, inference_json: str, eval_json: str, lmdb_path: str, split: Literal['train', 'test'], relevant_layers: List[int] = None):
         """
         Initialize the dataset.
         
         Args:
-            parser: ActivationParser instance containing the data
+            inference_json: Path to the inference JSON file
+            eval_json: Path to the evaluation JSON file
+            lmdb_path: Path to the LMDB file containing activations
             split: Which split to use ('train' or 'test')
+            relevant_layers: List of layer indices to use (default: layers 16-29)
         """
-        self.parser = parser
+        self.parser = ActivationParser(inference_json, eval_json, lmdb_path)
         self.split = split
-        self.df = parser.df[parser.df['split'] == split].reset_index(drop=True)
+        self.df = self.parser.df[self.parser.df['split'] == split].reset_index(drop=True)
 
         self.relevant_layers = relevant_layers if relevant_layers is not None else list(range(16,30))
         self.pad_length = 63 
@@ -199,7 +202,7 @@ class ActivationParser:
         Returns:
             ActivationDataset instance for the specified split
         """
-        return ActivationDataset(self, split)
+        return ActivationDataset(self.inference_json, self.eval_json, self.lmdb_path, split)
 
     def close(self):
         """Close the LMDB connection."""
