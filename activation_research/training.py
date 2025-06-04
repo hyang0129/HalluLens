@@ -1,6 +1,3 @@
-
-
-
 from tqdm.autonotebook import tqdm
 import torch
 import torch.nn.functional as F
@@ -194,11 +191,10 @@ def train_contrastive(model, train_dataset, test_dataset=None,
             buffer_x1.append(x1)
             buffer_x2.append(x2)
 
-            # Once we accumulate enough to reach full batch size
-            if len(buffer_x1) * sub_batch_size == batch_size:
+            # Process when buffer is full or at the end of the loop
+            if len(buffer_x1) * sub_batch_size == batch_size or i == len(loop):
                 x1_full = torch.cat(buffer_x1, dim=0)
                 x2_full = torch.cat(buffer_x2, dim=0)
-                # print(len(buffer_x1))
                 buffer_x1 = [] 
                 buffer_x2 = [] 
 
@@ -215,10 +211,6 @@ def train_contrastive(model, train_dataset, test_dataset=None,
                 acc = pairing_accuracy(z1, z2)
                 total_loss += loss.item()
                 total_acc += acc
-
-                # print(batch_size // sub_batch_size)
-                # print(sub_batch_size)
-                # print(loop.n)
                 
                 avg_loss = total_loss / (i / subsinbatch)
                 avg_acc = total_acc / ( i / subsinbatch)
@@ -278,7 +270,7 @@ def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, devi
     subs_in_batch = batch_size // sub_batch_size
 
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Inference"):
+        for i, batch in enumerate(tqdm(dataloader, desc="Inference")):
             x1 = batch['layer1_activations'].squeeze(1).to(device, non_blocking=True)
             x2 = batch['layer2_activations'].squeeze(1).to(device, non_blocking=True)
             hashkeys = batch['hashkey']
@@ -287,7 +279,8 @@ def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, devi
             buffer_x2.append(x2)
             buffer_hash.extend(hashkeys)
 
-            if len(buffer_x1) == subs_in_batch:
+            # Process when buffer is full or at the end of the loop
+            if len(buffer_x1) == subs_in_batch or i == len(dataloader) - 1:
                 x1_full = torch.cat(buffer_x1, dim=0)
                 x2_full = torch.cat(buffer_x2, dim=0)
 
