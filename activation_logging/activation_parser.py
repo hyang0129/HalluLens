@@ -192,17 +192,18 @@ class ActivationParser:
     
         return row, result, activations, input_length
 
-    def get_dataset(self, split: Literal['train', 'test']) -> ActivationDataset:
+    def get_dataset(self, split: Literal['train', 'test'], relevant_layers: List[int] = None) -> ActivationDataset:
         """
         Get a PyTorch Dataset for the specified split.
         
         Args:
             split: Which split to use ('train' or 'test')
+            relevant_layers: List of layer indices to use (default: layers 16-29)
             
         Returns:
             ActivationDataset instance for the specified split
         """
-        return ActivationDataset(self.inference_json, self.eval_json, self.lmdb_path, split)
+        return ActivationDataset(self.inference_json, self.eval_json, self.lmdb_path, split, relevant_layers)
 
     def close(self):
         """Close the LMDB connection."""
