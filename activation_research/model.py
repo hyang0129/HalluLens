@@ -37,7 +37,7 @@ class TransformerBlock(nn.Module):
         return self.norm(x)
 
 class ProgressiveCompressor(nn.Module):
-    def __init__(self, input_dim=4096, final_dim=512, dropout=0.1):
+    def __init__(self, input_dim=4096, final_dim=512, dropout=0.1, input_dropout=0.2):
         super().__init__()
 
         dims = []
@@ -54,7 +54,7 @@ class ProgressiveCompressor(nn.Module):
         ])
         self.final_proj = nn.Linear(dims[-1][1], final_dim)
 
-        self.dropout = nn.Dropout(p=0.5)
+        self.dropout = nn.Dropout(p=input_dropout)
 
     def forward(self, x):
         """
