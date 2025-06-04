@@ -110,34 +110,34 @@ def evaluate(model, test_dataloader, batch_size=32, loss_fn=None, device='cuda',
     n_batches = 0
 
     with torch.no_grad():
-        for batch in test_dataloader:
-            x1 = batch['layer1_activations'].squeeze(1)
-            x2 = batch['layer2_activations'].squeeze(1)
+        # Buffers to accumulate mini-batches
+        buffer_x1, buffer_x2 = [], []
+        subsinbatch = batch_size // sub_batch_size
 
-            batch_size_actual = x1.size(0)
-            batch_loss = 0.0
-            batch_acc = 0.0
-            num_sub_batches = 0
+        for i, batch in enumerate(test_dataloader):
+            x1 = batch['layer1_activations'].squeeze(1).to(device, non_blocking=True)
+            x2 = batch['layer2_activations'].squeeze(1).to(device, non_blocking=True)
 
-            for i in range(0, batch_size_actual, sub_batch_size):
-                x1_chunk = x1[i:i+sub_batch_size].to(device, non_blocking=True)
-                x2_chunk = x2[i:i+sub_batch_size].to(device, non_blocking=True)
+            buffer_x1.append(x1)
+            buffer_x2.append(x2)
 
-                z1 = model(x1_chunk)
-                z2 = model(x2_chunk)
+            # Process when buffer is full or at the end of the loop
+            if len(buffer_x1) * sub_batch_size == batch_size or i == len(test_dataloader) - 1:
+                x1_full = torch.cat(buffer_x1, dim=0)
+                x2_full = torch.cat(buffer_x2, dim=0)
+                buffer_x1 = []
+                buffer_x2 = []
+
+                z1 = model(x1_full)
+                z2 = model(x2_full)
 
                 z_stacked = torch.stack([z1, z2], dim=1)
-
                 loss = loss_fn(z_stacked)
                 acc = pairing_accuracy(z1, z2)
 
-                batch_loss += loss.item()
-                batch_acc += acc
-                num_sub_batches += 1
-
-            total_loss += batch_loss / num_sub_batches
-            total_acc += batch_acc / num_sub_batches
-            n_batches += 1
+                total_loss += loss.item()
+                total_acc += acc
+                n_batches += 1
 
     avg_loss = total_loss / n_batches
     avg_acc = total_acc / n_batches
