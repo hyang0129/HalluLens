@@ -20,18 +20,17 @@ from .activations_logger import ActivationsLogger
 class ActivationDataset(Dataset):
     """PyTorch Dataset for loading activation data."""
     
-    def __init__(self, inference_json: str, eval_json: str, lmdb_path: str, split: Literal['train', 'test'], relevant_layers: List[int] = None):
+    def __init__(self, df: pd.DataFrame, lmdb_path: str, split: Literal['train', 'test'], relevant_layers: List[int] = None):
         """
         Initialize the dataset.
         
         Args:
-            inference_json: Path to the inference JSON file
-            eval_json: Path to the evaluation JSON file
+            df: DataFrame containing the metadata
             lmdb_path: Path to the LMDB file containing activations
             split: Which split to use ('train' or 'test')
             relevant_layers: List of layer indices to use (default: layers 16-29)
         """
-        self.parser = ActivationParser(inference_json, eval_json, lmdb_path)
+        self.parser = ActivationParser("", "", lmdb_path, df=df)
         self.split = split
         self.df = self.parser.df[self.parser.df['split'] == split].reset_index(drop=True)
 
@@ -100,13 +99,15 @@ class ActivationDataset(Dataset):
 
 
 class ActivationParser:
-    def __init__(self, inference_json: str, eval_json: str, lmdb_path: str):
+    def __init__(self, inference_json: str, eval_json: str, lmdb_path: str, df: Optional[pd.DataFrame] = None):
         """
         Initialize the ActivationParser.
         
         Args:
-            json_path: Path to the JSON file containing metadata
+            inference_json: Path to the inference JSON file
+            eval_json: Path to the evaluation JSON file
             lmdb_path: Path to the LMDB file containing activations
+            df: Optional DataFrame to use instead of loading from JSON files
         """
         self.inference_json = Path(inference_json)
         if not self.inference_json.exists():
@@ -119,8 +120,8 @@ class ActivationParser:
         self.lmdb_path = lmdb_path
         self.activation_logger = ActivationsLogger(lmdb_path=lmdb_path, read_only=True)
         
-        # Load metadata from JSON
-        self.df = self._load_metadata()
+        # Load metadata from JSON or use provided DataFrame
+        self.df = df if df is not None else self._load_metadata()
 
 
         
@@ -203,7 +204,7 @@ class ActivationParser:
         Returns:
             ActivationDataset instance for the specified split
         """
-        return ActivationDataset(self.inference_json, self.eval_json, self.lmdb_path, split, relevant_layers)
+        return ActivationDataset(self.df, self.lmdb_path, split, relevant_layers)
 
     def close(self):
         """Close the LMDB connection."""
