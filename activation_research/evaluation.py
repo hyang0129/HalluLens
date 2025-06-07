@@ -114,3 +114,84 @@ def mahalanobis_ood_stats(train_records, test_records):
     }
 
     return stats
+
+def mahalanobis_ood_stats_multilayer(train_records, test_records, layers):
+    """
+    Calculate Mahalanobis OOD statistics for multiple layers.
+    
+    Args:
+        train_records: List of training records containing layer embeddings
+        test_records: List of test records containing layer embeddings
+        layers: List of layer indices to analyze
+        
+    Returns:
+        dict: Contains per-layer stats and aggregated stats
+    """
+    # Initialize storage for per-layer stats and distances
+    layer_stats = {}
+    layer_dists = {}
+    
+    # Process each layer
+    for layer_idx in layers:
+        layer_key = f"layer_{layer_idx}"
+        
+        # Extract embeddings for this layer from train set
+        train_z = torch.stack([r['layer_embeddings'][layer_key] for r in train_records])
+        
+        # Compute mean and covariance from training set
+        mean = train_z.mean(dim=0)
+        centered = train_z - mean
+        cov = torch.matmul(centered.T, centered) / (len(train_z) - 1)
+        
+        # Add small value to diagonal for numerical stability (regularization)
+        cov += torch.eye(cov.shape[0]) * 1e-5
+        inv_cov = torch.linalg.inv(cov)
+
+        def mahalanobis(x):
+            delta = x - mean
+            return torch.sqrt((delta @ inv_cov @ delta.T).diag())
+
+        # Prepare test set for this layer
+        test_z = torch.stack([r['layer_embeddings'][layer_key] for r in test_records])
+        test_labels = torch.tensor([r['halu'] for r in test_records], dtype=torch.int32)
+        test_labels = test_labels.squeeze()
+
+        # Compute Mahalanobis distances for test set
+        with torch.no_grad():
+            dists = mahalanobis(test_z)
+            
+        # Store distances for this layer
+        layer_dists[layer_key] = dists
+
+        # Compute per-layer stats
+        id_dists = dists[test_labels == 0]
+        ood_dists = dists[test_labels == 1]
+
+        layer_stats[layer_key] = {
+            'mahalanobis_mean_id': id_dists.mean().item(),
+            'mahalanobis_std_id': id_dists.std().item(),
+            'mahalanobis_mean_ood': ood_dists.mean().item(),
+            'mahalanobis_std_ood': ood_dists.std().item(),
+            'mahalanobis_auroc': roc_auc_score(test_labels, dists.numpy())
+        }
+    
+    # Compute aggregated stats using average distance across layers
+    avg_dists = torch.stack(list(layer_dists.values())).mean(dim=0)
+    test_labels = torch.tensor([r['halu'] for r in test_records], dtype=torch.int32).squeeze()
+    
+    id_dists_avg = avg_dists[test_labels == 0]
+    ood_dists_avg = avg_dists[test_labels == 1]
+    
+    aggregated_stats = {
+        'mahalanobis_mean_id': id_dists_avg.mean().item(),
+        'mahalanobis_std_id': id_dists_avg.std().item(),
+        'mahalanobis_mean_ood': ood_dists_avg.mean().item(),
+        'mahalanobis_std_ood': ood_dists_avg.std().item(),
+        'mahalanobis_auroc': roc_auc_score(test_labels, avg_dists.numpy())
+    }
+    
+    return {
+        'per_layer_stats': layer_stats,
+        'per_layer_distances': layer_dists,
+        'aggregated_stats': aggregated_stats
+    }
