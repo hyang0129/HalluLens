@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from .evaluation import evaluate, pairing_accuracy
 
 class SupConLoss(nn.Module):
     """Supervised Contrastive Learning: https://arxiv.org/pdf/2004.11362.pdf.
@@ -103,46 +104,6 @@ class SupConLoss(nn.Module):
 
         return loss
 
-def evaluate(model, test_dataloader, batch_size=32, loss_fn=None, device='cuda', sub_batch_size=64):
-    model.eval()
-    total_loss = 0.0
-    total_acc = 0.0
-    n_batches = 0
-
-    with torch.no_grad():
-        # Buffers to accumulate mini-batches
-        buffer_x1, buffer_x2 = [], []
-        subsinbatch = batch_size // sub_batch_size
-
-        for i, batch in enumerate(test_dataloader):
-            x1 = batch['layer1_activations'].squeeze(1).to(device, non_blocking=True)
-            x2 = batch['layer2_activations'].squeeze(1).to(device, non_blocking=True)
-
-            buffer_x1.append(x1)
-            buffer_x2.append(x2)
-
-            # Process when buffer is full or at the end of the loop
-            if len(buffer_x1) * sub_batch_size == batch_size or i == len(test_dataloader) - 1:
-                x1_full = torch.cat(buffer_x1, dim=0)
-                x2_full = torch.cat(buffer_x2, dim=0)
-                buffer_x1 = []
-                buffer_x2 = []
-
-                z1 = model(x1_full)
-                z2 = model(x2_full)
-
-                z_stacked = torch.stack([z1, z2], dim=1)
-                loss = loss_fn(z_stacked)
-                acc = pairing_accuracy(z1, z2)
-
-                total_loss += loss.item()
-                total_acc += acc
-                n_batches += 1
-
-    avg_loss = total_loss / n_batches
-    avg_acc = total_acc / n_batches
-    return avg_loss, avg_acc
-
 def train_contrastive(model, train_dataset, test_dataset=None,
                       epochs=10, batch_size=512, lr=1e-6,
                       temperature=0.07, device='cuda', num_workers=16, sub_batch_size=64):
@@ -224,32 +185,7 @@ def train_contrastive(model, train_dataset, test_dataset=None,
             print(f"Epoch {epoch + 1}/{epochs} - Test Loss: {test_loss:.4f} - Test Pairing Acc: {test_acc:.4f}")
 
 
-def pairing_accuracy(z1, z2):
-    """
-    z1, z2: (B, D) normalized embeddings
-    Returns percentage of pairs correctly matched by highest cosine similarity.
-    """
-    z1 = F.normalize(z1, dim=1)
-    z2 = F.normalize(z2, dim=1)
-
-    # Compute cosine similarity matrix (B x B)
-    sim_matrix = torch.matmul(z1, z2.T)  # (B, B)
-
-    # For each in z1, find index of max similarity in z2
-    preds_z1 = sim_matrix.argmax(dim=1)
-    # For each in z2, find index of max similarity in z1
-    preds_z2 = sim_matrix.argmax(dim=0)
-
-    batch_size = z1.size(0)
-    # Correct matches: indices where preds match i
-    correct_z1 = (preds_z1 == torch.arange(batch_size, device=z1.device)).sum().item()
-    correct_z2 = (preds_z2 == torch.arange(batch_size, device=z2.device)).sum().item()
-
-    # Average accuracy
-    accuracy = (correct_z1 + correct_z2) / (2 * batch_size)
-    return accuracy
-
-def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, device='cuda', num_workers=16):
+def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, device='cuda', num_workers=16, layers=None):
     assert batch_size % sub_batch_size == 0, "batch_size must be divisible by sub_batch_size"
 
     model = model.to(device)
@@ -265,36 +201,59 @@ def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, devi
     )
 
     buffer_x1, buffer_x2, buffer_hash = [], [], []
+    if layers is not None:
+        buffer_layers = [[] for _ in layers]
     results = []
 
     subs_in_batch = batch_size // sub_batch_size
 
     with torch.no_grad():
         for i, batch in enumerate(tqdm(dataloader, desc="Inference")):
-            x1 = batch['layer1_activations'].squeeze(1).to(device, non_blocking=True)
-            x2 = batch['layer2_activations'].squeeze(1).to(device, non_blocking=True)
+            if layers is None:
+                x1 = batch['layer1_activations'].squeeze(1).to(device, non_blocking=True)
+                x2 = batch['layer2_activations'].squeeze(1).to(device, non_blocking=True)
+                buffer_x1.append(x1)
+                buffer_x2.append(x2)
+            else:
+                all_activations = batch['all_layer_activations']
+                for layer_idx, layer_acts in zip(layers, all_activations):
+                    buffer_layers[layer_idx].append(layer_acts.squeeze(1).to(device, non_blocking=True))
+            
             hashkeys = batch['hashkey']
-
-            buffer_x1.append(x1)
-            buffer_x2.append(x2)
             buffer_hash.extend(hashkeys)
 
             # Process when buffer is full or at the end of the loop
-            if len(buffer_x1) == subs_in_batch or i == len(dataloader) - 1:
-                x1_full = torch.cat(buffer_x1, dim=0)
-                x2_full = torch.cat(buffer_x2, dim=0)
+            if (layers is None and len(buffer_x1) == subs_in_batch) or \
+               (layers is not None and len(buffer_layers[0]) == subs_in_batch) or \
+               i == len(dataloader) - 1:
+                
+                if layers is None:
+                    x1_full = torch.cat(buffer_x1, dim=0)
+                    x2_full = torch.cat(buffer_x2, dim=0)
+                    buffer_x1, buffer_x2 = [], []
 
-                buffer_x1, buffer_x2 = [], []
+                    z1 = model(x1_full)
+                    z2 = model(x2_full)
 
-                z1 = model(x1_full)
-                z2 = model(x2_full)
+                    for h, z1_i, z2_i in zip(buffer_hash, z1, z2):
+                        results.append({
+                            "hashkey": h,
+                            "z1": z1_i.cpu(),
+                            "z2": z2_i.cpu()
+                        })
+                else:
+                    layer_embeddings = {}
+                    for layer_idx, layer_buffer in enumerate(buffer_layers):
+                        layer_full = torch.cat(layer_buffer, dim=0)
+                        z = model(layer_full)
+                        layer_embeddings[f"layer_{layers[layer_idx]}"] = z.cpu()
+                        buffer_layers[layer_idx] = []
 
-                for h, z1_i, z2_i in zip(buffer_hash, z1, z2):
-                    results.append({
-                        "hashkey": h,
-                        "z1": z1_i.cpu(),
-                        "z2": z2_i.cpu()
-                    })
+                    for h in buffer_hash:
+                        results.append({
+                            "hashkey": h,
+                            "layer_embeddings": {k: v[i] for k, v in layer_embeddings.items()}
+                        })
 
                 buffer_hash = []
 
