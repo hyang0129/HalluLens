@@ -258,3 +258,86 @@ def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, devi
                 buffer_hash = []
 
     return results
+
+def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, batch_size=64, lr=1e-4, device='cuda', num_workers=4):
+    """
+    Train a hallucination classifier using last layer activations.
+    Args:
+        model: LastLayerHaluClassifier instance
+        train_dataset: ActivationDataset
+        test_dataset: ActivationDataset or None
+        epochs: int
+        batch_size: int
+        lr: float
+        device: str
+        num_workers: int
+    """
+    from torch.utils.data import DataLoader
+    import torch
+    import torch.nn.functional as F
+    from tqdm import tqdm
+
+    model = model.to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    loss_fn = torch.nn.BCELoss()
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=True
+    )
+    if test_dataset is not None:
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=True
+        )
+
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0.0
+        total_correct = 0
+        total_samples = 0
+        loop = tqdm(train_loader, desc=f"Train Epoch {epoch+1}/{epochs}")
+        for batch in loop:
+            # Get last layer activations (assume all_activations is a list of tensors)
+            last_layer = batch['all_activations'][-1].to(device)  # (B, L, D)
+            labels = batch['halu'].to(device).float().view(-1, 1)  # (B, 1)
+            preds = model(last_layer)
+            loss = loss_fn(preds, labels)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item() * labels.size(0)
+            preds_binary = (preds > 0.5).float()
+            total_correct += (preds_binary == labels).sum().item()
+            total_samples += labels.size(0)
+            loop.set_postfix(loss=loss.item())
+        avg_loss = total_loss / total_samples
+        avg_acc = total_correct / total_samples
+        print(f"Epoch {epoch+1} - Train Loss: {avg_loss:.4f} - Train Acc: {avg_acc:.4f}")
+
+        if test_dataset is not None:
+            model.eval()
+            val_loss = 0.0
+            val_correct = 0
+            val_samples = 0
+            with torch.no_grad():
+                for batch in tqdm(test_loader, desc="Validation"):
+                    last_layer = batch['all_activations'][-1].to(device)
+                    labels = batch['halu'].to(device).float().view(-1, 1)
+                    preds = model(last_layer)
+                    loss = loss_fn(preds, labels)
+                    val_loss += loss.item() * labels.size(0)
+                    preds_binary = (preds > 0.5).float()
+                    val_correct += (preds_binary == labels).sum().item()
+                    val_samples += labels.size(0)
+            val_loss /= val_samples
+            val_acc = val_correct / val_samples
+            print(f"Epoch {epoch+1} - Val Loss: {val_loss:.4f} - Val Acc: {val_acc:.4f}")

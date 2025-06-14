@@ -71,3 +71,32 @@ class ProgressiveCompressor(nn.Module):
         # Mean pooling over sequence dimension (L)
         x_pooled = x.mean(dim=1)  # (B, dim)
         return self.final_proj(x_pooled)  # (B, 512)
+
+class LastLayerHaluClassifier(nn.Module):
+    """
+    Transformer-based classifier for hallucination detection using last layer activations.
+    Input: (B, L, D) where L=sequence length, D=activation dim (e.g., 4096)
+    Output: (B, 1) sigmoid probability of hallucination
+    """
+    def __init__(self, input_dim=4096, n_blocks=4, hidden_dim=512, nhead=8, ff_multiplier=4, dropout=0.1, max_len=63):
+        super().__init__()
+        self.pos_encodings = PositionalEncoding(input_dim, max_len=max_len)
+        self.blocks = nn.ModuleList([
+            TransformerBlock(input_dim if i == 0 else hidden_dim, hidden_dim, nhead=nhead, ff_multiplier=ff_multiplier, dropout=dropout)
+            for i in range(n_blocks)
+        ])
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.classifier = nn.Linear(hidden_dim, 1)
+
+    def forward(self, x):
+        """
+        x: (B, L, D)
+        returns: (B, 1) sigmoid probability
+        """
+        x = self.pos_encodings(x)
+        for block in self.blocks:
+            x = block(x)
+        x = self.norm(x)
+        x_pooled = x.mean(dim=1)  # mean pooling over sequence
+        logits = self.classifier(x_pooled)
+        return torch.sigmoid(logits)
