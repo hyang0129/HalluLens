@@ -6,6 +6,7 @@ from tqdm import tqdm
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from .evaluation import evaluate, pairing_accuracy
+from loguru import logger
 
 class SupConLoss(nn.Module):
     """Supervised Contrastive Learning: https://arxiv.org/pdf/2004.11362.pdf.
@@ -319,6 +320,7 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
         for batch in loop:
             i += 1
             last_layer = batch['all_activations'][-1].to(device, non_blocking=True)  # (B, L, D)
+            logger.debug(f"Last layer shape before model: {last_layer.shape}")
             labels = batch['halu'].to(device, non_blocking=True).float().view(-1, 1)  # (B, 1)
 
             buffer_acts.append(last_layer)
