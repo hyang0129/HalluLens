@@ -320,6 +320,7 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
         for batch in loop:
             i += 1
             last_layer = batch['all_activations'][-1].to(device, non_blocking=True)  # (B, L, D)
+            last_layer = last_layer.squeeze()  # Remove any extra size-1 dimensions
             logger.debug(f"Last layer shape before model: {last_layer.shape}")
             labels = batch['halu'].to(device, non_blocking=True).float().view(-1, 1)  # (B, 1)
 
