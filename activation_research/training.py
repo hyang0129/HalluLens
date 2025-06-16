@@ -259,7 +259,7 @@ def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, devi
 
     return results
 
-def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, batch_size=64, lr=1e-4, device='cuda', num_workers=4):
+def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, batch_size=512, lr=1e-4, device='cuda', num_workers=4, sub_batch_size=64):
     """
     Train a hallucination classifier using last layer activations.
     Args:
@@ -271,11 +271,14 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
         lr: float
         device: str
         num_workers: int
+        sub_batch_size: int, size of sub-batches to process at once
     """
     from torch.utils.data import DataLoader
     import torch
     import torch.nn.functional as F
     from tqdm import tqdm
+
+    assert batch_size % sub_batch_size == 0, "batch_size must be divisible by sub_batch_size"
 
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -283,7 +286,7 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=batch_size,
+        batch_size=sub_batch_size,
         shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
@@ -292,12 +295,14 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
     if test_dataset is not None:
         test_loader = DataLoader(
             test_dataset,
-            batch_size=batch_size,
+            batch_size=sub_batch_size,
             shuffle=False,
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=True
         )
+
+    subsinbatch = batch_size // sub_batch_size
 
     for epoch in range(epochs):
         model.train()
@@ -305,22 +310,42 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
         total_correct = 0
         total_samples = 0
         loop = tqdm(train_loader, desc=f"Train Epoch {epoch+1}/{epochs}")
+
+        # Buffers to accumulate mini-batches
+        buffer_acts = []
+        buffer_labels = []
+        i = 0
+
         for batch in loop:
-            # Get last layer activations (assume all_activations is a list of tensors)
-            last_layer = batch['all_activations'][-1].to(device)  # (B, L, D)
-            labels = batch['halu'].to(device).float().view(-1, 1)  # (B, 1)
-            preds = model(last_layer)
-            loss = loss_fn(preds, labels)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item() * labels.size(0)
-            preds_binary = (preds > 0.5).float()
-            total_correct += (preds_binary == labels).sum().item()
-            total_samples += labels.size(0)
-            loop.set_postfix(loss=loss.item())
-        avg_loss = total_loss / total_samples
-        avg_acc = total_correct / total_samples
+            i += 1
+            last_layer = batch['all_activations'][-1].to(device, non_blocking=True)  # (B, L, D)
+            labels = batch['halu'].to(device, non_blocking=True).float().view(-1, 1)  # (B, 1)
+
+            buffer_acts.append(last_layer)
+            buffer_labels.append(labels)
+
+            # Process when buffer is full or at the end of the loop
+            if len(buffer_acts) * sub_batch_size == batch_size or i == len(loop):
+                acts_full = torch.cat(buffer_acts, dim=0)
+                labels_full = torch.cat(buffer_labels, dim=0)
+                buffer_acts = []
+                buffer_labels = []
+
+                preds = model(acts_full)
+                loss = loss_fn(preds, labels_full)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                total_loss += loss.item() * labels_full.size(0)
+                preds_binary = (preds > 0.5).float()
+                total_correct += (preds_binary == labels_full).sum().item()
+                total_samples += labels_full.size(0)
+
+                avg_loss = total_loss / total_samples
+                avg_acc = total_correct / total_samples
+                loop.set_postfix(loss=avg_loss, acc=avg_acc)
+
         print(f"Epoch {epoch+1} - Train Loss: {avg_loss:.4f} - Train Acc: {avg_acc:.4f}")
 
         if test_dataset is not None:
@@ -328,16 +353,32 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
             val_loss = 0.0
             val_correct = 0
             val_samples = 0
+            buffer_acts = []
+            buffer_labels = []
+            i = 0
+
             with torch.no_grad():
                 for batch in tqdm(test_loader, desc="Validation"):
-                    last_layer = batch['all_activations'][-1].to(device)
-                    labels = batch['halu'].to(device).float().view(-1, 1)
-                    preds = model(last_layer)
-                    loss = loss_fn(preds, labels)
-                    val_loss += loss.item() * labels.size(0)
-                    preds_binary = (preds > 0.5).float()
-                    val_correct += (preds_binary == labels).sum().item()
-                    val_samples += labels.size(0)
+                    i += 1
+                    last_layer = batch['all_activations'][-1].to(device, non_blocking=True)
+                    labels = batch['halu'].to(device, non_blocking=True).float().view(-1, 1)
+
+                    buffer_acts.append(last_layer)
+                    buffer_labels.append(labels)
+
+                    if len(buffer_acts) * sub_batch_size == batch_size or i == len(test_loader):
+                        acts_full = torch.cat(buffer_acts, dim=0)
+                        labels_full = torch.cat(buffer_labels, dim=0)
+                        buffer_acts = []
+                        buffer_labels = []
+
+                        preds = model(acts_full)
+                        loss = loss_fn(preds, labels_full)
+                        val_loss += loss.item() * labels_full.size(0)
+                        preds_binary = (preds > 0.5).float()
+                        val_correct += (preds_binary == labels_full).sum().item()
+                        val_samples += labels_full.size(0)
+
             val_loss /= val_samples
             val_acc = val_correct / val_samples
             print(f"Epoch {epoch+1} - Val Loss: {val_loss:.4f} - Val Acc: {val_acc:.4f}")
