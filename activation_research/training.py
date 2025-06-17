@@ -7,6 +7,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from .evaluation import evaluate, pairing_accuracy
 from loguru import logger
+from sklearn.metrics import roc_auc_score
 
 class SupConLoss(nn.Module):
     """Supervised Contrastive Learning: https://arxiv.org/pdf/2004.11362.pdf.
@@ -356,6 +357,8 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
             val_loss = 0.0
             val_correct = 0
             val_samples = 0
+            val_preds = []
+            val_labels = []
             buffer_acts = []
             buffer_labels = []
             i = 0
@@ -382,7 +385,12 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
                         preds_binary = (preds > 0.5).float()
                         val_correct += (preds_binary == labels_full).sum().item()
                         val_samples += labels_full.size(0)
+                        
+                        # Store predictions and labels for AUROC
+                        val_preds.extend(preds.cpu().numpy())
+                        val_labels.extend(labels_full.cpu().numpy())
 
             val_loss /= val_samples
             val_acc = val_correct / val_samples
-            print(f"Epoch {epoch+1} - Val Loss: {val_loss:.4f} - Val Acc: {val_acc:.4f}")
+            val_auroc = roc_auc_score(val_labels, val_preds)
+            print(f"Epoch {epoch+1} - Val Loss: {val_loss:.4f} - Val Acc: {val_acc:.4f} - Val AUROC: {val_auroc:.4f}")
