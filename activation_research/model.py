@@ -100,3 +100,42 @@ class LastLayerHaluClassifier(nn.Module):
         x_pooled = x.mean(dim=1)  # mean pooling over sequence
         logits = self.classifier(x_pooled)
         return torch.sigmoid(logits)
+
+class SimpleHaluClassifier(nn.Module):
+    """
+    Simple feed-forward classifier for hallucination detection using only the last token's activations.
+    Input: (B, L, D) where L=sequence length, D=activation dim (e.g., 4096)
+    Output: (B, 1) sigmoid probability of hallucination
+
+    This is SAPLMA
+    """
+    def __init__(self, input_dim=4096, hidden_dims=[2048, 1024, 512], dropout=0.1):
+        super().__init__()
+        
+        # Create feed-forward layers with decreasing dimensions
+        layers = []
+        prev_dim = input_dim
+        for hidden_dim in hidden_dims:
+            layers.extend([
+                nn.Linear(prev_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout)
+            ])
+            prev_dim = hidden_dim
+            
+        # Final classification layer
+        layers.append(nn.Linear(prev_dim, 1))
+        
+        self.classifier = nn.Sequential(*layers)
+
+    def forward(self, x):
+        """
+        x: (B, L, D)
+        returns: (B, 1) sigmoid probability
+        """
+        # Take only the last token's activations
+        last_token = x[:, -1, :]  # (B, D)
+        
+        # Pass through feed-forward layers
+        logits = self.classifier(last_token)
+        return torch.sigmoid(logits)
