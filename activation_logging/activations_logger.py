@@ -29,12 +29,12 @@ class ActivationsLogger:
             compression: Compression method ('zstd', None) or a BaseCompressor instance
             read_only: if True, the LMDB will be opened in read-only mode
             target_layers: Which layers to extract activations from ('all', 'first_half', or 'second_half')
-            sequence_mode: Which tokens to extract activations for ('all' for full sequence or 'prompt' for prompt tokens only)
+            sequence_mode: Which tokens to extract activations for ('all' for full sequence, 'prompt' for prompt tokens only, or 'response' for response tokens only)
         """
         if target_layers not in ['all', 'first_half', 'second_half']:
             raise ValueError("target_layers must be one of: 'all', 'first_half', 'second_half'")
-        if sequence_mode not in ['all', 'prompt']:
-            raise ValueError("sequence_mode must be either 'all' or 'prompt'")
+        if sequence_mode not in ['all', 'prompt', 'response']:
+            raise ValueError("sequence_mode must be one of: 'all', 'prompt', 'response'")
             
         self.target_layers = target_layers
         self.sequence_mode = sequence_mode
@@ -140,13 +140,14 @@ class ActivationsLogger:
             
         Returns:
             List of tensors containing activations from the specified layers based on target_layers setting:
-            - 'all': all layers
-            - 'first_half': first half of the model's layers
-            - 'second_half': second half of the model's layers
+            - 'all': all layers with their original activations
+            - 'first_half': first half of layers with original activations, second half as None
+            - 'second_half': second half of layers with original activations, first half as None
             
             For each layer, activations are extracted based on sequence_mode:
             - 'all': activations for both prompt and generated tokens
             - 'prompt': activations for prompt tokens only
+            - 'response': activations for response tokens only
         """
         # If model_outputs is None or doesn't have hidden_states, return None
         if model_outputs is None or not hasattr(model_outputs, 'hidden_states'):
@@ -185,21 +186,37 @@ class ActivationsLogger:
         if self.sequence_mode == 'prompt':
             # Only return prompt activations
             logger.debug("Extracting activations for prompt tokens only")
-            full_hidden_states = [prompt_hidden[layer_idx] for layer_idx in target_layer_indices]
+            full_hidden_states = []
+            for layer_idx in range(num_layers):
+                if layer_idx in target_layer_indices:
+                    full_hidden_states.append(prompt_hidden[layer_idx])
+                else:
+                    full_hidden_states.append(None)
+        elif self.sequence_mode == 'response':
+            # Only return response activations
+            logger.debug("Extracting activations for response tokens only")
+            full_hidden_states = []
+            for layer_idx in range(num_layers):
+                if layer_idx in target_layer_indices:
+                    # Only concatenate steps for target layers
+                    layer_acts = torch.cat([step[layer_idx] for step in gen_hiddens], dim=1)
+                    full_hidden_states.append(layer_acts)
+                else:
+                    full_hidden_states.append(None)
         else:  # 'all'
             # Concatenate prompt and generated token activations
             logger.debug("Extracting activations for full sequence (prompt + generated tokens)")
-
             
-            gen_hidden_per_layer = [
-                torch.cat([step[layer_idx] for step in gen_hiddens], dim=1)
-                for layer_idx in target_layer_indices
-            ]
-
-            full_hidden_states = [
-                torch.cat([prompt_hidden[layer_idx], gen_hidden_per_layer[i]], dim=1)
-                for i, layer_idx in enumerate(target_layer_indices)
-            ]
+            full_hidden_states = []
+            for layer_idx in range(num_layers):
+                if layer_idx in target_layer_indices:
+                    # Only concatenate steps for target layers
+                    gen_layer_acts = torch.cat([step[layer_idx] for step in gen_hiddens], dim=1)
+                    # Concatenate prompt and generated activations
+                    layer_acts = torch.cat([prompt_hidden[layer_idx], gen_layer_acts], dim=1)
+                    full_hidden_states.append(layer_acts)
+                else:
+                    full_hidden_states.append(None)
 
         return full_hidden_states
 
@@ -235,6 +252,11 @@ class ActivationsLogger:
                 # Replace model_outputs with extracted activations to save space
                 entry["all_layers_activations"] = all_layers_activations
                 
+                # Store the logging configuration in metadata
+                metadata_entry["logging_config"] = {
+                    "target_layers": self.target_layers,
+                    "sequence_mode": self.sequence_mode
+                }
 
         else: 
             raise ValueError("No model_outputs or input_length found in entry")

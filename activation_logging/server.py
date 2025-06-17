@@ -531,16 +531,30 @@ def get_logger_for_request(request_params):
     """
     lmdb_path = request_params.get('lmdb_path')
     
+    # Get target layers and sequence mode from environment variables
+    target_layers = os.environ.get("ACTIVATION_TARGET_LAYERS", "all")
+    sequence_mode = os.environ.get("ACTIVATION_SEQUENCE_MODE", "all")
+    
     # Always create a new logger instance to avoid LMDB assertion errors
     if lmdb_path and lmdb_path.strip():
         # Create and use a custom logger with the specified path
-        custom_logger = ActivationsLogger(lmdb_path=lmdb_path, map_size=DEFAULT_MAP_SIZE)
+        custom_logger = ActivationsLogger(
+            lmdb_path=lmdb_path, 
+            map_size=DEFAULT_MAP_SIZE,
+            target_layers=target_layers,
+            sequence_mode=sequence_mode
+        )
         return custom_logger, custom_logger, True
     else:
         # Create a new logger with the default path from environment
         # This avoids the 'Assertion mp->mp_pgno != pgno failed in mdb_page_touch()' error
         default_path = os.environ.get("ACTIVATION_LMDB_PATH", DEFAULT_LMDB_PATH)
-        new_logger = ActivationsLogger(lmdb_path=default_path, map_size=DEFAULT_MAP_SIZE)
+        new_logger = ActivationsLogger(
+            lmdb_path=default_path, 
+            map_size=DEFAULT_MAP_SIZE,
+            target_layers=target_layers,
+            sequence_mode=sequence_mode
+        )
         return new_logger, new_logger, False
 
 

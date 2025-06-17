@@ -52,7 +52,7 @@ class ActivationDataset(Dataset):
             Dictionary containing:
             - hashkey: The prompt hash
             - halu: Whether this is a hallucination
-            - all_activations: All padded activations
+            - all_activations: All padded activations (None for non-targeted layers)
             - layer1_activations: Activations from first randomly selected layer
             - layer2_activations: Activations from second randomly selected layer
             - layer1_idx: Index of first selected layer
@@ -65,22 +65,26 @@ class ActivationDataset(Dataset):
         padded_activations = []
         for layer_idx in self.relevant_layers:
             act = activations[layer_idx]
-            seq_len = act.shape[1]
-            
-            if seq_len < self.pad_length:
-                # Generate random noise with same shape as activations
-                noise = torch.randn(act.shape[0], self.pad_length - seq_len, act.shape[2], 
-                                  device=act.device, dtype=act.dtype)
-                # Concatenate original activations with noise
-                act = torch.cat([act, noise], dim=1)
-            elif seq_len > self.pad_length:
-                # Truncate if longer than pad_length
-                act = act[:, :self.pad_length, :]
+            if act is not None:
+                seq_len = act.shape[1]
                 
+                if seq_len < self.pad_length:
+                    # Generate random noise with same shape as activations
+                    noise = torch.randn(act.shape[0], self.pad_length - seq_len, act.shape[2], 
+                                      device=act.device, dtype=act.dtype)
+                    # Concatenate original activations with noise
+                    act = torch.cat([act, noise], dim=1)
+                elif seq_len > self.pad_length:
+                    # Truncate if longer than pad_length
+                    act = act[:, :self.pad_length, :]
+            # If act is None, keep it as None
             padded_activations.append(act)
             
-        # Randomly select two different layers
-        layer1_idx, layer2_idx = random.sample(range(len(padded_activations)), 2)
+        # Randomly select two different layers, ensuring they are not None
+        available_layers = [i for i, act in enumerate(padded_activations) if act is not None]
+        if len(available_layers) < 2:
+            raise ValueError(f"Not enough targeted layers available (found {len(available_layers)} layers)")
+        layer1_idx, layer2_idx = random.sample(available_layers, 2)
         layer1_activations = padded_activations[layer1_idx]
         layer2_activations = padded_activations[layer2_idx]
             
@@ -183,14 +187,26 @@ class ActivationParser:
         return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         
     def get_activations(self, idx) -> Optional[Dict[str, Any]]:
-
         row = self.df.iloc[idx]
         result = self.activation_logger.get_entry(row['prompt_hash'])
         input_length = result['input_length']
         
-        # Trim activations to only include generated tokens
-        activations = [act[:, input_length:, :] for act in result['all_layers_activations']]
-    
+        # Check how the activations were logged
+        logging_config = result.get('logging_config', {})
+        sequence_mode = logging_config.get('sequence_mode', 'all')
+        
+        # Only trim if the activations weren't already logged in response mode
+        if sequence_mode != 'response':
+            # Trim activations to only include generated tokens
+            activations = []
+            for act in result['all_layers_activations']:
+                if act is not None:
+                    activations.append(act[:, input_length:, :])
+                else:
+                    activations.append(None)
+        else:
+            activations = result['all_layers_activations']
+
         return row, result, activations, input_length
 
     def get_dataset(self, split: Literal['train', 'test'], relevant_layers: List[int] = None) -> ActivationDataset:

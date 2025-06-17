@@ -32,6 +32,12 @@ def main():
                         help="Size of LMDB map in gigabytes (default: 64)")
     parser.add_argument("--log-file", type=str, default="server.log",
                         help="Path to log file (default: server.log)")
+    parser.add_argument("--target-layers", type=str, default="all",
+                        choices=["all", "first_half", "second_half"],
+                        help="Which layers to extract activations from (default: all)")
+    parser.add_argument("--sequence-mode", type=str, default="all",
+                        choices=["all", "prompt", "response"],
+                        help="Which tokens to extract activations for (default: all)")
     
     args = parser.parse_args()
 
@@ -49,6 +55,8 @@ def main():
     os.environ["ACTIVATION_LMDB_PATH"] = args.lmdb_path
     os.environ["ACTIVATION_LMDB_MAP_SIZE"] = str(args.map_size_gb * (1 << 30))  # Convert GB to bytes
     os.environ["SERVER_LOG_FILE"] = args.log_file  # Add log file path to environment
+    os.environ["ACTIVATION_TARGET_LAYERS"] = args.target_layers  # Add target layers setting
+    os.environ["ACTIVATION_SEQUENCE_MODE"] = args.sequence_mode  # Add sequence mode setting
     if args.auth_token:
         os.environ["HF_TOKEN"] = args.auth_token
         logger.info("Using provided HuggingFace token for model access")
