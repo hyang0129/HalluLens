@@ -290,6 +290,9 @@ class PreciseQAEval:
             'halu_test_res': halu_test_res,
             'abstantion_raw_generation' : abstantion_raw_gen,
             'is_hallucinated_raw_generation' : halu_test_raw_gen,
+            'prompt': [str(row['prompt']) for _, row in self.test_df.iterrows()],
+            'generation': [str(row['generation']) for _, row in self.test_df.iterrows()],
+            'answer': [str(row['answer']) for _, row in self.test_df.iterrows()],
         }
 
         # save the results
