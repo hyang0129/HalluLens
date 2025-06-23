@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 from loguru import logger
 
-from activations_logger import ActivationsLogger
+from activation_logging.activations_logger import ActivationsLogger
 
 
 def hash_prompt(prompt: str) -> str:
