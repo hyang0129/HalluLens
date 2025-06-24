@@ -101,6 +101,8 @@ class LastLayerHaluClassifier(nn.Module):
         logits = self.classifier(x_pooled)
         return torch.sigmoid(logits)
 
+
+
 class SimpleHaluClassifier(nn.Module):
     """
     Simple feed-forward classifier for hallucination detection using only the last token's activations.
@@ -139,3 +141,33 @@ class SimpleHaluClassifier(nn.Module):
         # Pass through feed-forward layers
         logits = self.classifier(last_token)
         return torch.sigmoid(logits)
+
+class HallucinationClassifier(nn.Module):
+    """
+    Simple feed-forward classifier for hallucination detection using the last token of a selected layer.
+    Input: (B, L, D) where L=sequence length, D=activation dim (e.g., 4096)
+    Output: (B,) sigmoid probability of hallucination
+    """
+    def __init__(self, dim, layer_index=0):
+        super().__init__()
+        self.layer_index = layer_index
+        self.net = nn.Sequential(
+            nn.Linear(dim, 1024),
+            nn.ReLU(),
+            nn.Linear(1024, 1)
+        )
+
+    def forward(self, x):
+        """
+        x: (B, L, D) or list of (B, L, D) tensors for multiple layers
+        returns: (B,) sigmoid probability
+        """
+        # If x is a list/tuple of layer activations, select the specified layer
+        if isinstance(x, (list, tuple)):
+            x = x[self.layer_index]
+        
+        # Take only the last token's activations
+        last_token = x[:, -1, :]  # (B, D)
+        
+        # Pass through feed-forward layers
+        return torch.sigmoid(self.net(last_token)).squeeze()
