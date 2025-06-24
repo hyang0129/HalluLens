@@ -166,6 +166,9 @@ class HallucinationClassifier(nn.Module):
         if isinstance(x, (list, tuple)):
             x = x[self.layer_index]
         
+        # Convert to fp32 if needed (activations might be saved as fp16)
+        x = x.float()
+        
         # Take only the last token's activations
         last_token = x[:, -1, :]  # (B, D)
         
