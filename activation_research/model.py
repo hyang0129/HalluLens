@@ -146,7 +146,7 @@ class HallucinationClassifier(nn.Module):
     """
     Simple feed-forward classifier for hallucination detection using the last token of a selected layer.
     Input: (B, L, D) where L=sequence length, D=activation dim (e.g., 4096)
-    Output: (B,) sigmoid probability of hallucination
+    Output: (B, 1) sigmoid probability of hallucination
     """
     def __init__(self, dim, layer_index=0):
         super().__init__()
@@ -160,7 +160,7 @@ class HallucinationClassifier(nn.Module):
     def forward(self, x):
         """
         x: (B, L, D) or list of (B, L, D) tensors for multiple layers
-        returns: (B,) sigmoid probability
+        returns: (B, 1) sigmoid probability
         """
         # If x is a list/tuple of layer activations, select the specified layer
         if isinstance(x, (list, tuple)):
@@ -173,4 +173,4 @@ class HallucinationClassifier(nn.Module):
         last_token = x[:, -1, :]  # (B, D)
         
         # Pass through feed-forward layers
-        return torch.sigmoid(self.net(last_token)).squeeze()
+        return torch.sigmoid(self.net(last_token))  # (B, 1) - removed squeeze()
