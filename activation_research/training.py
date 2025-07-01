@@ -8,6 +8,8 @@ from torch.utils.data import DataLoader
 from .evaluation import evaluate, pairing_accuracy
 from loguru import logger
 from sklearn.metrics import roc_auc_score
+import os
+import json
 
 class SupConLoss(nn.Module):
     """Supervised Contrastive Learning: https://arxiv.org/pdf/2004.11362.pdf.
@@ -108,12 +110,30 @@ class SupConLoss(nn.Module):
 
 def train_contrastive(model, train_dataset, test_dataset=None,
                       epochs=10, batch_size=512, lr=1e-6,
-                      temperature=0.07, device='cuda', num_workers=16, sub_batch_size=64):
+                      temperature=0.07, device='cuda', num_workers=16, sub_batch_size=64,
+                      checkpoint_dir='checkpoints', save_every=5, resume_from=None):
     assert batch_size % sub_batch_size == 0, "batch_size must be divisible by sub_batch_size"
 
+    # Create checkpoint directory
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = SupConLoss(temperature=temperature)
+    
+    start_epoch = 0
+    best_loss = float('inf')
+    
+    # Resume from checkpoint if specified
+    if resume_from is not None:
+        checkpoint_path = os.path.join(checkpoint_dir, resume_from)
+        if os.path.exists(checkpoint_path):
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_epoch = checkpoint['epoch'] + 1
+            best_loss = checkpoint.get('best_loss', float('inf'))
+            logger.info(f"Resumed training from epoch {start_epoch}")
 
     train_loader = DataLoader(
         train_dataset,
@@ -136,7 +156,7 @@ def train_contrastive(model, train_dataset, test_dataset=None,
 
     subsinbatch = batch_size // sub_batch_size
     
-    for epoch in tqdm(range(epochs), desc="Epochs"):
+    for epoch in tqdm(range(start_epoch, epochs), desc="Epochs"):
         model.train()
         total_loss = 0.0
         total_acc = 0.0
@@ -182,12 +202,39 @@ def train_contrastive(model, train_dataset, test_dataset=None,
 
         print(f"Epoch {epoch + 1}/{epochs} - Train Loss: {avg_loss:.4f} - Train Pairing Acc: {avg_acc:.4f}")
 
+        test_loss = float('inf')
         if test_dataset is not None:
             test_loss, test_acc = evaluate(model, test_dataset, batch_size=batch_size, loss_fn=loss_fn, device=device, sub_batch_size= sub_batch_size)
             print(f"Epoch {epoch + 1}/{epochs} - Test Loss: {test_loss:.4f} - Test Pairing Acc: {test_acc:.4f}")
 
+        # Save checkpoint
+        if (epoch + 1) % save_every == 0 or epoch == epochs - 1:
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'train_loss': avg_loss,
+                'train_acc': avg_acc,
+                'test_loss': test_loss,
+                'best_loss': min(best_loss, test_loss),
+                'temperature': temperature,
+                'lr': lr
+            }
+            
+            # Save regular checkpoint
+            checkpoint_path = os.path.join(checkpoint_dir, f'contrastive_checkpoint_epoch_{epoch+1}.pt')
+            torch.save(checkpoint, checkpoint_path)
+            
+            # Save best checkpoint if test loss improved
+            if test_loss < best_loss:
+                best_loss = test_loss
+                best_checkpoint_path = os.path.join(checkpoint_dir, 'contrastive_best.pt')
+                torch.save(checkpoint, best_checkpoint_path)
+                logger.info(f"New best model saved with test loss: {test_loss:.4f}")
 
-def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, batch_size=512, lr=1e-4, device='cuda', num_workers=4, sub_batch_size=64):
+
+def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, batch_size=512, lr=1e-4, device='cuda', num_workers=4, sub_batch_size=64,
+                         checkpoint_dir='checkpoints', save_every=5, resume_from=None):
     """
     Train a hallucination classifier using last layer activations.
     Args:
@@ -200,6 +247,9 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
         device: str
         num_workers: int
         sub_batch_size: int, size of sub-batches to process at once
+        checkpoint_dir: str, directory to save checkpoints
+        save_every: int, save checkpoint every N epochs
+        resume_from: str, checkpoint file to resume from
     """
     from torch.utils.data import DataLoader
     import torch
@@ -208,9 +258,26 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
 
     assert batch_size % sub_batch_size == 0, "batch_size must be divisible by sub_batch_size"
 
+    # Create checkpoint directory
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = torch.nn.BCELoss()
+    
+    start_epoch = 0
+    best_auroc = 0.0
+    
+    # Resume from checkpoint if specified
+    if resume_from is not None:
+        checkpoint_path = os.path.join(checkpoint_dir, resume_from)
+        if os.path.exists(checkpoint_path):
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_epoch = checkpoint['epoch'] + 1
+            best_auroc = checkpoint.get('best_auroc', 0.0)
+            logger.info(f"Resumed training from epoch {start_epoch}")
 
     train_loader = DataLoader(
         train_dataset,
@@ -232,7 +299,7 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
 
     subsinbatch = batch_size // sub_batch_size
 
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         model.train()
         total_loss = 0.0
         total_correct = 0
@@ -278,6 +345,10 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
 
         print(f"Epoch {epoch+1} - Train Loss: {avg_loss:.4f} - Train Acc: {avg_acc:.4f}")
 
+        val_loss = float('inf')
+        val_acc = 0.0
+        val_auroc = 0.0
+        
         if test_dataset is not None:
             model.eval()
             val_loss = 0.0
@@ -320,3 +391,29 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
             val_acc = val_correct / val_samples
             val_auroc = roc_auc_score(val_labels, val_preds)
             print(f"Epoch {epoch+1} - Val Loss: {val_loss:.4f} - Val Acc: {val_acc:.4f} - Val AUROC: {val_auroc:.4f}")
+
+        # Save checkpoint
+        if (epoch + 1) % save_every == 0 or epoch == epochs - 1:
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'train_loss': avg_loss,
+                'train_acc': avg_acc,
+                'val_loss': val_loss,
+                'val_acc': val_acc,
+                'val_auroc': val_auroc,
+                'best_auroc': max(best_auroc, val_auroc),
+                'lr': lr
+            }
+            
+            # Save regular checkpoint
+            checkpoint_path = os.path.join(checkpoint_dir, f'halu_classifier_checkpoint_epoch_{epoch+1}.pt')
+            torch.save(checkpoint, checkpoint_path)
+            
+            # Save best checkpoint if AUROC improved
+            if val_auroc > best_auroc:
+                best_auroc = val_auroc
+                best_checkpoint_path = os.path.join(checkpoint_dir, 'halu_classifier_best.pt')
+                torch.save(checkpoint, best_checkpoint_path)
+                logger.info(f"New best model saved with AUROC: {val_auroc:.4f}")

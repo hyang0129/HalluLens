@@ -58,16 +58,15 @@ class ActivationsLogger:
         if lmdb_dir and not os.path.exists(lmdb_dir):
             os.makedirs(lmdb_dir, exist_ok=True)
             
-        # Open main LMDB for activations (large map size)
-        self.env = lmdb.open(safe_lmdb_path, map_size=map_size, subdir=True, create=True, readonly=read_only, lock=True, max_readers=2048)
-        self.env.reader_check()
+        # Do NOT open main LMDB or metadata LMDB here; rely on lazy initialization
+        # self.env = lmdb.open(safe_lmdb_path, map_size=map_size, subdir=True, create=True, readonly=read_only, lock=True, max_readers=2048)
+        # self.env.reader_check()
         
-        # Open separate LMDB for metadata (smaller map size)
-        metadata_path = os.path.join(os.path.dirname(safe_lmdb_path), f"{os.path.basename(safe_lmdb_path)}_metadata")
-        os.makedirs(metadata_path, exist_ok=True)
-        self.metadata_env = lmdb.open(metadata_path, map_size, subdir=True, create=True, readonly=read_only, lock=True, max_readers=2048)
-        self.metadata_env.reader_check()
-        logger.info(f"Opened metadata store at {metadata_path}")
+        # metadata_path = os.path.join(os.path.dirname(safe_lmdb_path), f"{os.path.basename(safe_lmdb_path)}_metadata")
+        # os.makedirs(metadata_path, exist_ok=True)
+        # self.metadata_env = lmdb.open(metadata_path, map_size, subdir=True, create=True, readonly=read_only, lock=True, max_readers=2048)
+        # self.metadata_env.reader_check()
+        # logger.info(f"Opened metadata store at {metadata_path}")
 
         self.read_only = read_only
 
@@ -318,6 +317,17 @@ class ActivationsLogger:
 
         return self.get_entry_by_key(key)
 
+    def _get_env(self):
+        if self.env is None:
+            self.env = lmdb.open(self.lmdb_path, map_size=self.map_size, subdir=True, create=True, readonly=self.read_only, lock=True, max_readers=2048)
+        return self.env
+
+    def _get_metadata_env(self):
+        if self.metadata_env is None:
+            metadata_path = os.path.join(os.path.dirname(self.lmdb_path), f"{os.path.basename(self.lmdb_path)}_metadata")
+            os.makedirs(metadata_path, exist_ok=True)
+            self.metadata_env = lmdb.open(metadata_path, self.map_size, subdir=True, create=True, readonly=self.read_only, lock=True, max_readers=2048)
+        return self.metadata_env
 
     def get_entry_by_key(self, key: str, metadata_only: bool = False) -> Optional[Dict[str, Any]]:
         """
@@ -331,20 +341,22 @@ class ActivationsLogger:
             Dictionary containing the entry data if found, None otherwise
         """
         # Raise an error if LMDB is not initialized
-        if self.env is None:
+        if self._get_env() is None:
             raise ValueError("LMDB is not initialized")
             
         # If only metadata is requested and metadata store is available
-        if metadata_only and self.metadata_env is not None:
-            with self.metadata_env.begin(write=False) as txn:
-                value = txn.get(key.encode("utf-8"))
-                if value is not None:
-                    return pickle.loads(value)
-                else:
-                    raise ValueError("No metadata found for key")
+        if metadata_only:
+            metadata_env = self._get_metadata_env()
+            if metadata_env is not None:
+                with metadata_env.begin(write=False) as txn:
+                    value = txn.get(key.encode("utf-8"))
+                    if value is not None:
+                        return pickle.loads(value)
+                    else:
+                        raise ValueError("No metadata found for key")
         
         # Otherwise retrieve full entry including activations
-        with self.env.begin(write=False) as txn:
+        with self._get_env().begin(write=False) as txn:
             value = txn.get(key.encode("utf-8"))
             if value is not None:
                 stored_entry = pickle.loads(value)
@@ -380,11 +392,12 @@ class ActivationsLogger:
         Returns:
             List of entry keys as strings
         """
-        if self.metadata_env is None:
+        metadata_env = self._get_metadata_env()
+        if metadata_env is None:
             return []
             
         keys = []
-        with self.metadata_env.begin(write=False) as txn:
+        with metadata_env.begin(write=False) as txn:
             cursor = txn.cursor()
             # Use iternext with keys=True, values=False to avoid reading values
             for key in cursor.iternext(keys=True, values=False):
@@ -416,8 +429,8 @@ class ActivationsLogger:
 
     def close(self):
         """Close the LMDB environments."""
-        if self.env is not None:
-            self.env.close()
+        if self._get_env() is not None:
+            self._get_env().close()
             self.env = None 
             
         if self.metadata_env is not None:
@@ -429,7 +442,7 @@ class ActivationsLogger:
         Fix existing entries by ensuring all tensors are on CPU.
         This is useful for entries that were saved with CUDA tensors.
         """
-        if self.env is None:
+        if self._get_env() is None:
             raise ValueError("LMDB is not initialized")
             
         if self.read_only:
@@ -448,7 +461,7 @@ class ActivationsLogger:
         for key in tqdm(keys, desc="Fixing CUDA tensors"):
             try:
                 # Use a single transaction for both reading and writing
-                with self.env.begin(write=True) as txn:
+                with self._get_env().begin(write=True) as txn:
                     value = txn.get(key.encode("utf-8"))
                     if value is None:
                         continue
