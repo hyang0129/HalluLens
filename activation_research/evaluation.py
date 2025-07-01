@@ -227,7 +227,7 @@ def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, devi
                 buffer_x1.append(x1)
                 buffer_x2.append(x2)
             else:
-                all_activations = batch['all_layer_activations']
+                all_activations = batch['all_activations']
                 for layer_idx, layer_acts in zip(layers, all_activations):
                     buffer_layers[layer_idx].append(layer_acts.squeeze(1).to(device, non_blocking=True))
             
