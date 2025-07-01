@@ -214,7 +214,7 @@ def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, devi
 
     buffer_x1, buffer_x2, buffer_hash = [], [], []
     if layers is not None:
-        buffer_layers = [[] for _ in layers]
+        buffer_layers = {layer_idx: [] for layer_idx in layers}
     results = []
 
     subs_in_batch = batch_size // sub_batch_size
@@ -236,7 +236,7 @@ def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, devi
 
             # Process when buffer is full or at the end of the loop
             if (layers is None and len(buffer_x1) == subs_in_batch) or \
-               (layers is not None and len(buffer_layers[0]) == subs_in_batch) or \
+               (layers is not None and len(next(iter(buffer_layers.values()))) == subs_in_batch) or \
                i == len(dataloader) - 1:
                 
                 if layers is None:
@@ -255,10 +255,11 @@ def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, devi
                         })
                 else:
                     layer_embeddings = {}
-                    for layer_idx, layer_buffer in enumerate(buffer_layers):
+                    for layer_idx in layers:
+                        layer_buffer = buffer_layers[layer_idx]
                         layer_full = torch.cat(layer_buffer, dim=0)
                         z = model(layer_full)
-                        layer_embeddings[f"layer_{layers[layer_idx]}"] = z.cpu()
+                        layer_embeddings[f"layer_{layer_idx}"] = z.cpu()
                         buffer_layers[layer_idx] = []
 
                     for h in buffer_hash:
