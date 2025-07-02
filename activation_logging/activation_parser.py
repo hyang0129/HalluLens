@@ -30,13 +30,18 @@ class ActivationDataset(Dataset):
             split: Which split to use ('train' or 'test')
             relevant_layers: List of layer indices to use (default: layers 16-29)
         """
-        self.parser = ActivationParser("", "", lmdb_path, df=df)
+        self.lmdb_path = lmdb_path
+        self._activation_parser = None
         self.split = split
-        self.df = self.parser.df[self.parser.df['split'] == split].reset_index(drop=True)
-
+        self.df = df[df['split'] == split].reset_index(drop=True)
         self.relevant_layers = relevant_layers if relevant_layers is not None else list(range(16,30))
         self.pad_length = 63 
 
+    @property
+    def activation_parser(self):
+        if self._activation_parser is None:
+            self._activation_parser = ActivationParser("", "", self.lmdb_path, df=self.df)
+        return self._activation_parser
 
     def __len__(self) -> int:
         return len(self.df)
@@ -59,7 +64,7 @@ class ActivationDataset(Dataset):
             - layer2_idx: Index of second selected layer
             - input_length: Length of the input prompt
         """
-        row, result, activations, input_length = self.parser.get_activations(idx)
+        row, result, activations, input_length = self.activation_parser.get_activations(idx)
         
         # Filter to relevant layers and pad if necessary
         padded_activations = []
@@ -122,16 +127,18 @@ class ActivationParser:
             raise FileNotFoundError(f"JSON file not found: {eval_json}")
 
         self.lmdb_path = lmdb_path
-        self.activation_logger = ActivationsLogger(lmdb_path=lmdb_path, read_only=True)
+        self._activation_logger = None
         
         # Load metadata from JSON or use provided DataFrame
         self.df = df if df is not None else self._load_metadata()
 
+    @property
+    def activation_logger(self):
+        if self._activation_logger is None:
+            self._activation_logger = ActivationsLogger(lmdb_path=self.lmdb_path, read_only=True)
+        return self._activation_logger
 
-        
     def _load_metadata(self) -> Dict[str, Any]:
-
-
         gendf = pd.read_json(self.inference_json, lines=True)
 
         with open(self.eval_json, 'r') as f:
@@ -139,8 +146,6 @@ class ActivationParser:
             
         gendf['abstain'] = data['abstantion']
         gendf['halu'] = data['halu_test_res']
-
-
 
         gendf['prompt_hash'] = gendf['prompt'].apply(lambda x : 
                                                     hashlib.sha256(('user: ' + 
