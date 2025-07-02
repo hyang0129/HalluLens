@@ -168,6 +168,7 @@ def train_contrastive(model, train_dataset, test_dataset=None,
         i = 0
         for batch in loop:
             i += 1 
+            logger.debug(f"Adding batch {i} to buffer. Current buffer size: {len(buffer_x1)}")
             x1 = batch['layer1_activations'].squeeze(1).to(device, non_blocking=True)
             x2 = batch['layer2_activations'].squeeze(1).to(device, non_blocking=True)
 
@@ -176,6 +177,7 @@ def train_contrastive(model, train_dataset, test_dataset=None,
 
             # Process when buffer is full or at the end of the loop
             if len(buffer_x1) * sub_batch_size == batch_size or i == len(loop):
+                logger.debug(f"Processing buffer at batch {i}. Buffer size: {len(buffer_x1)}")
                 x1_full = torch.cat(buffer_x1, dim=0)
                 x2_full = torch.cat(buffer_x2, dim=0)
                 buffer_x1 = [] 
