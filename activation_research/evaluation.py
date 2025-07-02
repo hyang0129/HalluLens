@@ -197,7 +197,7 @@ def mahalanobis_ood_stats_multilayer(train_records, test_records, layers):
         'aggregated_stats': aggregated_stats
     }
 
-def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, device='cuda', num_workers=16, layers=None):
+def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, device='cuda', num_workers=16, layers=None, persistent_workers=True):
     assert batch_size % sub_batch_size == 0, "batch_size must be divisible by sub_batch_size"
 
     model = model.to(device)
@@ -209,7 +209,7 @@ def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, devi
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
-        persistent_workers=True
+        persistent_workers=persistent_workers
     )
 
     buffer_x1, buffer_x2, buffer_hash = [], [], []

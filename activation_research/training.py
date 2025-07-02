@@ -111,7 +111,7 @@ class SupConLoss(nn.Module):
 def train_contrastive(model, train_dataset, test_dataset=None,
                       epochs=10, batch_size=512, lr=1e-6,
                       temperature=0.07, device='cuda', num_workers=16, sub_batch_size=64,
-                      checkpoint_dir='checkpoints', save_every=5, resume_from=None):
+                      checkpoint_dir='checkpoints', save_every=5, resume_from=None, persistent_workers=True):
     assert batch_size % sub_batch_size == 0, "batch_size must be divisible by sub_batch_size"
 
     # Create checkpoint directory
@@ -141,7 +141,7 @@ def train_contrastive(model, train_dataset, test_dataset=None,
         shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
-        persistent_workers=True
+        persistent_workers=persistent_workers
     )
 
     if test_dataset is not None:
@@ -151,7 +151,7 @@ def train_contrastive(model, train_dataset, test_dataset=None,
             shuffle=False,
             num_workers=num_workers,
             pin_memory=True,
-            persistent_workers=True
+            persistent_workers=persistent_workers
         )
 
     subsinbatch = batch_size // sub_batch_size
@@ -234,7 +234,7 @@ def train_contrastive(model, train_dataset, test_dataset=None,
 
 
 def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, batch_size=512, lr=1e-4, device='cuda', num_workers=4, sub_batch_size=64,
-                         checkpoint_dir='checkpoints', save_every=5, resume_from=None):
+                         checkpoint_dir='checkpoints', save_every=5, resume_from=None, persistent_workers=True):
     """
     Train a hallucination classifier using last layer activations.
     Args:
@@ -250,6 +250,7 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
         checkpoint_dir: str, directory to save checkpoints
         save_every: int, save checkpoint every N epochs
         resume_from: str, checkpoint file to resume from
+        persistent_workers: bool, whether to use persistent DataLoader workers
     """
     from torch.utils.data import DataLoader
     import torch
@@ -285,7 +286,7 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
         shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
-        persistent_workers=True
+        persistent_workers=persistent_workers
     )
     if test_dataset is not None:
         test_loader = DataLoader(
@@ -294,7 +295,7 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
             shuffle=False,
             num_workers=num_workers,
             pin_memory=True,
-            persistent_workers=True
+            persistent_workers=persistent_workers
         )
 
     subsinbatch = batch_size // sub_batch_size
