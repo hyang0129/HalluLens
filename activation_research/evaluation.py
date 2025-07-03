@@ -262,10 +262,14 @@ def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, devi
                         layer_embeddings[f"layer_{layer_idx}"] = z.cpu()
                         buffer_layers[layer_idx] = []
 
-                    for h in buffer_hash:
+                    # Consistency check
+                    n_hash = len(buffer_hash)
+                    n_emb = next(iter(layer_embeddings.values())).shape[0]
+                    assert n_hash == n_emb, f"buffer_hash length {n_hash} does not match embeddings batch size {n_emb}"
+                    for idx, h in enumerate(buffer_hash):
                         results.append({
                             "hashkey": h,
-                            "layer_embeddings": {k: v[i] for k, v in layer_embeddings.items()}
+                            "layer_embeddings": {k: v[idx] for k, v in layer_embeddings.items()}
                         })
 
                 buffer_hash = []
