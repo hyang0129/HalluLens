@@ -75,8 +75,13 @@ class ZarrActivationsLogger:
             acts = entry["all_layers_activations"]
             if isinstance(acts, torch.Tensor):
                 acts = acts.cpu().numpy()
-            compressed_acts, compression_metadata = self.compressor.compress(acts)
-            self.activations.array(name=key, data=compressed_acts, chunks=True, overwrite=True)
+            acts_bytes = acts.tobytes()
+            shape = acts.shape
+            dtype = str(acts.dtype)
+            # Store as a 1D uint8 array (binary blob)
+            acts_np = np.frombuffer(acts_bytes, dtype=np.uint8)
+            self.activations.array(name=key, data=acts_np, shape=acts_np.shape, dtype=acts_np.dtype, chunks=True, overwrite=True)
+            compression_metadata = {"original_shape": shape, "original_dtype": dtype}
         else:
             compression_metadata = {}
         # Store metadata (excluding activations)
@@ -95,11 +100,18 @@ class ZarrActivationsLogger:
         """
         result = {}
         if key in self.activations:
-            compressed_acts = self.activations[key][...]
+            acts_np = self.activations[key][...]
             meta = self.metadata.attrs.get(key, {})
             compression_metadata = meta.get("compression_metadata", {})
-            acts = self.compressor.decompress(compressed_acts, compression_metadata)
-            result["all_layers_activations"] = torch.tensor(acts)
+            shape = tuple(compression_metadata.get("original_shape", ()))
+            dtype = compression_metadata.get("original_dtype", None)
+            if shape and dtype:
+                acts_bytes = acts_np.tobytes()
+                acts = np.frombuffer(acts_bytes, dtype=dtype).reshape(shape)
+                result["all_layers_activations"] = torch.tensor(acts)
+            else:
+                logger.warning(f"Missing shape or dtype in metadata for key {key}")
+                result["all_layers_activations"] = None
         if key in self.metadata.attrs:
             result.update(self.metadata.attrs[key])
         else:
