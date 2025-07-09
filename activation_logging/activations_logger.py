@@ -12,6 +12,10 @@ from loguru import logger
 import torch 
 from tqdm.autonotebook import tqdm
 from .compression import BaseCompressor, NoCompression, ZstdCompression, ZSTD_AVAILABLE
+import json
+from pathlib import Path
+import uuid
+import shutil
 
 
 class ActivationsLogger:
@@ -518,3 +522,89 @@ class ActivationsLogger:
                 error_count += 1
                 
         logger.info(f"Finished fixing CUDA tensors. Fixed {fixed_count} entries, skipped {skipped_count} entries (already on CPU), encountered {error_count} errors")
+
+    def export_to_npy_format(self, output_dir: str, indices: Optional[List[int]] = None):
+        """
+        Export entries to the NpyActivationsLogger format.
+        Args:
+            output_dir: Directory to write the NpyActivationsLogger files
+            indices: Optional list of indices to export (default: all entries)
+        """
+        # Disk space check
+        keys = self.list_entries()
+        if indices is None:
+            indices = list(range(len(keys)))
+        entries_to_export = [keys[idx] for idx in indices]
+        # Estimate required space (sum of pickled entry sizes)
+        import pickle
+        total_size = 0
+        for key in entries_to_export:
+            entry = self.get_entry_by_key(key)
+            total_size += len(pickle.dumps(entry))
+        output_dir_path = Path(output_dir)
+        output_dir_path.mkdir(parents=True, exist_ok=True)
+        usage = shutil.disk_usage(str(output_dir_path))
+        free_space = usage.free
+        print(f"Estimated required space: {total_size / (1024**3):.2f} GB")
+        print(f"Available space at destination: {free_space / (1024**3):.2f} GB")
+        if free_space < total_size:
+            print("ERROR: Available disk space is less than the estimated required space! Aborting export.")
+            return
+        # Proceed with export
+        npy_logger = NpyActivationsLogger(output_dir=output_dir, target_layers=self.target_layers, sequence_mode=self.sequence_mode)
+        for key in entries_to_export:
+            entry = self.get_entry_by_key(key)
+            npy_logger.log_entry(key, entry)
+        npy_logger.close()
+
+
+class NpyActivationsLogger:
+    """
+    Handles logging for LLM activations using a master index.json file for all metadata and .npy files for activations.
+    The index maps hashkeys to {file_id, metadata}.
+    """
+    def __init__(self, output_dir: str = "npy_data/", target_layers: str = 'all', sequence_mode: str = 'all', read_only: bool = False):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.index_path = self.output_dir / "index.json"
+        self.target_layers = target_layers
+        self.sequence_mode = sequence_mode
+        self.read_only = read_only
+        # Load or initialize the index
+        if self.index_path.exists():
+            with open(self.index_path, "r") as f:
+                self.index = json.load(f)
+        else:
+            self.index = {}
+
+    def log_entry(self, key: str, entry: Dict[str, Any]):
+        file_id = str(uuid.uuid4())
+        meta = {k: v for k, v in entry.items() if k != "all_layers_activations"}
+        # Save activations if present
+        if "all_layers_activations" in entry:
+            acts = entry["all_layers_activations"]
+            npy_path = self.output_dir / f"{file_id}.npy"
+            np.save(npy_path, acts, allow_pickle=True)
+            meta["activations_file"] = f"{file_id}.npy"
+        # Store metadata in the index
+        self.index[key] = {"file_id": file_id, "metadata": meta}
+        with open(self.index_path, "w") as f:
+            json.dump(self.index, f)
+
+    def get_entry(self, key: str) -> Dict[str, Any]:
+        if key not in self.index:
+            raise KeyError(f"Key {key} not found in index.")
+        entry_info = self.index[key]
+        meta = dict(entry_info["metadata"])
+        result = dict(meta)
+        if "activations_file" in meta:
+            npy_path = self.output_dir / meta["activations_file"]
+            acts = np.load(npy_path, allow_pickle=True)
+            result["all_layers_activations"] = acts.tolist() if isinstance(acts, np.ndarray) else acts
+        return result
+
+    def list_entries(self) -> List[str]:
+        return list(self.index.keys())
+
+    def close(self):
+        pass
