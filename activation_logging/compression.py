@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from typing import Dict, Any, Tuple
 from loguru import logger
+import pickle
 
 try:
     import zstandard as zstd
@@ -236,4 +237,15 @@ class ZstdCompression(BaseCompressor):
                 return data
         else:
             # No compressed activations found
-            raise ValueError("No compressed activations found in data") 
+            raise ValueError("No compressed activations found in data")
+
+
+class BytesCompressor(BaseCompressor):
+    """
+    Compressor that simply serializes data to bytes using pickle (no actual compression).
+    """
+    def compress(self, data):
+        return pickle.dumps(data), {"compression": "bytes"}
+
+    def decompress(self, data, metadata):
+        return pickle.loads(data) 
