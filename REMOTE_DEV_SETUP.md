@@ -2,6 +2,20 @@
 
 This document provides comprehensive instructions for setting up and using the remote development environment for the HalluLens project.
 
+## 🚀 Quick Start (TL;DR)
+**Recommended approach:** Use the automated `connect_gpu.sh` script which handles SSH agent setup automatically, eliminating the need to repeatedly enter your SSH key passphrase.
+
+```bash
+# One command to connect to GPU node with automatic SSH agent setup
+./connect_gpu.sh
+```
+
+This script will:
+- ✅ Set up SSH agent and handle passphrase automatically
+- ✅ Find your running GPU job dynamically
+- ✅ Connect directly to the GPU node
+- ✅ Navigate to HalluLens directory automatically
+
 ## 🖥️ Remote Server Information
 
 **Login Server:** `sporcsubmit.rc.rit.edu`
@@ -15,25 +29,55 @@ This document provides comprehensive instructions for setting up and using the r
 
 ## 🔐 SSH Connection Commands
 
-### Basic SSH Connection (Login Node - No GPU)
+### 🚀 Automated GPU Connection (Recommended - Uses SSH Agent)
+```bash
+# Preferred method - automatically handles SSH agent and passphrase
+./connect_gpu.sh
+
+# Or on Windows
+connect_gpu.bat
+```
+**✅ Benefits:**
+- Automatically sets up SSH agent to avoid repeated passphrase prompts
+- Finds the correct GPU node dynamically
+- Navigates directly to HalluLens directory
+- Handles different node allocations seamlessly
+- Works on Linux, Mac, and Windows (Git Bash)
+
+### SSH Agent Setup (Manual - if needed)
+```bash
+# Start SSH agent (if not already running)
+eval $(ssh-agent -s)
+
+# Add key to agent (enter passphrase once)
+ssh-add "C:\Users\HongM\OneDrive\Documents\ssh\.ssh\rit_rc_key"
+
+# Now SSH commands won't prompt for passphrase
+ssh hy3134@sporcsubmit.rc.rit.edu
+```
+**Note:** Once added to SSH agent, the key remains loaded until agent is stopped or system reboot.
+
+### Manual SSH Connection Commands (Fallback)
+
+#### Basic SSH Connection (Login Node - No GPU)
 ```bash
 ssh hy3134@sporcsubmit.rc.rit.edu -i "C:\Users\HongM\OneDrive\Documents\ssh\.ssh\rit_rc_key"
 ```
 **Use for:** File management, basic Python scripts, environment setup, non-GPU tasks
 
-### SSH with Port Forwarding to GPU Node (Recommended for ML Work)
+#### SSH with Port Forwarding to GPU Node
 ```bash
 ssh hy3134@sporcsubmit.rc.rit.edu -i "C:\Users\HongM\OneDrive\Documents\ssh\.ssh\rit_rc_key" -L 8887:skl-a-52:8887
 ```
 **Use for:** Jupyter notebooks on GPU node, vLLM servers, GPU-accelerated training
 
-### SSH with Multiple Port Forwards (GPU Node + API Access)
+#### SSH with Multiple Port Forwards (GPU Node + API Access)
 ```bash
 ssh hy3134@sporcsubmit.rc.rit.edu -i "C:\Users\HongM\OneDrive\Documents\ssh\.ssh\rit_rc_key" -L 8887:skl-a-52:8887 -L 8000:skl-a-52:8000
 ```
 **Use for:** Full access to GPU node services (Jupyter + vLLM/API servers)
 
-### Direct Access to GPU Node via Slurm Job
+#### Direct Access to GPU Node via Slurm Job
 ```bash
 # First, check your running jobs
 squeue -u hy3134
@@ -133,22 +177,49 @@ retry
 
 ## 🚀 Quick Start Guide
 
-### Option 1: Automated GPU Connection (Recommended)
+### 🎯 Automated GPU Connection (Strongly Recommended)
 ```bash
-# Run the automated connection script
+# Run the automated connection script with SSH agent
 ./connect_gpu.sh
 
 # Or on Windows
 connect_gpu.bat
 ```
-**This script will:**
-- Find the running job named "nb8887new"
-- Connect directly to the GPU node
-- Navigate to the HalluLens directory automatically
+**✅ This script automatically:**
+- Sets up SSH agent and handles the passphrase (no repeated prompts!)
+- Finds the running job named "nb8887new" dynamically
+- Connects directly to the correct GPU node
+- Navigates to the HalluLens directory automatically
+- Provides colored output and comprehensive error handling
 
-### Option 2: Manual Connection
+**🔑 SSH Agent Benefits:**
+- Enter passphrase only once per session
+- All subsequent SSH connections are seamless
+- Works across multiple terminal windows
+- Significantly improves development workflow
+
+### Option 2: Manual SSH Agent Setup + Connection
 ```bash
-# 1. Connect to login node
+# 1. Setup SSH agent (one-time per session)
+eval $(ssh-agent -s)
+ssh-add "C:\Users\HongM\OneDrive\Documents\ssh\.ssh\rit_rc_key"  # Enter passphrase once
+
+# 2. Connect to login node (no passphrase prompt)
+ssh hy3134@sporcsubmit.rc.rit.edu
+
+# 3. Find your GPU job
+squeue -u hy3134 --name=nb8887new
+
+# 4. Connect to GPU node
+srun --jobid=<JOBID> --pty bash
+
+# 5. Navigate to project
+cd notebook_llm/HalluLens
+```
+
+### Option 3: Manual Connection (Legacy - Not Recommended)
+```bash
+# 1. Connect to login node (will prompt for passphrase)
 ssh hy3134@sporcsubmit.rc.rit.edu -i "C:\Users\HongM\OneDrive\Documents\ssh\.ssh\rit_rc_key"
 
 # 2. Find your GPU job
@@ -160,6 +231,7 @@ srun --jobid=<JOBID> --pty bash
 # 4. Navigate to project
 cd notebook_llm/HalluLens
 ```
+**⚠️ Note:** This method requires entering the passphrase for every SSH connection.
 
 ### 3. Verify Environment
 ```bash
@@ -277,9 +349,75 @@ model_map = {
 }
 ```
 
-## 🔍 Troubleshooting
+## � SSH Agent Best Practices
+
+### Why Use SSH Agent?
+SSH agent eliminates the need to repeatedly enter your SSH key passphrase during a session:
+- **One-time setup:** Enter passphrase once per terminal session
+- **Seamless connections:** All SSH commands work without prompts
+- **Multiple connections:** Works across multiple terminal windows
+- **Script compatibility:** Enables automated scripts and AI assistant connections
+
+### SSH Agent Workflow
+```bash
+# 1. Start SSH agent (automatic in most modern terminals)
+eval $(ssh-agent -s)
+
+# 2. Add your key (enter passphrase once)
+ssh-add "C:\Users\HongM\OneDrive\Documents\ssh\.ssh\rit_rc_key"
+
+# 3. Verify key is loaded
+ssh-add -l
+
+# 4. Now all SSH connections are seamless
+ssh hy3134@sporcsubmit.rc.rit.edu  # No passphrase prompt!
+```
+
+### Automated Setup with connect_gpu.sh
+The `connect_gpu.sh` script automatically handles SSH agent setup:
+- Detects if SSH agent is running
+- Starts agent if needed
+- Adds the key with automatic passphrase handling
+- Uses multiple fallback methods (expect, sshpass, SSH_ASKPASS)
+- Provides clear status messages
+
+### SSH Agent Persistence
+```bash
+# For persistent SSH agent across terminal sessions (optional)
+# Add to ~/.bashrc (Linux/Mac) or ~/.bash_profile (Mac)
+if [ -z "$SSH_AUTH_SOCK" ]; then
+    eval $(ssh-agent -s) > /dev/null 2>&1
+    ssh-add "C:\Users\HongM\OneDrive\Documents\ssh\.ssh\rit_rc_key" > /dev/null 2>&1
+fi
+```
+
+## �🔍 Troubleshooting
 
 ### Common Issues
+
+#### SSH Agent Not Working / Repeated Passphrase Prompts
+```bash
+# Check if SSH agent is running
+echo $SSH_AUTH_SOCK
+
+# If empty, start SSH agent
+eval $(ssh-agent -s)
+
+# Add key to agent
+ssh-add "C:\Users\HongM\OneDrive\Documents\ssh\.ssh\rit_rc_key"
+
+# Verify key is loaded
+ssh-add -l
+```
+**Solution:** Use the automated `connect_gpu.sh` script which handles SSH agent setup automatically.
+
+#### SSH Agent Key Not Persisting
+```bash
+# On Windows (Git Bash), add to ~/.bashrc for persistence
+echo 'eval $(ssh-agent -s) > /dev/null 2>&1' >> ~/.bashrc
+echo 'ssh-add "C:\Users\HongM\OneDrive\Documents\ssh\.ssh\rit_rc_key" > /dev/null 2>&1' >> ~/.bashrc
+```
+**Note:** You'll still need to enter the passphrase once per terminal session.
 
 #### Port Already in Use
 ```
@@ -288,9 +426,10 @@ channel_setup_fwd_listener_tcpip: cannot listen to port: 8887
 ```
 **Solution:** Use a different port or kill the process using the port
 
-#### SSH Key Passphrase
+#### SSH Key Passphrase Issues
 - **Passphrase:** `123`
 - **Key Location:** `C:\Users\HongM\OneDrive\Documents\ssh\.ssh\rit_rc_key`
+- **Recommended:** Use SSH agent to avoid repeated prompts
 
 #### Storage Space
 - **Current Usage:** 73% (2.2T used, 859G available)
@@ -352,7 +491,7 @@ netstat -tulpn | grep :8000
 ## 🤖 AI Assistant Remote Development
 
 ### How AI Assistant Connects
-The AI assistant can connect to the remote VM using the same SSH credentials and execute commands remotely. This enables:
+The AI assistant can connect to the remote VM using the same SSH credentials and execute commands remotely. **With SSH agent setup, the AI assistant can connect seamlessly without passphrase prompts.** This enables:
 
 - **Remote code execution:** Run Python scripts, tests, and benchmarks
 - **Environment setup:** Install dependencies, configure settings
@@ -456,7 +595,7 @@ python -c "from utils.lm import generate; print('LM utils imported successfully'
 
 ---
 
-**Last Updated:** August 20, 2025
+**Last Updated:** August 20, 2025 - Added SSH Agent best practices and automated connection emphasis
 **Environment:** RIT Research Computing Cluster
 **Project:** HalluLens - LLM Hallucination Benchmark
 **Status:** ✅ Remote Development Environment Ready

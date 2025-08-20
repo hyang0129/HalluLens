@@ -92,10 +92,10 @@ ssh_connect() {
     echo -e "${GREEN}🔗 Connecting to GPU node via job $jobid...${NC}"
 
     if is_windows; then
-        ssh -i "$SSH_KEY" "$SSH_USER@$SSH_HOST" -t "srun --jobid=$jobid --pty bash -c 'cd $PROJECT_DIR && exec bash'"
+        ssh -i "$SSH_KEY" "$SSH_USER@$SSH_HOST" -t "srun --jobid=$jobid --pty bash -c 'cd $PROJECT_DIR && source halu/bin/activate && exec bash'"
     else
         local unix_key_path=$(echo "$SSH_KEY" | sed 's|C:|/c|' | sed 's|\\|/|g')
-        ssh -i "$unix_key_path" "$SSH_USER@$SSH_HOST" -t "srun --jobid=$jobid --pty bash -c 'cd $PROJECT_DIR && exec bash'"
+        ssh -i "$unix_key_path" "$SSH_USER@$SSH_HOST" -t "srun --jobid=$jobid --pty bash -c 'cd $PROJECT_DIR && source halu/bin/activate && exec bash'"
     fi
 }
 
