@@ -15,32 +15,38 @@ import torch
 from torch.utils.data import Dataset
 import random
 
-from .activations_logger import ActivationsLogger
+from .activations_logger import ActivationsLogger, JsonActivationsLogger
 
 class ActivationDataset(Dataset):
     """PyTorch Dataset for loading activation data."""
     
-    def __init__(self, df: pd.DataFrame, lmdb_path: str, split: Literal['train', 'test'], relevant_layers: List[int] = None):
+    def __init__(self, df: pd.DataFrame, activations_path: str, split: Literal['train', 'test'],
+                 relevant_layers: List[int] = None, logger_type: str = "lmdb"):
         """
         Initialize the dataset.
-        
+
         Args:
             df: DataFrame containing the metadata
-            lmdb_path: Path to the LMDB file containing activations
+            activations_path: Path to the activations storage (LMDB file or JSON directory)
             split: Which split to use ('train' or 'test')
             relevant_layers: List of layer indices to use (default: layers 16-29)
+            logger_type: Type of logger to use ('lmdb' or 'json')
         """
-        self.lmdb_path = lmdb_path
+        self.activations_path = activations_path
+        self.logger_type = logger_type
+        # For backward compatibility
+        self.lmdb_path = activations_path
         self._activation_parser = None
         self.split = split
         self.df = df[df['split'] == split].reset_index(drop=True)
         self.relevant_layers = relevant_layers if relevant_layers is not None else list(range(16,30))
-        self.pad_length = 63 
+        self.pad_length = 63
 
     @property
     def activation_parser(self):
         if self._activation_parser is None:
-            self._activation_parser = ActivationParser("", "", self.lmdb_path, df=self.df)
+            self._activation_parser = ActivationParser("", "", self.activations_path,
+                                                     df=self.df, logger_type=self.logger_type)
         return self._activation_parser
 
     def __len__(self) -> int:
@@ -108,34 +114,43 @@ class ActivationDataset(Dataset):
 
 
 class ActivationParser:
-    def __init__(self, inference_json: str, eval_json: str, lmdb_path: str, df: Optional[pd.DataFrame] = None):
+    def __init__(self, inference_json: str, eval_json: str, activations_path: str,
+                 df: Optional[pd.DataFrame] = None, logger_type: str = "lmdb"):
         """
         Initialize the ActivationParser.
-        
+
         Args:
             inference_json: Path to the inference JSON file
             eval_json: Path to the evaluation JSON file
-            lmdb_path: Path to the LMDB file containing activations
+            activations_path: Path to the activations storage (LMDB file or JSON directory)
             df: Optional DataFrame to use instead of loading from JSON files
+            logger_type: Type of logger to use ('lmdb' or 'json')
         """
         self.inference_json = Path(inference_json)
         if not self.inference_json.exists():
             raise FileNotFoundError(f"JSON file not found: {inference_json}")
-            
+
         self.eval_json = Path(eval_json)
         if not self.eval_json.exists():
             raise FileNotFoundError(f"JSON file not found: {eval_json}")
 
-        self.lmdb_path = lmdb_path
+        self.activations_path = activations_path
+        self.logger_type = logger_type
         self._activation_logger = None
-        
+
+        # For backward compatibility, also store as lmdb_path
+        self.lmdb_path = activations_path
+
         # Load metadata from JSON or use provided DataFrame
         self.df = df if df is not None else self._load_metadata()
 
     @property
     def activation_logger(self):
         if self._activation_logger is None:
-            self._activation_logger = ActivationsLogger(lmdb_path=self.lmdb_path, read_only=True)
+            if self.logger_type == "json":
+                self._activation_logger = JsonActivationsLogger(output_dir=self.activations_path, read_only=True)
+            else:  # default to lmdb
+                self._activation_logger = ActivationsLogger(lmdb_path=self.activations_path, read_only=True)
         return self._activation_logger
 
     def _load_metadata(self) -> Dict[str, Any]:
@@ -217,15 +232,15 @@ class ActivationParser:
     def get_dataset(self, split: Literal['train', 'test'], relevant_layers: List[int] = None) -> ActivationDataset:
         """
         Get a PyTorch Dataset for the specified split.
-        
+
         Args:
             split: Which split to use ('train' or 'test')
             relevant_layers: List of layer indices to use (default: layers 16-29)
-            
+
         Returns:
             ActivationDataset instance for the specified split
         """
-        return ActivationDataset(self.df, self.lmdb_path, split, relevant_layers)
+        return ActivationDataset(self.df, self.activations_path, split, relevant_layers, self.logger_type)
 
     def close(self):
         """Close the LMDB connection."""

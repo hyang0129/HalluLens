@@ -608,3 +608,404 @@ class NpyActivationsLogger:
 
     def close(self):
         pass
+
+
+class JsonActivationsLogger:
+    """
+    Handles logging for LLM activations using JSON files.
+    Structure:
+    - Folder/
+      - metadata.json (contains metadata for all entries)
+      - activations/
+        - <key1>.json (activation data for key1)
+        - <key2>.json (activation data for key2)
+        - ...
+    """
+    def __init__(self, output_dir: str = "json_data/", target_layers: str = 'all',
+                 sequence_mode: str = 'all', read_only: bool = False):
+        """
+        Initialize the JSON-based activations logger.
+
+        Args:
+            output_dir: Directory to store the JSON files
+            target_layers: Which layers to extract activations from ('all', 'first_half', or 'second_half')
+            sequence_mode: Which tokens to extract activations for ('all', 'prompt', 'response')
+            read_only: If True, open in read-only mode
+        """
+        if target_layers not in ['all', 'first_half', 'second_half']:
+            raise ValueError("target_layers must be one of: 'all', 'first_half', 'second_half'")
+        if sequence_mode not in ['all', 'prompt', 'response']:
+            raise ValueError("sequence_mode must be one of: 'all', 'prompt', 'response'")
+
+        self.output_dir = Path(output_dir)
+        self.activations_dir = self.output_dir / "activations"
+        self.metadata_path = self.output_dir / "metadata.json"
+        self.target_layers = target_layers
+        self.sequence_mode = sequence_mode
+        self.read_only = read_only
+
+        # Create directories if they don't exist
+        if not read_only:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            self.activations_dir.mkdir(parents=True, exist_ok=True)
+
+        # Load or initialize the metadata
+        if self.metadata_path.exists():
+            with open(self.metadata_path, "r") as f:
+                self.metadata = json.load(f)
+        else:
+            self.metadata = {
+                "logger_config": {
+                    "target_layers": target_layers,
+                    "sequence_mode": sequence_mode,
+                    "version": "1.0"
+                },
+                "entries": {}
+            }
+
+        logger.info(f"JsonActivationsLogger initialized at {output_dir} with {len(self.metadata['entries'])} existing entries")
+
+    def _tensor_to_json_serializable(self, obj):
+        """Convert tensors and other non-JSON-serializable objects to JSON-serializable format."""
+        if isinstance(obj, torch.Tensor):
+            return {
+                "_type": "torch.Tensor",
+                "data": obj.cpu().numpy().tolist(),
+                "shape": list(obj.shape),
+                "dtype": str(obj.dtype)
+            }
+        elif isinstance(obj, np.ndarray):
+            return {
+                "_type": "numpy.ndarray",
+                "data": obj.tolist(),
+                "shape": list(obj.shape),
+                "dtype": str(obj.dtype)
+            }
+        elif isinstance(obj, list):
+            return [self._tensor_to_json_serializable(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {k: self._tensor_to_json_serializable(v) for k, v in obj.items()}
+        elif obj is None:
+            return None
+        else:
+            return obj
+
+    def _json_to_tensor(self, obj):
+        """Convert JSON-serializable format back to tensors."""
+        if isinstance(obj, dict) and "_type" in obj:
+            if obj["_type"] == "torch.Tensor":
+                data = np.array(obj["data"])
+                tensor = torch.from_numpy(data)
+                # Convert dtype string back to torch dtype
+                if "dtype" in obj:
+                    dtype_str = obj["dtype"].replace("torch.", "")
+                    if hasattr(torch, dtype_str):
+                        tensor = tensor.to(getattr(torch, dtype_str))
+                return tensor
+            elif obj["_type"] == "numpy.ndarray":
+                return np.array(obj["data"], dtype=obj.get("dtype", "float32"))
+        elif isinstance(obj, list):
+            return [self._json_to_tensor(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {k: self._json_to_tensor(v) for k, v in obj.items()}
+        else:
+            return obj
+
+    def extract_activations(self, model_outputs, input_length):
+        """
+        Extract activations from model outputs.
+        This method is identical to the one in ActivationsLogger for compatibility.
+        """
+        # If model_outputs is None or doesn't have hidden_states, return None
+        if model_outputs is None or not hasattr(model_outputs, 'hidden_states'):
+            logger.info("No hidden states found in model outputs")
+            return None
+
+        # Get the generated tokens (excluding prompt)
+        gen_sequence = model_outputs.sequences[0]
+        gen_ids = gen_sequence[input_length:]
+
+        all_hidden_states = model_outputs.hidden_states
+        prompt_hidden = all_hidden_states[0]  # first set of tokens, the prompt tokens. It has len = num_layers
+        gen_hiddens = all_hidden_states[1:]  # all subsequent sets of tokens, the generated tokens. The structure of this list is [token_num, layer_num, ...]
+
+        # If there's a trim position, only use activations up to that point
+        trim_pos = None
+        if hasattr(model_outputs, 'trim_position'):
+            trim_pos = model_outputs.trim_position
+            if trim_pos is not None:
+                logger.info(f"Trimming activations at position {trim_pos}")
+                gen_hiddens = gen_hiddens[:trim_pos]
+
+        # Determine which layers to extract based on target_layers setting
+        num_layers = len(prompt_hidden)
+        if self.target_layers == 'first_half':
+            target_layer_indices = range(num_layers // 2)
+            logger.debug(f"Extracting first {num_layers // 2} layers")
+        elif self.target_layers == 'second_half':
+            start_idx = num_layers // 2
+            target_layer_indices = range(start_idx, num_layers)
+            logger.debug(f"Extracting second half of layers ({start_idx} to {num_layers-1})")
+        else:  # 'all'
+            target_layer_indices = range(num_layers)
+            logger.debug(f"Extracting all {num_layers} layers")
+
+        if self.sequence_mode == 'prompt':
+            # Only return prompt activations
+            logger.debug("Extracting activations for prompt tokens only")
+            full_hidden_states = []
+            for layer_idx in range(num_layers):
+                if layer_idx in target_layer_indices:
+                    full_hidden_states.append(prompt_hidden[layer_idx])
+                else:
+                    full_hidden_states.append(None)
+        elif self.sequence_mode == 'response':
+            # Only return response activations
+            logger.debug("Extracting activations for response tokens only")
+            full_hidden_states = []
+            for layer_idx in range(num_layers):
+                if layer_idx in target_layer_indices:
+                    # Only concatenate steps for target layers
+                    layer_acts = torch.cat([step[layer_idx] for step in gen_hiddens], dim=1)
+                    full_hidden_states.append(layer_acts)
+                else:
+                    full_hidden_states.append(None)
+        else:  # 'all'
+            # Concatenate prompt and generated token activations
+            logger.debug("Extracting activations for full sequence (prompt + generated tokens)")
+
+            full_hidden_states = []
+            for layer_idx in range(num_layers):
+                if layer_idx in target_layer_indices:
+                    # Only concatenate steps for target layers
+                    gen_layer_acts = torch.cat([step[layer_idx] for step in gen_hiddens], dim=1)
+                    # Concatenate prompt and generated activations
+                    layer_acts = torch.cat([prompt_hidden[layer_idx], gen_layer_acts], dim=1)
+                    full_hidden_states.append(layer_acts)
+                else:
+                    full_hidden_states.append(None)
+
+        return full_hidden_states
+
+    def log_entry(self, key: str, entry: Dict[str, Any]):
+        """
+        Log an entry to the JSON store.
+
+        Args:
+            key: Unique identifier for the entry (typically a hash of the prompt)
+            entry: Dictionary containing the data to log (prompt, response, model_outputs, etc.)
+        """
+        if self.read_only:
+            raise ValueError("Cannot log entries in read-only mode")
+
+        # Process model outputs if present
+        if "model_outputs" in entry and "input_length" in entry:
+            model_outputs = entry["model_outputs"]
+            input_length = entry["input_length"]
+
+            # Add trim position to model_outputs for use in extract_activations
+            if "trim_position" in entry:
+                model_outputs.trim_position = entry["trim_position"]
+
+            # Extract activations from model outputs
+            all_layers_activations = self.extract_activations(model_outputs, input_length)
+
+            # Create metadata entry (without activations)
+            metadata_entry = entry.copy()
+            metadata_entry.pop("model_outputs", None)
+            metadata_entry.pop("all_layers_activations", None)
+
+            if all_layers_activations:
+                # Store the logging configuration in metadata
+                metadata_entry["logging_config"] = {
+                    "target_layers": self.target_layers,
+                    "sequence_mode": self.sequence_mode
+                }
+
+                # Save activations to separate JSON file
+                activation_data = {
+                    "all_layers_activations": self._tensor_to_json_serializable(all_layers_activations)
+                }
+
+                activation_file_path = self.activations_dir / f"{key}.json"
+                with open(activation_file_path, "w") as f:
+                    json.dump(activation_data, f, indent=2)
+
+                # Add reference to activation file in metadata
+                metadata_entry["has_activations"] = True
+                metadata_entry["activation_file"] = f"activations/{key}.json"
+            else:
+                metadata_entry["has_activations"] = False
+        else:
+            raise ValueError("No model_outputs or input_length found in entry")
+
+        import time
+        metadata_entry["timestamp"] = time.time()
+
+        # Store metadata in the main metadata file
+        self.metadata["entries"][key] = metadata_entry
+
+        # Save updated metadata
+        with open(self.metadata_path, "w") as f:
+            json.dump(self.metadata, f, indent=2)
+
+        logger.debug(f"Logged entry with key {key[:8]}...")
+
+    def get_entry(self, key: str, metadata_only: bool = False) -> Dict[str, Any]:
+        """
+        Retrieve an entry from the JSON store.
+
+        Args:
+            key: Unique identifier for the entry to retrieve
+            metadata_only: If True, only retrieve metadata without activations
+
+        Returns:
+            Dictionary containing the entry data if found
+        """
+        if key not in self.metadata["entries"]:
+            raise KeyError(f"Key {key} not found in metadata.")
+
+        entry_metadata = self.metadata["entries"][key].copy()
+
+        # If only metadata is requested or no activations exist
+        if metadata_only or not entry_metadata.get("has_activations", False):
+            return entry_metadata
+
+        # Load activations from separate file
+        activation_file = entry_metadata.get("activation_file")
+        if activation_file:
+            activation_path = self.output_dir / activation_file
+            if activation_path.exists():
+                with open(activation_path, "r") as f:
+                    activation_data = json.load(f)
+
+                # Convert back to tensors
+                activations = self._json_to_tensor(activation_data["all_layers_activations"])
+                entry_metadata["all_layers_activations"] = activations
+            else:
+                logger.warning(f"Activation file not found: {activation_path}")
+                entry_metadata["has_activations"] = False
+
+        return entry_metadata
+
+    def get_entry_by_key(self, key: str, metadata_only: bool = False) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve an entry from the JSON store by key.
+        This method provides compatibility with the LMDB logger interface.
+
+        Args:
+            key: Unique identifier for the entry to retrieve
+            metadata_only: If True, only retrieve metadata without activations
+
+        Returns:
+            Dictionary containing the entry data if found, None otherwise
+        """
+        try:
+            return self.get_entry(key, metadata_only)
+        except KeyError:
+            return None
+
+    def list_entries(self) -> List[str]:
+        """
+        List all entry keys in the JSON store.
+
+        Returns:
+            List of entry keys as strings
+        """
+        return list(self.metadata["entries"].keys())
+
+    def search_metadata(self, filter_fn: Callable[[Dict[str, Any]], bool]) -> List[Tuple[str, Dict[str, Any]]]:
+        """
+        Search through metadata entries using a filter function.
+
+        Args:
+            filter_fn: Function that takes a metadata entry and returns True if it matches the search criteria
+
+        Returns:
+            List of tuples containing (key, metadata_entry) for matching entries
+        """
+        results = []
+        for key, metadata in self.metadata["entries"].items():
+            if filter_fn(metadata):
+                results.append((key, metadata))
+        return results
+
+    def close(self):
+        """Close the JSON logger (no-op for JSON files)."""
+        pass
+
+    def fix_cuda_tensors(self):
+        """
+        Fix existing entries by ensuring all tensors are on CPU.
+        This method provides compatibility with the LMDB logger interface.
+        """
+        if self.read_only:
+            raise ValueError("Cannot fix CUDA tensors in read-only mode")
+
+        logger.info("Starting to fix CUDA tensors in existing JSON entries...")
+        fixed_count = 0
+        skipped_count = 0
+        error_count = 0
+
+        keys = self.list_entries()
+        total_entries = len(keys)
+        logger.info(f"Found {total_entries} entries to process")
+
+        for key in keys:
+            try:
+                # Check if this entry has activations
+                metadata = self.metadata["entries"][key]
+                if not metadata.get("has_activations", False):
+                    skipped_count += 1
+                    continue
+
+                activation_file = metadata.get("activation_file")
+                if not activation_file:
+                    skipped_count += 1
+                    continue
+
+                activation_path = self.output_dir / activation_file
+                if not activation_path.exists():
+                    error_count += 1
+                    continue
+
+                # Load activation data
+                with open(activation_path, "r") as f:
+                    activation_data = json.load(f)
+
+                # Convert to tensors to check device
+                activations = self._json_to_tensor(activation_data["all_layers_activations"])
+
+                # Check if any tensors need to be moved to CPU
+                needs_fixing = False
+                fixed_tensors = []
+                for tensor in activations:
+                    if isinstance(tensor, torch.Tensor):
+                        if tensor.device.type != 'cpu':
+                            needs_fixing = True
+                            fixed_tensors.append(tensor.cpu())
+                        else:
+                            fixed_tensors.append(tensor)
+                    else:
+                        fixed_tensors.append(tensor)
+
+                # Only write back if tensors needed fixing
+                if needs_fixing:
+                    # Convert back to JSON-serializable format
+                    fixed_activation_data = {
+                        "all_layers_activations": self._tensor_to_json_serializable(fixed_tensors)
+                    }
+
+                    # Save back to file
+                    with open(activation_path, "w") as f:
+                        json.dump(fixed_activation_data, f, indent=2)
+
+                    fixed_count += 1
+                else:
+                    skipped_count += 1
+
+            except Exception as e:
+                logger.error(f"Error fixing entry {key[:8]}: {e}")
+                error_count += 1
+
+        logger.info(f"Finished fixing CUDA tensors. Fixed {fixed_count} entries, skipped {skipped_count} entries (already on CPU), encountered {error_count} errors")

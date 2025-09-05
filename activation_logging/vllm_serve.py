@@ -2,10 +2,20 @@
 """
 Command-line script to run the vLLM server with activation logging.
 This script serves as a wrapper around vllm serve to ensure the activations
-are properly logged.
+are properly logged using either LMDB or JSON storage.
 
 Usage:
-  python -m activation_logging.vllm_serve [--model MODEL] [--host HOST] [--port PORT] [--lmdb_path LMDB_PATH] [--auth_token AUTH_TOKEN] [--trim-output-at TRIM_SEQUENCE] [--map-size-gb MAP_SIZE_GB]
+  python -m activation_logging.vllm_serve [--model MODEL] [--host HOST] [--port PORT]
+    [--logger-type {lmdb,json}] [--activations-path PATH] [--target-layers {all,first_half,second_half}]
+    [--sequence-mode {all,prompt,response}] [--auth_token AUTH_TOKEN] [--trim-output-at TRIM_SEQUENCE]
+    [--map-size-gb MAP_SIZE_GB]
+
+Examples:
+  # Use JSON logging
+  python -m activation_logging.vllm_serve --logger-type json --activations-path json_data/activations
+
+  # Use LMDB logging (default)
+  python -m activation_logging.vllm_serve --logger-type lmdb --activations-path lmdb_data/activations.lmdb
 """
 
 import argparse
@@ -22,8 +32,13 @@ def main():
                         help="Host to bind server to (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8000,
                         help="Port to run server on (default: 8000)")
+    parser.add_argument("--activations-path", type=str, default=None,
+                        help="Path for storing activations (LMDB file or JSON directory)")
+    parser.add_argument("--logger-type", type=str, default="lmdb",
+                        choices=["lmdb", "json"],
+                        help="Type of activation logger to use (default: lmdb)")
     parser.add_argument("--lmdb_path", type=str, default="lmdb_data/activations.lmdb",
-                        help="Path to LMDB for storing activations (default: lmdb_data/activations.lmdb)")
+                        help="Path to LMDB for storing activations (default: lmdb_data/activations.lmdb) - deprecated, use --activations-path")
     parser.add_argument("--auth_token", type=str, default=None,
                         help="HuggingFace authentication token for accessing gated models")
     parser.add_argument("--trim-output-at", type=str, default=None,
@@ -51,8 +66,20 @@ def main():
         format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}"
     )
     
+    # Determine the activations path
+    activations_path = args.activations_path if args.activations_path else args.lmdb_path
+
+    # Set default path based on logger type if not specified
+    if not args.activations_path:
+        if args.logger_type == "json":
+            activations_path = "json_data/activations"
+        else:
+            activations_path = args.lmdb_path
+
     # Set environment variables for server configuration
-    os.environ["ACTIVATION_LMDB_PATH"] = args.lmdb_path
+    os.environ["ACTIVATION_STORAGE_PATH"] = activations_path
+    os.environ["ACTIVATION_LOGGER_TYPE"] = args.logger_type
+    os.environ["ACTIVATION_LMDB_PATH"] = args.lmdb_path  # Keep for backward compatibility
     os.environ["ACTIVATION_LMDB_MAP_SIZE"] = str(args.map_size_gb * (1 << 30))  # Convert GB to bytes
     os.environ["SERVER_LOG_FILE"] = args.log_file  # Add log file path to environment
     os.environ["ACTIVATION_TARGET_LAYERS"] = args.target_layers  # Add target layers setting
@@ -70,14 +97,25 @@ def main():
     logger.info(f"Model: {args.model}")
     logger.info(f"Host: {args.host}")
     logger.info(f"Port: {args.port}")
-    logger.info(f"LMDB Path: {args.lmdb_path}")
-    logger.info(f"LMDB Map Size: {args.map_size_gb} GB")
+    logger.info(f"Logger Type: {args.logger_type}")
+    logger.info(f"Activations Path: {activations_path}")
+    logger.info(f"Target Layers: {args.target_layers}")
+    logger.info(f"Sequence Mode: {args.sequence_mode}")
+    if args.logger_type == "lmdb":
+        logger.info(f"LMDB Map Size: {args.map_size_gb} GB")
     
-    # Create LMDB directory if it doesn't exist
-    lmdb_dir = os.path.dirname(args.lmdb_path)
-    if lmdb_dir and not os.path.exists(lmdb_dir):
-        os.makedirs(lmdb_dir, exist_ok=True)
-        logger.info(f"Created LMDB directory: {lmdb_dir}")
+    # Create activations directory if it doesn't exist
+    if args.logger_type == "json":
+        # For JSON logger, create the output directory
+        if not os.path.exists(activations_path):
+            os.makedirs(activations_path, exist_ok=True)
+            logger.info(f"Created JSON activations directory: {activations_path}")
+    else:
+        # For LMDB logger, create the parent directory
+        activations_dir = os.path.dirname(activations_path)
+        if activations_dir and not os.path.exists(activations_dir):
+            os.makedirs(activations_dir, exist_ok=True)
+            logger.info(f"Created LMDB directory: {activations_dir}")
     
     # Two server options:
     # 1. Using uvicorn directly (easier for debugging)

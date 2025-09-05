@@ -13,7 +13,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from loguru import logger
 import uvicorn
-from activation_logging.activations_logger import ActivationsLogger
+from activation_logging.activations_logger import ActivationsLogger, JsonActivationsLogger
 from llama_cpp import Llama  # Import for llama.cpp Python bindings
 
 # Configure logger to use the same log file as parent process if specified
@@ -31,8 +31,15 @@ if "SERVER_LOG_FILE" in os.environ:
 DEFAULT_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
 app = FastAPI()
 
-# Default LMDB path
-DEFAULT_LMDB_PATH = os.environ.get("ACTIVATION_LMDB_PATH", "lmdb_data/activations.lmdb")
+# Default activation storage path (can be LMDB or JSON directory)
+DEFAULT_ACTIVATIONS_PATH = os.environ.get("ACTIVATION_STORAGE_PATH",
+                                        os.environ.get("ACTIVATION_LMDB_PATH", "lmdb_data/activations.lmdb"))
+
+# Default logger type ('lmdb' or 'json')
+DEFAULT_LOGGER_TYPE = os.environ.get("ACTIVATION_LOGGER_TYPE", "lmdb")
+
+# Default LMDB path (for backward compatibility)
+DEFAULT_LMDB_PATH = DEFAULT_ACTIVATIONS_PATH
 
 # Default LMDB map size (16GB if not specified)
 DEFAULT_MAP_SIZE = int(os.environ.get("ACTIVATION_LMDB_MAP_SIZE", 16 * (1 << 30)))
@@ -45,7 +52,13 @@ _llamacpp_model_cache = {}  # Cache for llama.cpp models
 # Temperature overwrite variable, None means use request temperature
 overwrite_temperature = None
 
-# LMDB path overwrite variable, None means use the default path from environment
+# Activation storage path overwrite variable, None means use the default path from environment
+overwrite_activations_path = None
+
+# Logger type overwrite variable, None means use the default type from environment
+overwrite_logger_type = None
+
+# LMDB path overwrite variable, None means use the default path from environment (backward compatibility)
 overwrite_lmdb_path = None
 
 # Top-p overwrite variable, None means use request top_p
@@ -504,57 +517,92 @@ def apply_overwrites(request_params):
         params['top_p'] = overwrite_top_p
         logger.info(f"Using overwrite top_p: {overwrite_top_p} instead of request top_p: {original_top_p}")
     
-    # Apply LMDB path overwrite if set
+    # Apply activation storage path overwrite if set
+    if overwrite_activations_path is not None:
+        params['activations_path'] = overwrite_activations_path
+        logger.info(f"Using overwrite activations path: {overwrite_activations_path}")
+    elif 'activations_path' not in params or not params.get('activations_path'):
+        # If no path specified and no overwrite, use the environment variable
+        params['activations_path'] = DEFAULT_ACTIVATIONS_PATH
+        logger.info(f"Using default activations path from environment: {params['activations_path']}")
+
+    # Apply logger type overwrite if set
+    if overwrite_logger_type is not None:
+        params['logger_type'] = overwrite_logger_type
+        logger.info(f"Using overwrite logger type: {overwrite_logger_type}")
+    elif 'logger_type' not in params or not params.get('logger_type'):
+        # If no logger type specified and no overwrite, use the environment variable
+        params['logger_type'] = DEFAULT_LOGGER_TYPE
+        logger.info(f"Using default logger type from environment: {params['logger_type']}")
+
+    # Apply LMDB path overwrite if set (backward compatibility)
     if overwrite_lmdb_path is not None:
         params['lmdb_path'] = overwrite_lmdb_path
+        params['activations_path'] = overwrite_lmdb_path  # Also set activations_path for consistency
         logger.info(f"Using overwrite LMDB path: {overwrite_lmdb_path}")
     elif 'lmdb_path' not in params or not params.get('lmdb_path'):
-        # If no path specified and no overwrite, use the environment variable
-        params['lmdb_path'] = os.environ.get("ACTIVATION_LMDB_PATH", DEFAULT_LMDB_PATH)
-        logger.info(f"Using default LMDB path from environment: {params['lmdb_path']}")
-        
+        # If no path specified and no overwrite, use the activations_path or environment variable
+        params['lmdb_path'] = params.get('activations_path', DEFAULT_ACTIVATIONS_PATH)
+        logger.info(f"Using activations path as LMDB path for backward compatibility: {params['lmdb_path']}")
+
     return params
 
 
 def get_logger_for_request(request_params):
     """
     Create a new logger instance for each request to avoid LMDB assertion errors.
-    
+
     Args:
         request_params: Dictionary containing request parameters (with overwrites applied)
-        
+
     Returns:
         Tuple of (logger_to_use, custom_logger, used_custom_path)
         - logger_to_use: Logger to use for this request
         - custom_logger: Custom logger instance if created (to be closed after use)
         - used_custom_path: Boolean indicating if a custom path was used
     """
-    lmdb_path = request_params.get('lmdb_path')
-    
+    activations_path = request_params.get('activations_path', request_params.get('lmdb_path'))
+    logger_type = request_params.get('logger_type', DEFAULT_LOGGER_TYPE)
+
     # Get target layers and sequence mode from environment variables
     target_layers = os.environ.get("ACTIVATION_TARGET_LAYERS", "all")
     sequence_mode = os.environ.get("ACTIVATION_SEQUENCE_MODE", "all")
-    
-    # Always create a new logger instance to avoid LMDB assertion errors
-    if lmdb_path and lmdb_path.strip():
-        # Create and use a custom logger with the specified path
-        custom_logger = ActivationsLogger(
-            lmdb_path=lmdb_path, 
-            map_size=DEFAULT_MAP_SIZE,
-            target_layers=target_layers,
-            sequence_mode=sequence_mode
-        )
+
+    # Always create a new logger instance to avoid assertion errors
+    if activations_path and activations_path.strip():
+        # Create and use a custom logger with the specified path and type
+        if logger_type == "json":
+            custom_logger = JsonActivationsLogger(
+                output_dir=activations_path,
+                target_layers=target_layers,
+                sequence_mode=sequence_mode,
+                read_only=False
+            )
+        else:  # default to lmdb
+            custom_logger = ActivationsLogger(
+                lmdb_path=activations_path,
+                map_size=DEFAULT_MAP_SIZE,
+                target_layers=target_layers,
+                sequence_mode=sequence_mode
+            )
         return custom_logger, custom_logger, True
     else:
         # Create a new logger with the default path from environment
-        # This avoids the 'Assertion mp->mp_pgno != pgno failed in mdb_page_touch()' error
-        default_path = os.environ.get("ACTIVATION_LMDB_PATH", DEFAULT_LMDB_PATH)
-        new_logger = ActivationsLogger(
-            lmdb_path=default_path, 
-            map_size=DEFAULT_MAP_SIZE,
-            target_layers=target_layers,
-            sequence_mode=sequence_mode
-        )
+        default_path = DEFAULT_ACTIVATIONS_PATH
+        if logger_type == "json":
+            new_logger = JsonActivationsLogger(
+                output_dir=default_path,
+                target_layers=target_layers,
+                sequence_mode=sequence_mode,
+                read_only=False
+            )
+        else:  # default to lmdb
+            new_logger = ActivationsLogger(
+                lmdb_path=default_path,
+                map_size=DEFAULT_MAP_SIZE,
+                target_layers=target_layers,
+                sequence_mode=sequence_mode
+            )
         return new_logger, new_logger, False
 
 
