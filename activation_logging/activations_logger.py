@@ -612,22 +612,22 @@ class NpyActivationsLogger:
 
 class JsonActivationsLogger:
     """
-    Handles logging for LLM activations using JSON files.
+    Handles logging for LLM activations using JSON metadata and NPY activation files.
     Structure:
     - Folder/
       - metadata.json (contains metadata for all entries)
       - activations/
-        - <key1>.json (activation data for key1)
-        - <key2>.json (activation data for key2)
+        - <key1>.npy (activation tensor data for key1)
+        - <key2>.npy (activation tensor data for key2)
         - ...
     """
     def __init__(self, output_dir: str = "json_data/", target_layers: str = 'all',
                  sequence_mode: str = 'all', read_only: bool = False):
         """
-        Initialize the JSON-based activations logger.
+        Initialize the JSON-based activations logger with NPY tensor storage.
 
         Args:
-            output_dir: Directory to store the JSON files
+            output_dir: Directory to store the JSON metadata and NPY activation files
             target_layers: Which layers to extract activations from ('all', 'first_half', or 'second_half')
             sequence_mode: Which tokens to extract activations for ('all', 'prompt', 'response')
             read_only: If True, open in read-only mode
@@ -658,15 +658,51 @@ class JsonActivationsLogger:
                 "logger_config": {
                     "target_layers": target_layers,
                     "sequence_mode": sequence_mode,
-                    "version": "1.0"
+                    "version": "2.0",  # Updated version for NPY format
+                    "storage_format": "npy"
                 },
                 "entries": {}
             }
 
-        logger.info(f"JsonActivationsLogger initialized at {output_dir} with {len(self.metadata['entries'])} existing entries")
+        logger.info(f"JsonActivationsLogger (NPY format) initialized at {output_dir} with {len(self.metadata['entries'])} existing entries")
+
+    def _tensors_to_numpy_arrays(self, obj):
+        """Convert tensors to numpy arrays for NPY storage."""
+        if isinstance(obj, torch.Tensor):
+            return obj.cpu().numpy()
+        elif isinstance(obj, np.ndarray):
+            return obj
+        elif isinstance(obj, list):
+            return [self._tensors_to_numpy_arrays(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {k: self._tensors_to_numpy_arrays(v) for k, v in obj.items()}
+        elif obj is None:
+            return None
+        else:
+            return obj
+
+    def _get_activation_shape_info(self, activation_arrays):
+        """Get shape information for activation arrays to store in metadata."""
+        if isinstance(activation_arrays, np.ndarray):
+            return {
+                "shape": list(activation_arrays.shape),
+                "dtype": str(activation_arrays.dtype)
+            }
+        elif isinstance(activation_arrays, list):
+            return [self._get_activation_shape_info(item) for item in activation_arrays]
+        elif isinstance(activation_arrays, dict):
+            return {k: self._get_activation_shape_info(v) for k, v in activation_arrays.items()}
+        elif activation_arrays is None:
+            return None
+        else:
+            return {"type": type(activation_arrays).__name__}
 
     def _tensor_to_json_serializable(self, obj):
-        """Convert tensors and other non-JSON-serializable objects to JSON-serializable format."""
+        """Convert tensors and other non-JSON-serializable objects to JSON-serializable format.
+
+        Note: This method is kept for backward compatibility but is no longer used
+        for activation storage in NPY format.
+        """
         if isinstance(obj, torch.Tensor):
             return {
                 "_type": "torch.Tensor",
@@ -690,8 +726,24 @@ class JsonActivationsLogger:
         else:
             return obj
 
+    def _numpy_arrays_to_tensors(self, obj):
+        """Convert numpy arrays back to tensors."""
+        if isinstance(obj, np.ndarray):
+            return torch.from_numpy(obj)
+        elif isinstance(obj, list):
+            return [self._numpy_arrays_to_tensors(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {k: self._numpy_arrays_to_tensors(v) for k, v in obj.items()}
+        elif obj is None:
+            return None
+        else:
+            return obj
+
     def _json_to_tensor(self, obj):
-        """Convert JSON-serializable format back to tensors."""
+        """Convert JSON-serializable format back to tensors.
+
+        Note: This method is kept for backward compatibility with old JSON activation files.
+        """
         if isinstance(obj, dict) and "_type" in obj:
             if obj["_type"] == "torch.Tensor":
                 data = np.array(obj["data"])
@@ -789,7 +841,7 @@ class JsonActivationsLogger:
 
     def log_entry(self, key: str, entry: Dict[str, Any]):
         """
-        Log an entry to the JSON store.
+        Log an entry to the JSON store with NPY activation files.
 
         Args:
             key: Unique identifier for the entry (typically a hash of the prompt)
@@ -822,18 +874,17 @@ class JsonActivationsLogger:
                     "sequence_mode": self.sequence_mode
                 }
 
-                # Save activations to separate JSON file
-                activation_data = {
-                    "all_layers_activations": self._tensor_to_json_serializable(all_layers_activations)
-                }
+                # Convert activations to numpy arrays and save as NPY file
+                activation_arrays = self._tensors_to_numpy_arrays(all_layers_activations)
+                activation_file_path = self.activations_dir / f"{key}.npy"
 
-                activation_file_path = self.activations_dir / f"{key}.json"
-                with open(activation_file_path, "w") as f:
-                    json.dump(activation_data, f, indent=2)
+                # Save as NPY file with allow_pickle=True to handle list of arrays
+                np.save(activation_file_path, activation_arrays, allow_pickle=True)
 
                 # Add reference to activation file in metadata
                 metadata_entry["has_activations"] = True
-                metadata_entry["activation_file"] = f"activations/{key}.json"
+                metadata_entry["activation_file"] = f"activations/{key}.npy"
+                metadata_entry["activation_shape_info"] = self._get_activation_shape_info(activation_arrays)
             else:
                 metadata_entry["has_activations"] = False
         else:
@@ -849,11 +900,11 @@ class JsonActivationsLogger:
         with open(self.metadata_path, "w") as f:
             json.dump(self.metadata, f, indent=2)
 
-        logger.debug(f"Logged entry with key {key[:8]}...")
+        logger.debug(f"Logged entry with key {key[:8]}... (NPY format)")
 
     def get_entry(self, key: str, metadata_only: bool = False) -> Dict[str, Any]:
         """
-        Retrieve an entry from the JSON store.
+        Retrieve an entry from the JSON store with NPY activation loading.
 
         Args:
             key: Unique identifier for the entry to retrieve
@@ -871,17 +922,23 @@ class JsonActivationsLogger:
         if metadata_only or not entry_metadata.get("has_activations", False):
             return entry_metadata
 
-        # Load activations from separate file
+        # Load activations from NPY file
         activation_file = entry_metadata.get("activation_file")
         if activation_file:
             activation_path = self.output_dir / activation_file
             if activation_path.exists():
-                with open(activation_path, "r") as f:
-                    activation_data = json.load(f)
-
-                # Convert back to tensors
-                activations = self._json_to_tensor(activation_data["all_layers_activations"])
-                entry_metadata["all_layers_activations"] = activations
+                # Check if it's an NPY file (new format) or JSON file (old format)
+                if activation_path.suffix == '.npy':
+                    # Load NPY file and convert back to tensors
+                    activation_arrays = np.load(activation_path, allow_pickle=True)
+                    activations = self._numpy_arrays_to_tensors(activation_arrays)
+                    entry_metadata["all_layers_activations"] = activations
+                else:
+                    # Backward compatibility: load old JSON format
+                    with open(activation_path, "r") as f:
+                        activation_data = json.load(f)
+                    activations = self._json_to_tensor(activation_data["all_layers_activations"])
+                    entry_metadata["all_layers_activations"] = activations
             else:
                 logger.warning(f"Activation file not found: {activation_path}")
                 entry_metadata["has_activations"] = False
@@ -1009,3 +1066,36 @@ class JsonActivationsLogger:
                 error_count += 1
 
         logger.info(f"Finished fixing CUDA tensors. Fixed {fixed_count} entries, skipped {skipped_count} entries (already on CPU), encountered {error_count} errors")
+
+    def _tensors_to_numpy_arrays(self, obj):
+        """Convert tensors to numpy arrays for NPY storage."""
+        if isinstance(obj, torch.Tensor):
+            return obj.cpu().numpy()
+        elif isinstance(obj, list):
+            return [self._tensors_to_numpy_arrays(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {key: self._tensors_to_numpy_arrays(value) for key, value in obj.items()}
+        else:
+            return obj
+
+    def _numpy_arrays_to_tensors(self, obj):
+        """Convert numpy arrays back to tensors."""
+        if isinstance(obj, np.ndarray):
+            return torch.from_numpy(obj)
+        elif isinstance(obj, list):
+            return [self._numpy_arrays_to_tensors(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {key: self._numpy_arrays_to_tensors(value) for key, value in obj.items()}
+        else:
+            return obj
+
+    def _get_activation_shape_info(self, activation_arrays):
+        """Get shape information for activation arrays for debugging purposes."""
+        if isinstance(activation_arrays, np.ndarray):
+            return {"shape": activation_arrays.shape, "dtype": str(activation_arrays.dtype)}
+        elif isinstance(activation_arrays, list):
+            return [self._get_activation_shape_info(item) for item in activation_arrays]
+        elif isinstance(activation_arrays, dict):
+            return {key: self._get_activation_shape_info(value) for key, value in activation_arrays.items()}
+        else:
+            return {"type": type(activation_arrays).__name__}
