@@ -68,9 +68,16 @@ We aim to extend our method to work on benchmarks from the **LLMsKnow repository
 - **`scripts/`**: Automation scripts for running experiments
 - **`data/`**: Data management and download utilities
 
+### 🌐 Remote Development
+- **`REMOTE_DEV_SETUP.md`**: Comprehensive guide for GPU-accelerated remote development
+- **`connect_gpu.sh`**: Automated script for connecting to remote GPU nodes
+- **`test_gpu_connection.sh`**: Environment verification script for remote setups
+
 ## Quick Start
 
 ### 1. Installation
+
+#### Local Development
 ```bash
 git clone https://github.com/your-repo/HalluLens.git
 cd HalluLens
@@ -79,20 +86,47 @@ conda activate hallulens
 pip install -r requirements.txt
 ```
 
+#### Remote Development Environment
+For GPU-accelerated development on remote servers, see our comprehensive remote development setup guide:
+
+📖 **[Remote Development Setup Guide](REMOTE_DEV_SETUP.md)**
+
+Key features:
+- 🚀 **One-command GPU connection** via `./connect_gpu.sh`
+- 🔐 **Automated SSH agent setup** (no repeated passphrase prompts)
+- 🎯 **Dynamic job discovery** (finds running Slurm jobs automatically)
+- 🖥️ **Direct GPU node access** for ML training and inference
+- 📁 **Automatic project navigation** and environment activation
+
 ### 2. Data Setup
 ```bash
 bash scripts/download_data.sh
 ```
 
 ### 3. Run PreciseWikiQA Benchmark
+
+#### Option A: Unified Script (Recommended)
 ```bash
-# Start activation logging server
+# Run complete experiment with automatic server management
+python scripts/run_with_server.py \
+    --step all \
+    --task precisewikiqa \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --N 100
+
+# Or use enhanced bash script
+bash scripts/task1_precisewikiqa_with_server.sh --N 100
+```
+
+#### Option B: Manual Server Management
+```bash
+# Start activation logging server (in one terminal)
 python -m activation_logging.vllm_serve \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --host 0.0.0.0 \
     --port 8000
 
-# Run benchmark with activation logging
+# Run benchmark (in another terminal)
 bash scripts/task1_precisewikiqa.sh
 ```
 
