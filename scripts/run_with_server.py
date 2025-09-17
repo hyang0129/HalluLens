@@ -20,6 +20,9 @@ Examples:
 
     # Run all steps in sequence
     python scripts/run_with_server.py --step all --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --N 100
+
+    # Custom server log file
+    python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --log-file custom/server.log
 """
 
 import argparse
@@ -27,7 +30,6 @@ import os
 import subprocess
 import sys
 import time
-import signal
 import requests
 from pathlib import Path
 from loguru import logger
@@ -95,15 +97,39 @@ def check_dependencies(task, step):
 
     return True
 
+def get_task_name(task, **kwargs):
+    """Generate the task name based on task type and parameters."""
+    if task == "precisewikiqa":
+        wiki_src = kwargs.get("wiki_src", "goodwiki")
+        mode = kwargs.get("mode", "dynamic")
+        return f"precise_wikiqa_{wiki_src}_{mode}"
+    elif task == "longwiki":
+        return "longwiki"
+    elif task == "mixedentities":
+        exp = kwargs.get("exp", "nonsense_all")
+        return f"refusal_test_{exp}"
+    else:
+        return task
+
+def determine_generations_file_path(task_name, model, generations_file_path=None):
+    """Determine the generations file path based on task and model."""
+    if generations_file_path:
+        return generations_file_path
+
+    # Use the standard pattern: output/{task_name}/{model_name}/generation.jsonl
+    model_name = model.split("/")[-1]
+    return f"output/{task_name}/{model_name}/generation.jsonl"
+
 class ServerManager:
     """Manages the activation logging server lifecycle."""
-    
-    def __init__(self, model, host="0.0.0.0", port=8000, logger_type="lmdb", activations_path=None):
+
+    def __init__(self, model, host="0.0.0.0", port=8000, logger_type="lmdb", activations_path=None, log_file_path=None):
         self.model = model
         self.host = host
         self.port = port
         self.logger_type = logger_type
         self.activations_path = activations_path or f"lmdb_data/{model.replace('/', '_')}_activations.lmdb"
+        self.log_file_path = log_file_path
         self.server_process = None
         
     def start_server(self):
@@ -126,6 +152,11 @@ class ServerManager:
             "--logger-type", self.logger_type,
             "--activations-path", self.activations_path
         ]
+
+        # Add log file path if specified
+        if self.log_file_path:
+            cmd.extend(["--log-file", self.log_file_path])
+            logger.info(f"Server behavior logs will be written to: {self.log_file_path}")
         
         logger.info(f"Server command: {' '.join(cmd)}")
         
@@ -306,7 +337,8 @@ def main():
     parser.add_argument("--logger-type", default="lmdb", choices=["lmdb", "json"],
                        help="Activation logger type")
     parser.add_argument("--activations-path", help="Path for storing activations")
-    
+    parser.add_argument("--log-file", help="Path for server behavior logs (if not specified and step is inference, will be placed in same directory as generations file)")
+
     # Task-specific arguments
     parser.add_argument("--N", type=int, default=1, help="Number of samples")
     parser.add_argument("--wiki_src", default="goodwiki", help="Wiki source for precisewikiqa")
@@ -338,13 +370,31 @@ def main():
     if not check_dependencies(args.task, args.step):
         sys.exit(1)
 
+    # Determine log file path for server behavior logs
+    log_file_path = args.log_file
+    if not log_file_path and (args.step == "inference" or args.step == "all"):
+        # For inference steps, place server logs in same directory as generations file
+        task_kwargs_for_name = {
+            "wiki_src": args.wiki_src,
+            "mode": args.mode,
+            "exp": args.exp
+        }
+        task_name = get_task_name(args.task, **task_kwargs_for_name)
+        generations_path = determine_generations_file_path(task_name, args.model, args.generations_file_path)
+
+        # Create log file path in same directory as generations file
+        generations_dir = Path(generations_path).parent
+        generations_dir.mkdir(parents=True, exist_ok=True)
+        log_file_path = str(generations_dir / "server_behavior.log")
+
     # Create server manager
     server_manager = ServerManager(
         model=args.model,
         host=args.host,
         port=args.port,
         logger_type=args.logger_type,
-        activations_path=args.activations_path
+        activations_path=args.activations_path,
+        log_file_path=log_file_path
     )
 
     try:
