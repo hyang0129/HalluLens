@@ -16,3 +16,5 @@ debug.ipynb
 
 output/*
 venv/
+generation.jsonl
+test_llama.json

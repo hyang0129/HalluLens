@@ -157,6 +157,7 @@ python scripts/run_with_server.py \
   --inference_method vllm \
   --logger-type json \
   --activations-path test_output/activations.json \
+  --max_inference_tokens 256 \
   --N 100 \
   --qa_output_path data/precise_qa/save/qa_goodwiki_Llama-3.1-8B-Instruct_gguf_big.jsonl \
   --generations_file_path test_output/generation.jsonl
@@ -165,6 +166,7 @@ python scripts/run_with_server.py \
 **Key Parameters for JSON Logging:**
 - `--logger-type json`: Enables JSON activation logging with NPY binary tensor storage
 - `--activations-path`: Directory path for JSON metadata and NPY activation files
+- `--max_inference_tokens 256`: Maximum tokens per response (controls generation length and storage size)
 - `--N 100`: Number of inference samples (adjust based on testing needs)
 
 **Storage Efficiency:**
@@ -188,6 +190,7 @@ python scripts/run_with_server.py \
   --inference_method vllm \
   --logger-type lmdb \
   --activations-path test_output/activations.lmdb \
+  --max_inference_tokens 256 \
   --N 100 \
   --qa_output_path data/precise_qa/save/qa_goodwiki_Llama-3.1-8B-Instruct_gguf_big.jsonl \
   --generations_file_path test_output/generation.jsonl

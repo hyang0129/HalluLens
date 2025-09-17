@@ -200,6 +200,7 @@ def run_task_step(step, task, model, **kwargs):
             "--wiki_src", kwargs.get("wiki_src", "goodwiki"),
             "--mode", kwargs.get("mode", "dynamic"),
             "--inference_method", kwargs.get("inference_method", "vllm"),
+            "--max_inference_tokens", str(kwargs.get("max_inference_tokens", 256)),
             "--N", str(kwargs.get("N", 1))
         ])
 
@@ -311,6 +312,7 @@ def main():
     parser.add_argument("--wiki_src", default="goodwiki", help="Wiki source for precisewikiqa")
     parser.add_argument("--mode", default="dynamic", help="Mode for precisewikiqa")
     parser.add_argument("--inference_method", default="vllm", help="Inference method")
+    parser.add_argument("--max_inference_tokens", type=int, default=256, help="Maximum number of tokens to generate per inference")
     parser.add_argument("--generations_file_path", help="Path for generations file")
     parser.add_argument("--eval_results_path", help="Path for evaluation results")
     parser.add_argument("--q_generator", help="Question generator model")
@@ -355,6 +357,7 @@ def main():
             "wiki_src": args.wiki_src,
             "mode": args.mode,
             "inference_method": args.inference_method,
+            "max_inference_tokens": args.max_inference_tokens,
             "generations_file_path": args.generations_file_path,
             "eval_results_path": args.eval_results_path,
             "q_generator": args.q_generator,
