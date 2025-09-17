@@ -19,8 +19,10 @@ def run_exp(
     inference_method="vllm",
     max_workers=64,
     max_tokens=512,
-    return_gen = False
-):  
+    return_gen = False,
+    max_retries=3,
+    base_delay=1.0
+):
     if not generations_file_path:
         base_path = Path(base_path)
         model_name = model_path.split("/")[-1]
@@ -44,14 +46,14 @@ def run_exp(
     elif inference_method == "vllm":
         port = None
         all_prompts["generation"] = thread_map(
-            lambda p: lm.call_vllm_api(p, model=model_path, temperature=0.0, top_p=1.0,  max_tokens=max_tokens, port=port),
+            lambda p: lm.call_vllm_api(p, model=model_path, temperature=0.0, top_p=1.0,  max_tokens=max_tokens, port=port, max_retries=max_retries, base_delay=base_delay),
             prompts,
             max_workers=max_workers,
             desc="Predict on vllm",
         )
     elif inference_method == "custom":
         all_prompts["generation"] = thread_map(
-            lambda p: lm.generate(p, model=model_path, temperature=0.0, top_p=1.0, max_tokens=max_tokens ),
+            lambda p: lm.generate(p, model=model_path, temperature=0.0, top_p=1.0, max_tokens=max_tokens, max_retries=max_retries, base_delay=base_delay),
             prompts,
             max_workers=max_workers,
             desc="Predict on custom API",

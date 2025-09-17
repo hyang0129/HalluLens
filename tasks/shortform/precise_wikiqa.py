@@ -328,7 +328,11 @@ if __name__ == '__main__':
     parser.add_argument('--inference_method', type=str, default='vllm', help='check and customize util/lm.py')
     parser.add_argument('--max_inference_tokens',  type=int, default=256)
     parser.add_argument('--inf_batch_size', type=int, default=64)
-    
+
+    # Retry mechanism parameters
+    parser.add_argument('--max_retries', type=int, default=3, help='Maximum number of retry attempts for API timeouts')
+    parser.add_argument('--base_delay', type=float, default=1.0, help='Base delay in seconds for exponential backoff')
+
     parser.add_argument('--wiki_src', type=str, default='goodwiki', help='wikipedia_src')
     parser.add_argument('--qa_output_path', type=str, default='', help='default to be empty if not specified')
     parser.add_argument('--generations_file_path', type=str, default='', help='path to save the model-generated outputs; if not specified, outputs will be saved to output/{TASKNAME}/{model_name}/generation.jsonl')
@@ -388,13 +392,15 @@ if __name__ == '__main__':
 
         print(f"Starting Inference for [{args.model}], Testset_N: {QAs_df.shape}")
         exp.run_exp(
-                    task=f"{TASKNAME}", 
-                    model_path=args.model, 
-                    all_prompts=QAs_df, 
+                    task=f"{TASKNAME}",
+                    model_path=args.model,
+                    all_prompts=QAs_df,
                     generations_file_path=args.generations_file_path if args.generations_file_path else None,
                     inference_method=args.inference_method, \
                     max_tokens=args.max_inference_tokens,
-                    max_workers=1)
+                    max_workers=1,
+                    max_retries=args.max_retries,
+                    base_delay=args.base_delay)
         print('Inference completed')
 
     if args.do_eval:
