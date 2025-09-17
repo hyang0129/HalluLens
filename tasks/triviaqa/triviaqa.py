@@ -10,9 +10,68 @@ import pandas as pd
 import jsonlines
 import os
 import argparse
+import tarfile
+import urllib.request
+from pathlib import Path
 from sklearn.model_selection import train_test_split
 
 from utils import exp
+
+
+def download_triviaqa_unfiltered(data_dir="data"):
+    """
+    Download and extract TriviaQA unfiltered dataset.
+
+    Args:
+        data_dir: Directory to download and extract data to
+    """
+    triviaqa_url = "https://nlp.cs.washington.edu/triviaqa/data/triviaqa-unfiltered.tar.gz"
+    download_dir = Path(data_dir)
+    download_dir.mkdir(parents=True, exist_ok=True)
+
+    tar_path = download_dir / "triviaqa-unfiltered.tar.gz"
+    extract_dir = download_dir / "triviaqa-unfiltered"
+
+    # Check if already extracted
+    dev_file = extract_dir / "unfiltered-web-dev.json"
+    train_file = extract_dir / "unfiltered-web-train.json"
+
+    if dev_file.exists() and train_file.exists():
+        print(f"TriviaQA unfiltered data already exists at {extract_dir}")
+        return str(extract_dir)
+
+    print(f"Downloading TriviaQA unfiltered dataset from {triviaqa_url}")
+    print(f"This may take a few minutes...")
+
+    try:
+        # Download the tar.gz file
+        urllib.request.urlretrieve(triviaqa_url, tar_path)
+        print(f"Downloaded to {tar_path}")
+
+        # Extract the tar.gz file
+        print(f"Extracting to {extract_dir}")
+        with tarfile.open(tar_path, 'r:gz') as tar:
+            tar.extractall(path=download_dir)
+
+        # Clean up the tar file
+        tar_path.unlink()
+        print(f"Extraction complete. Data available at {extract_dir}")
+
+        # Verify the expected files exist
+        if not (dev_file.exists() and train_file.exists()):
+            raise FileNotFoundError(
+                f"Expected files not found after extraction:\n"
+                f"  - {dev_file}\n"
+                f"  - {train_file}"
+            )
+
+        return str(extract_dir)
+
+    except Exception as e:
+        print(f"Error downloading TriviaQA data: {e}")
+        if tar_path.exists():
+            tar_path.unlink()  # Clean up partial download
+        raise
 
 
 def compute_correctness_triviaqa(model_answers, correct_answers_list):
@@ -176,7 +235,7 @@ class TriviaQAEval:
         print("-" * 80)
 
 
-def load_triviaqa_data(dataset_variant="unfiltered", split="dev", n_samples=1000, data_dir="data/triviaqa"):
+def load_triviaqa_data(dataset_variant="unfiltered", split="dev", n_samples=1000, data_dir="data", auto_download=True):
     """
     Load TriviaQA dataset from JSON files.
 
@@ -185,6 +244,7 @@ def load_triviaqa_data(dataset_variant="unfiltered", split="dev", n_samples=1000
         split: "train" or "dev"
         n_samples: number of samples to load (will be subsampled if dataset is larger)
         data_dir: directory containing TriviaQA data files
+        auto_download: whether to automatically download data if not found
 
     Returns:
         dict with 'questions', 'correct_answers', 'question_ids'
@@ -204,13 +264,26 @@ def load_triviaqa_data(dataset_variant="unfiltered", split="dev", n_samples=1000
     else:
         raise NotImplementedError(f"Dataset variant '{dataset_variant}' not implemented yet")
 
-    # Check if file exists
+    # Check if file exists, download if needed
     if not os.path.exists(file_path):
-        raise FileNotFoundError(
-            f"TriviaQA data file not found: {file_path}\n"
-            f"Please download TriviaQA data from https://nlp.cs.washington.edu/triviaqa/\n"
-            f"and place the unfiltered files in {data_dir}/triviaqa-unfiltered/"
-        )
+        if auto_download and dataset_variant == "unfiltered":
+            print(f"TriviaQA data not found at {file_path}")
+            print("Attempting automatic download...")
+            try:
+                download_triviaqa_unfiltered(data_dir)
+                print("Download completed successfully!")
+            except Exception as e:
+                raise FileNotFoundError(
+                    f"Failed to automatically download TriviaQA data: {e}\n"
+                    f"Please manually download from https://nlp.cs.washington.edu/triviaqa/data/triviaqa-unfiltered.tar.gz\n"
+                    f"and extract to {data_dir}/triviaqa-unfiltered/"
+                )
+        else:
+            raise FileNotFoundError(
+                f"TriviaQA data file not found: {file_path}\n"
+                f"Please download TriviaQA data from https://nlp.cs.washington.edu/triviaqa/data/triviaqa-unfiltered.tar.gz\n"
+                f"and extract to {data_dir}/triviaqa-unfiltered/"
+            )
 
     # Load JSON data
     print(f"Loading data from: {file_path}")
@@ -264,6 +337,8 @@ if __name__ == '__main__':
     parser.add_argument('--dataset_variant', type=str, default='unfiltered', help='TriviaQA variant: filtered/unfiltered')
     parser.add_argument('--split', type=str, default='dev', help='TriviaQA split: train/dev')
     parser.add_argument('--data_dir', type=str, default='', help='directory containing TriviaQA data files')
+    parser.add_argument('--auto_download', action='store_true', default=True, help='automatically download TriviaQA data if not found')
+    parser.add_argument('--no_auto_download', dest='auto_download', action='store_false', help='disable automatic download')
     parser.add_argument('--generations_file_path', type=str, default='', help='path to save model generations')
     parser.add_argument('--eval_results_path', type=str, default='', help='path to save evaluation results')
     parser.add_argument('--N', type=int, default=1000, help='number of samples to evaluate')
@@ -285,7 +360,8 @@ if __name__ == '__main__':
             dataset_variant=args.dataset_variant,
             split=args.split,
             n_samples=args.N,
-            data_dir=data_dir
+            data_dir=data_dir,
+            auto_download=args.auto_download
         )
 
         # Prepare prompts for inference (following TriviaQA format from LLMsKnow)

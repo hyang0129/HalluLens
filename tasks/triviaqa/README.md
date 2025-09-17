@@ -35,6 +35,16 @@ TriviaQA provides:
 - **Answer Aliases**: Multiple acceptable answer variations for each question
 - **Evidence**: Supporting documents (optional, depending on variant used)
 
+## Data Requirements
+
+The TriviaQA task requires the TriviaQA unfiltered dataset:
+- **Automatic Download**: The script will automatically download and extract the dataset on first run
+- **Manual Download**: If needed, download from: https://nlp.cs.washington.edu/triviaqa/data/triviaqa-unfiltered.tar.gz
+- Required files:
+  - `data/triviaqa-unfiltered/unfiltered-web-train.json`
+  - `data/triviaqa-unfiltered/unfiltered-web-dev.json`
+- Use `--no_auto_download` to disable automatic downloading
+
 ## Planned Components
 
 ### Core Scripts
