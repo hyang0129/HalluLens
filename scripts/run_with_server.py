@@ -5,12 +5,6 @@ Unified script to run HalluLens tasks with automatic server management.
 This script automatically starts the activation logging server and runs one of the three
 generation steps, eliminating the need for manual server startup.
 
-Key Features:
-- Automatic server startup and shutdown
-- Server logs are automatically placed in the same directory as generation files
-- Supports all HalluLens tasks (precisewikiqa, longwiki, mixedentities)
-- Configurable retry mechanism for handling API timeouts
-
 Usage:
     python scripts/run_with_server.py --step [generate|inference|eval] [task_options...]
 
@@ -26,9 +20,6 @@ Examples:
 
     # Run all steps in sequence
     python scripts/run_with_server.py --step all --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --N 100
-
-    # Custom activations path
-    python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --activations-path custom/path/activations.lmdb
 """
 
 import argparse
@@ -36,6 +27,7 @@ import os
 import subprocess
 import sys
 import time
+import signal
 import requests
 from pathlib import Path
 from loguru import logger
@@ -105,55 +97,19 @@ def check_dependencies(task, step):
 
 class ServerManager:
     """Manages the activation logging server lifecycle."""
-
-    def __init__(self, model, host="0.0.0.0", port=8000, logger_type="lmdb", activations_path=None, task=None, generations_file_path=None):
+    
+    def __init__(self, model, host="0.0.0.0", port=8000, logger_type="lmdb", activations_path=None):
         self.model = model
         self.host = host
         self.port = port
         self.logger_type = logger_type
-        self.task = task
-        self.generations_file_path = generations_file_path
-
-        # Automatically determine activations path based on generations file location
-        if activations_path:
-            self.activations_path = activations_path
-        else:
-            self.activations_path = self._determine_activations_path()
-
+        self.activations_path = activations_path or f"lmdb_data/{model.replace('/', '_')}_activations.lmdb"
         self.server_process = None
-
-    def _determine_activations_path(self):
-        """Determine the activations path based on the generations file location."""
-        if self.generations_file_path:
-            # Use the same directory as the generations file
-            generations_dir = Path(self.generations_file_path).parent
-        elif self.task:
-            # Use the standard output pattern: output/{task}/{model_name}/
-            model_name = self.model.split("/")[-1]
-            generations_dir = Path("output") / self.task / model_name
-        else:
-            # Fallback to the old default location
-            return f"lmdb_data/{self.model.replace('/', '_')}_activations.lmdb"
-
-        # Create the directory if it doesn't exist
-        generations_dir.mkdir(parents=True, exist_ok=True)
-
-        # Set activations path in the same directory
-        if self.logger_type == "lmdb":
-            activations_filename = f"{self.model.replace('/', '_')}_activations.lmdb"
-        else:  # json
-            activations_filename = f"{self.model.replace('/', '_')}_activations"
-
-        activations_path = generations_dir / activations_filename
-
-        logger.info(f"Server logs will be saved to: {activations_path}")
-        return str(activations_path)
         
     def start_server(self):
         """Start the activation logging server."""
         logger.info(f"Starting activation logging server for model: {self.model}")
-        logger.info(f"Activation logs will be stored at: {self.activations_path}")
-
+        
         # Set environment variables for activation logging
         env = os.environ.copy()
         env["ACTIVATION_STORAGE_PATH"] = self.activations_path
@@ -221,20 +177,6 @@ class ServerManager:
                 self.server_process.kill()
                 self.server_process.wait()
             logger.info("Server stopped")
-
-def get_task_name(task, **kwargs):
-    """Generate the task name based on task type and parameters."""
-    if task == "precisewikiqa":
-        wiki_src = kwargs.get("wiki_src", "goodwiki")
-        mode = kwargs.get("mode", "dynamic")
-        return f"precise_wikiqa_{wiki_src}_{mode}"
-    elif task == "longwiki":
-        return "longwiki"
-    elif task == "mixedentities":
-        exp = kwargs.get("exp", "nonsense_all")
-        return f"refusal_test_{exp}"
-    else:
-        return task
 
 def run_task_step(step, task, model, **kwargs):
     """Run the specified task step."""
@@ -363,7 +305,7 @@ def main():
     parser.add_argument("--port", type=int, default=8000, help="Server port")
     parser.add_argument("--logger-type", default="lmdb", choices=["lmdb", "json"],
                        help="Activation logger type")
-    parser.add_argument("--activations-path", help="Path for storing activations (if not specified, will be automatically placed in the same directory as generation files)")
+    parser.add_argument("--activations-path", help="Path for storing activations")
     
     # Task-specific arguments
     parser.add_argument("--N", type=int, default=1, help="Number of samples")
@@ -396,23 +338,13 @@ def main():
     if not check_dependencies(args.task, args.step):
         sys.exit(1)
 
-    # Determine task name for output path calculation
-    task_kwargs_for_name = {
-        "wiki_src": args.wiki_src,
-        "mode": args.mode,
-        "exp": args.exp
-    }
-    task_name = get_task_name(args.task, **task_kwargs_for_name)
-
     # Create server manager
     server_manager = ServerManager(
         model=args.model,
         host=args.host,
         port=args.port,
         logger_type=args.logger_type,
-        activations_path=args.activations_path,
-        task=task_name,
-        generations_file_path=args.generations_file_path
+        activations_path=args.activations_path
     )
 
     try:
