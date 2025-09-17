@@ -140,6 +140,67 @@ model = LastLayerHaluClassifier(input_dim=4096)
 train_halu_classifier(model, train_dataset, test_dataset)
 ```
 
+## Testing Inference with Activation Logging
+
+### JSON Activation Logging (NPY Format)
+
+For testing inference with efficient binary tensor storage while maintaining JSON metadata readability:
+
+```bash
+# Test with JSON logger using NPY binary format (recommended for large-scale experiments)
+python scripts/run_with_server.py \
+  --step inference \
+  --task precisewikiqa \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --wiki_src goodwiki \
+  --mode gguf_big \
+  --inference_method vllm \
+  --logger-type json \
+  --activations-path test_output/activations.json \
+  --N 100 \
+  --qa_output_path data/precise_qa/save/qa_goodwiki_Llama-3.1-8B-Instruct_gguf_big.jsonl \
+  --generations_file_path test_output/generation.jsonl
+```
+
+**Key Parameters for JSON Logging:**
+- `--logger-type json`: Enables JSON activation logging with NPY binary tensor storage
+- `--activations-path`: Directory path for JSON metadata and NPY activation files
+- `--N 100`: Number of inference samples (adjust based on testing needs)
+
+**Storage Efficiency:**
+- **NPY Binary Format**: ~95% storage reduction compared to JSON text tensors
+- **Expected Size**: ~5-10GB for 100 inferences (vs 106GB for pure JSON)
+- **Format**: JSON metadata + separate `.npy` files for activation tensors
+- **Backward Compatibility**: Supports both new NPY and legacy JSON activation files
+
+### LMDB Activation Logging (Alternative)
+
+For maximum storage efficiency:
+
+```bash
+# Test with LMDB logger (most compact storage)
+python scripts/run_with_server.py \
+  --step inference \
+  --task precisewikiqa \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --wiki_src goodwiki \
+  --mode gguf_big \
+  --inference_method vllm \
+  --logger-type lmdb \
+  --activations-path test_output/activations.lmdb \
+  --N 100 \
+  --qa_output_path data/precise_qa/save/qa_goodwiki_Llama-3.1-8B-Instruct_gguf_big.jsonl \
+  --generations_file_path test_output/generation.jsonl
+```
+
+### Remote Testing
+
+For comprehensive remote GPU testing with JSON logging, see:
+
+📖 **[Remote Testing Guide](REMOTE_TESTING_GUIDE.md)**
+
+This guide includes step-by-step instructions for testing JSON activation logging in remote GPU environments with automated scripts and verification procedures.
+
 ## Key Features
 
 ### 🔍 Comprehensive Activation Logging
