@@ -142,6 +142,8 @@ train_halu_classifier(model, train_dataset, test_dataset)
 
 ## Testing Inference with Activation Logging
 
+> **⚠️ Important Note on Model Types**: GGUF models are quantized (low precision) formats designed for efficient inference and are **not intended for activation logging**. For activation logging experiments, use full-precision models (e.g., `meta-llama/Llama-3.1-8B-Instruct`) rather than GGUF variants. GGUF models will automatically skip activation logging during inference.
+
 ### JSON Activation Logging (NPY Format)
 
 For testing inference with efficient binary tensor storage while maintaining JSON metadata readability:
