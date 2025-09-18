@@ -583,11 +583,14 @@ class JsonActivationsLogger:
             sequence_mode: Which tokens to extract activations for ('all', 'prompt', 'response')
             read_only: If True, open in read-only mode
         """
+        logger.info(f"JsonActivationsLogger.__init__ starting - output_dir: {output_dir}, target_layers: {target_layers}, sequence_mode: {sequence_mode}, read_only: {read_only}")
+
         if target_layers not in ['all', 'first_half', 'second_half']:
             raise ValueError("target_layers must be one of: 'all', 'first_half', 'second_half'")
         if sequence_mode not in ['all', 'prompt', 'response']:
             raise ValueError("sequence_mode must be one of: 'all', 'prompt', 'response'")
 
+        logger.info(f"JsonActivationsLogger.__init__ - Setting up paths")
         self.output_dir = Path(output_dir)
         self.activations_dir = self.output_dir / "activations"
         self.metadata_path = self.output_dir / "metadata.json"
@@ -597,39 +600,78 @@ class JsonActivationsLogger:
 
         # Create directories if they don't exist
         if not read_only:
-            self.output_dir.mkdir(parents=True, exist_ok=True)
-            self.activations_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"JsonActivationsLogger.__init__ - Creating directories")
+            try:
+                self.output_dir.mkdir(parents=True, exist_ok=True)
+                self.activations_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"JsonActivationsLogger.__init__ - Directories created successfully")
+            except Exception as e:
+                logger.error(f"JsonActivationsLogger.__init__ - Failed to create directories: {e}")
+                raise
 
         # Load or initialize the metadata
-        if self.metadata_path.exists():
-            with open(self.metadata_path, "r") as f:
-                self.metadata = json.load(f)
-        else:
-            self.metadata = {
-                "logger_config": {
-                    "target_layers": target_layers,
-                    "sequence_mode": sequence_mode,
-                    "version": "2.0",  # Updated version for NPY format
-                    "storage_format": "npy"
-                },
-                "entries": {}
-            }
+        logger.info(f"JsonActivationsLogger.__init__ - Loading metadata from {self.metadata_path}")
+        try:
+            if self.metadata_path.exists():
+                logger.info(f"JsonActivationsLogger.__init__ - Metadata file exists, loading...")
+                with open(self.metadata_path, "r") as f:
+                    self.metadata = json.load(f)
+                logger.info(f"JsonActivationsLogger.__init__ - Metadata loaded successfully")
+            else:
+                logger.info(f"JsonActivationsLogger.__init__ - Creating new metadata")
+                self.metadata = {
+                    "logger_config": {
+                        "target_layers": target_layers,
+                        "sequence_mode": sequence_mode,
+                        "version": "2.0",  # Updated version for NPY format
+                        "storage_format": "npy"
+                    },
+                    "entries": {}
+                }
+                logger.info(f"JsonActivationsLogger.__init__ - New metadata created")
+        except Exception as e:
+            logger.error(f"JsonActivationsLogger.__init__ - Failed to load/create metadata: {e}")
+            raise
 
         logger.info(f"JsonActivationsLogger (NPY format) initialized at {output_dir} with {len(self.metadata['entries'])} existing entries")
+        logger.info(f"JsonActivationsLogger.__init__ completed successfully")
 
     def _tensors_to_numpy_arrays(self, obj):
         """Convert tensors to numpy arrays for NPY storage."""
         if isinstance(obj, torch.Tensor):
-            return obj.cpu().numpy()
+            logger.debug(f"JsonActivationsLogger._tensors_to_numpy_arrays - Converting tensor of shape {obj.shape} to numpy")
+            try:
+                result = obj.cpu().numpy()
+                logger.debug(f"JsonActivationsLogger._tensors_to_numpy_arrays - Tensor conversion successful")
+                return result
+            except Exception as e:
+                logger.error(f"JsonActivationsLogger._tensors_to_numpy_arrays - Tensor conversion failed: {e}")
+                raise
         elif isinstance(obj, np.ndarray):
+            logger.debug(f"JsonActivationsLogger._tensors_to_numpy_arrays - Object is already numpy array")
             return obj
         elif isinstance(obj, list):
-            return [self._tensors_to_numpy_arrays(item) for item in obj]
+            logger.debug(f"JsonActivationsLogger._tensors_to_numpy_arrays - Converting list of {len(obj)} items")
+            try:
+                result = [self._tensors_to_numpy_arrays(item) for item in obj]
+                logger.debug(f"JsonActivationsLogger._tensors_to_numpy_arrays - List conversion successful")
+                return result
+            except Exception as e:
+                logger.error(f"JsonActivationsLogger._tensors_to_numpy_arrays - List conversion failed: {e}")
+                raise
         elif isinstance(obj, dict):
-            return {k: self._tensors_to_numpy_arrays(v) for k, v in obj.items()}
+            logger.debug(f"JsonActivationsLogger._tensors_to_numpy_arrays - Converting dict with {len(obj)} keys")
+            try:
+                result = {k: self._tensors_to_numpy_arrays(v) for k, v in obj.items()}
+                logger.debug(f"JsonActivationsLogger._tensors_to_numpy_arrays - Dict conversion successful")
+                return result
+            except Exception as e:
+                logger.error(f"JsonActivationsLogger._tensors_to_numpy_arrays - Dict conversion failed: {e}")
+                raise
         elif obj is None:
             return None
         else:
+            logger.debug(f"JsonActivationsLogger._tensors_to_numpy_arrays - Object type {type(obj)} passed through unchanged")
             return obj
 
     def _get_activation_shape_info(self, activation_arrays):
@@ -719,75 +761,111 @@ class JsonActivationsLogger:
         Extract activations from model outputs.
         This method is identical to the one in ActivationsLogger for compatibility.
         """
+        logger.info(f"JsonActivationsLogger.extract_activations starting - input_length: {input_length}")
+
         # If model_outputs is None or doesn't have hidden_states, return None
         if model_outputs is None or not hasattr(model_outputs, 'hidden_states'):
-            logger.info("No hidden states found in model outputs")
+            logger.info("JsonActivationsLogger.extract_activations - No hidden states found in model outputs")
             return None
 
-        # Get the generated tokens (excluding prompt)
-        gen_sequence = model_outputs.sequences[0]
-        gen_ids = gen_sequence[input_length:]
+        logger.info(f"JsonActivationsLogger.extract_activations - Processing model outputs")
 
-        all_hidden_states = model_outputs.hidden_states
-        prompt_hidden = all_hidden_states[0]  # first set of tokens, the prompt tokens. It has len = num_layers
-        gen_hiddens = all_hidden_states[1:]  # all subsequent sets of tokens, the generated tokens. The structure of this list is [token_num, layer_num, ...]
+        # Get the generated tokens (excluding prompt)
+        try:
+            gen_sequence = model_outputs.sequences[0]
+            gen_ids = gen_sequence[input_length:]
+            logger.info(f"JsonActivationsLogger.extract_activations - Generated sequence length: {len(gen_ids)}")
+        except Exception as e:
+            logger.error(f"JsonActivationsLogger.extract_activations - Failed to extract generated sequence: {e}")
+            raise
+
+        try:
+            all_hidden_states = model_outputs.hidden_states
+            prompt_hidden = all_hidden_states[0]  # first set of tokens, the prompt tokens. It has len = num_layers
+            gen_hiddens = all_hidden_states[1:]  # all subsequent sets of tokens, the generated tokens. The structure of this list is [token_num, layer_num, ...]
+            logger.info(f"JsonActivationsLogger.extract_activations - Hidden states structure: {len(all_hidden_states)} steps, {len(prompt_hidden)} layers")
+        except Exception as e:
+            logger.error(f"JsonActivationsLogger.extract_activations - Failed to extract hidden states: {e}")
+            raise
 
         # If there's a trim position, only use activations up to that point
         trim_pos = None
         if hasattr(model_outputs, 'trim_position'):
             trim_pos = model_outputs.trim_position
             if trim_pos is not None:
-                logger.info(f"Trimming activations at position {trim_pos}")
+                logger.info(f"JsonActivationsLogger.extract_activations - Trimming activations at position {trim_pos}")
                 gen_hiddens = gen_hiddens[:trim_pos]
 
         # Determine which layers to extract based on target_layers setting
         num_layers = len(prompt_hidden)
         if self.target_layers == 'first_half':
             target_layer_indices = range(num_layers // 2)
-            logger.debug(f"Extracting first {num_layers // 2} layers")
+            logger.info(f"JsonActivationsLogger.extract_activations - Extracting first {num_layers // 2} layers")
         elif self.target_layers == 'second_half':
             start_idx = num_layers // 2
             target_layer_indices = range(start_idx, num_layers)
-            logger.debug(f"Extracting second half of layers ({start_idx} to {num_layers-1})")
+            logger.info(f"JsonActivationsLogger.extract_activations - Extracting second half of layers ({start_idx} to {num_layers-1})")
         else:  # 'all'
             target_layer_indices = range(num_layers)
-            logger.debug(f"Extracting all {num_layers} layers")
+            logger.info(f"JsonActivationsLogger.extract_activations - Extracting all {num_layers} layers")
+
+        logger.info(f"JsonActivationsLogger.extract_activations - Processing sequence mode: {self.sequence_mode}")
 
         if self.sequence_mode == 'prompt':
             # Only return prompt activations
-            logger.debug("Extracting activations for prompt tokens only")
+            logger.info("JsonActivationsLogger.extract_activations - Extracting activations for prompt tokens only")
             full_hidden_states = []
-            for layer_idx in range(num_layers):
-                if layer_idx in target_layer_indices:
-                    full_hidden_states.append(prompt_hidden[layer_idx])
-                else:
-                    full_hidden_states.append(None)
+            try:
+                for layer_idx in range(num_layers):
+                    if layer_idx in target_layer_indices:
+                        full_hidden_states.append(prompt_hidden[layer_idx])
+                    else:
+                        full_hidden_states.append(None)
+                logger.info(f"JsonActivationsLogger.extract_activations - Prompt activations extracted successfully")
+            except Exception as e:
+                logger.error(f"JsonActivationsLogger.extract_activations - Failed to extract prompt activations: {e}")
+                raise
+
         elif self.sequence_mode == 'response':
             # Only return response activations
-            logger.debug("Extracting activations for response tokens only")
+            logger.info("JsonActivationsLogger.extract_activations - Extracting activations for response tokens only")
             full_hidden_states = []
-            for layer_idx in range(num_layers):
-                if layer_idx in target_layer_indices:
-                    # Only concatenate steps for target layers
-                    layer_acts = torch.cat([step[layer_idx] for step in gen_hiddens], dim=1)
-                    full_hidden_states.append(layer_acts)
-                else:
-                    full_hidden_states.append(None)
+            try:
+                for layer_idx in range(num_layers):
+                    if layer_idx in target_layer_indices:
+                        # Only concatenate steps for target layers
+                        logger.debug(f"JsonActivationsLogger.extract_activations - Concatenating response activations for layer {layer_idx}")
+                        layer_acts = torch.cat([step[layer_idx] for step in gen_hiddens], dim=1)
+                        full_hidden_states.append(layer_acts)
+                    else:
+                        full_hidden_states.append(None)
+                logger.info(f"JsonActivationsLogger.extract_activations - Response activations extracted successfully")
+            except Exception as e:
+                logger.error(f"JsonActivationsLogger.extract_activations - Failed to extract response activations: {e}")
+                raise
+
         else:  # 'all'
             # Concatenate prompt and generated token activations
-            logger.debug("Extracting activations for full sequence (prompt + generated tokens)")
+            logger.info("JsonActivationsLogger.extract_activations - Extracting activations for full sequence (prompt + generated tokens)")
 
             full_hidden_states = []
-            for layer_idx in range(num_layers):
-                if layer_idx in target_layer_indices:
-                    # Only concatenate steps for target layers
-                    gen_layer_acts = torch.cat([step[layer_idx] for step in gen_hiddens], dim=1)
-                    # Concatenate prompt and generated activations
-                    layer_acts = torch.cat([prompt_hidden[layer_idx], gen_layer_acts], dim=1)
-                    full_hidden_states.append(layer_acts)
-                else:
-                    full_hidden_states.append(None)
+            try:
+                for layer_idx in range(num_layers):
+                    if layer_idx in target_layer_indices:
+                        # Only concatenate steps for target layers
+                        logger.debug(f"JsonActivationsLogger.extract_activations - Processing layer {layer_idx}/{num_layers}")
+                        gen_layer_acts = torch.cat([step[layer_idx] for step in gen_hiddens], dim=1)
+                        # Concatenate prompt and generated activations
+                        layer_acts = torch.cat([prompt_hidden[layer_idx], gen_layer_acts], dim=1)
+                        full_hidden_states.append(layer_acts)
+                    else:
+                        full_hidden_states.append(None)
+                logger.info(f"JsonActivationsLogger.extract_activations - Full sequence activations extracted successfully")
+            except Exception as e:
+                logger.error(f"JsonActivationsLogger.extract_activations - Failed to extract full sequence activations: {e}")
+                raise
 
+        logger.info(f"JsonActivationsLogger.extract_activations completed - extracted {len([x for x in full_hidden_states if x is not None])} layers")
         return full_hidden_states
 
     def log_entry(self, key: str, entry: Dict[str, Any]):
@@ -798,27 +876,43 @@ class JsonActivationsLogger:
             key: Unique identifier for the entry (typically a hash of the prompt)
             entry: Dictionary containing the data to log (prompt, response, model_outputs, etc.)
         """
+        logger.info(f"JsonActivationsLogger.log_entry starting - key: {key[:8]}...")
+
         if self.read_only:
             raise ValueError("Cannot log entries in read-only mode")
 
         # Process model outputs if present
         if "model_outputs" in entry and "input_length" in entry:
+            logger.info(f"JsonActivationsLogger.log_entry - Processing model outputs")
             model_outputs = entry["model_outputs"]
             input_length = entry["input_length"]
 
             # Add trim position to model_outputs for use in extract_activations
             if "trim_position" in entry:
                 model_outputs.trim_position = entry["trim_position"]
+                logger.info(f"JsonActivationsLogger.log_entry - Added trim position: {entry['trim_position']}")
 
             # Extract activations from model outputs
-            all_layers_activations = self.extract_activations(model_outputs, input_length)
+            logger.info(f"JsonActivationsLogger.log_entry - Starting activation extraction")
+            try:
+                import time
+                extraction_start = time.time()
+                all_layers_activations = self.extract_activations(model_outputs, input_length)
+                extraction_time = time.time() - extraction_start
+                logger.info(f"JsonActivationsLogger.log_entry - Activation extraction completed in {extraction_time:.3f}s")
+            except Exception as e:
+                logger.error(f"JsonActivationsLogger.log_entry - Activation extraction failed: {e}")
+                raise
 
             # Create metadata entry (without activations)
+            logger.info(f"JsonActivationsLogger.log_entry - Creating metadata entry")
             metadata_entry = entry.copy()
             metadata_entry.pop("model_outputs", None)
             metadata_entry.pop("all_layers_activations", None)
 
             if all_layers_activations:
+                logger.info(f"JsonActivationsLogger.log_entry - Processing activations for storage")
+
                 # Store the logging configuration in metadata
                 metadata_entry["logging_config"] = {
                     "target_layers": self.target_layers,
@@ -826,32 +920,59 @@ class JsonActivationsLogger:
                 }
 
                 # Convert activations to numpy arrays and save as NPY file
-                activation_arrays = self._tensors_to_numpy_arrays(all_layers_activations)
+                logger.info(f"JsonActivationsLogger.log_entry - Converting tensors to numpy arrays")
+                try:
+                    conversion_start = time.time()
+                    activation_arrays = self._tensors_to_numpy_arrays(all_layers_activations)
+                    conversion_time = time.time() - conversion_start
+                    logger.info(f"JsonActivationsLogger.log_entry - Tensor conversion completed in {conversion_time:.3f}s")
+                except Exception as e:
+                    logger.error(f"JsonActivationsLogger.log_entry - Tensor conversion failed: {e}")
+                    raise
+
                 activation_file_path = self.activations_dir / f"{key}.npy"
+                logger.info(f"JsonActivationsLogger.log_entry - Saving NPY file to {activation_file_path}")
 
                 # Save as NPY file with allow_pickle=True to handle list of arrays
-                np.save(activation_file_path, activation_arrays, allow_pickle=True)
+                try:
+                    save_start = time.time()
+                    np.save(activation_file_path, activation_arrays, allow_pickle=True)
+                    save_time = time.time() - save_start
+                    file_size = activation_file_path.stat().st_size / 1024**2  # MB
+                    logger.info(f"JsonActivationsLogger.log_entry - NPY file saved in {save_time:.3f}s, size: {file_size:.2f}MB")
+                except Exception as e:
+                    logger.error(f"JsonActivationsLogger.log_entry - NPY file save failed: {e}")
+                    raise
 
                 # Add reference to activation file in metadata
                 metadata_entry["has_activations"] = True
                 metadata_entry["activation_file"] = f"activations/{key}.npy"
                 metadata_entry["activation_shape_info"] = self._get_activation_shape_info(activation_arrays)
+                logger.info(f"JsonActivationsLogger.log_entry - Added activation metadata")
             else:
                 metadata_entry["has_activations"] = False
+                logger.info(f"JsonActivationsLogger.log_entry - No activations to store")
         else:
             raise ValueError("No model_outputs or input_length found in entry")
 
-        import time
         metadata_entry["timestamp"] = time.time()
 
         # Store metadata in the main metadata file
+        logger.info(f"JsonActivationsLogger.log_entry - Updating metadata file")
         self.metadata["entries"][key] = metadata_entry
 
         # Save updated metadata
-        with open(self.metadata_path, "w") as f:
-            json.dump(self.metadata, f, indent=2)
+        try:
+            metadata_save_start = time.time()
+            with open(self.metadata_path, "w") as f:
+                json.dump(self.metadata, f, indent=2)
+            metadata_save_time = time.time() - metadata_save_start
+            logger.info(f"JsonActivationsLogger.log_entry - Metadata saved in {metadata_save_time:.3f}s")
+        except Exception as e:
+            logger.error(f"JsonActivationsLogger.log_entry - Metadata save failed: {e}")
+            raise
 
-        logger.debug(f"Logged entry with key {key[:8]}... (NPY format)")
+        logger.info(f"JsonActivationsLogger.log_entry completed successfully - key: {key[:8]}...")
 
     def get_entry(self, key: str, metadata_only: bool = False) -> Dict[str, Any]:
         """
