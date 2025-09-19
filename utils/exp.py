@@ -23,6 +23,11 @@ def run_exp(
     max_retries=3,
     base_delay=1.0
 ):
+    # Initialize client logging for debugging
+    if inference_method == "vllm":
+        lm.setup_client_logging()
+        print(f"Client logging initialized for {len(all_prompts)} requests")
+
     if not generations_file_path:
         base_path = Path(base_path)
         model_name = model_path.split("/")[-1]
@@ -63,6 +68,19 @@ def run_exp(
 
     # save the results
     all_prompts.to_json(generations_file_path, lines=True, orient="records")
+
+    # Report skip statistics if using vllm
+    if inference_method == "vllm":
+        skip_stats = lm.get_skip_statistics()
+        if skip_stats["total_skipped"] > 0:
+            print(f"\n📊 Experiment completed with {skip_stats['total_skipped']} skipped samples:")
+            print(f"   - Timeout skipped: {skip_stats['timeout_skipped']}")
+            print(f"   - Error skipped: {skip_stats['error_skipped']}")
+            print(f"   - Successfully processed: {len(all_prompts) - skip_stats['total_skipped']}")
+            print(f"   - Skip rate: {skip_stats['total_skipped']/len(all_prompts)*100:.2f}%")
+            print(f"   - Skipped samples list saved to: goodwiki_json/skipped_samples.json")
+        else:
+            print(f"✅ Experiment completed successfully with no skipped samples!")
 
     if return_gen:
         return all_prompts

@@ -1036,6 +1036,7 @@ async def chat_completions(request: ChatCompletionRequest):
         # Track successful completion
         track_request_end(request_id, "completed")
         logger.info(f"[{request_id}] Request completed successfully")
+        logger.info(f"[{request_id}] Sending response to client - Response size: {len(response_text)} chars")
 
         return response
 
