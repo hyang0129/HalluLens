@@ -171,9 +171,6 @@ def call_vllm_api(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512, por
         APITimeoutError: If all retry attempts fail due to timeout
         Exception: For other non-timeout errors
     """
-    # Setup client logging on first call
-    setup_client_logging()
-
     # Generate unique request ID for tracking
     request_id = generate_request_id(prompt)
 
