@@ -12,6 +12,7 @@ from openai import APITimeoutError
 from loguru import logger
 import hashlib
 import json
+import requests
 
 class SampleSkippedException(Exception):
     """Exception raised when a sample is skipped due to repeated failures."""
@@ -24,6 +25,10 @@ class SampleSkippedException(Exception):
 # Global tracking of skipped samples
 skipped_samples = set()
 skip_stats = {"total_skipped": 0, "timeout_skipped": 0, "error_skipped": 0}
+
+# Global flag to enable/disable server restart on timeout
+ENABLE_SERVER_RESTART = os.environ.get("ENABLE_SERVER_RESTART", "true").lower() == "true"
+SERVER_RESTART_WAIT_TIME = int(os.environ.get("SERVER_RESTART_WAIT_TIME", "30"))  # seconds to wait for server restart
 
 '''
 NOTE:
@@ -46,6 +51,72 @@ def setup_client_logging():
         client_log_file = "goodwiki_json/client.log"
         logger.add(client_log_file, format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}", level="DEBUG")
         logger.info(f"Client logging configured to: {client_log_file}")
+
+def check_server_health(port, timeout=5):
+    """
+    Check if the server is healthy and responsive.
+
+    Args:
+        port: Server URL/port
+        timeout: Timeout for health check request
+
+    Returns:
+        bool: True if server is healthy, False otherwise
+    """
+    try:
+        health_url = f"{port}/health"
+        response = requests.get(health_url, timeout=timeout)
+        return response.status_code == 200
+    except Exception as e:
+        logger.debug(f"Health check failed: {e}")
+        return False
+
+def restart_server(port, wait_time=30):
+    """
+    Restart the server by calling the restart endpoint and waiting for it to come back online.
+
+    Args:
+        port: Server URL/port
+        wait_time: Maximum time to wait for server to restart (seconds)
+
+    Returns:
+        bool: True if server restarted successfully, False otherwise
+    """
+    try:
+        logger.warning(f"Attempting to restart server at {port}...")
+        restart_url = f"{port}/restart"
+
+        # Call restart endpoint (may fail if server is already unresponsive)
+        try:
+            response = requests.post(restart_url, timeout=5)
+            if response.status_code == 200:
+                logger.info("Restart request sent successfully")
+            else:
+                logger.warning(f"Restart request returned status {response.status_code}")
+        except Exception as e:
+            logger.warning(f"Failed to send restart request (server may be unresponsive): {e}")
+            # Continue anyway - the server might restart via external mechanism
+
+        # Wait for server to go down
+        logger.info("Waiting for server to shut down...")
+        time.sleep(5)
+
+        # Wait for server to come back up
+        logger.info(f"Waiting up to {wait_time}s for server to restart...")
+        start_time = time.time()
+        while time.time() - start_time < wait_time:
+            if check_server_health(port):
+                elapsed = time.time() - start_time
+                logger.success(f"Server restarted successfully after {elapsed:.1f}s")
+                return True
+            time.sleep(2)
+
+        logger.error(f"Server did not restart within {wait_time}s")
+        return False
+
+    except Exception as e:
+        logger.error(f"Error during server restart: {e}")
+        return False
 
 def generate_request_id(prompt):
     """Generate a unique request ID based on prompt content."""
@@ -182,7 +253,7 @@ def call_vllm_api(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512, por
     client = openai.OpenAI(
         base_url=f"{port}",
         api_key="NOT A REAL KEY",
-        timeout=300.0  # 5 minute timeout instead of default 30 minutes
+        timeout=60.0  # 1 minute timeout
     )
 
     for attempt in range(max_retries + 1):  # +1 to include the initial attempt
@@ -216,6 +287,16 @@ def call_vllm_api(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512, por
                 # Log payload on first timeout to help debug
                 if attempt == 0:
                     log_request_payload(request_id, prompt, model, max_tokens, temperature, top_p, "first_timeout")
+
+                    # Trigger server restart on first timeout if enabled
+                    if ENABLE_SERVER_RESTART:
+                        logger.warning(f"[CLIENT {request_id}] First timeout detected - triggering server restart")
+                        if restart_server(port, wait_time=SERVER_RESTART_WAIT_TIME):
+                            logger.success(f"[CLIENT {request_id}] Server restarted successfully, will retry request")
+                            # Skip the normal delay since we already waited for restart
+                            continue
+                        else:
+                            logger.error(f"[CLIENT {request_id}] Server restart failed, continuing with normal retry")
 
                 time.sleep(delay)
             else:

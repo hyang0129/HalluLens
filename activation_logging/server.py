@@ -766,12 +766,65 @@ def get_logger_for_request(request_params):
 async def health_check():
     """
     Simple health check endpoint to verify the server is running.
-    
+
     Returns:
         Dict with status and timestamp
     """
     return {
         "status": "ok",
+        "timestamp": time.time()
+    }
+
+@app.post("/restart")
+async def restart_server():
+    """
+    Restart the server by triggering a graceful shutdown and restart.
+    This endpoint should be called when the server becomes unresponsive.
+
+    Returns:
+        Dict with restart status
+    """
+    logger.warning("=" * 80)
+    logger.warning("SERVER RESTART REQUESTED")
+    logger.warning("=" * 80)
+
+    # Log current state
+    with request_lock:
+        if active_requests:
+            logger.warning(f"Restarting with {len(active_requests)} active requests:")
+            for request_id, info in active_requests.items():
+                duration = time.time() - info["start_time"]
+                logger.warning(f"  [{request_id}] {info['endpoint']} - {duration:.2f}s")
+        else:
+            logger.info("No active requests at restart")
+
+    log_system_resources("Pre-Restart")
+
+    # Clear GPU cache if available
+    if torch.cuda.is_available():
+        logger.info("Clearing CUDA cache...")
+        torch.cuda.empty_cache()
+        logger.info("CUDA cache cleared")
+
+    # Clear model caches
+    logger.info("Clearing model caches...")
+    _model_cache.clear()
+    _tokenizer_cache.clear()
+    _llamacpp_model_cache.clear()
+    logger.info("Model caches cleared")
+
+    # Schedule restart in background
+    import asyncio
+    async def do_restart():
+        await asyncio.sleep(1)  # Give time to send response
+        logger.warning("Initiating server restart...")
+        os._exit(0)  # Force exit, supervisor/systemd should restart
+
+    asyncio.create_task(do_restart())
+
+    return {
+        "status": "restarting",
+        "message": "Server restart initiated",
         "timestamp": time.time()
     }
 
