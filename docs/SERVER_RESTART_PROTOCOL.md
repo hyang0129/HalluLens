@@ -60,7 +60,34 @@ except APITimeoutError as e:
             restart_server(port, wait_time=SERVER_RESTART_WAIT_TIME)
 ```
 
-### 2. Server Restart Endpoint
+### 2. Server Process Restart (Primary Method)
+
+**When using `run_with_server.py`** (recommended):
+
+The `ServerManager` class manages the server process and can kill and restart it:
+
+```python
+def restart_server(self):
+    # Kill the current server process
+    self.server_process.terminate()
+    self.server_process.wait(timeout=5)
+
+    # If it doesn't stop, force kill
+    if still_running:
+        self.server_process.kill()
+
+    # Wait for resources to be released
+    time.sleep(3)
+
+    # Start a new server process
+    self.start_server()
+```
+
+**Key advantage**: Works even when server is completely hung/unresponsive.
+
+### 3. Server Restart Endpoint (Fallback Method)
+
+**When NOT using `run_with_server.py`**:
 
 The server provides a `/restart` endpoint that:
 - Logs current state and active requests
@@ -75,12 +102,35 @@ async def restart_server():
     torch.cuda.empty_cache()
     _model_cache.clear()
     _tokenizer_cache.clear()
-    
+
     # Schedule restart
     os._exit(0)  # Force exit
 ```
 
-### 3. Health Check Monitoring
+**Limitation**: Won't work if server is completely hung and can't respond to HTTP requests.
+
+### 4. Client-Side Restart Logic
+
+The client tries both methods:
+
+```python
+def restart_server(port, wait_time=30):
+    # Try ServerManager first (if available)
+    try:
+        from scripts.run_with_server import get_server_manager
+        server_manager = get_server_manager()
+        if server_manager:
+            server_manager.restart_server()  # Process kill + restart
+            return True
+    except:
+        pass
+
+    # Fallback to REST endpoint
+    requests.post(f"{port}/restart")
+    # Wait for server to come back...
+```
+
+### 5. Health Check Monitoring
 
 The client monitors the `/health` endpoint to detect when the server is back online:
 
@@ -93,7 +143,7 @@ def check_server_health(port, timeout=5):
         return False
 ```
 
-### 4. Automatic Retry
+### 6. Automatic Retry
 
 After successful restart, the client automatically retries the failed request without additional delay.
 

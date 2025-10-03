@@ -73,7 +73,10 @@ def check_server_health(port, timeout=5):
 
 def restart_server(port, wait_time=30):
     """
-    Restart the server by calling the restart endpoint and waiting for it to come back online.
+    Restart the server by killing and restarting the process.
+
+    This function attempts to restart the server using the ServerManager if available,
+    otherwise falls back to calling the /restart endpoint (which won't work if server is hung).
 
     Args:
         port: Server URL/port
@@ -84,9 +87,28 @@ def restart_server(port, wait_time=30):
     """
     try:
         logger.warning(f"Attempting to restart server at {port}...")
+
+        # Try to use ServerManager if available (preferred method)
+        try:
+            from scripts.run_with_server import get_server_manager
+            server_manager = get_server_manager()
+
+            if server_manager:
+                logger.info("Using ServerManager to restart server (process kill + restart)...")
+                server_manager.restart_server()
+                logger.success("Server restarted successfully via ServerManager")
+                return True
+            else:
+                logger.warning("ServerManager not available, falling back to REST endpoint method")
+        except ImportError:
+            logger.warning("run_with_server module not available, falling back to REST endpoint method")
+        except Exception as e:
+            logger.warning(f"Failed to use ServerManager: {e}, falling back to REST endpoint method")
+
+        # Fallback: Try calling the /restart endpoint (won't work if server is truly hung)
+        logger.info("Attempting restart via /restart endpoint (may not work if server is hung)...")
         restart_url = f"{port}/restart"
 
-        # Call restart endpoint (may fail if server is already unresponsive)
         try:
             response = requests.post(restart_url, timeout=5)
             if response.status_code == 200:
@@ -95,7 +117,8 @@ def restart_server(port, wait_time=30):
                 logger.warning(f"Restart request returned status {response.status_code}")
         except Exception as e:
             logger.warning(f"Failed to send restart request (server may be unresponsive): {e}")
-            # Continue anyway - the server might restart via external mechanism
+            logger.error("Cannot restart server - no ServerManager and REST endpoint failed")
+            return False
 
         # Wait for server to go down
         logger.info("Waiting for server to shut down...")

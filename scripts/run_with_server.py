@@ -120,6 +120,18 @@ def determine_generations_file_path(task_name, model, generations_file_path=None
     model_name = model.split("/")[-1]
     return f"output/{task_name}/{model_name}/generation.jsonl"
 
+# Global server manager instance (set when server is started)
+_global_server_manager = None
+
+def get_server_manager():
+    """Get the global server manager instance."""
+    return _global_server_manager
+
+def set_server_manager(manager):
+    """Set the global server manager instance."""
+    global _global_server_manager
+    _global_server_manager = manager
+
 class ServerManager:
     """Manages the activation logging server lifecycle."""
 
@@ -208,6 +220,39 @@ class ServerManager:
                 self.server_process.kill()
                 self.server_process.wait()
             logger.info("Server stopped")
+
+    def restart_server(self):
+        """Restart the activation logging server by killing and restarting the process."""
+        logger.warning("=" * 80)
+        logger.warning("RESTARTING SERVER (PROCESS KILL + RESTART)")
+        logger.warning("=" * 80)
+
+        # Stop the current server process
+        if self.server_process:
+            logger.info("Killing current server process...")
+            try:
+                self.server_process.terminate()
+                try:
+                    self.server_process.wait(timeout=5)
+                    logger.info("Server terminated gracefully")
+                except subprocess.TimeoutExpired:
+                    logger.warning("Server didn't stop gracefully, force killing...")
+                    self.server_process.kill()
+                    self.server_process.wait()
+                    logger.info("Server killed")
+            except Exception as e:
+                logger.error(f"Error stopping server: {e}")
+
+        # Wait a moment for resources to be released
+        logger.info("Waiting for resources to be released...")
+        time.sleep(3)
+
+        # Start a new server process
+        logger.info("Starting new server process...")
+        self.start_server()
+        logger.success("Server restarted successfully!")
+
+        return True
 
 def run_task_step(step, task, model, **kwargs):
     """Run the specified task step."""
@@ -400,6 +445,9 @@ def main():
     try:
         # Start server
         server_manager.start_server()
+
+        # Register server manager globally so client code can restart it
+        set_server_manager(server_manager)
 
         # Prepare task kwargs
         task_kwargs = {
