@@ -29,14 +29,15 @@ import argparse
 import os
 import subprocess
 import sys
-import time
-import requests
 from pathlib import Path
 from loguru import logger
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
+
+# Import ServerManager from utils.lm
+from utils import lm
 
 def check_dependencies(task, step):
     """Check if required data files and directories exist for the task and step."""
@@ -120,143 +121,30 @@ def determine_generations_file_path(task_name, model, generations_file_path=None
     model_name = model.split("/")[-1]
     return f"output/{task_name}/{model_name}/generation.jsonl"
 
-# Global server manager instance (set when server is started)
-_global_server_manager = None
+# Use ServerManager from utils.lm
+ServerManager = lm.ServerManager
+get_server_manager = lm.get_server_manager
+set_server_manager = lm.set_server_manager
 
-def get_server_manager():
-    """Get the global server manager instance."""
-    return _global_server_manager
+def run_task_step(step, task, model, server_manager=None, **kwargs):
+    """Run the specified task step.
 
-def set_server_manager(manager):
-    """Set the global server manager instance."""
-    global _global_server_manager
-    _global_server_manager = manager
-
-class ServerManager:
-    """Manages the activation logging server lifecycle."""
-
-    def __init__(self, model, host="0.0.0.0", port=8000, logger_type="lmdb", activations_path=None, log_file_path=None):
-        self.model = model
-        self.host = host
-        self.port = port
-        self.logger_type = logger_type
-        self.activations_path = activations_path or f"lmdb_data/{model.replace('/', '_')}_activations.lmdb"
-        self.log_file_path = log_file_path
-        self.server_process = None
-        
-    def start_server(self):
-        """Start the activation logging server."""
-        logger.info(f"Starting activation logging server for model: {self.model}")
-        
-        # Set environment variables for activation logging
-        env = os.environ.copy()
-        env["ACTIVATION_STORAGE_PATH"] = self.activations_path
-        env["ACTIVATION_LOGGER_TYPE"] = self.logger_type
-        env["ACTIVATION_TARGET_LAYERS"] = "all"
-        env["ACTIVATION_SEQUENCE_MODE"] = "all"
-        
-        # Build server command
-        cmd = [
-            sys.executable, "-m", "activation_logging.vllm_serve",
-            "--model", self.model,
-            "--host", self.host,
-            "--port", str(self.port),
-            "--logger-type", self.logger_type,
-            "--activations-path", self.activations_path
-        ]
-
-        # Add log file path if specified
-        if self.log_file_path:
-            cmd.extend(["--log-file", self.log_file_path])
-            logger.info(f"Server behavior logs will be written to: {self.log_file_path}")
-        
-        logger.info(f"Server command: {' '.join(cmd)}")
-        
-        # Start server process
-        self.server_process = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        
-        # Wait for server to be ready
-        self._wait_for_server()
-        
-    def _wait_for_server(self, timeout=120):
-        """Wait for server to be ready to accept requests."""
-        logger.info("Waiting for server to be ready...")
-        start_time = time.time()
-        
-        while time.time() - start_time < timeout:
-            try:
-                response = requests.get(f"http://{self.host}:{self.port}/health", timeout=5)
-                if response.status_code == 200:
-                    logger.success("Server is ready!")
-                    return
-            except requests.exceptions.RequestException:
-                pass
-            
-            # Check if server process is still running
-            if self.server_process.poll() is not None:
-                stdout, stderr = self.server_process.communicate()
-                logger.error(f"Server process died. STDOUT: {stdout}, STDERR: {stderr}")
-                raise RuntimeError("Server process terminated unexpectedly")
-            
-            time.sleep(2)
-        
-        raise TimeoutError(f"Server did not become ready within {timeout} seconds")
-    
-    def stop_server(self):
-        """Stop the activation logging server."""
-        if self.server_process:
-            logger.info("Stopping activation logging server...")
-            self.server_process.terminate()
-            try:
-                self.server_process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                logger.warning("Server didn't stop gracefully, killing...")
-                self.server_process.kill()
-                self.server_process.wait()
-            logger.info("Server stopped")
-
-    def restart_server(self):
-        """Restart the activation logging server by killing and restarting the process."""
-        logger.warning("=" * 80)
-        logger.warning("RESTARTING SERVER (PROCESS KILL + RESTART)")
-        logger.warning("=" * 80)
-
-        # Stop the current server process
-        if self.server_process:
-            logger.info("Killing current server process...")
-            try:
-                self.server_process.terminate()
-                try:
-                    self.server_process.wait(timeout=5)
-                    logger.info("Server terminated gracefully")
-                except subprocess.TimeoutExpired:
-                    logger.warning("Server didn't stop gracefully, force killing...")
-                    self.server_process.kill()
-                    self.server_process.wait()
-                    logger.info("Server killed")
-            except Exception as e:
-                logger.error(f"Error stopping server: {e}")
-
-        # Wait a moment for resources to be released
-        logger.info("Waiting for resources to be released...")
-        time.sleep(3)
-
-        # Start a new server process
-        logger.info("Starting new server process...")
-        self.start_server()
-        logger.success("Server restarted successfully!")
-
-        return True
-
-def run_task_step(step, task, model, **kwargs):
-    """Run the specified task step."""
+    Args:
+        step: The step to run (generate, inference, eval)
+        task: The task name
+        model: The model name
+        server_manager: ServerManager instance to pass to subprocess
+        **kwargs: Additional task-specific arguments
+    """
     logger.info(f"Running {step} step for {task} task with model {model}")
+
+    # Set environment variable to indicate server manager is available
+    # The subprocess can use this to know it should try to access the server manager
+    env = os.environ.copy()
+    if server_manager:
+        env["SERVER_MANAGER_AVAILABLE"] = "true"
+        env["SERVER_HOST"] = server_manager.host
+        env["SERVER_PORT"] = str(server_manager.port)
 
     # Build command based on task and step
     if task == "precisewikiqa":
@@ -291,7 +179,7 @@ def run_task_step(step, task, model, **kwargs):
             cmd.extend(["--qa_output_path", kwargs["qa_output_path"]])
         if kwargs.get("quick_debug_mode"):
             cmd.append("--quick_debug_mode")
-            
+
     elif task == "longwiki":
         cmd = [sys.executable, "-m", "tasks.longwiki.longwiki_main"]
 
@@ -352,17 +240,17 @@ def run_task_step(step, task, model, **kwargs):
         
     else:
         raise ValueError(f"Unknown task: {task}")
-    
+
     logger.info(f"Task command: {' '.join(cmd)}")
-    
-    # Run the task
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    
+
+    # Run the task with environment variables
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+
     if result.returncode != 0:
         logger.error(f"Task failed with return code {result.returncode}")
         logger.error(f"STDERR: {result.stderr}")
         raise RuntimeError(f"Task execution failed: {result.stderr}")
-    
+
     logger.success(f"Task {step} completed successfully")
     return result
 
@@ -480,10 +368,10 @@ def main():
             steps = ["generate", "inference", "eval"]
             for step in steps:
                 logger.info(f"Running step {step}...")
-                run_task_step(step, args.task, args.model, **task_kwargs)
+                run_task_step(step, args.task, args.model, server_manager=server_manager, **task_kwargs)
         else:
             # Run single step
-            run_task_step(args.step, args.task, args.model, **task_kwargs)
+            run_task_step(args.step, args.task, args.model, server_manager=server_manager, **task_kwargs)
 
         logger.success("All steps completed successfully!")
 

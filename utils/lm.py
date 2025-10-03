@@ -6,7 +6,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
+import sys
 import time
+import subprocess
 import openai
 from openai import APITimeoutError
 from loguru import logger
@@ -29,6 +31,140 @@ skip_stats = {"total_skipped": 0, "timeout_skipped": 0, "error_skipped": 0}
 # Global flag to enable/disable server restart on timeout
 ENABLE_SERVER_RESTART = os.environ.get("ENABLE_SERVER_RESTART", "true").lower() == "true"
 SERVER_RESTART_WAIT_TIME = int(os.environ.get("SERVER_RESTART_WAIT_TIME", "30"))  # seconds to wait for server restart
+
+# Global server manager instance (set when server is started in run_exp)
+_global_server_manager = None
+
+def get_server_manager():
+    """Get the global server manager instance."""
+    return _global_server_manager
+
+def set_server_manager(manager):
+    """Set the global server manager instance."""
+    global _global_server_manager
+    _global_server_manager = manager
+
+class ServerManager:
+    """Manages the activation logging server lifecycle."""
+
+    def __init__(self, model, host="0.0.0.0", port=8000, logger_type="lmdb", activations_path=None, log_file_path=None):
+        self.model = model
+        self.host = host
+        self.port = port
+        self.logger_type = logger_type
+        self.activations_path = activations_path or f"lmdb_data/{model.replace('/', '_')}_activations.lmdb"
+        self.log_file_path = log_file_path
+        self.server_process = None
+
+    def start_server(self):
+        """Start the activation logging server."""
+        logger.info(f"Starting activation logging server for model: {self.model}")
+
+        # Set environment variables for activation logging
+        env = os.environ.copy()
+        env["ACTIVATION_STORAGE_PATH"] = self.activations_path
+        env["ACTIVATION_LOGGER_TYPE"] = self.logger_type
+        env["ACTIVATION_TARGET_LAYERS"] = "all"
+        env["ACTIVATION_SEQUENCE_MODE"] = "all"
+
+        # Build server command
+        cmd = [
+            sys.executable, "-m", "activation_logging.vllm_serve",
+            "--model", self.model,
+            "--host", self.host,
+            "--port", str(self.port),
+            "--logger-type", self.logger_type,
+            "--activations-path", self.activations_path
+        ]
+
+        # Add log file path if specified
+        if self.log_file_path:
+            cmd.extend(["--log-file", self.log_file_path])
+            logger.info(f"Server behavior logs will be written to: {self.log_file_path}")
+
+        logger.info(f"Server command: {' '.join(cmd)}")
+
+        # Start server process
+        self.server_process = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        # Wait for server to be ready
+        self._wait_for_server()
+
+    def _wait_for_server(self, timeout=120):
+        """Wait for server to be ready to accept requests."""
+        logger.info("Waiting for server to be ready...")
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            try:
+                response = requests.get(f"http://{self.host}:{self.port}/health", timeout=5)
+                if response.status_code == 200:
+                    logger.success("Server is ready!")
+                    return
+            except requests.exceptions.RequestException:
+                pass
+
+            # Check if server process is still running
+            if self.server_process.poll() is not None:
+                stdout, stderr = self.server_process.communicate()
+                logger.error(f"Server process died. STDOUT: {stdout}, STDERR: {stderr}")
+                raise RuntimeError("Server process terminated unexpectedly")
+
+            time.sleep(2)
+
+        raise TimeoutError(f"Server did not become ready within {timeout} seconds")
+
+    def stop_server(self):
+        """Stop the activation logging server."""
+        if self.server_process:
+            logger.info("Stopping activation logging server...")
+            self.server_process.terminate()
+            try:
+                self.server_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                logger.warning("Server didn't stop gracefully, killing...")
+                self.server_process.kill()
+                self.server_process.wait()
+            logger.info("Server stopped")
+
+    def restart_server(self):
+        """Restart the activation logging server by killing and restarting the process."""
+        logger.warning("=" * 80)
+        logger.warning("RESTARTING SERVER (PROCESS KILL + RESTART)")
+        logger.warning("=" * 80)
+
+        # Stop the current server process
+        if self.server_process:
+            logger.info("Killing current server process...")
+            try:
+                self.server_process.terminate()
+                try:
+                    self.server_process.wait(timeout=5)
+                    logger.info("Server terminated gracefully")
+                except subprocess.TimeoutExpired:
+                    logger.warning("Server didn't stop gracefully, force killing...")
+                    self.server_process.kill()
+                    self.server_process.wait()
+                    logger.info("Server killed")
+            except Exception as e:
+                logger.error(f"Error stopping server: {e}")
+
+        # Wait a moment for resources to be released
+        logger.info("Waiting for resources to be released...")
+        time.sleep(3)
+
+        # Start a new server process
+        logger.info("Starting new server process...")
+        self.start_server()
+        logger.success("Server restarted successfully!")
+
+        return True
 
 '''
 NOTE:
@@ -89,21 +225,15 @@ def restart_server(port, wait_time=30):
         logger.warning(f"Attempting to restart server at {port}...")
 
         # Try to use ServerManager if available (preferred method)
-        try:
-            from scripts.run_with_server import get_server_manager
-            server_manager = get_server_manager()
+        server_manager = get_server_manager()
 
-            if server_manager:
-                logger.info("Using ServerManager to restart server (process kill + restart)...")
-                server_manager.restart_server()
-                logger.success("Server restarted successfully via ServerManager")
-                return True
-            else:
-                logger.warning("ServerManager not available, falling back to REST endpoint method")
-        except ImportError:
-            logger.warning("run_with_server module not available, falling back to REST endpoint method")
-        except Exception as e:
-            logger.warning(f"Failed to use ServerManager: {e}, falling back to REST endpoint method")
+        if server_manager:
+            logger.info("Using ServerManager to restart server (process kill + restart)...")
+            server_manager.restart_server()
+            logger.success("Server restarted successfully via ServerManager")
+            return True
+        else:
+            logger.warning("ServerManager not available, falling back to REST endpoint method")
 
         # Fallback: Try calling the /restart endpoint (won't work if server is truly hung)
         logger.info("Attempting restart via /restart endpoint (may not work if server is hung)...")
