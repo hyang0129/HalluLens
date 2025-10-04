@@ -126,25 +126,19 @@ ServerManager = lm.ServerManager
 get_server_manager = lm.get_server_manager
 set_server_manager = lm.set_server_manager
 
-def run_task_step(step, task, model, server_manager=None, **kwargs):
+def run_task_step(step, task, model, **kwargs):
     """Run the specified task step.
 
     Args:
         step: The step to run (generate, inference, eval)
         task: The task name
         model: The model name
-        server_manager: ServerManager instance to pass to subprocess
         **kwargs: Additional task-specific arguments
     """
     logger.info(f"Running {step} step for {task} task with model {model}")
 
-    # Set environment variable to indicate server manager is available
-    # The subprocess can use this to know it should try to access the server manager
+    # Use default environment
     env = os.environ.copy()
-    if server_manager:
-        env["SERVER_MANAGER_AVAILABLE"] = "true"
-        env["SERVER_HOST"] = server_manager.host
-        env["SERVER_PORT"] = str(server_manager.port)
 
     # Build command based on task and step
     if task == "precisewikiqa":
@@ -320,22 +314,12 @@ def main():
         generations_dir.mkdir(parents=True, exist_ok=True)
         log_file_path = str(generations_dir / "server_behavior.log")
 
-    # Create server manager
-    server_manager = ServerManager(
-        model=args.model,
-        host=args.host,
-        port=args.port,
-        logger_type=args.logger_type,
-        activations_path=args.activations_path,
-        log_file_path=log_file_path
-    )
+    logger.info("=" * 80)
+    logger.info("NOTE: Server management is now handled by run_exp()")
+    logger.info("The server will be started automatically when needed during inference")
+    logger.info("=" * 80)
 
     try:
-        # Start server
-        server_manager.start_server()
-
-        # Register server manager globally so client code can restart it
-        set_server_manager(server_manager)
 
         # Prepare task kwargs
         task_kwargs = {
@@ -368,10 +352,10 @@ def main():
             steps = ["generate", "inference", "eval"]
             for step in steps:
                 logger.info(f"Running step {step}...")
-                run_task_step(step, args.task, args.model, server_manager=server_manager, **task_kwargs)
+                run_task_step(step, args.task, args.model, **task_kwargs)
         else:
             # Run single step
-            run_task_step(args.step, args.task, args.model, server_manager=server_manager, **task_kwargs)
+            run_task_step(args.step, args.task, args.model, **task_kwargs)
 
         logger.success("All steps completed successfully!")
 
@@ -380,9 +364,6 @@ def main():
     except Exception as e:
         logger.error(f"Error: {e}")
         sys.exit(1)
-    finally:
-        # Always stop server
-        server_manager.stop_server()
 
 if __name__ == "__main__":
     main()

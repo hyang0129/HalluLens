@@ -53,9 +53,13 @@ def run_exp(
     """
     # Start server if needed
     server_manager = None
+    server_was_running = False
+
     if inference_method == "vllm" and manage_server:
         # Check if server is already running
-        if not lm.check_server_health(f"http://{server_host}:{server_port}"):
+        server_was_running = lm.check_server_health(f"http://{server_host}:{server_port}")
+
+        if not server_was_running:
             print(f"Starting activation logging server for {model_path}...")
             server_manager = lm.ServerManager(
                 model=model_path,
@@ -70,6 +74,7 @@ def run_exp(
             print(f"✅ Server started successfully at http://{server_host}:{server_port}")
         else:
             print(f"Server already running at http://{server_host}:{server_port}")
+            print(f"⚠️  Note: Server restart will not be available (server not managed by this process)")
 
     try:
         # Initialize client logging for debugging
