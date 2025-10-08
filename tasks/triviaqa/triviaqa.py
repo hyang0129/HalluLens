@@ -343,7 +343,12 @@ if __name__ == '__main__':
     parser.add_argument('--eval_results_path', type=str, default='', help='path to save evaluation results')
     parser.add_argument('--N', type=int, default=1000, help='number of samples to evaluate')
     parser.add_argument('--quick_debug_mode', action='store_true', default=False, help='if True, only evaluate first 50 questions')
-    
+
+    # Activation logging parameters
+    parser.add_argument('--logger_type', type=str, default='lmdb', choices=['lmdb', 'json'], help='Activation logger type')
+    parser.add_argument('--activations_path', type=str, default=None, help='Path for storing activations')
+    parser.add_argument('--log_file', type=str, default=None, help='Path for server behavior logs')
+
     args = parser.parse_args()
     
     # Set up task name and paths
@@ -380,7 +385,10 @@ if __name__ == '__main__':
             generations_file_path=args.generations_file_path if args.generations_file_path else None,
             inference_method=args.inference_method,
             max_tokens=args.max_inference_tokens,
-            max_workers=1
+            max_workers=1,
+            logger_type=args.logger_type,
+            activations_path=args.activations_path,
+            log_file_path=args.log_file
         )
         print('Inference completed')
     

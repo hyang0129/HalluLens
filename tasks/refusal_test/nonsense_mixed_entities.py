@@ -17,12 +17,8 @@ import tasks.refusal_test.prompt as prompt_templates
 
 
 class NonsenseMixedInference(NonsenseNameInference):
-    def __init__(self, taskname, output_base_dir, generate_model, prompt_path, seed, method='vllm'):
-        self.output_base_dir = output_base_dir
-        self.generate_model = generate_model
-        self.inference_method = method
-        self.prompt_path = prompt_path
-        self.seed = seed
+    def __init__(self, taskname, output_base_dir, generate_model, prompt_path, seed, method='vllm', logger_type='lmdb', activations_path=None, log_file_path=None):
+        super().__init__(output_base_dir, generate_model, prompt_path, seed, method, logger_type, activations_path, log_file_path)
         self.TASKNAME = taskname #prompt_path.split('/')[-1].replace('.csv', '') #  f"{seed}_{N}.csv"
         print('INFER TASKNAME', self.TASKNAME)
 
@@ -105,6 +101,12 @@ if __name__ == '__main__':
     parser.add_argument('--N', type=int, default=2000)
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--inference_method', type=str, default='vllm')
+
+    # Activation logging parameters
+    parser.add_argument('--logger_type', type=str, default='lmdb', choices=['lmdb', 'json'], help='Activation logger type')
+    parser.add_argument('--activations_path', type=str, default=None, help='Path for storing activations')
+    parser.add_argument('--log_file', type=str, default=None, help='Path for server behavior logs')
+
     args = parser.parse_args()
 
     # set variables
@@ -131,7 +133,7 @@ if __name__ == '__main__':
 
     # run inference
     if args.do_inference:
-        inference = NonsenseMixedInference(TASKNAME, output_base_dir, tested_model, prompt_path, seed, inference_method)
+        inference = NonsenseMixedInference(TASKNAME, output_base_dir, tested_model, prompt_path, seed, inference_method, args.logger_type, args.activations_path, args.log_file)
         if args.infer_overwrite:
             inference.remove_existing_files()
         inference.run_inference()

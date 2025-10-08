@@ -340,6 +340,12 @@ if __name__ == '__main__':
     parser.add_argument('--N', type=int, default=5000)
     parser.add_argument('--quick_debug_mode', action='store_true', default=False, help='if True, only evaluate first 50 questions')
     parser.add_argument('--q_generator', type=str, default='Llama-3.3-70B-Instruct-IQ3_M.gguf', help='model to use for question generation')
+
+    # Activation logging parameters
+    parser.add_argument('--logger_type', type=str, default='lmdb', choices=['lmdb', 'json'], help='Activation logger type')
+    parser.add_argument('--activations_path', type=str, default=None, help='Path for storing activations')
+    parser.add_argument('--log_file', type=str, default=None, help='Path for server behavior logs')
+
     args = parser.parse_args()
 
     # get base path
@@ -400,7 +406,10 @@ if __name__ == '__main__':
                     max_tokens=args.max_inference_tokens,
                     max_workers=1,
                     max_retries=args.max_retries,
-                    base_delay=args.base_delay)
+                    base_delay=args.base_delay,
+                    logger_type=args.logger_type,
+                    activations_path=args.activations_path,
+                    log_file_path=args.log_file)
         print('Inference completed')
 
     if args.do_eval:

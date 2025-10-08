@@ -18,12 +18,15 @@ def remove_file(file_path):
 
 
 class NonsenseNameInference:
-    def __init__(self, output_base_dir, generate_model, prompt_path, seed, method='vllm'):
+    def __init__(self, output_base_dir, generate_model, prompt_path, seed, method='vllm', logger_type='lmdb', activations_path=None, log_file_path=None):
         self.output_base_dir = output_base_dir
         self.generate_model = generate_model
         self.inference_method = method
         self.prompt_path = prompt_path
         self.seed = seed
+        self.logger_type = logger_type
+        self.activations_path = activations_path
+        self.log_file_path = log_file_path
         self.TASKNAME = prompt_path.split('/')[-1].replace('_all_not_exist.csv', '') #  f"{seed}_{BUSINESS_N}_{EVENT_N}_{PRODUCT_N}"
         print('INFER TASKNAME', self.TASKNAME)
     
@@ -33,12 +36,15 @@ class NonsenseNameInference:
         TASKNAME = self.TASKNAME
         # prompt_path = f"{self.root_path}/save/{self.seed}_{self.BUSINESS_N}_{self.EVENT_N}_{self.PRODUCT_N}_all_not_exist.csv"
         all_prompts = pd.read_csv(self.prompt_path)
-        exp.run_exp(task=TASKNAME, 
-                    model_path=generate_model, 
-                    all_prompts=all_prompts, 
-                    inference_method=self.inference_method, 
-                    max_tokens=256, 
-                    base_path=self.output_base_dir)
+        exp.run_exp(task=TASKNAME,
+                    model_path=generate_model,
+                    all_prompts=all_prompts,
+                    inference_method=self.inference_method,
+                    max_tokens=256,
+                    base_path=self.output_base_dir,
+                    logger_type=self.logger_type,
+                    activations_path=self.activations_path,
+                    log_file_path=self.log_file_path)
         print(TASKNAME, 'Inference completed')
 
     def remove_existing_files(self):

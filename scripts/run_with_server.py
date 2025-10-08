@@ -174,6 +174,14 @@ def run_task_step(step, task, model, **kwargs):
         if kwargs.get("quick_debug_mode"):
             cmd.append("--quick_debug_mode")
 
+        # Add activation logging parameters
+        if kwargs.get("logger_type"):
+            cmd.extend(["--logger_type", kwargs["logger_type"]])
+        if kwargs.get("activations_path"):
+            cmd.extend(["--activations_path", kwargs["activations_path"]])
+        if kwargs.get("log_file"):
+            cmd.extend(["--log_file", kwargs["log_file"]])
+
     elif task == "longwiki":
         cmd = [sys.executable, "-m", "tasks.longwiki.longwiki_main"]
 
@@ -211,7 +219,15 @@ def run_task_step(step, task, model, **kwargs):
             cmd.extend(["--max_tokens", str(kwargs["max_tokens"])])
         if kwargs.get("max_workers"):
             cmd.extend(["--max_workers", str(kwargs["max_workers"])])
-            
+
+        # Add activation logging parameters
+        if kwargs.get("logger_type"):
+            cmd.extend(["--logger_type", kwargs["logger_type"]])
+        if kwargs.get("activations_path"):
+            cmd.extend(["--activations_path", kwargs["activations_path"]])
+        if kwargs.get("log_file"):
+            cmd.extend(["--log_file", kwargs["log_file"]])
+
     elif task == "mixedentities":
         cmd = [sys.executable, "-m", "tasks.refusal_test.nonsense_mixed_entities"]
 
@@ -231,6 +247,14 @@ def run_task_step(step, task, model, **kwargs):
             "--seed", str(kwargs.get("seed", 1)),
             "--inference_method", kwargs.get("inference_method", "vllm")
         ])
+
+        # Add activation logging parameters
+        if kwargs.get("logger_type"):
+            cmd.extend(["--logger_type", kwargs["logger_type"]])
+        if kwargs.get("activations_path"):
+            cmd.extend(["--activations_path", kwargs["activations_path"]])
+        if kwargs.get("log_file"):
+            cmd.extend(["--log_file", kwargs["log_file"]])
         
     else:
         raise ValueError(f"Unknown task: {task}")
@@ -333,6 +357,10 @@ def main():
             "q_generator": args.q_generator,
             "qa_output_path": args.qa_output_path,
             "quick_debug_mode": args.quick_debug_mode,
+            # Activation logging parameters
+            "logger_type": args.logger_type,
+            "activations_path": args.activations_path,
+            "log_file": args.log_file,
             # LongWiki specific
             "db_path": args.db_path,
             "claim_extractor": args.claim_extractor,
