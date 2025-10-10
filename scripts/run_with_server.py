@@ -360,7 +360,7 @@ def main():
             # Activation logging parameters
             "logger_type": args.logger_type,
             "activations_path": args.activations_path,
-            "log_file": args.log_file,
+            "log_file": log_file_path,
             # LongWiki specific
             "db_path": args.db_path,
             "claim_extractor": args.claim_extractor,

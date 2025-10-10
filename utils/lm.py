@@ -295,8 +295,19 @@ def log_request_payload(request_id, prompt, model, max_tokens, temperature, top_
     logger.error(f"[CLIENT {request_id}] Prompt preview: {prompt[:200]}{'...' if len(prompt) > 200 else ''}")
     logger.error(f"[CLIENT {request_id}] Max tokens: {max_tokens}, Temperature: {temperature}, Top-p: {top_p}")
 
+    # Create failed_requests subfolder if it doesn't exist
+    failed_requests_dir = "goodwiki_json/failed_requests"
+    os.makedirs(failed_requests_dir, exist_ok=True)
+
+    # Find the next available number for failed request files
+    counter = 1
+    while True:
+        payload_file = f"{failed_requests_dir}/failed_request_{counter}.json"
+        if not os.path.exists(payload_file):
+            break
+        counter += 1
+
     # Also save full payload to separate file for detailed analysis
-    payload_file = f"goodwiki_json/failed_request_{request_id}.json"
     try:
         with open(payload_file, 'w') as f:
             json.dump(payload, f, indent=2)
@@ -320,9 +331,11 @@ def track_skipped_sample(request_id, reason, attempts):
         logger.warning(f"[SKIP TRACKER] Sample {request_id} skipped due to {reason} after {attempts} attempts")
         logger.warning(f"[SKIP TRACKER] Total skipped: {skip_stats['total_skipped']} (timeouts: {skip_stats['timeout_skipped']}, errors: {skip_stats['error_skipped']})")
 
-        # Save skipped samples list
+        # Save skipped samples list in failed_requests subfolder
         try:
-            skipped_file = "goodwiki_json/skipped_samples.json"
+            failed_requests_dir = "goodwiki_json/failed_requests"
+            os.makedirs(failed_requests_dir, exist_ok=True)
+            skipped_file = f"{failed_requests_dir}/skipped_samples.json"
             with open(skipped_file, 'w') as f:
                 json.dump({
                     "skipped_samples": list(skipped_samples),

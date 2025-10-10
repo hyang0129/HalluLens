@@ -136,21 +136,47 @@ class PreciseQAEval:
     def eval_abstention(self, evaluator):
         print("Start abstantion evaluation")
         abs_path = f'{self.output_path}/abstain_eval_raw.jsonl'
-        
+
         abstain_prompts = [
                 ABSTAIN_PROMPT_UPDATED.format(
                     prompt=g.prompt, generation=g.generation
                 )
                 for _, g in self.test_df.iterrows()
             ]
-        
-        abstains_eval_raw = thread_map(
-            lambda p: lm.generate(p, evaluator),
-            abstain_prompts,
-            max_workers=1,
-            desc=f"using {evaluator}")
-        
-        eval_utils.save_eval_raw(abstains_eval_raw, abs_path)
+
+        # Start server for evaluator model if needed
+        server_was_running = lm.check_server_health("http://0.0.0.0:8000")
+        server_manager = None
+
+        if not server_was_running:
+            print(f"Starting evaluation server for {evaluator}...")
+            server_manager = lm.ServerManager(
+                model=evaluator,
+                host="0.0.0.0",
+                port=8000,
+                logger_type="lmdb",  # Use minimal logging for evaluation
+                activations_path=None  # No activation logging needed for evaluation
+            )
+            server_manager.start_server()
+            lm.set_server_manager(server_manager)
+            print(f"✅ Evaluation server started successfully")
+        else:
+            print(f"Using existing server for evaluation")
+
+        try:
+            abstains_eval_raw = thread_map(
+                lambda p: lm.generate(p, evaluator),
+                abstain_prompts,
+                max_workers=1,
+                desc=f"using {evaluator}")
+
+            eval_utils.save_eval_raw(abstains_eval_raw, abs_path)
+        finally:
+            # Stop server if we started it
+            if server_manager and not server_was_running:
+                print("Stopping evaluation server...")
+                server_manager.stop_server()
+                lm.set_server_manager(None)
         
         ABSTAIN_JSON_KEY = 'is_abstaining'
         abstains_eval = eval_utils.jsonify_ans(raw_responses=abstains_eval_raw, \
@@ -221,18 +247,44 @@ class PreciseQAEval:
         ]
 
         if evaluator == "meta-llama/Llama-3.1-8B-Instruct" or evaluator == "Llama-3.3-70B-Instruct-IQ3_M.gguf":
-            halu_eval_raw = thread_map(
-                lambda p: lm.generate(p, evaluator),
-                halu_prompts,
-                max_workers=1,
-                desc=f"using {evaluator}"
-            )
+            # Start server for evaluator model if needed
+            server_was_running = lm.check_server_health("http://0.0.0.0:8000")
+            server_manager = None
 
-            # Save raw hallucination evaluation responses
-            with open(halu_path, 'w') as f:
-                for response in halu_eval_raw:
-                    json.dump({"eval_res": response}, f)
-                    f.write('\n')
+            if not server_was_running:
+                print(f"Starting evaluation server for {evaluator}...")
+                server_manager = lm.ServerManager(
+                    model=evaluator,
+                    host="0.0.0.0",
+                    port=8000,
+                    logger_type="lmdb",  # Use minimal logging for evaluation
+                    activations_path=None  # No activation logging needed for evaluation
+                )
+                server_manager.start_server()
+                lm.set_server_manager(server_manager)
+                print(f"✅ Evaluation server started successfully")
+            else:
+                print(f"Using existing server for evaluation")
+
+            try:
+                halu_eval_raw = thread_map(
+                    lambda p: lm.generate(p, evaluator),
+                    halu_prompts,
+                    max_workers=1,
+                    desc=f"using {evaluator}"
+                )
+
+                # Save raw hallucination evaluation responses
+                with open(halu_path, 'w') as f:
+                    for response in halu_eval_raw:
+                        json.dump({"eval_res": response}, f)
+                        f.write('\n')
+            finally:
+                # Stop server if we started it
+                if server_manager and not server_was_running:
+                    print("Stopping evaluation server...")
+                    server_manager.stop_server()
+                    lm.set_server_manager(None)
 
         else:
             raise ValueError(f"Invalid evaluator: {evaluator}")

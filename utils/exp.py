@@ -132,7 +132,7 @@ def run_exp(
                 print(f"   - Error skipped: {skip_stats['error_skipped']}")
                 print(f"   - Successfully processed: {len(all_prompts) - skip_stats['total_skipped']}")
                 print(f"   - Skip rate: {skip_stats['total_skipped']/len(all_prompts)*100:.2f}%")
-                print(f"   - Skipped samples list saved to: goodwiki_json/skipped_samples.json")
+                print(f"   - Skipped samples list saved to: goodwiki_json/failed_requests/skipped_samples.json")
             else:
                 print(f"✅ Experiment completed successfully with no skipped samples!")
 
