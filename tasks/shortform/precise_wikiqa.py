@@ -116,10 +116,11 @@ class PreciseQAEval:
         
         if generations_file_path:
             self.generations_file_path = generations_file_path
+            # Use the same directory as the generations file for evaluation outputs
+            self.output_path = os.path.dirname(self.generations_file_path)
         else:
             self.generations_file_path = f'output/{TASKNAME}/{self.model_name}/generation.jsonl'
-        
-        self.output_path = f'output/{TASKNAME}/{self.model_name}'
+            self.output_path = f'output/{TASKNAME}/{self.model_name}'
         self.test_df = pd.read_json(self.generations_file_path, lines=True)
        
         # self.abtention_evaluator = 'meta-llama/Llama-3.1-70B-Instruct'
