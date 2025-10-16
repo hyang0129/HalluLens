@@ -18,3 +18,15 @@ output/*
 venv/
 generation.jsonl
 test_llama.json
+
+# Testing and debugging files
+goodwiki_json/
+test_output/
+**/test_*.json
+**/test_*.jsonl
+**/failed_request_*.json
+**/skipped_samples.json
+client.log
+server.log
+*_client.log
+*_server.log

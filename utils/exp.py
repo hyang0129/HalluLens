@@ -80,7 +80,9 @@ def run_exp(
         # Initialize client logging for debugging
         if inference_method == "vllm":
             lm.setup_client_logging()
+            lm.initialize_progress_tracking(len(all_prompts))
             print(f"Client logging initialized for {len(all_prompts)} requests")
+            print(f"📊 Starting inference: {len(all_prompts)} total requests to process")
 
         if not generations_file_path:
             base_path = Path(base_path)
@@ -95,12 +97,13 @@ def run_exp(
         prompts =  all_prompts.prompt.to_list()
 
         # get the response from the model
+        print(f"🚀 Processing {len(prompts)} inference requests...")
         if inference_method == 'openai':
             all_prompts["generation"] = thread_map(
                 lambda p: lm.openai_generate(p, model=model_path, temperature=0.0, top_p=1.0, max_tokens=max_tokens),
                 prompts,
                 max_workers=max_workers,
-                desc="Predict openai",
+                desc=f"OpenAI inference ({len(prompts)} requests)",
             )
         elif inference_method == "vllm":
             port = None
@@ -108,14 +111,14 @@ def run_exp(
                 lambda p: lm.call_vllm_api(p, model=model_path, temperature=0.0, top_p=1.0,  max_tokens=max_tokens, port=port, max_retries=max_retries, base_delay=base_delay),
                 prompts,
                 max_workers=max_workers,
-                desc="Predict on vllm",
+                desc=f"vLLM inference ({len(prompts)} requests)",
             )
         elif inference_method == "custom":
             all_prompts["generation"] = thread_map(
                 lambda p: lm.generate(p, model=model_path, temperature=0.0, top_p=1.0, max_tokens=max_tokens, max_retries=max_retries, base_delay=base_delay),
                 prompts,
                 max_workers=max_workers,
-                desc="Predict on custom API",
+                desc=f"Custom API inference ({len(prompts)} requests)",
             )
         else:
             raise NotImplementedError(f"No method {inference_method}")
@@ -123,18 +126,24 @@ def run_exp(
         # save the results
         all_prompts.to_json(generations_file_path, lines=True, orient="records")
 
-        # Report skip statistics if using vllm
+        # Report final statistics if using vllm
         if inference_method == "vllm":
             skip_stats = lm.get_skip_statistics()
+            progress_stats = lm.get_progress_stats()
+
+            print(f"\n📊 Experiment completed:")
+            print(f"   - Total requests: {progress_stats['total_requests']}")
+            print(f"   - Successfully completed: {progress_stats['completed_requests']}")
+            print(f"   - Failed requests: {progress_stats['failed_requests']}")
+            print(f"   - Success rate: {progress_stats['completed_requests']/progress_stats['total_requests']*100:.2f}%")
+
             if skip_stats["total_skipped"] > 0:
-                print(f"\n📊 Experiment completed with {skip_stats['total_skipped']} skipped samples:")
                 print(f"   - Timeout skipped: {skip_stats['timeout_skipped']}")
                 print(f"   - Error skipped: {skip_stats['error_skipped']}")
-                print(f"   - Successfully processed: {len(all_prompts) - skip_stats['total_skipped']}")
                 print(f"   - Skip rate: {skip_stats['total_skipped']/len(all_prompts)*100:.2f}%")
                 print(f"   - Skipped samples list saved to: goodwiki_json/failed_requests/skipped_samples.json")
             else:
-                print(f"✅ Experiment completed successfully with no skipped samples!")
+                print(f"✅ All samples processed successfully!")
 
         if return_gen:
             return all_prompts

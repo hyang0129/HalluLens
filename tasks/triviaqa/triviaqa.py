@@ -391,6 +391,13 @@ if __name__ == '__main__':
         })
         
         print(f"Starting Inference for [{args.model}], Testset_N: {prompts_df.shape}")
+        print(f"📋 Task: {TASKNAME}")
+        print(f"🔧 Inference method: {args.inference_method}")
+        print(f"🎯 Max tokens per request: {args.max_inference_tokens}")
+        if args.logger_type:
+            print(f"📊 Activation logging: {args.logger_type}")
+        print("-" * 60)
+
         exp.run_exp(
             task=TASKNAME,
             model_path=args.model,
@@ -403,7 +410,7 @@ if __name__ == '__main__':
             activations_path=args.activations_path,
             log_file_path=args.log_file
         )
-        print('Inference completed')
+        print('✅ Inference completed successfully!')
     
     if args.do_eval:
         print(f"Starting Evaluation for {args.model}")

@@ -28,6 +28,13 @@ class SampleSkippedException(Exception):
 skipped_samples = set()
 skip_stats = {"total_skipped": 0, "timeout_skipped": 0, "error_skipped": 0}
 
+# Global progress tracking
+progress_stats = {
+    "total_requests": 0,
+    "completed_requests": 0,
+    "failed_requests": 0
+}
+
 # Global flag to enable/disable server restart on timeout
 ENABLE_SERVER_RESTART = os.environ.get("ENABLE_SERVER_RESTART", "true").lower() == "true"
 SERVER_RESTART_WAIT_TIME = int(os.environ.get("SERVER_RESTART_WAIT_TIME", "30"))  # seconds to wait for server restart
@@ -349,6 +356,27 @@ def get_skip_statistics():
     """Get current skip statistics."""
     return skip_stats.copy()
 
+def initialize_progress_tracking(total_requests):
+    """Initialize progress tracking for a new batch of requests."""
+    global progress_stats
+    progress_stats = {
+        "total_requests": total_requests,
+        "completed_requests": 0,
+        "failed_requests": 0
+    }
+
+def update_progress(success=True):
+    """Update progress tracking for a completed request."""
+    global progress_stats
+    if success:
+        progress_stats["completed_requests"] += 1
+    else:
+        progress_stats["failed_requests"] += 1
+
+def get_progress_stats():
+    """Get current progress statistics."""
+    return progress_stats.copy()
+
 ########################################################################################################
 def custom_api(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512):
 
@@ -414,7 +442,12 @@ def call_vllm_api(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512, por
     if port == None:
         port = model_map[model]["server_urls"][i]
 
+    # Get current progress for logging
+    current_progress = get_progress_stats()
+    remaining = current_progress["total_requests"] - current_progress["completed_requests"] - current_progress["failed_requests"]
+
     logger.info(f"[CLIENT {request_id}] Starting API call - Model: {model}, Prompt length: {len(prompt)} chars")
+    logger.info(f"[CLIENT {request_id}] Progress: {current_progress['completed_requests']}/{current_progress['total_requests']} completed, {remaining} remaining")
 
     client = openai.OpenAI(
         base_url=f"{port}",
@@ -440,7 +473,14 @@ def call_vllm_api(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512, por
 
             request_time = time.time() - start_time
             response_content = chat_completion.choices[0].message.content
+
+            # Update progress tracking
+            update_progress(success=True)
+            current_progress = get_progress_stats()
+            remaining = current_progress["total_requests"] - current_progress["completed_requests"] - current_progress["failed_requests"]
+
             logger.info(f"[CLIENT {request_id}] Request completed successfully in {request_time:.2f}s - Response length: {len(response_content)} chars")
+            logger.info(f"[CLIENT {request_id}] Progress: {current_progress['completed_requests']}/{current_progress['total_requests']} completed, {remaining} remaining")
             return response_content
 
         except APITimeoutError as e:
@@ -474,8 +514,14 @@ def call_vllm_api(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512, por
                 # Track the skipped sample
                 track_skipped_sample(request_id, "timeout", max_retries + 1)
 
+                # Update progress tracking
+                update_progress(success=False)
+                current_progress = get_progress_stats()
+                remaining = current_progress["total_requests"] - current_progress["completed_requests"] - current_progress["failed_requests"]
+
                 # Return a placeholder response instead of raising exception
                 logger.warning(f"[CLIENT {request_id}] Returning placeholder response to continue with next sample")
+                logger.warning(f"[CLIENT {request_id}] Progress: {current_progress['completed_requests']}/{current_progress['total_requests']} completed, {current_progress['failed_requests']} failed, {remaining} remaining")
                 return f"[TIMEOUT_SKIPPED] Request {request_id} timed out after {max_retries + 1} attempts. Total skipped: {skip_stats['total_skipped']}"
         except Exception as e:
             request_time = time.time() - start_time
@@ -489,8 +535,14 @@ def call_vllm_api(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512, por
             # Track the skipped sample
             track_skipped_sample(request_id, error_reason, 1)
 
+            # Update progress tracking
+            update_progress(success=False)
+            current_progress = get_progress_stats()
+            remaining = current_progress["total_requests"] - current_progress["completed_requests"] - current_progress["failed_requests"]
+
             # Return placeholder instead of raising exception
             logger.warning(f"[CLIENT {request_id}] Returning placeholder response due to error: {type(e).__name__}")
+            logger.warning(f"[CLIENT {request_id}] Progress: {current_progress['completed_requests']}/{current_progress['total_requests']} completed, {current_progress['failed_requests']} failed, {remaining} remaining")
             return f"[ERROR_SKIPPED] Request {request_id} failed with {type(e).__name__}: {str(e)[:100]}. Total skipped: {skip_stats['total_skipped']}"
 
 def openai_generate(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512):
