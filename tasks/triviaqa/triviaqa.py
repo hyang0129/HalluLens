@@ -138,27 +138,40 @@ class TriviaQAEval:
     def load_test_data(self):
         """Load generated responses and prepare for evaluation"""
         print(f"Loading test data from: {self.generations_file_path}")
-        
+
         if not os.path.exists(self.generations_file_path):
             raise FileNotFoundError(f"Generations file not found: {self.generations_file_path}")
-        
+
         # Load generations
         generations = []
         with open(self.generations_file_path, 'r') as f:
             for line in f:
                 generations.append(json.loads(line))
-        
+
         test_df = pd.DataFrame(generations)
-        
+
         if self.quick_debug_mode:
             print("Quick debug mode: Using first 50 samples")
             test_df = test_df.head(50)
-        
+
         print(f"Loaded {len(test_df)} test samples")
         return test_df
-    
 
-    
+    def evaluate_correctness(self):
+        """Evaluate correctness using TriviaQA string matching"""
+        print("Evaluating correctness using TriviaQA string matching...")
+
+        # Extract model answers and correct answers from the test dataframe
+        model_answers = self.test_df['generation'].tolist()
+        correct_answers_list = self.test_df['correct_answers'].tolist()
+
+        # Use the existing compute_correctness_triviaqa function
+        binary_correctness = compute_correctness_triviaqa(model_answers, correct_answers_list)
+
+        print(f"Evaluated {len(binary_correctness)} samples")
+        return binary_correctness
+
+
     def process_correctness_results(self, correctness_results):
         """Process binary correctness results into categorical labels"""
         processed_results = []

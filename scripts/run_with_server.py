@@ -9,17 +9,23 @@ Usage:
     python scripts/run_with_server.py --step [generate|inference|eval] [task_options...]
 
 Examples:
-    # Generate prompts
+    # Generate prompts (PreciseWikiQA)
     python scripts/run_with_server.py --step generate --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --N 100
 
-    # Run inference
+    # Run inference (PreciseWikiQA)
     python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct
 
-    # Run evaluation
+    # Run evaluation (PreciseWikiQA)
     python scripts/run_with_server.py --step eval --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct
 
-    # Run all steps in sequence
+    # Run all steps in sequence (PreciseWikiQA)
     python scripts/run_with_server.py --step all --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --N 100
+
+    # TriviaQA inference and evaluation
+    python scripts/run_with_server.py --step all --task triviaqa --model meta-llama/Llama-3.1-8B-Instruct --N 1000
+
+    # TriviaQA with custom dataset variant
+    python scripts/run_with_server.py --step inference --task triviaqa --model meta-llama/Llama-3.1-8B-Instruct --dataset_variant unfiltered --split dev
 
     # Custom server log file
     python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --log-file custom/server.log
@@ -84,6 +90,12 @@ def check_dependencies(task, step):
         output_dir = project_root / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
 
+    elif task == "triviaqa":
+        # TriviaQA has auto-download capability, so no strict dependency checks needed
+        # Just ensure output directory exists
+        output_dir = project_root / "output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
     if missing_deps:
         logger.error("Missing required dependencies:")
         for dep in missing_deps:
@@ -109,6 +121,10 @@ def get_task_name(task, **kwargs):
     elif task == "mixedentities":
         exp = kwargs.get("exp", "nonsense_all")
         return f"refusal_test_{exp}"
+    elif task == "triviaqa":
+        dataset_variant = kwargs.get("dataset_variant", "unfiltered")
+        split = kwargs.get("split", "dev")
+        return f"triviaqa_{dataset_variant}_{split}"
     else:
         return task
 
@@ -255,11 +271,59 @@ def run_task_step(step, task, model, **kwargs):
             cmd.extend(["--activations_path", kwargs["activations_path"]])
         if kwargs.get("log_file"):
             cmd.extend(["--log_file", kwargs["log_file"]])
-        
+
+    elif task == "triviaqa":
+        cmd = [sys.executable, "-m", "tasks.triviaqa.triviaqa"]
+
+        # Add step-specific flags (TriviaQA only has inference and eval, no generate)
+        if step == "generate":
+            # TriviaQA doesn't have a generate step, skip
+            logger.info("TriviaQA doesn't have a generate step - skipping")
+            return None
+        elif step == "inference":
+            cmd.append("--do_inference")
+        elif step == "eval":
+            cmd.append("--do_eval")
+
+        # Add common parameters
+        cmd.extend([
+            "--model", model,
+            "--dataset_variant", kwargs.get("dataset_variant", "unfiltered"),
+            "--split", kwargs.get("split", "dev"),
+            "--inference_method", kwargs.get("inference_method", "vllm"),
+            "--max_inference_tokens", str(kwargs.get("max_inference_tokens", 256)),
+            "--N", str(kwargs.get("N", 1000))
+        ])
+
+        # Add optional parameters
+        if kwargs.get("generations_file_path"):
+            cmd.extend(["--generations_file_path", kwargs["generations_file_path"]])
+        if kwargs.get("eval_results_path"):
+            cmd.extend(["--eval_results_path", kwargs["eval_results_path"]])
+        if kwargs.get("data_dir"):
+            cmd.extend(["--data_dir", kwargs["data_dir"]])
+        if kwargs.get("quick_debug_mode"):
+            cmd.append("--quick_debug_mode")
+        if not kwargs.get("auto_download", True):
+            cmd.append("--no_auto_download")
+
+        # Add activation logging parameters
+        if kwargs.get("logger_type"):
+            cmd.extend(["--logger_type", kwargs["logger_type"]])
+        if kwargs.get("activations_path"):
+            cmd.extend(["--activations_path", kwargs["activations_path"]])
+        if kwargs.get("log_file"):
+            cmd.extend(["--log_file", kwargs["log_file"]])
+
     else:
         raise ValueError(f"Unknown task: {task}")
 
     logger.info(f"Task command: {' '.join(cmd)}")
+
+    # Handle case where command is None (e.g., TriviaQA generate step)
+    if cmd is None:
+        logger.info(f"Step {step} skipped for task {task}")
+        return None
 
     # Run the task with environment variables
     result = subprocess.run(cmd, capture_output=True, text=True, env=env)
@@ -278,7 +342,7 @@ def main():
     # Required arguments
     parser.add_argument("--step", required=True, choices=["generate", "inference", "eval", "all"],
                        help="Which step to run (or 'all' for all steps)")
-    parser.add_argument("--task", required=True, choices=["precisewikiqa", "longwiki", "mixedentities"],
+    parser.add_argument("--task", required=True, choices=["precisewikiqa", "longwiki", "mixedentities", "triviaqa"],
                        help="Which task to run")
     parser.add_argument("--model", required=True, help="Model to use")
     
@@ -314,6 +378,12 @@ def main():
     # Mixed entities specific
     parser.add_argument("--exp", default="nonsense_all", help="Experiment name for mixed entities")
     parser.add_argument("--seed", type=int, default=1, help="Random seed")
+
+    # TriviaQA specific
+    parser.add_argument("--dataset_variant", default="unfiltered", help="TriviaQA dataset variant (filtered/unfiltered)")
+    parser.add_argument("--split", default="dev", help="TriviaQA split (train/dev)")
+    parser.add_argument("--data_dir", help="Directory containing TriviaQA data files")
+    parser.add_argument("--auto_download", action="store_true", default=True, help="Automatically download TriviaQA data if not found")
     
     args = parser.parse_args()
     
@@ -328,7 +398,9 @@ def main():
         task_kwargs_for_name = {
             "wiki_src": args.wiki_src,
             "mode": args.mode,
-            "exp": args.exp
+            "exp": args.exp,
+            "dataset_variant": args.dataset_variant,
+            "split": args.split
         }
         task_name = get_task_name(args.task, **task_kwargs_for_name)
         generations_path = determine_generations_file_path(task_name, args.model, args.generations_file_path)
@@ -371,19 +443,33 @@ def main():
             "max_workers": args.max_workers,
             # Mixed entities specific
             "exp": args.exp,
-            "seed": args.seed
+            "seed": args.seed,
+            # TriviaQA specific
+            "dataset_variant": args.dataset_variant,
+            "split": args.split,
+            "data_dir": args.data_dir,
+            "auto_download": args.auto_download
         }
 
         # Run task step(s)
         if args.step == "all":
             # Run all steps in sequence
-            steps = ["generate", "inference", "eval"]
+            if args.task == "triviaqa":
+                # TriviaQA only has inference and eval steps
+                steps = ["inference", "eval"]
+            else:
+                steps = ["generate", "inference", "eval"]
+
             for step in steps:
                 logger.info(f"Running step {step}...")
-                run_task_step(step, args.task, args.model, **task_kwargs)
+                result = run_task_step(step, args.task, args.model, **task_kwargs)
+                if result is None:
+                    logger.info(f"Step {step} was skipped")
         else:
             # Run single step
-            run_task_step(args.step, args.task, args.model, **task_kwargs)
+            result = run_task_step(args.step, args.task, args.model, **task_kwargs)
+            if result is None:
+                logger.info(f"Step {args.step} was skipped")
 
         logger.success("All steps completed successfully!")
 
