@@ -135,8 +135,9 @@ class PreciseQAEval:
             self.test_df = self.test_df.head(5)
 
     def eval_abstention(self, evaluator):
-        print("Start abstantion evaluation")
+        print(f"🔍 Starting abstention evaluation with {evaluator}")
         abs_path = f'{self.output_path}/abstain_eval_raw.jsonl'
+        print(f"📁 Abstention logs will be saved to: {abs_path}")
 
         abstain_prompts = [
                 ABSTAIN_PROMPT_UPDATED.format(
@@ -145,12 +146,14 @@ class PreciseQAEval:
                 for _, g in self.test_df.iterrows()
             ]
 
+        print(f"📊 Generated {len(abstain_prompts)} abstention evaluation prompts")
+
         # Start server for evaluator model if needed
         server_was_running = lm.check_server_health("http://0.0.0.0:8000")
         server_manager = None
 
         if not server_was_running:
-            print(f"Starting evaluation server for {evaluator}...")
+            print(f"🚀 Starting evaluation server for {evaluator}...")
             server_manager = lm.ServerManager(
                 model=evaluator,
                 host="0.0.0.0",
@@ -162,20 +165,23 @@ class PreciseQAEval:
             lm.set_server_manager(server_manager)
             print(f"✅ Evaluation server started successfully")
         else:
-            print(f"Using existing server for evaluation")
+            print(f"🔄 Using existing server for evaluation")
 
         try:
+            print(f"🔄 Processing {len(abstain_prompts)} abstention evaluation requests...")
             abstains_eval_raw = thread_map(
                 lambda p: lm.generate(p, evaluator),
                 abstain_prompts,
                 max_workers=1,
-                desc=f"using {evaluator}")
+                desc=f"Abstention eval using {evaluator}")
 
+            print(f"💾 Saving raw abstention evaluation results to: {abs_path}")
             eval_utils.save_eval_raw(abstains_eval_raw, abs_path)
+            print(f"✅ Abstention evaluation completed successfully")
         finally:
             # Stop server if we started it
             if server_manager and not server_was_running:
-                print("Stopping evaluation server...")
+                print("🛑 Stopping evaluation server...")
                 server_manager.stop_server()
                 lm.set_server_manager(None)
         
@@ -238,14 +244,18 @@ class PreciseQAEval:
         return refusal_res, abstains_eval_raw
 
     def judge_hallucination(self, evaluator):
-        print("Starting Hallucination Evaluation")
+        print(f"🔍 Starting hallucination evaluation with {evaluator}")
 
         halu_path = f'{self.output_path}/halu_eval_raw.jsonl'
+        print(f"📁 Hallucination logs will be saved to: {halu_path}")
+
         halu_prompts = [
             IS_HALLUCINATION_RESPONSE.format(
                 prompt=g.prompt, generation=g.generation, gold_answer=g.answer
             ) for _, g in self.test_df.iterrows()
         ]
+
+        print(f"📊 Generated {len(halu_prompts)} hallucination evaluation prompts")
 
         if evaluator == "meta-llama/Llama-3.1-8B-Instruct" or evaluator == "Llama-3.3-70B-Instruct-IQ3_M.gguf":
             # Start server for evaluator model if needed
@@ -253,7 +263,7 @@ class PreciseQAEval:
             server_manager = None
 
             if not server_was_running:
-                print(f"Starting evaluation server for {evaluator}...")
+                print(f"🚀 Starting evaluation server for {evaluator}...")
                 server_manager = lm.ServerManager(
                     model=evaluator,
                     host="0.0.0.0",
@@ -265,25 +275,28 @@ class PreciseQAEval:
                 lm.set_server_manager(server_manager)
                 print(f"✅ Evaluation server started successfully")
             else:
-                print(f"Using existing server for evaluation")
+                print(f"🔄 Using existing server for evaluation")
 
             try:
+                print(f"🔄 Processing {len(halu_prompts)} hallucination evaluation requests...")
                 halu_eval_raw = thread_map(
                     lambda p: lm.generate(p, evaluator),
                     halu_prompts,
                     max_workers=1,
-                    desc=f"using {evaluator}"
+                    desc=f"Hallucination eval using {evaluator}"
                 )
 
+                print(f"💾 Saving raw hallucination evaluation results to: {halu_path}")
                 # Save raw hallucination evaluation responses
                 with open(halu_path, 'w') as f:
                     for response in halu_eval_raw:
                         json.dump({"eval_res": response}, f)
                         f.write('\n')
+                print(f"✅ Hallucination evaluation completed successfully")
             finally:
                 # Stop server if we started it
                 if server_manager and not server_was_running:
-                    print("Stopping evaluation server...")
+                    print("🛑 Stopping evaluation server...")
                     server_manager.stop_server()
                     lm.set_server_manager(None)
 
@@ -315,12 +328,30 @@ class PreciseQAEval:
         return abstantion_res, halu_test_res
 
     def run_eval(self, eval_results_path=None):
+        print("=" * 80)
+        print(f"🎯 Starting PreciseWikiQA Evaluation")
+        print(f"📊 Model: {self.model_name}")
+        print(f"📂 Generations file: {self.generations_file_path}")
+        print(f"📈 Total samples: {len(self.test_df)}")
+        print(f"🔧 Abstention evaluator: {self.abtention_evaluator}")
+        print(f"🔧 Hallucination evaluator: {self.halu_evaluator}")
+        print("=" * 80)
+
+        # Step 1: Abstention Evaluation
+        print(f"\n📋 Step 1/3: Abstention Evaluation")
         abstantion_res, abstantion_raw_gen = self.eval_abstention(self.abtention_evaluator)
+
+        # Step 2: Hallucination Evaluation
+        print(f"\n📋 Step 2/3: Hallucination Evaluation")
         halu_test_raw_gen = self.judge_hallucination(self.halu_evaluator)
 
 
+        # Step 3: Processing Results
+        print(f"\n📋 Step 3/3: Processing Results")
+        print(f"🔄 Processing abstention and hallucination evaluation results...")
         abstantion_res, halu_test_res = self.process_res(abstantion_raw_gen, halu_test_raw_gen)
 
+        print(f"📊 Computing final metrics...")
         not_abstained = sum([1 for x in abstantion_res if x == False])
         if not_abstained == 0:
             hallu_rate_not_abstain = 0
@@ -329,6 +360,13 @@ class PreciseQAEval:
                                 if is_abstaining == False and is_hallucinated == True])/not_abstained
         refusal_rate = sum([1 for is_abstaining in abstantion_res if is_abstaining == True])/ (len(abstantion_res) + 1e-8)
         correct_rate = sum([1 for is_hallucinated in halu_test_res if is_hallucinated == False])/ (len(halu_test_res) + 1e-8)
+
+        print(f"📈 Evaluation Results Summary:")
+        print(f"   - Total samples evaluated: {len(abstantion_res)}")
+        print(f"   - Samples not abstained: {not_abstained}")
+        print(f"   - Hallucination rate (non-abstained): {hallu_rate_not_abstain:.3f}")
+        print(f"   - Refusal rate: {refusal_rate:.3f}")
+        print(f"   - Correct rate: {correct_rate:.3f}")
 
         res = {
             'model': self.model_name,
@@ -363,8 +401,10 @@ class PreciseQAEval:
         if res_dir:  # Only create directory if path has a directory component
             os.makedirs(res_dir, exist_ok=True)
 
+        print(f"💾 Saving final evaluation results to: {res_path}")
         with open(res_path, 'w') as f:
             json.dump(res, f, indent=4)
+        print(f"✅ Evaluation results saved successfully")
 
         # Print the results 
         print("=" * 80)
@@ -380,6 +420,8 @@ class PreciseQAEval:
         print(f"  False Refusal Rate: {refusal_rate:.3f} %")
         print(f"  Correct Rate: {correct_rate:.3f} %")
         print("-" * 80)
+        print(f"🎉 PreciseWikiQA evaluation completed successfully!")
+        print("=" * 80)
 
 
 if __name__ == '__main__':
