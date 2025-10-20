@@ -361,7 +361,7 @@ def main():
     parser.add_argument("--inference_method", default="vllm", help="Inference method")
     parser.add_argument("--max_inference_tokens", type=int, default=256, help="Maximum number of tokens to generate per inference")
     parser.add_argument("--generations_file_path", help="Path for generations file")
-    parser.add_argument("--eval_results_path", help="Path for evaluation results")
+    parser.add_argument("--eval_results_path", help="Path for evaluation results (default: co-located with generations file)")
     parser.add_argument("--q_generator", help="Question generator model")
     parser.add_argument("--qa_output_path", help="Custom QA output path")
     parser.add_argument("--quick_debug_mode", action="store_true", help="Quick debug mode (first 5 questions)")

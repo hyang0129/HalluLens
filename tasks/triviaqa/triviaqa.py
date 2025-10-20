@@ -225,11 +225,25 @@ class TriviaQAEval:
             "sample_results": self.test_df.to_dict('records')
         }
 
-        # Save results
+        # Determine save path - co-locate with generations file if custom path provided
         if eval_results_path:
             res_path = eval_results_path
         else:
-            res_path = f'{self.output_path}/eval_results.json'
+            # Check if we have a custom generations file path (not the default)
+            default_generations_path = f'{self.output_path}/generation.jsonl'
+            if self.generations_file_path != default_generations_path:
+                # Co-locate eval results with custom generations file
+                generations_dir = os.path.dirname(self.generations_file_path)
+                res_path = os.path.join(generations_dir, 'eval_results.json')
+                print(f"📁 Co-locating eval results with generations file in: {generations_dir}")
+            else:
+                # Use default output path
+                res_path = f'{self.output_path}/eval_results.json'
+
+        # Ensure directory exists
+        res_dir = os.path.dirname(res_path)
+        if res_dir:  # Only create directory if path has a directory component
+            os.makedirs(res_dir, exist_ok=True)
 
         with open(res_path, 'w') as f:
             json.dump(res, f, indent=4)
@@ -353,7 +367,7 @@ if __name__ == '__main__':
     parser.add_argument('--auto_download', action='store_true', default=True, help='automatically download TriviaQA data if not found')
     parser.add_argument('--no_auto_download', dest='auto_download', action='store_false', help='disable automatic download')
     parser.add_argument('--generations_file_path', type=str, default='', help='path to save model generations')
-    parser.add_argument('--eval_results_path', type=str, default='', help='path to save evaluation results')
+    parser.add_argument('--eval_results_path', type=str, default='', help='path to save evaluation results (default: co-located with generations file)')
     parser.add_argument('--N', type=int, default=1000, help='number of samples to evaluate')
     parser.add_argument('--quick_debug_mode', action='store_true', default=False, help='if True, only evaluate first 50 questions')
 
