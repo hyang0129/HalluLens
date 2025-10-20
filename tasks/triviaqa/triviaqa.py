@@ -201,28 +201,65 @@ class TriviaQAEval:
             "error_rate": error_rate
         }
     
-    def run_eval(self, eval_results_path=None):
+    def run_eval(self, eval_results_path=None, log_file=None):
         """Run complete evaluation pipeline"""
+        # Set up basic logging for TriviaQA evaluation (for consistency)
+        if log_file:
+            client_log_file = log_file.replace(".log", "_eval_client.log") if log_file.endswith(".log") else f"{log_file}_eval_client.log"
+        else:
+            # Default to same directory as generations file
+            generations_dir = os.path.dirname(self.generations_file_path) if self.generations_file_path != f'{self.output_path}/generation.jsonl' else self.output_path
+            client_log_file = f"{generations_dir}/eval_client.log"
+
         print(f"Starting TriviaQA evaluation for model: {self.model_name}")
+        print(f"📝 Evaluation logs: {client_log_file}")
 
         # Evaluate correctness using TriviaQA string matching
         binary_correctness = self.evaluate_correctness()
         correctness_results = self.process_correctness_results(binary_correctness)
 
-        # Compute metrics
-        metrics = self.compute_metrics(correctness_results)
-
         # Add correctness results to dataframe
         self.test_df['correctness_judgment'] = correctness_results
         self.test_df['is_correct'] = binary_correctness
 
-        # Prepare final results
+        # Convert to PreciseWikiQA-compatible format
+        # For TriviaQA: no abstentions, incorrect answers are treated as hallucinations
+        total_samples = len(binary_correctness)
+
+        # Abstention arrays (all False for TriviaQA)
+        abstention_res = [False] * total_samples
+        abstention_raw_gen = ['{"is_abstaining":false}'] * total_samples
+
+        # Hallucination arrays (True = hallucinated/incorrect, False = correct)
+        halu_test_res = [not bool(correct) for correct in binary_correctness]  # Invert: 0->True, 1->False
+        halu_raw_gen = ["INCORRECT" if not bool(correct) else "CORRECT" for correct in binary_correctness]
+
+        # Compute PreciseWikiQA-style metrics
+        correct_count = sum(binary_correctness)
+        incorrect_count = total_samples - correct_count
+
+        # Since no abstentions in TriviaQA, all samples are evaluated
+        halu_rate = incorrect_count / total_samples if total_samples > 0 else 0
+        refusal_rate = 0.0  # No refusals in TriviaQA
+        correct_rate = correct_count / total_samples if total_samples > 0 else 0
+
+        # Prepare PreciseWikiQA-compatible results
         res = {
-            "model": self.model_name,
-            "task": self.TASKNAME,
-            "evaluation_method": "triviaqa_string_matching",
-            "metrics": metrics,
-            "sample_results": self.test_df.to_dict('records')
+            'model': self.model_name,
+            'halu_Rate': halu_rate,
+            'refusal_rate': refusal_rate,
+            'correct_rate': correct_rate,
+
+            'evaluator_abstantion': 'triviaqa_string_matching',
+            'evaluator_hallucination': 'triviaqa_string_matching',
+
+            'abstantion': abstention_res,
+            'halu_test_res': halu_test_res,
+            'abstantion_raw_generation': abstention_raw_gen,
+            'is_hallucinated_raw_generation': halu_raw_gen,
+            'prompt': [str(row['prompt']) for _, row in self.test_df.iterrows()],
+            'generation': [str(row['generation']) for _, row in self.test_df.iterrows()],
+            'answer': [str(row['correct_answers']) for _, row in self.test_df.iterrows()],
         }
 
         # Determine save path - co-locate with generations file if custom path provided
@@ -248,18 +285,21 @@ class TriviaQAEval:
         with open(res_path, 'w') as f:
             json.dump(res, f, indent=4)
 
-        # Print results
+        # Print results in PreciseWikiQA-compatible format
         print("=" * 80)
         print(f" TriviaQA Evaluation Results for: <<{self.model_name}>>")
         print("=" * 80)
         print(f"  >> Results saved to: {res_path}")
         print("-" * 80)
-        print(f"  Evaluation Method: TriviaQA String Matching")
+        print(f"  Evaluation Method: TriviaQA String Matching (PreciseWikiQA-compatible)")
         print("-" * 80)
-        print(f"  Total Samples: {metrics['total_samples']}")
-        print(f"  Accuracy: {metrics['accuracy']:.3f}")
-        print(f"  Error Rate: {metrics['error_rate']:.3f}")
+        print(f"  Total Samples: {total_samples}")
+        print(f"  Hallucination Rate: {halu_rate:.3f}")
+        print(f"  Refusal Rate: {refusal_rate:.3f}")
+        print(f"  Correct Rate: {correct_rate:.3f}")
         print("-" * 80)
+        print(f"🎉 TriviaQA evaluation completed successfully!")
+        print("=" * 80)
 
 
 def load_triviaqa_data(dataset_variant="unfiltered", split="dev", n_samples=1000, data_dir="data", auto_download=True):
@@ -433,5 +473,5 @@ if __name__ == '__main__':
             TASKNAME=TASKNAME,
             generations_file_path=args.generations_file_path,
             quick_debug_mode=args.quick_debug_mode
-        ).run_eval(eval_results_path=args.eval_results_path)
+        ).run_eval(eval_results_path=args.eval_results_path, log_file=args.log_file)
         print(f'{TASKNAME} Evaluation completed')

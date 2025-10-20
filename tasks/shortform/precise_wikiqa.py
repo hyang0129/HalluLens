@@ -327,7 +327,23 @@ class PreciseQAEval:
             halu_test_res.append(hallucinated_judge)
         return abstantion_res, halu_test_res
 
-    def run_eval(self, eval_results_path=None):
+    def run_eval(self, eval_results_path=None, log_file=None):
+        # Set up client logging for evaluation process
+        if log_file:
+            # Use provided log file path
+            client_log_file = log_file.replace(".log", "_eval_client.log") if log_file.endswith(".log") else f"{log_file}_eval_client.log"
+        else:
+            # Default to same directory as generations file
+            client_log_file = f"{self.output_path}/eval_client.log"
+
+        # Set up client logging similar to inference process
+        import utils.lm as lm
+        from loguru import logger
+
+        # Add client logging handler
+        logger.add(client_log_file, format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}", level="DEBUG")
+        logger.info(f"PreciseWikiQA evaluation client logging configured to: {client_log_file}")
+
         print("=" * 80)
         print(f"🎯 Starting PreciseWikiQA Evaluation")
         print(f"📊 Model: {self.model_name}")
@@ -335,6 +351,7 @@ class PreciseQAEval:
         print(f"📈 Total samples: {len(self.test_df)}")
         print(f"🔧 Abstention evaluator: {self.abtention_evaluator}")
         print(f"🔧 Hallucination evaluator: {self.halu_evaluator}")
+        print(f"📝 Client logs: {client_log_file}")
         print("=" * 80)
 
         # Step 1: Abstention Evaluation
@@ -523,9 +540,9 @@ if __name__ == '__main__':
     if args.do_eval:
         print(f"Starting Evaluation for {args.model}")
         PreciseQAEval(
-            model_path=args.model, 
-            TASKNAME=TASKNAME, 
+            model_path=args.model,
+            TASKNAME=TASKNAME,
             generations_file_path=args.generations_file_path,
             quick_debug_mode=args.quick_debug_mode
-        ).run_eval(eval_results_path=args.eval_results_path)
+        ).run_eval(eval_results_path=args.eval_results_path, log_file=args.log_file)
         print(f'{TASKNAME} Evaluation completed')
