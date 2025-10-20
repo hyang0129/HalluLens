@@ -348,10 +348,23 @@ class PreciseQAEval:
             'answer': [str(row['answer']) for _, row in self.test_df.iterrows()],
         }
 
-        # save the results
-        res_path = eval_results_path if eval_results_path else f'output/{TASKNAME}/{self.model_name}/eval_results.json'
+        # Determine save path - use the output_path which is already set to co-locate with generations
+        if eval_results_path:
+            res_path = eval_results_path
+        else:
+            res_path = f'{self.output_path}/eval_results.json'
+            # If using custom generations path, show co-location message
+            default_generations_path = f'output/{TASKNAME}/{self.model_name}/generation.jsonl'
+            if self.generations_file_path != default_generations_path:
+                print(f"📁 Co-locating eval results with generations file in: {self.output_path}")
+
+        # Ensure directory exists
+        res_dir = os.path.dirname(res_path)
+        if res_dir:  # Only create directory if path has a directory component
+            os.makedirs(res_dir, exist_ok=True)
+
         with open(res_path, 'w') as f:
-            json.dump(res, f, indent=4)   
+            json.dump(res, f, indent=4)
 
         # Print the results 
         print("=" * 80)
@@ -389,7 +402,7 @@ if __name__ == '__main__':
     parser.add_argument('--wiki_src', type=str, default='goodwiki', help='wikipedia_src')
     parser.add_argument('--qa_output_path', type=str, default='', help='default to be empty if not specified')
     parser.add_argument('--generations_file_path', type=str, default='', help='path to save the model-generated outputs; if not specified, outputs will be saved to output/{TASKNAME}/{model_name}/generation.jsonl')
-    parser.add_argument('--eval_results_path', type=str, default='', help='path to save the evaluation results; if not specified, results will be saved to output/{TASKNAME}/{model_name}/eval_results.json')
+    parser.add_argument('--eval_results_path', type=str, default='', help='path to save evaluation results (default: co-located with generations file)')
     parser.add_argument('--N', type=int, default=5000)
     parser.add_argument('--quick_debug_mode', action='store_true', default=False, help='if True, only evaluate first 50 questions')
     parser.add_argument('--q_generator', type=str, default='Llama-3.3-70B-Instruct-IQ3_M.gguf', help='model to use for question generation')
