@@ -180,13 +180,21 @@ NOTE:
         - openai_generate: using openai models
 '''
 
-def setup_client_logging():
+def setup_client_logging(generations_file_path=None):
     """Setup client logging to match server log format and location."""
     # Check if we should log to the same location as server
     server_log_file = os.environ.get("SERVER_LOG_FILE")
     if server_log_file:
         # Use the same log file as server but with client prefix
         client_log_file = server_log_file.replace(".log", "_client.log")
+        logger.add(client_log_file, format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}", level="DEBUG")
+        logger.info(f"Client logging configured to: {client_log_file}")
+    elif generations_file_path:
+        # Derive client log path from generations file path
+        from pathlib import Path
+        generations_dir = Path(generations_file_path).parent
+        generations_dir.mkdir(parents=True, exist_ok=True)
+        client_log_file = str(generations_dir / "client.log")
         logger.add(client_log_file, format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}", level="DEBUG")
         logger.info(f"Client logging configured to: {client_log_file}")
     else:

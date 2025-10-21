@@ -28,7 +28,10 @@ class SupConLoss(nn.Module):
 
         Args:
             features: hidden vector of shape [bsz, n_views, ...].
-            labels: ground truth of shape [bsz].
+            labels: ground truth of shape [bsz]. Labels with value -1 are treated
+                as belonging to no class - their different views will still be pulled
+                together (positive pairs), but they will repel from all other samples
+                including other -1 labeled samples.
             mask: contrastive mask of shape [bsz, bsz], mask_{i,j}=1 if sample j
                 has the same class as sample i. Can be asymmetric.
         Returns:
@@ -53,7 +56,19 @@ class SupConLoss(nn.Module):
             labels = labels.contiguous().view(-1, 1)
             if labels.shape[0] != batch_size:
                 raise ValueError('Num of labels does not match num of features')
+
+            # Create mask where samples with same labels are positive pairs
             mask = torch.eq(labels, labels.T).float().to(device)
+
+            # For samples with label -1: they should not be positive with other -1 samples
+            # but should still be positive with themselves (different views of same sample)
+            # This is handled by the anchor_count and contrast_count logic below
+            ignore_cross_mask = (labels == -1) & (labels.T == -1)
+            # Create identity mask to preserve self-positive relationships
+            identity_mask = torch.eye(batch_size, device=device, dtype=torch.bool)
+            # Remove cross -1 relationships but keep self relationships
+            ignore_cross_mask = ignore_cross_mask & (~identity_mask)
+            mask = mask * (~ignore_cross_mask).float()
         else:
             mask = mask.float().to(device)
 
@@ -111,7 +126,8 @@ class SupConLoss(nn.Module):
 def train_contrastive(model, train_dataset, test_dataset=None,
                       epochs=10, batch_size=512, lr=1e-6,
                       temperature=0.07, device='cuda', num_workers=16, sub_batch_size=64,
-                      checkpoint_dir='checkpoints', save_every=5, resume_from=None, persistent_workers=True):
+                      checkpoint_dir='checkpoints', save_every=5, resume_from=None, persistent_workers=True,
+                      use_labels=False):
     assert batch_size % sub_batch_size == 0, "batch_size must be divisible by sub_batch_size"
 
     # Create checkpoint directory
@@ -164,10 +180,11 @@ def train_contrastive(model, train_dataset, test_dataset=None,
 
         # Buffers to accumulate mini-batches
         buffer_x1, buffer_x2 = [], []
+        buffer_labels = [] if use_labels else None
 
         i = 0
         for batch in loop:
-            i += 1 
+            i += 1
             logger.debug(f"Adding batch {i} to buffer. Current buffer size: {len(buffer_x1)}")
             x1 = batch['layer1_activations'].squeeze(1).to(device, non_blocking=True)
             x2 = batch['layer2_activations'].squeeze(1).to(device, non_blocking=True)
@@ -175,19 +192,38 @@ def train_contrastive(model, train_dataset, test_dataset=None,
             buffer_x1.append(x1)
             buffer_x2.append(x2)
 
+            if use_labels:
+                labels = batch['halu'].to(device, non_blocking=True)
+                # Ensure labels have at least one dimension for concatenation
+                if labels.dim() == 0:
+                    labels = labels.unsqueeze(0)
+                elif labels.dim() == 1 and labels.size(0) == 1:
+                    # Already has batch dimension
+                    pass
+                else:
+                    # Handle batch of labels
+                    labels = labels.view(-1)
+                buffer_labels.append(labels)
+
             # Process when buffer is full or at the end of the loop
             if len(buffer_x1) * sub_batch_size == batch_size or i == len(loop):
                 logger.debug(f"Processing buffer at batch {i}. Buffer size: {len(buffer_x1)}")
                 x1_full = torch.cat(buffer_x1, dim=0)
                 x2_full = torch.cat(buffer_x2, dim=0)
-                buffer_x1 = [] 
-                buffer_x2 = [] 
+                buffer_x1 = []
+                buffer_x2 = []
 
                 z1 = model(x1_full)
                 z2 = model(x2_full)
 
                 z_stacked = torch.stack([z1, z2], dim=1)
-                loss = loss_fn(z_stacked)
+
+                if use_labels:
+                    labels_full = torch.cat(buffer_labels, dim=0)
+                    buffer_labels = []
+                    loss = loss_fn(z_stacked, labels=labels_full)
+                else:
+                    loss = loss_fn(z_stacked)
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -206,7 +242,7 @@ def train_contrastive(model, train_dataset, test_dataset=None,
 
         test_loss = float('inf')
         if test_dataset is not None:
-            test_loss, test_acc = evaluate(model, test_dataset, batch_size=batch_size, loss_fn=loss_fn, device=device, sub_batch_size= sub_batch_size)
+            test_loss, test_acc = evaluate(model, test_dataset, batch_size=batch_size, loss_fn=loss_fn, device=device, sub_batch_size=sub_batch_size, use_labels=use_labels)
             print(f"Epoch {epoch + 1}/{epochs} - Test Loss: {test_loss:.4f} - Test Pairing Acc: {test_acc:.4f}")
 
         # Save checkpoint

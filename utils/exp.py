@@ -77,13 +77,7 @@ def run_exp(
             print(f"⚠️  Note: Server restart will not be available (server not managed by this process)")
 
     try:
-        # Initialize client logging for debugging
-        if inference_method == "vllm":
-            lm.setup_client_logging()
-            lm.initialize_progress_tracking(len(all_prompts))
-            print(f"Client logging initialized for {len(all_prompts)} requests")
-            print(f"📊 Starting inference: {len(all_prompts)} total requests to process")
-
+        # Determine generations file path first
         if not generations_file_path:
             base_path = Path(base_path)
             model_name = model_path.split("/")[-1]
@@ -93,6 +87,13 @@ def run_exp(
 
         generations_file_path = str(generations_file_path)
         print('generations_file_path', generations_file_path)
+
+        # Initialize client logging for debugging
+        if inference_method == "vllm":
+            lm.setup_client_logging(generations_file_path)
+            lm.initialize_progress_tracking(len(all_prompts))
+            print(f"Client logging initialized for {len(all_prompts)} requests")
+            print(f"📊 Starting inference: {len(all_prompts)} total requests to process")
 
         prompts =  all_prompts.prompt.to_list()
 
