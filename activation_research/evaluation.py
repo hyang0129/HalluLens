@@ -9,7 +9,7 @@ from sklearn.metrics import roc_auc_score
 from scipy.spatial import distance
 
 
-def evaluate(model, test_dataloader, batch_size=32, loss_fn=None, device='cuda', sub_batch_size=64, use_labels=False):
+def evaluate(model, test_dataloader, batch_size=32, loss_fn=None, device='cuda', sub_batch_size=64, use_labels=False, ignore_label=-1):
     model.eval()
     total_loss = 0.0
     total_acc = 0.0

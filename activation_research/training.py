@@ -15,25 +15,34 @@ class SupConLoss(nn.Module):
     """Supervised Contrastive Learning: https://arxiv.org/pdf/2004.11362.pdf.
     It also supports the unsupervised contrastive loss in SimCLR"""
     def __init__(self, temperature=0.07, contrast_mode='all',
-                 base_temperature=0.07):
+                 base_temperature=0.07, ignore_label=-1,
+                 same_sample_weight=1.0, same_class_weight=1.0):
         super(SupConLoss, self).__init__()
         self.temperature = temperature
         self.contrast_mode = contrast_mode
         self.base_temperature = base_temperature
+        self.ignore_label = ignore_label
+        self.same_sample_weight = same_sample_weight
+        self.same_class_weight = same_class_weight
 
-    def forward(self, features, labels=None, mask=None):
+    def forward(self, features, labels=None, mask=None, sample_ids=None):
         """Compute loss for model. If both `labels` and `mask` are None,
         it degenerates to SimCLR unsupervised loss:
         https://arxiv.org/pdf/2002.05709.pdf
 
         Args:
             features: hidden vector of shape [bsz, n_views, ...].
-            labels: ground truth of shape [bsz]. Labels with value -1 are treated
-                as belonging to no class - their different views will still be pulled
-                together (positive pairs), but they will repel from all other samples
-                including other -1 labeled samples.
+            labels: ground truth of shape [bsz]. Labels with value equal to
+                self.ignore_label are treated as belonging to no class - their
+                different views will still be pulled together (positive pairs),
+                but they will repel from all other samples including other
+                ignore_label samples.
             mask: contrastive mask of shape [bsz, bsz], mask_{i,j}=1 if sample j
                 has the same class as sample i. Can be asymmetric.
+            sample_ids: sample identifiers of shape [bsz]. Used to distinguish
+                between same sample pairs (different views) and same class pairs
+                (different samples). If provided, same sample pairs get
+                same_sample_weight, same class pairs get same_class_weight.
         Returns:
             A loss scalar.
         """
@@ -57,18 +66,32 @@ class SupConLoss(nn.Module):
             if labels.shape[0] != batch_size:
                 raise ValueError('Num of labels does not match num of features')
 
-            # Create mask where samples with same labels are positive pairs
+            # Create base mask where samples with same labels are positive pairs
             mask = torch.eq(labels, labels.T).float().to(device)
 
-            # For samples with label -1: they should not be positive with other -1 samples
+            # For samples with ignore_label: they should not be positive with other ignore_label samples
             # but should still be positive with themselves (different views of same sample)
-            # This is handled by the anchor_count and contrast_count logic below
-            ignore_cross_mask = (labels == -1) & (labels.T == -1)
+            ignore_cross_mask = (labels == self.ignore_label) & (labels.T == self.ignore_label)
             # Create identity mask to preserve self-positive relationships
             identity_mask = torch.eye(batch_size, device=device, dtype=torch.bool)
-            # Remove cross -1 relationships but keep self relationships
+            # Remove cross ignore_label relationships but keep self relationships
             ignore_cross_mask = ignore_cross_mask & (~identity_mask)
             mask = mask * (~ignore_cross_mask).float()
+
+            # Apply differential weighting if sample_ids are provided
+            if sample_ids is not None:
+                sample_ids = sample_ids.contiguous().view(-1, 1)
+                if sample_ids.shape[0] != batch_size:
+                    raise ValueError('Num of sample_ids does not match num of features')
+
+                # Create mask for same sample pairs (different views of same sample)
+                same_sample_mask = torch.eq(sample_ids, sample_ids.T).float().to(device)
+
+                # Create mask for same class but different sample pairs
+                same_class_diff_sample_mask = mask * (1 - same_sample_mask)
+
+                # Apply weights: same sample pairs get full weight, same class pairs get reduced weight
+                mask = same_sample_mask * self.same_sample_weight + same_class_diff_sample_mask * self.same_class_weight
         else:
             mask = mask.float().to(device)
 
@@ -127,7 +150,8 @@ def train_contrastive(model, train_dataset, test_dataset=None,
                       epochs=10, batch_size=512, lr=1e-6,
                       temperature=0.07, device='cuda', num_workers=16, sub_batch_size=64,
                       checkpoint_dir='checkpoints', save_every=5, resume_from=None, persistent_workers=True,
-                      use_labels=False):
+                      use_labels=False, ignore_label=-1,
+                      same_sample_weight=1.0, same_class_weight=1.0):
     assert batch_size % sub_batch_size == 0, "batch_size must be divisible by sub_batch_size"
 
     # Create checkpoint directory
@@ -135,7 +159,8 @@ def train_contrastive(model, train_dataset, test_dataset=None,
     
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    loss_fn = SupConLoss(temperature=temperature)
+    loss_fn = SupConLoss(temperature=temperature, ignore_label=ignore_label,
+                         same_sample_weight=same_sample_weight, same_class_weight=same_class_weight)
     
     start_epoch = 0
     best_loss = float('inf')
@@ -181,6 +206,7 @@ def train_contrastive(model, train_dataset, test_dataset=None,
         # Buffers to accumulate mini-batches
         buffer_x1, buffer_x2 = [], []
         buffer_labels = [] if use_labels else None
+        buffer_sample_ids = [] if use_labels else None
 
         i = 0
         for batch in loop:
@@ -205,6 +231,17 @@ def train_contrastive(model, train_dataset, test_dataset=None,
                     labels = labels.view(-1)
                 buffer_labels.append(labels)
 
+                # Extract sample IDs (use hashkey as unique identifier)
+                # Convert hashkey to numeric ID for tensor operations
+                hashkeys = batch['hashkey']
+                if isinstance(hashkeys, str):
+                    hashkeys = [hashkeys]
+
+                # Create numeric sample IDs from hashkeys
+                sample_ids = torch.tensor([hash(hk) % 1000000 for hk in hashkeys],
+                                        dtype=torch.long, device=device)
+                buffer_sample_ids.append(sample_ids)
+
             # Process when buffer is full or at the end of the loop
             if len(buffer_x1) * sub_batch_size == batch_size or i == len(loop):
                 logger.debug(f"Processing buffer at batch {i}. Buffer size: {len(buffer_x1)}")
@@ -220,8 +257,10 @@ def train_contrastive(model, train_dataset, test_dataset=None,
 
                 if use_labels:
                     labels_full = torch.cat(buffer_labels, dim=0)
+                    sample_ids_full = torch.cat(buffer_sample_ids, dim=0)
                     buffer_labels = []
-                    loss = loss_fn(z_stacked, labels=labels_full)
+                    buffer_sample_ids = []
+                    loss = loss_fn(z_stacked, labels=labels_full, sample_ids=sample_ids_full)
                 else:
                     loss = loss_fn(z_stacked)
 
@@ -242,7 +281,7 @@ def train_contrastive(model, train_dataset, test_dataset=None,
 
         test_loss = float('inf')
         if test_dataset is not None:
-            test_loss, test_acc = evaluate(model, test_dataset, batch_size=batch_size, loss_fn=loss_fn, device=device, sub_batch_size=sub_batch_size, use_labels=use_labels)
+            test_loss, test_acc = evaluate(model, test_dataset, batch_size=batch_size, loss_fn=loss_fn, device=device, sub_batch_size=sub_batch_size, use_labels=use_labels, ignore_label=ignore_label)
             print(f"Epoch {epoch + 1}/{epochs} - Test Loss: {test_loss:.4f} - Test Pairing Acc: {test_acc:.4f}")
 
         # Save checkpoint
