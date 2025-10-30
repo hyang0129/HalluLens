@@ -195,12 +195,11 @@ def train_contrastive(model, train_dataset, test_dataset=None,
             persistent_workers=persistent_workers
         )
 
-    subsinbatch = batch_size // sub_batch_size
-    
     for epoch in tqdm(range(start_epoch, epochs), desc="Epochs"):
         model.train()
         total_loss = 0.0
         total_acc = 0.0
+        n_batches = 0  # Track number of full batches processed
         loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False)
 
         # Buffers to accumulate mini-batches
@@ -271,9 +270,10 @@ def train_contrastive(model, train_dataset, test_dataset=None,
                 acc = pairing_accuracy(z1, z2)
                 total_loss += loss.item()
                 total_acc += acc
-                
-                avg_loss = total_loss / (i / subsinbatch)
-                avg_acc = total_acc / ( i / subsinbatch)
+                n_batches += 1  # Increment for each full batch processed
+
+                avg_loss = total_loss / n_batches
+                avg_acc = total_acc / n_batches
 
                 loop.set_postfix(loss=avg_loss, pairing_acc=avg_acc)
 
@@ -331,7 +331,6 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
     """
     from torch.utils.data import DataLoader
     import torch
-    import torch.nn.functional as F
     from tqdm import tqdm
 
     assert batch_size % sub_batch_size == 0, "batch_size must be divisible by sub_batch_size"
@@ -374,8 +373,6 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
             pin_memory=True,
             persistent_workers=persistent_workers
         )
-
-    subsinbatch = batch_size // sub_batch_size
 
     for epoch in range(start_epoch, epochs):
         model.train()
