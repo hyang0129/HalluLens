@@ -21,7 +21,8 @@ class ActivationDataset(Dataset):
     """PyTorch Dataset for loading activation data."""
     
     def __init__(self, df: pd.DataFrame, activations_path: str, split: Literal['train', 'test'],
-                 relevant_layers: List[int] = None, logger_type: str = "lmdb"):
+                 relevant_layers: List[int] = None, logger_type: str = "lmdb",
+                 fixed_layer: Optional[int] = None):
         """
         Initialize the dataset.
 
@@ -31,6 +32,7 @@ class ActivationDataset(Dataset):
             split: Which split to use ('train' or 'test')
             relevant_layers: List of layer indices to use (default: layers 16-29)
             logger_type: Type of logger to use ('lmdb' or 'json')
+            fixed_layer: If specified, one activation will always be from this layer (index in relevant_layers)
         """
         self.activations_path = activations_path
         self.logger_type = logger_type
@@ -40,6 +42,7 @@ class ActivationDataset(Dataset):
         self.split = split
         self.df = df[df['split'] == split].reset_index(drop=True)
         self.relevant_layers = relevant_layers if relevant_layers is not None else list(range(16,30))
+        self.fixed_layer = fixed_layer
         self.pad_length = 63
 
     @property
@@ -55,17 +58,17 @@ class ActivationDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         """
         Get a single data point.
-        
+
         Args:
             idx: Index of the data point
-            
+
         Returns:
             Dictionary containing:
             - hashkey: The prompt hash
             - halu: Whether this is a hallucination
             - all_activations: All padded activations (None for non-targeted layers)
-            - layer1_activations: Activations from first randomly selected layer
-            - layer2_activations: Activations from second randomly selected layer
+            - layer1_activations: Activations from first layer (fixed layer if specified, otherwise random)
+            - layer2_activations: Activations from second layer (random, different from layer1)
             - layer1_idx: Index of first selected layer
             - layer2_idx: Index of second selected layer
             - input_length: Length of the input prompt
@@ -91,11 +94,27 @@ class ActivationDataset(Dataset):
             # If act is None, keep it as None
             padded_activations.append(act)
             
-        # Randomly select two different layers, ensuring they are not None
+        # Select two different layers, with optional fixed layer
         available_layers = [i for i, act in enumerate(padded_activations) if act is not None]
         if len(available_layers) < 2:
             raise ValueError(f"Not enough targeted layers available (found {len(available_layers)} layers)")
-        layer1_idx, layer2_idx = random.sample(available_layers, 2)
+
+        if self.fixed_layer is not None:
+            # Ensure fixed_layer is valid and available
+            if self.fixed_layer not in available_layers:
+                raise ValueError(f"Fixed layer {self.fixed_layer} is not available in the relevant layers")
+
+            # Set one layer to the fixed layer
+            layer1_idx = self.fixed_layer
+            # Select a random different layer for the second activation
+            other_layers = [i for i in available_layers if i != self.fixed_layer]
+            if len(other_layers) == 0:
+                raise ValueError(f"No other layers available besides fixed layer {self.fixed_layer}")
+            layer2_idx = random.choice(other_layers)
+        else:
+            # Original behavior: randomly select two different layers
+            layer1_idx, layer2_idx = random.sample(available_layers, 2)
+
         layer1_activations = padded_activations[layer1_idx]
         layer2_activations = padded_activations[layer2_idx]
             
@@ -229,18 +248,20 @@ class ActivationParser:
 
         return row, result, activations, input_length
 
-    def get_dataset(self, split: Literal['train', 'test'], relevant_layers: List[int] = None) -> ActivationDataset:
+    def get_dataset(self, split: Literal['train', 'test'], relevant_layers: List[int] = None,
+                    fixed_layer: Optional[int] = None) -> ActivationDataset:
         """
         Get a PyTorch Dataset for the specified split.
 
         Args:
             split: Which split to use ('train' or 'test')
             relevant_layers: List of layer indices to use (default: layers 16-29)
+            fixed_layer: If specified, one activation will always be from this layer (index in relevant_layers)
 
         Returns:
             ActivationDataset instance for the specified split
         """
-        return ActivationDataset(self.df, self.activations_path, split, relevant_layers, self.logger_type)
+        return ActivationDataset(self.df, self.activations_path, split, relevant_layers, self.logger_type, fixed_layer)
 
     def close(self):
         """Close the LMDB connection."""
