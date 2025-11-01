@@ -97,45 +97,7 @@ def pairing_accuracy(z1, z2):
 
 
 
-def mahalanobis_ood_stats(train_records, test_records):
-    # Extract z1 tensors from train set and stack
-    train_z = torch.stack([r['z1'] for r in train_records])
-    
-    # Compute mean and covariance from training set
-    mean = train_z.mean(dim=0)
-    centered = train_z - mean
-    cov = torch.matmul(centered.T, centered) / (len(train_z) - 1)
-    
-    # Add small value to diagonal for numerical stability (regularization)
-    cov += torch.eye(cov.shape[0]) * 1e-5
-    inv_cov = torch.linalg.inv(cov)
 
-    def mahalanobis(x):
-        delta = x - mean
-        return torch.sqrt((delta @ inv_cov @ delta.T).diag())
-
-    # Prepare test set
-    test_z = torch.stack([r['z1'] for r in test_records])
-    test_labels = torch.tensor([r['halu'] for r in test_records], dtype=torch.int32)
-    test_labels = test_labels.squeeze()
-
-    # Compute Mahalanobis distances for test set
-    with torch.no_grad():
-        dists = mahalanobis(test_z)
-
-    # Compute stats
-    id_dists = dists[test_labels == 0]
-    ood_dists = dists[test_labels == 1]
-
-    stats = {
-        'mahalanobis_mean_id': id_dists.mean().item(),
-        'mahalanobis_std_id': id_dists.std().item(),
-        'mahalanobis_mean_ood': ood_dists.mean().item(),
-        'mahalanobis_std_ood': ood_dists.std().item(),
-        'mahalanobis_auroc': roc_auc_score(test_labels, dists.numpy())
-    }
-
-    return stats
 
 def mahalanobis_ood_stats_multilayer(train_records, test_records, layers):
     """
@@ -218,7 +180,7 @@ def mahalanobis_ood_stats_multilayer(train_records, test_records, layers):
         'aggregated_stats': aggregated_stats
     }
 
-def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, device='cuda', num_workers=16, layers=None, persistent_workers=True):
+def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, device='cuda', num_workers=16, layers=None, persistent_workers=False):
     assert batch_size % sub_batch_size == 0, "batch_size must be divisible by sub_batch_size"
 
     model = model.to(device)
