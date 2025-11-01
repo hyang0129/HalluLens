@@ -5,6 +5,26 @@ from .evaluation import inference_embeddings
 from .metrics import mahalanobis_ood_stats
 
 
+def set_logging_level(level: str = "INFO"):
+    """
+    Set the logging level for loguru logger.
+
+    Args:
+        level: Logging level ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+               Use "WARNING" or higher to suppress info messages during data loading
+    """
+    logger.remove()  # Remove default handler
+    logger.add(lambda msg: print(msg, end=""), level=level)
+
+
+def suppress_dataloader_logs():
+    """
+    Convenience function to suppress info-level logs that are noisy during data loading.
+    Sets logging level to WARNING to reduce verbosity.
+    """
+    set_logging_level("WARNING")
+
+
 class HallucinationEvaluator:
     """
     A reusable class for evaluating hallucination detection using activation embeddings.

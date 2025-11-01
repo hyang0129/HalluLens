@@ -20,13 +20,14 @@ import shutil
 
 class ActivationsLogger:
     def __init__(self, lmdb_path: str = "lmdb_data/activations.lmdb", map_size: int = 16 << 30,
-                 compression: Union[str, BaseCompressor, None] = None, 
+                 compression: Union[str, BaseCompressor, None] = None,
                  read_only: bool = False,
                  target_layers: str = 'all',
-                 sequence_mode: str = 'all'):
+                 sequence_mode: str = 'all',
+                 verbose: bool = True):
         """
         Initialize the LMDB-based activations logger.
-        
+
         Args:
             lmdb_path: Path to the LMDB file to store activations
             map_size: Maximum size of the LMDB file in bytes (default: 16GB)
@@ -34,6 +35,7 @@ class ActivationsLogger:
             read_only: if True, the LMDB will be opened in read-only mode
             target_layers: Which layers to extract activations from ('all', 'first_half', or 'second_half')
             sequence_mode: Which tokens to extract activations for ('all' for full sequence, 'prompt' for prompt tokens only, or 'response' for response tokens only)
+            verbose: Whether to log detailed initialization and processing messages (default: True)
         """
         if target_layers not in ['all', 'first_half', 'second_half']:
             raise ValueError("target_layers must be one of: 'all', 'first_half', 'second_half'")
@@ -42,7 +44,9 @@ class ActivationsLogger:
             
         self.target_layers = target_layers
         self.sequence_mode = sequence_mode
-        logger.info(f"ActivationsLogger initialized to target '{target_layers}' layers with '{sequence_mode}' sequence mode")
+        self.verbose = verbose
+        if self.verbose:
+            logger.info(f"ActivationsLogger initialized to target '{target_layers}' layers with '{sequence_mode}' sequence mode")
         self.lmdb_path = lmdb_path
         self.env = None
         self.metadata_env = None  # Separate environment for metadata
@@ -154,7 +158,8 @@ class ActivationsLogger:
         """
         # If model_outputs is None or doesn't have hidden_states, return None
         if model_outputs is None or not hasattr(model_outputs, 'hidden_states'):
-            logger.info("No hidden states found in model outputs")
+            if self.verbose:
+                logger.info("No hidden states found in model outputs")
             return None
             
         # Get the generated tokens (excluding prompt)
@@ -170,7 +175,8 @@ class ActivationsLogger:
         if hasattr(model_outputs, 'trim_position'):
             trim_pos = model_outputs.trim_position
             if trim_pos is not None:
-                logger.info(f"Trimming activations at position {trim_pos}")
+                if self.verbose:
+                    logger.info(f"Trimming activations at position {trim_pos}")
                 gen_hiddens = gen_hiddens[:trim_pos]
                         
         # Determine which layers to extract based on target_layers setting
@@ -573,7 +579,7 @@ class JsonActivationsLogger:
         - ...
     """
     def __init__(self, output_dir: str = "json_data/", target_layers: str = 'all',
-                 sequence_mode: str = 'all', read_only: bool = False):
+                 sequence_mode: str = 'all', read_only: bool = False, verbose: bool = True):
         """
         Initialize the JSON-based activations logger with NPY tensor storage.
 
@@ -582,15 +588,19 @@ class JsonActivationsLogger:
             target_layers: Which layers to extract activations from ('all', 'first_half', or 'second_half')
             sequence_mode: Which tokens to extract activations for ('all', 'prompt', 'response')
             read_only: If True, open in read-only mode
+            verbose: Whether to log detailed initialization and processing messages (default: True)
         """
-        logger.info(f"JsonActivationsLogger.__init__ starting - output_dir: {output_dir}, target_layers: {target_layers}, sequence_mode: {sequence_mode}, read_only: {read_only}")
+        self.verbose = verbose
+        if self.verbose:
+            logger.info(f"JsonActivationsLogger.__init__ starting - output_dir: {output_dir}, target_layers: {target_layers}, sequence_mode: {sequence_mode}, read_only: {read_only}")
 
         if target_layers not in ['all', 'first_half', 'second_half']:
             raise ValueError("target_layers must be one of: 'all', 'first_half', 'second_half'")
         if sequence_mode not in ['all', 'prompt', 'response']:
             raise ValueError("sequence_mode must be one of: 'all', 'prompt', 'response'")
 
-        logger.info(f"JsonActivationsLogger.__init__ - Setting up paths")
+        if self.verbose:
+            logger.info(f"JsonActivationsLogger.__init__ - Setting up paths")
         self.output_dir = Path(output_dir)
         self.activations_dir = self.output_dir / "activations"
         self.metadata_path = self.output_dir / "metadata.json"

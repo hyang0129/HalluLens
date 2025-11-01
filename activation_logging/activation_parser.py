@@ -22,7 +22,7 @@ class ActivationDataset(Dataset):
     
     def __init__(self, df: pd.DataFrame, activations_path: str, split: Literal['train', 'test'],
                  relevant_layers: List[int] = None, logger_type: str = "lmdb",
-                 fixed_layer: Optional[int] = None, random_seed: int = 42):
+                 fixed_layer: Optional[int] = None, random_seed: int = 42, verbose: bool = False):
         """
         Initialize the dataset.
 
@@ -34,10 +34,12 @@ class ActivationDataset(Dataset):
             logger_type: Type of logger to use ('lmdb' or 'json')
             fixed_layer: If specified, one activation will always be from this layer (index in relevant_layers)
             random_seed: Random seed for train/test split (default: 42)
+            verbose: Whether to log initialization messages (default: False for datasets)
         """
         self.activations_path = activations_path
         self.logger_type = logger_type
         self.random_seed = random_seed
+        self.verbose = verbose
         # For backward compatibility
         self.lmdb_path = activations_path
         self._activation_parser = None
@@ -52,7 +54,7 @@ class ActivationDataset(Dataset):
         if self._activation_parser is None:
             self._activation_parser = ActivationParser("", "", self.activations_path,
                                                      df=self.df, logger_type=self.logger_type,
-                                                     random_seed=self.random_seed)
+                                                     random_seed=self.random_seed, verbose=self.verbose)
         return self._activation_parser
 
     def __len__(self) -> int:
@@ -138,7 +140,7 @@ class ActivationDataset(Dataset):
 class ActivationParser:
     def __init__(self, inference_json: str, eval_json: str, activations_path: str,
                  df: Optional[pd.DataFrame] = None, logger_type: str = "lmdb",
-                 random_seed: int = 42):
+                 random_seed: int = 42, verbose: bool = True):
         """
         Initialize the ActivationParser.
 
@@ -149,6 +151,7 @@ class ActivationParser:
             df: Optional DataFrame to use instead of loading from JSON files
             logger_type: Type of logger to use ('lmdb' or 'json')
             random_seed: Random seed for train/test split (default: 42)
+            verbose: Whether to log initialization and metadata loading messages (default: True)
         """
         self.inference_json = Path(inference_json)
         if not self.inference_json.exists():
@@ -161,6 +164,7 @@ class ActivationParser:
         self.activations_path = activations_path
         self.logger_type = logger_type
         self.random_seed = random_seed
+        self.verbose = verbose
         self._activation_logger = None
 
         # For backward compatibility, also store as lmdb_path
@@ -173,9 +177,9 @@ class ActivationParser:
     def activation_logger(self):
         if self._activation_logger is None:
             if self.logger_type == "json":
-                self._activation_logger = JsonActivationsLogger(output_dir=self.activations_path, read_only=True)
+                self._activation_logger = JsonActivationsLogger(output_dir=self.activations_path, read_only=True, verbose=self.verbose)
             else:  # default to lmdb
-                self._activation_logger = ActivationsLogger(lmdb_path=self.activations_path, read_only=True)
+                self._activation_logger = ActivationsLogger(lmdb_path=self.activations_path, read_only=True, verbose=self.verbose)
         return self._activation_logger
 
     def _load_metadata(self) -> Dict[str, Any]:
@@ -206,11 +210,12 @@ class ActivationParser:
         gendf.loc[train_df.index, 'split'] = 'train'
         gendf.loc[test_df.index, 'split'] = 'test'
 
-        logger.info(f"Found {len(gendf)} prompts with activations")
-        logger.info(f"Found {len(gendf[gendf['halu']])} hallucinations")
-        logger.info(f"Found {len(gendf[~gendf['halu']])} non-hallucinations")
-        logger.info(f"Found {gendf['halu'].sum()/len(gendf)}% hallucinations")
-        logger.info(f"Train set size: {len(train_df)}, Test set size: {len(test_df)}")
+        if self.verbose:
+            logger.info(f"Found {len(gendf)} prompts with activations")
+            logger.info(f"Found {len(gendf[gendf['halu']])} hallucinations")
+            logger.info(f"Found {len(gendf[~gendf['halu']])} non-hallucinations")
+            logger.info(f"Found {gendf['halu'].sum()/len(gendf)}% hallucinations")
+            logger.info(f"Train set size: {len(train_df)}, Test set size: {len(test_df)}")
 
         # gen df contains these columns ['index', 'title', 'h_score_cat', 'pageid', 'revid', 'description',
         # 'categories', 'reference', 'prompt', 'answer', 'generation', 'abstain',
@@ -267,7 +272,7 @@ class ActivationParser:
         Returns:
             ActivationDataset instance for the specified split
         """
-        return ActivationDataset(self.df, self.activations_path, split, relevant_layers, self.logger_type, fixed_layer, self.random_seed)
+        return ActivationDataset(self.df, self.activations_path, split, relevant_layers, self.logger_type, fixed_layer, self.random_seed, verbose=False)
 
     def close(self):
         """Close the LMDB connection."""
