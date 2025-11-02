@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from .evaluation import evaluate, pairing_accuracy
+from .evaluation import evaluate, pairing_accuracy, average_cosine_similarity
 from loguru import logger
 from sklearn.metrics import roc_auc_score
 import os
@@ -199,6 +199,7 @@ def train_contrastive(model, train_dataset, test_dataset=None,
         model.train()
         total_loss = 0.0
         total_acc = 0.0
+        total_cosine_sim = 0.0
         n_batches = 0  # Track number of full batches processed
         loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False)
 
@@ -268,21 +269,25 @@ def train_contrastive(model, train_dataset, test_dataset=None,
                 optimizer.step()
 
                 acc = pairing_accuracy(z1, z2)
+                cosine_sim = average_cosine_similarity(z1, z2)
                 total_loss += loss.item()
                 total_acc += acc
+                total_cosine_sim += cosine_sim
                 n_batches += 1  # Increment for each full batch processed
 
                 avg_loss = total_loss / n_batches
                 avg_acc = total_acc / n_batches
+                avg_cosine_sim = total_cosine_sim / n_batches
 
-                loop.set_postfix(loss=avg_loss, pairing_acc=avg_acc)
+                loop.set_postfix(loss=avg_loss, pairing_acc=avg_acc, cosine_sim=avg_cosine_sim)
 
-        print(f"Epoch {epoch + 1}/{epochs} - Train Loss: {avg_loss:.4f} - Train Pairing Acc: {avg_acc:.4f}")
+        print(f"Epoch {epoch + 1}/{epochs} - Train Loss: {avg_loss:.4f} - Train Pairing Acc: {avg_acc:.4f} - Train Cosine Sim: {avg_cosine_sim:.4f}")
 
         test_loss = float('inf')
+        test_cosine_sim = 0.0
         if test_dataset is not None:
-            test_loss, test_acc = evaluate(model, test_dataset, batch_size=batch_size, loss_fn=loss_fn, device=device, sub_batch_size=sub_batch_size, use_labels=use_labels, ignore_label=ignore_label)
-            print(f"Epoch {epoch + 1}/{epochs} - Test Loss: {test_loss:.4f} - Test Pairing Acc: {test_acc:.4f}")
+            test_loss, test_acc, test_cosine_sim = evaluate(model, test_dataset, batch_size=batch_size, loss_fn=loss_fn, device=device, sub_batch_size=sub_batch_size, use_labels=use_labels, ignore_label=ignore_label)
+            print(f"Epoch {epoch + 1}/{epochs} - Test Loss: {test_loss:.4f} - Test Pairing Acc: {test_acc:.4f} - Test Cosine Sim: {test_cosine_sim:.4f}")
 
         # Save checkpoint
         if (epoch + 1) % save_every == 0 or epoch == epochs - 1:
@@ -292,7 +297,9 @@ def train_contrastive(model, train_dataset, test_dataset=None,
                 'optimizer_state_dict': optimizer.state_dict(),
                 'train_loss': avg_loss,
                 'train_acc': avg_acc,
+                'train_cosine_sim': avg_cosine_sim,
                 'test_loss': test_loss,
+                'test_cosine_sim': test_cosine_sim,
                 'best_loss': min(best_loss, test_loss),
                 'temperature': temperature,
                 'lr': lr

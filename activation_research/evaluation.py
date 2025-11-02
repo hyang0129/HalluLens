@@ -13,6 +13,7 @@ def evaluate(model, test_dataloader, batch_size=32, loss_fn=None, device='cuda',
     model.eval()
     total_loss = 0.0
     total_acc = 0.0
+    total_cosine_sim = 0.0
     n_batches = 0
 
     with torch.no_grad():
@@ -61,14 +62,17 @@ def evaluate(model, test_dataloader, batch_size=32, loss_fn=None, device='cuda',
                     loss = loss_fn(z_stacked)
 
                 acc = pairing_accuracy(z1, z2)
+                cosine_sim = average_cosine_similarity(z1, z2)
 
                 total_loss += loss.item()
                 total_acc += acc
+                total_cosine_sim += cosine_sim
                 n_batches += 1
 
     avg_loss = total_loss / n_batches
     avg_acc = total_acc / n_batches
-    return avg_loss, avg_acc
+    avg_cosine_sim = total_cosine_sim / n_batches
+    return avg_loss, avg_acc, avg_cosine_sim
 
 def pairing_accuracy(z1, z2):
     """
@@ -93,7 +97,22 @@ def pairing_accuracy(z1, z2):
 
     # Average accuracy
     accuracy = (correct_z1 + correct_z2) / (2 * batch_size)
-    return accuracy 
+    return accuracy
+
+
+def average_cosine_similarity(z1, z2):
+    """
+    z1, z2: (B, D) embeddings
+    Returns average cosine similarity between corresponding pairs (z1[i], z2[i]).
+    """
+    z1 = F.normalize(z1, dim=1)
+    z2 = F.normalize(z2, dim=1)
+
+    # Compute cosine similarity for corresponding pairs
+    cosine_sim = (z1 * z2).sum(dim=1)  # (B,)
+
+    # Return average cosine similarity
+    return cosine_sim.mean().item()
 
 
 
