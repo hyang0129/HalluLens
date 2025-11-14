@@ -2,7 +2,7 @@
 Example usage showing how to suppress loguru messages during data loading.
 """
 
-from activation_research.hallucination_evaluator import HallucinationEvaluator, suppress_dataloader_logs, set_logging_level
+from activation_research.metric_evaluator import HallucinationEvaluator, suppress_dataloader_logs, set_logging_level
 from activation_logging.activation_parser import ActivationParser
 
 def example_with_suppressed_logs():
@@ -33,17 +33,22 @@ def example_with_suppressed_logs():
     # Get datasets (these will now be much quieter)
     train_dataset = ap.get_dataset('train')
     eval_dataset = ap.get_dataset('test')
-    
+
+    # Create data loaders
+    from torch.utils.data import DataLoader
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=False)
+    eval_loader = DataLoader(eval_dataset, batch_size=32, shuffle=False)
+
     # Create evaluator and run evaluation
     evaluator = HallucinationEvaluator(
-        model=your_model,
         activation_parser_df=ap.df,
+        train_data_loader=train_loader,
         layers=[10, 15, 20, 25, 30]
     )
-    
+
     # This will now run with minimal logging output
-    stats = evaluator.evaluate_detection(train_dataset, eval_dataset)
-    
+    stats = evaluator.compute(eval_loader, your_model)
+
     print("Results:", stats)
 
 def example_with_different_log_levels():

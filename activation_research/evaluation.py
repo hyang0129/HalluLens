@@ -9,7 +9,7 @@ from sklearn.metrics import roc_auc_score
 from scipy.spatial import distance
 
 
-def evaluate(model, test_dataloader, batch_size=32, loss_fn=None, device='cuda', sub_batch_size=64, use_labels=False, ignore_label=-1):
+def evaluate(model, test_dataloader, batch_size=32, loss_fn=None, device='cuda', sub_batch_size=64, use_labels=False, ignore_label=-1, evaluator_manager=None):
     model.eval()
     total_loss = 0.0
     total_acc = 0.0
@@ -51,6 +51,22 @@ def evaluate(model, test_dataloader, batch_size=32, loss_fn=None, device='cuda',
 
                 z1 = model(x1_full)
                 z2 = model(x2_full)
+
+                # Accumulate embeddings if evaluator manager is provided
+                if evaluator_manager is not None:
+                    # Extract hashkeys if available in the batch
+                    hashkeys = None
+                    if hasattr(batch, 'get') and 'hashkey' in batch:
+                        hashkeys = batch['hashkey']
+                    elif hasattr(batch, 'get') and 'hashkeys' in batch:
+                        hashkeys = batch['hashkeys']
+
+                    # Get labels if using them
+                    labels = None
+                    if use_labels:
+                        labels = torch.cat(buffer_labels, dim=0) if buffer_labels else None
+
+                    evaluator_manager.accumulate_batch(z1, z2, hashkeys, labels)
 
                 z_stacked = torch.stack([z1, z2], dim=1)
 
