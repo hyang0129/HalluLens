@@ -416,6 +416,9 @@ if __name__ == '__main__':
     parser.add_argument('--activations_path', type=str, default=None, help='Path for storing activations')
     parser.add_argument('--log_file', type=str, default=None, help='Path for server behavior logs')
 
+    # Resume control
+    parser.add_argument('--no-resume', action='store_true', help='Disable automatic resume from existing generations file')
+
     args = parser.parse_args()
     
     # Set up task name and paths
@@ -462,7 +465,8 @@ if __name__ == '__main__':
             max_workers=1,
             logger_type=args.logger_type,
             activations_path=args.activations_path,
-            log_file_path=args.log_file
+            log_file_path=args.log_file,
+            resume=not args.no_resume
         )
         print('✅ Inference completed successfully!')
     

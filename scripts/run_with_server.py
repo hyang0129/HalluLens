@@ -198,6 +198,10 @@ def run_task_step(step, task, model, **kwargs):
         if kwargs.get("log_file"):
             cmd.extend(["--log_file", kwargs["log_file"]])
 
+        # Add resume control
+        if not kwargs.get("resume", True):
+            cmd.append("--no-resume")
+
     elif task == "longwiki":
         cmd = [sys.executable, "-m", "tasks.longwiki.longwiki_main"]
 
@@ -315,6 +319,10 @@ def run_task_step(step, task, model, **kwargs):
         if kwargs.get("log_file"):
             cmd.extend(["--log_file", kwargs["log_file"]])
 
+        # Add resume control
+        if not kwargs.get("resume", True):
+            cmd.append("--no-resume")
+
     else:
         raise ValueError(f"Unknown task: {task}")
 
@@ -384,7 +392,10 @@ def main():
     parser.add_argument("--split", default="dev", help="TriviaQA split (train/dev)")
     parser.add_argument("--data_dir", help="Directory containing TriviaQA data files")
     parser.add_argument("--auto_download", action="store_true", default=True, help="Automatically download TriviaQA data if not found")
-    
+
+    # Resume control
+    parser.add_argument("--no-resume", action="store_true", help="Disable automatic resume from existing generations file")
+
     args = parser.parse_args()
     
     # Check dependencies first
@@ -433,6 +444,8 @@ def main():
             "logger_type": args.logger_type,
             "activations_path": args.activations_path,
             "log_file": log_file_path,
+            # Resume control
+            "resume": not args.no_resume,
             # LongWiki specific
             "db_path": args.db_path,
             "claim_extractor": args.claim_extractor,

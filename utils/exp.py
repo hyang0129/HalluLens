@@ -27,7 +27,8 @@ def run_exp(
     server_port=8000,
     logger_type="lmdb",
     activations_path=None,
-    log_file_path=None
+    log_file_path=None,
+    resume=True
 ):
     """
     Run experiment with model inference.
@@ -50,6 +51,7 @@ def run_exp(
         logger_type: Activation logger type (lmdb or json)
         activations_path: Path for activation storage
         log_file_path: Path for server logs
+        resume: Whether to resume from existing generations file (default: True)
     """
     # Start server if needed
     server_manager = None
@@ -88,6 +90,48 @@ def run_exp(
         generations_file_path = str(generations_file_path)
         print('generations_file_path', generations_file_path)
 
+        # Check for existing generations and resume if requested
+        existing_generations = None
+        original_prompt_count = len(all_prompts)
+
+        if resume and Path(generations_file_path).exists():
+            import pandas as pd
+            import jsonlines
+
+            print(f"📂 Found existing generations file: {generations_file_path}")
+            try:
+                # Load existing generations
+                existing_generations = pd.read_json(generations_file_path, lines=True)
+                print(f"✅ Loaded {len(existing_generations)} existing generations")
+
+                # Filter out prompts that already have generations
+                # Match on the 'prompt' field to identify already-processed items
+                existing_prompts = set(existing_generations['prompt'].tolist())
+
+                # Create a mask for prompts that haven't been processed yet
+                mask = ~all_prompts['prompt'].isin(existing_prompts)
+                remaining_prompts = all_prompts[mask].copy()
+
+                if len(remaining_prompts) == 0:
+                    print(f"✅ All {original_prompt_count} prompts already processed! Nothing to do.")
+                    if return_gen:
+                        return existing_generations
+                    return None
+
+                print(f"📊 Resume statistics:")
+                print(f"   - Total prompts: {original_prompt_count}")
+                print(f"   - Already completed: {len(existing_generations)}")
+                print(f"   - Remaining to process: {len(remaining_prompts)}")
+                print(f"   - Progress: {len(existing_generations)/original_prompt_count*100:.1f}%")
+
+                # Update all_prompts to only include remaining prompts
+                all_prompts = remaining_prompts
+
+            except Exception as e:
+                print(f"⚠️  Warning: Could not load existing generations: {e}")
+                print(f"   Starting from scratch...")
+                existing_generations = None
+
         # Initialize client logging for debugging
         if inference_method == "vllm":
             lm.setup_client_logging(generations_file_path)
@@ -124,6 +168,13 @@ def run_exp(
         else:
             raise NotImplementedError(f"No method {inference_method}")
 
+        # Merge with existing generations if resuming
+        if existing_generations is not None:
+            import pandas as pd
+            print(f"📝 Merging {len(all_prompts)} new generations with {len(existing_generations)} existing ones...")
+            all_prompts = pd.concat([existing_generations, all_prompts], ignore_index=True)
+            print(f"✅ Total generations: {len(all_prompts)}")
+
         # save the results
         all_prompts.to_json(generations_file_path, lines=True, orient="records")
 
@@ -133,15 +184,20 @@ def run_exp(
             progress_stats = lm.get_progress_stats()
 
             print(f"\n📊 Experiment completed:")
-            print(f"   - Total requests: {progress_stats['total_requests']}")
+            if existing_generations is not None:
+                print(f"   - Previously completed: {len(existing_generations)}")
+                print(f"   - Newly processed: {progress_stats['total_requests']}")
+                print(f"   - Total in dataset: {original_prompt_count}")
+            print(f"   - Total requests (this run): {progress_stats['total_requests']}")
             print(f"   - Successfully completed: {progress_stats['completed_requests']}")
             print(f"   - Failed requests: {progress_stats['failed_requests']}")
-            print(f"   - Success rate: {progress_stats['completed_requests']/progress_stats['total_requests']*100:.2f}%")
+            if progress_stats['total_requests'] > 0:
+                print(f"   - Success rate: {progress_stats['completed_requests']/progress_stats['total_requests']*100:.2f}%")
 
             if skip_stats["total_skipped"] > 0:
                 print(f"   - Timeout skipped: {skip_stats['timeout_skipped']}")
                 print(f"   - Error skipped: {skip_stats['error_skipped']}")
-                print(f"   - Skip rate: {skip_stats['total_skipped']/len(all_prompts)*100:.2f}%")
+                print(f"   - Skip rate: {skip_stats['total_skipped']/progress_stats['total_requests']*100:.2f}%")
                 print(f"   - Skipped samples list saved to: goodwiki_json/failed_requests/skipped_samples.json")
             else:
                 print(f"✅ All samples processed successfully!")

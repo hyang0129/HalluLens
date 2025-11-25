@@ -471,6 +471,9 @@ if __name__ == '__main__':
     parser.add_argument('--activations_path', type=str, default=None, help='Path for storing activations')
     parser.add_argument('--log_file', type=str, default=None, help='Path for server behavior logs')
 
+    # Resume control
+    parser.add_argument('--no-resume', action='store_true', help='Disable automatic resume from existing generations file')
+
     args = parser.parse_args()
 
     # get base path
@@ -518,7 +521,16 @@ if __name__ == '__main__':
         # Remove rows where answer only contains the word 'answer' and punctuation
         QAs_df = QAs_df[~(QAs_df.answer.str.replace(r'[^\w\s]', '', regex=True).str.strip().str.lower() == 'answer')]
         QAs_df = QAs_df[(QAs_df.h_score_cat > 6)]
-        QAs_df = QAs_df.sample(args.N)
+
+        # Use deterministic sampling for resumable inference
+        # Reset index to ensure consistent ordering, then take first N rows
+        QAs_df = QAs_df.reset_index(drop=True)
+        if len(QAs_df) > args.N:
+            print(f"📊 Selecting first {args.N} questions from {len(QAs_df)} filtered questions (deterministic ordering for resume support)")
+            QAs_df = QAs_df.iloc[:args.N]
+        else:
+            print(f"⚠️  Warning: Only {len(QAs_df)} questions available after filtering, requested {args.N}")
+
         QAs_df['prompt'] = QAs_df.prompt.apply(lambda x : f'Answer in one sentence. Q:{x}\n A:')
 
         print(f"Starting Inference for [{args.model}], Testset_N: {QAs_df.shape}")
@@ -534,7 +546,8 @@ if __name__ == '__main__':
                     base_delay=args.base_delay,
                     logger_type=args.logger_type,
                     activations_path=args.activations_path,
-                    log_file_path=args.log_file)
+                    log_file_path=args.log_file,
+                    resume=not args.no_resume)
         print('Inference completed')
 
     if args.do_eval:
