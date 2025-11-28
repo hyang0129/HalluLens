@@ -2,21 +2,28 @@
 
 ## Overview
 
-The inference pipeline now supports automatic resume functionality. If your inference job is interrupted (e.g., due to cluster time limits, crashes, or manual stops), you can simply re-run the same command and it will automatically resume from where it left off.
+The inference pipeline now supports automatic resume functionality with **incremental saving**. If your inference job is interrupted (e.g., due to cluster time limits, crashes, or manual stops), you can simply re-run the same command and it will automatically resume from where it left off.
 
 ## How It Works
 
-1. **Deterministic Ordering**: Questions are now selected deterministically (first N after filtering) instead of randomly, ensuring the same set of questions is selected each time.
+1. **Single-Threaded Sequential Processing**: Inference runs in a single thread, processing one prompt at a time. This is optimal because:
+   - The vLLM server handles parallelism internally
+   - Client-side parallelism adds complexity without benefit
+   - Sequential processing makes incremental saving simpler and safer
 
-2. **Automatic Detection**: When starting inference, the system checks if a generations file already exists at the target path.
+2. **Incremental Saving**: **Each sample is saved to disk immediately after generation** (with `flush()` to ensure it's written). This means no progress is lost if the job crashes - every completed sample is already safely on disk.
 
-3. **Smart Filtering**: If existing generations are found, the system:
+3. **Deterministic Ordering**: Questions are now selected deterministically (first N after filtering) instead of randomly, ensuring the same set of questions is selected each time.
+
+4. **Automatic Detection**: When starting inference, the system checks if a generations file already exists at the target path.
+
+5. **Smart Filtering**: If existing generations are found, the system:
    - Loads the existing generations
-   - Identifies which prompts have already been processed
+   - Identifies which prompts have already been processed (by matching prompt text)
    - Filters them out from the current batch
    - Only processes the remaining prompts
 
-4. **Seamless Merging**: After processing remaining prompts, the new generations are merged with existing ones and saved to the same file.
+6. **Append Mode**: When resuming, new generations are appended to the existing file, preserving all previous work.
 
 ## Usage
 
@@ -68,7 +75,15 @@ When resuming, you'll see output like:
    - Already completed: 15000
    - Remaining to process: 45000
    - Progress: 25.0%
-📊 Starting inference: 45000 total requests to process
+Client logging initialized for 45000 remaining requests
+📊 Starting inference: 45000 remaining requests to process (total: 60000, completed: 15000)
+```
+
+And in the client logs, you'll see progress continue from where it left off:
+
+```
+2025-11-28 16:06:06 | INFO | [CLIENT 307ba024] Starting API call - Model: meta-llama/Llama-3.1-8B-Instruct, Prompt length: 103 chars
+2025-11-28 16:06:06 | INFO | [CLIENT 307ba024] Progress: 15000/60000 completed, 45000 remaining
 ```
 
 When all prompts are already processed:

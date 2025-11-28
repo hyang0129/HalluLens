@@ -364,12 +364,17 @@ def get_skip_statistics():
     """Get current skip statistics."""
     return skip_stats.copy()
 
-def initialize_progress_tracking(total_requests):
-    """Initialize progress tracking for a new batch of requests."""
+def initialize_progress_tracking(total_requests, already_completed=0):
+    """Initialize progress tracking for a new batch of requests.
+
+    Args:
+        total_requests: Total number of requests in the full batch
+        already_completed: Number of requests already completed (for resume support)
+    """
     global progress_stats
     progress_stats = {
         "total_requests": total_requests,
-        "completed_requests": 0,
+        "completed_requests": already_completed,
         "failed_requests": 0
     }
 

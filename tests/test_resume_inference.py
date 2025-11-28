@@ -17,6 +17,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import exp
+import utils.lm as lm
 
 def test_resume_basic():
     """Test basic resume functionality."""
@@ -143,19 +144,56 @@ def test_resume_all_complete():
             os.unlink(temp_file)
 
 
+def test_progress_tracking():
+    """Test that progress tracking correctly accounts for already-completed items."""
+    print("\n" + "=" * 60)
+    print("Test 3: Progress Tracking with Resume")
+    print("=" * 60)
+
+    # Test progress tracking initialization
+    print("\n📝 Testing progress tracking initialization...")
+
+    # Initialize with 100 total, 30 already completed
+    lm.initialize_progress_tracking(total_requests=100, already_completed=30)
+    stats = lm.get_progress_stats()
+
+    print(f"📊 Initial progress stats:")
+    print(f"   - Total requests: {stats['total_requests']}")
+    print(f"   - Completed requests: {stats['completed_requests']}")
+    print(f"   - Failed requests: {stats['failed_requests']}")
+
+    assert stats['total_requests'] == 100, f"Expected total 100, got {stats['total_requests']}"
+    assert stats['completed_requests'] == 30, f"Expected completed 30, got {stats['completed_requests']}"
+    assert stats['failed_requests'] == 0, f"Expected failed 0, got {stats['failed_requests']}"
+
+    print("✅ Progress tracking correctly initialized with already-completed count")
+
+    # Simulate processing one more request
+    lm.update_progress(success=True)
+    stats = lm.get_progress_stats()
+
+    assert stats['completed_requests'] == 31, f"Expected completed 31, got {stats['completed_requests']}"
+    print("✅ Progress tracking correctly increments from resumed state")
+
+    print("\n" + "=" * 60)
+    print("✅ Test 3 PASSED")
+    print("=" * 60)
+
+
 if __name__ == "__main__":
     print("\n🧪 Testing Resume Inference Functionality\n")
-    
+
     try:
         test_resume_basic()
         test_resume_all_complete()
-        
+        test_progress_tracking()
+
         print("\n" + "=" * 60)
         print("🎉 ALL TESTS PASSED!")
         print("=" * 60)
         print("\nThe resume functionality is working correctly.")
         print("You can now use it for large-scale inference jobs.")
-        
+
     except AssertionError as e:
         print(f"\n❌ TEST FAILED: {e}")
         sys.exit(1)

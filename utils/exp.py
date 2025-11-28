@@ -6,9 +6,52 @@
 # LICENSE file in the root directory of this source tree.
 
 from pathlib import Path
-from tqdm.contrib.concurrent import thread_map
+from tqdm import tqdm
+import json
 
 from utils import lm
+
+def process_with_incremental_save(all_prompts, inference_fn, generations_file_path, desc="Processing", resume_mode=False):
+    """
+    Process prompts sequentially and save each result immediately to JSONL file.
+
+    Args:
+        all_prompts: DataFrame with prompts and metadata
+        inference_fn: Function to call for each prompt (takes prompt string, returns generation string)
+        generations_file_path: Path to save generations
+        desc: Description for progress bar
+        resume_mode: If True, append to existing file; if False, overwrite
+
+    Returns:
+        DataFrame with generations added
+    """
+    prompts = all_prompts.prompt.to_list()
+    generations = []
+
+    # Determine file mode
+    file_mode = 'a' if resume_mode else 'w'
+
+    # Open file once and keep it open for all writes
+    with open(generations_file_path, file_mode, encoding='utf-8') as f:
+        # Process each prompt sequentially
+        for idx, prompt in enumerate(tqdm(prompts, desc=desc)):
+            # Generate response
+            generation = inference_fn(prompt)
+            generations.append(generation)
+
+            # Create the full record with all metadata from original prompt
+            record = all_prompts.iloc[idx].to_dict()
+            record['generation'] = generation
+
+            # Write to file immediately
+            f.write(json.dumps(record, ensure_ascii=False) + '\n')
+            f.flush()  # Ensure it's written to disk immediately
+
+    # Add generations to dataframe
+    all_prompts = all_prompts.copy()
+    all_prompts['generation'] = generations
+
+    return all_prompts
 
 def run_exp(
     task: str,
@@ -40,7 +83,7 @@ def run_exp(
         generations_file_path: Path to save generations
         base_path: Base output directory
         inference_method: Inference method (vllm, openai, custom)
-        max_workers: Number of parallel workers
+        max_workers: DEPRECATED - kept for backward compatibility, inference is now single-threaded
         max_tokens: Maximum tokens to generate
         return_gen: Whether to return generations
         max_retries: Maximum retry attempts
@@ -52,6 +95,10 @@ def run_exp(
         activations_path: Path for activation storage
         log_file_path: Path for server logs
         resume: Whether to resume from existing generations file (default: True)
+
+    Note:
+        Inference is now single-threaded with incremental saving. Each generation is saved
+        to disk immediately after completion, ensuring no progress is lost on interruption.
     """
     # Start server if needed
     server_manager = None
@@ -93,10 +140,10 @@ def run_exp(
         # Check for existing generations and resume if requested
         existing_generations = None
         original_prompt_count = len(all_prompts)
+        already_completed_count = 0
 
         if resume and Path(generations_file_path).exists():
             import pandas as pd
-            import jsonlines
 
             print(f"📂 Found existing generations file: {generations_file_path}")
             try:
@@ -118,11 +165,14 @@ def run_exp(
                         return existing_generations
                     return None
 
+                # Track how many were already completed for progress tracking
+                already_completed_count = len(existing_generations)
+
                 print(f"📊 Resume statistics:")
                 print(f"   - Total prompts: {original_prompt_count}")
-                print(f"   - Already completed: {len(existing_generations)}")
+                print(f"   - Already completed: {already_completed_count}")
                 print(f"   - Remaining to process: {len(remaining_prompts)}")
-                print(f"   - Progress: {len(existing_generations)/original_prompt_count*100:.1f}%")
+                print(f"   - Progress: {already_completed_count/original_prompt_count*100:.1f}%")
 
                 # Update all_prompts to only include remaining prompts
                 all_prompts = remaining_prompts
@@ -131,52 +181,49 @@ def run_exp(
                 print(f"⚠️  Warning: Could not load existing generations: {e}")
                 print(f"   Starting from scratch...")
                 existing_generations = None
+                already_completed_count = 0
 
         # Initialize client logging for debugging
         if inference_method == "vllm":
             lm.setup_client_logging(generations_file_path)
-            lm.initialize_progress_tracking(len(all_prompts))
-            print(f"Client logging initialized for {len(all_prompts)} requests")
-            print(f"📊 Starting inference: {len(all_prompts)} total requests to process")
+            # Initialize progress tracking with total original count and already completed count
+            lm.initialize_progress_tracking(original_prompt_count, already_completed=already_completed_count)
+            print(f"Client logging initialized for {len(all_prompts)} remaining requests")
+            print(f"📊 Starting inference: {len(all_prompts)} remaining requests to process (total: {original_prompt_count}, completed: {already_completed_count})")
 
-        prompts =  all_prompts.prompt.to_list()
+        # get the response from the model with incremental saving
+        print(f"🚀 Processing {len(all_prompts)} inference requests with incremental saving...")
+        print(f"💾 Results will be saved to: {generations_file_path}")
 
-        # get the response from the model
-        print(f"🚀 Processing {len(prompts)} inference requests...")
+        # Define inference function based on method
         if inference_method == 'openai':
-            all_prompts["generation"] = thread_map(
-                lambda p: lm.openai_generate(p, model=model_path, temperature=0.0, top_p=1.0, max_tokens=max_tokens),
-                prompts,
-                max_workers=max_workers,
-                desc=f"OpenAI inference ({len(prompts)} requests)",
-            )
+            inference_fn = lambda p: lm.openai_generate(p, model=model_path, temperature=0.0, top_p=1.0, max_tokens=max_tokens)
         elif inference_method == "vllm":
             port = None
-            all_prompts["generation"] = thread_map(
-                lambda p: lm.call_vllm_api(p, model=model_path, temperature=0.0, top_p=1.0,  max_tokens=max_tokens, port=port, max_retries=max_retries, base_delay=base_delay),
-                prompts,
-                max_workers=max_workers,
-                desc=f"vLLM inference ({len(prompts)} requests)",
-            )
+            inference_fn = lambda p: lm.call_vllm_api(p, model=model_path, temperature=0.0, top_p=1.0, max_tokens=max_tokens, port=port, max_retries=max_retries, base_delay=base_delay)
         elif inference_method == "custom":
-            all_prompts["generation"] = thread_map(
-                lambda p: lm.generate(p, model=model_path, temperature=0.0, top_p=1.0, max_tokens=max_tokens, max_retries=max_retries, base_delay=base_delay),
-                prompts,
-                max_workers=max_workers,
-                desc=f"Custom API inference ({len(prompts)} requests)",
-            )
+            inference_fn = lambda p: lm.generate(p, model=model_path, temperature=0.0, top_p=1.0, max_tokens=max_tokens, max_retries=max_retries, base_delay=base_delay)
         else:
             raise NotImplementedError(f"No method {inference_method}")
 
-        # Merge with existing generations if resuming
+        # Process with incremental saving (single-threaded, sequential)
+        # If resuming, append to existing file; otherwise start fresh
+        all_prompts = process_with_incremental_save(
+            all_prompts=all_prompts,
+            inference_fn=inference_fn,
+            generations_file_path=generations_file_path,
+            desc=f"{inference_method.upper()} inference",
+            resume_mode=(existing_generations is not None)
+        )
+
+        print(f"✅ All {len(all_prompts)} samples processed and saved to {generations_file_path}")
+
+        # If resuming, we need to reload the full file to get complete dataset
         if existing_generations is not None:
             import pandas as pd
-            print(f"📝 Merging {len(all_prompts)} new generations with {len(existing_generations)} existing ones...")
-            all_prompts = pd.concat([existing_generations, all_prompts], ignore_index=True)
-            print(f"✅ Total generations: {len(all_prompts)}")
-
-        # save the results
-        all_prompts.to_json(generations_file_path, lines=True, orient="records")
+            print(f"📊 Reloading complete dataset from {generations_file_path}...")
+            all_prompts = pd.read_json(generations_file_path, lines=True)
+            print(f"✅ Total generations in file: {len(all_prompts)}")
 
         # Report final statistics if using vllm
         if inference_method == "vllm":
