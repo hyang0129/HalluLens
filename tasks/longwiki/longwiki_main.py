@@ -78,6 +78,10 @@ if __name__ == '__main__':
     parser.add_argument('--max_tokens', type=int, default=1024)
     parser.add_argument('--max_workers', type=int, default=64)
 
+    # Resume control
+    parser.add_argument('--no-resume', action='store_true', help='Disable automatic resume from existing generations file (inference)')
+    parser.add_argument('--no-resume-eval', action='store_true', help='Disable automatic resume for evaluation step')
+
     # Activation logging parameters
     parser.add_argument('--logger_type', type=str, default='lmdb', choices=['lmdb', 'json'], help='Activation logger type')
     parser.add_argument('--activations_path', type=str, default=None, help='Path for storing activations')

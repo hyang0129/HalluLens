@@ -134,7 +134,7 @@ class PreciseQAEval:
             logger.info("Quick debug mode enabled - using only first 5 questions")
             self.test_df = self.test_df.head(5)
 
-    def eval_abstention(self, evaluator):
+    def eval_abstention(self, evaluator, resume=True):
         print(f"🔍 Starting abstention evaluation with {evaluator}")
         abs_path = f'{self.output_path}/abstain_eval_raw.jsonl'
         print(f"📁 Abstention logs will be saved to: {abs_path}")
@@ -147,6 +147,34 @@ class PreciseQAEval:
             ]
 
         print(f"📊 Generated {len(abstain_prompts)} abstention evaluation prompts")
+
+        # Check for existing results and resume if requested
+        existing_results = []
+        prompts_to_process = abstain_prompts
+
+        if resume and os.path.exists(abs_path):
+            print(f"📂 Found existing abstention evaluation file: {abs_path}")
+            try:
+                with open(abs_path, 'r') as f:
+                    for line in f:
+                        existing_results.append(json.loads(line)['eval_res'])
+
+                if len(existing_results) > 0:
+                    print(f"✅ Loaded {len(existing_results)} existing abstention evaluations")
+                    if len(existing_results) >= len(abstain_prompts):
+                        print(f"✅ All {len(abstain_prompts)} abstention evaluations already complete!")
+                        return existing_results
+
+                    prompts_to_process = abstain_prompts[len(existing_results):]
+                    print(f"📊 Resume statistics:")
+                    print(f"   - Total prompts: {len(abstain_prompts)}")
+                    print(f"   - Already completed: {len(existing_results)}")
+                    print(f"   - Remaining to process: {len(prompts_to_process)}")
+            except Exception as e:
+                print(f"⚠️  Warning: Could not load existing results: {e}")
+                print(f"   Starting from scratch...")
+                existing_results = []
+                prompts_to_process = abstain_prompts
 
         # Start server for evaluator model if needed
         server_was_running = lm.check_server_health("http://0.0.0.0:8000")
@@ -167,17 +195,29 @@ class PreciseQAEval:
         else:
             print(f"🔄 Using existing server for evaluation")
 
-        try:
-            print(f"🔄 Processing {len(abstain_prompts)} abstention evaluation requests...")
-            abstains_eval_raw = thread_map(
-                lambda p: lm.generate(p, evaluator),
-                abstain_prompts,
-                max_workers=1,
-                desc=f"Abstention eval using {evaluator}")
+        # Initialize progress tracking for client logging
+        lm.initialize_progress_tracking(len(abstain_prompts), already_completed=len(existing_results))
 
-            print(f"💾 Saving raw abstention evaluation results to: {abs_path}")
-            eval_utils.save_eval_raw(abstains_eval_raw, abs_path)
-            print(f"✅ Abstention evaluation completed successfully")
+        try:
+            # Process remaining prompts with incremental saving
+            file_mode = 'a' if existing_results else 'w'
+
+            with open(abs_path, file_mode, encoding='utf-8') as f:
+                print(f"🔄 Processing {len(prompts_to_process)} abstention evaluation requests...")
+                from tqdm import tqdm
+
+                new_results = []
+                for prompt in tqdm(prompts_to_process, desc=f"Abstention eval using {evaluator}"):
+                    result = lm.generate(prompt, evaluator)
+                    new_results.append(result)
+
+                    # Save immediately
+                    f.write(json.dumps({"eval_res": result}, ensure_ascii=False) + '\n')
+                    f.flush()
+
+            # Combine existing and new results
+            abstains_eval_raw = existing_results + new_results
+            print(f"✅ Abstention evaluation completed successfully ({len(abstains_eval_raw)} total)")
         finally:
             # Stop server if we started it
             if server_manager and not server_was_running:
@@ -190,12 +230,9 @@ class PreciseQAEval:
                                                 eval_prompts=abstain_prompts, \
                                                 evaluator_model=evaluator,\
                                                 key=ABSTAIN_JSON_KEY)
-        
-        # Save original responses
-        with open(abs_path, 'w') as f:
-            for response in abstains_eval:
-                json.dump({"eval_res": response}, f)
-                f.write('\n')
+
+        # Note: Raw responses are already saved incrementally during processing
+        # No need to overwrite the file here
 
         # Validate and clean up JSON responses
         cleaned_abstains_eval = []
@@ -243,7 +280,7 @@ class PreciseQAEval:
 
         return refusal_res, abstains_eval_raw
 
-    def judge_hallucination(self, evaluator):
+    def judge_hallucination(self, evaluator, resume=True):
         print(f"🔍 Starting hallucination evaluation with {evaluator}")
 
         halu_path = f'{self.output_path}/halu_eval_raw.jsonl'
@@ -256,6 +293,34 @@ class PreciseQAEval:
         ]
 
         print(f"📊 Generated {len(halu_prompts)} hallucination evaluation prompts")
+
+        # Check for existing results and resume if requested
+        existing_results = []
+        prompts_to_process = halu_prompts
+
+        if resume and os.path.exists(halu_path):
+            print(f"📂 Found existing hallucination evaluation file: {halu_path}")
+            try:
+                with open(halu_path, 'r') as f:
+                    for line in f:
+                        existing_results.append(json.loads(line)['eval_res'])
+
+                if len(existing_results) > 0:
+                    print(f"✅ Loaded {len(existing_results)} existing hallucination evaluations")
+                    if len(existing_results) >= len(halu_prompts):
+                        print(f"✅ All {len(halu_prompts)} hallucination evaluations already complete!")
+                        return existing_results
+
+                    prompts_to_process = halu_prompts[len(existing_results):]
+                    print(f"📊 Resume statistics:")
+                    print(f"   - Total prompts: {len(halu_prompts)}")
+                    print(f"   - Already completed: {len(existing_results)}")
+                    print(f"   - Remaining to process: {len(prompts_to_process)}")
+            except Exception as e:
+                print(f"⚠️  Warning: Could not load existing results: {e}")
+                print(f"   Starting from scratch...")
+                existing_results = []
+                prompts_to_process = halu_prompts
 
         if evaluator == "meta-llama/Llama-3.1-8B-Instruct" or evaluator == "Llama-3.3-70B-Instruct-IQ3_M.gguf":
             # Start server for evaluator model if needed
@@ -277,22 +342,29 @@ class PreciseQAEval:
             else:
                 print(f"🔄 Using existing server for evaluation")
 
-            try:
-                print(f"🔄 Processing {len(halu_prompts)} hallucination evaluation requests...")
-                halu_eval_raw = thread_map(
-                    lambda p: lm.generate(p, evaluator),
-                    halu_prompts,
-                    max_workers=1,
-                    desc=f"Hallucination eval using {evaluator}"
-                )
+            # Initialize progress tracking for client logging
+            lm.initialize_progress_tracking(len(halu_prompts), already_completed=len(existing_results))
 
-                print(f"💾 Saving raw hallucination evaluation results to: {halu_path}")
-                # Save raw hallucination evaluation responses
-                with open(halu_path, 'w') as f:
-                    for response in halu_eval_raw:
-                        json.dump({"eval_res": response}, f)
-                        f.write('\n')
-                print(f"✅ Hallucination evaluation completed successfully")
+            try:
+                # Process remaining prompts with incremental saving
+                file_mode = 'a' if existing_results else 'w'
+                
+                with open(halu_path, file_mode, encoding='utf-8') as f:
+                    print(f"🔄 Processing {len(prompts_to_process)} hallucination evaluation requests...")
+                    from tqdm import tqdm
+
+                    new_results = []
+                    for prompt in tqdm(prompts_to_process, desc=f"Hallucination eval using {evaluator}"):
+                        result = lm.generate(prompt, evaluator)
+                        new_results.append(result)
+
+                        # Save immediately
+                        f.write(json.dumps({"eval_res": result}, ensure_ascii=False) + '\n')
+                        f.flush()
+
+                # Combine existing and new results
+                halu_eval_raw = existing_results + new_results
+                print(f"✅ Hallucination evaluation completed successfully ({len(halu_eval_raw)} total)")
             finally:
                 # Stop server if we started it
                 if server_manager and not server_was_running:
@@ -327,7 +399,7 @@ class PreciseQAEval:
             halu_test_res.append(hallucinated_judge)
         return abstantion_res, halu_test_res
 
-    def run_eval(self, eval_results_path=None, log_file=None):
+    def run_eval(self, eval_results_path=None, log_file=None, resume=True):
         # Set up client logging for evaluation process
         if log_file:
             # Use provided log file path
@@ -352,15 +424,16 @@ class PreciseQAEval:
         print(f"🔧 Abstention evaluator: {self.abtention_evaluator}")
         print(f"🔧 Hallucination evaluator: {self.halu_evaluator}")
         print(f"📝 Client logs: {client_log_file}")
+        print(f"🔄 Resume mode: {'enabled' if resume else 'disabled'}")
         print("=" * 80)
 
         # Step 1: Abstention Evaluation
         print(f"\n📋 Step 1/3: Abstention Evaluation")
-        abstantion_res, abstantion_raw_gen = self.eval_abstention(self.abtention_evaluator)
+        abstantion_res, abstantion_raw_gen = self.eval_abstention(self.abtention_evaluator, resume=resume)
 
         # Step 2: Hallucination Evaluation
         print(f"\n📋 Step 2/3: Hallucination Evaluation")
-        halu_test_raw_gen = self.judge_hallucination(self.halu_evaluator)
+        halu_test_raw_gen = self.judge_hallucination(self.halu_evaluator, resume=resume)
 
 
         # Step 3: Processing Results
@@ -472,7 +545,8 @@ if __name__ == '__main__':
     parser.add_argument('--log_file', type=str, default=None, help='Path for server behavior logs')
 
     # Resume control
-    parser.add_argument('--no-resume', action='store_true', help='Disable automatic resume from existing generations file')
+    parser.add_argument('--no-resume', action='store_true', help='Disable automatic resume from existing generations file (inference)')
+    parser.add_argument('--no-resume-eval', action='store_true', help='Disable automatic resume for evaluation step')
 
     args = parser.parse_args()
 
@@ -557,5 +631,9 @@ if __name__ == '__main__':
             TASKNAME=TASKNAME,
             generations_file_path=args.generations_file_path,
             quick_debug_mode=args.quick_debug_mode
-        ).run_eval(eval_results_path=args.eval_results_path, log_file=args.log_file)
+        ).run_eval(
+            eval_results_path=args.eval_results_path,
+            log_file=args.log_file,
+            resume=not args.no_resume_eval
+        )
         print(f'{TASKNAME} Evaluation completed')

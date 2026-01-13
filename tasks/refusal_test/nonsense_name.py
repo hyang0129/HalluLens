@@ -66,7 +66,7 @@ class NonsenseNameEval:
         self.eval_raw_path = f'{self.task_output_dir}/raw_eval_res.jsonl'
         self.evaluator = "meta-llama/Llama-3.1-70B-Instruct"
 
-    def automatic_abstention(self, generations, evaluator_model="meta-llama/Meta-Llama-3.1-70B-Instruct"):
+    def automatic_abstention(self, generations, evaluator_model="meta-llama/Meta-Llama-3.1-70B-Instruct", resume=True):
         abstain_prompts = [
                 prompt_templates.ABSTAIN_PROMPT_PLACE_NONSENSE.format(
                     name=generation['name'], 
@@ -76,13 +76,77 @@ class NonsenseNameEval:
                 )
                 for generation in generations
             ]
-        abstains_eval_raw = thread_map(lambda p: lm.generate(p, self.evaluator),
-                                        abstain_prompts,
-                                        max_workers=50,
-                                        desc=f"using {self.evaluator}")
-                        
-        eval_utils.save_eval_raw(abstains_eval_raw, self.eval_raw_path)
 
+        # Check for existing results and resume if requested
+        existing_results = []
+        prompts_to_process = abstain_prompts
+
+        if resume and os.path.exists(self.eval_raw_path):
+            print(f"📂 Found existing evaluation file: {self.eval_raw_path}")
+            try:
+                with open(self.eval_raw_path, 'r') as f:
+                    for line in f:
+                        existing_results.append(json.loads(line)['eval_res'])
+
+                if len(existing_results) > 0:
+                    print(f"✅ Loaded {len(existing_results)} existing evaluations")
+                    if len(existing_results) >= len(abstain_prompts):
+                        print(f"✅ All {len(abstain_prompts)} evaluations already complete!")
+                        abstains_eval_raw = existing_results
+                    else:
+                        prompts_to_process = abstain_prompts[len(existing_results):]
+                        print(f"📊 Resume statistics:")
+                        print(f"   - Total prompts: {len(abstain_prompts)}")
+                        print(f"   - Already completed: {len(existing_results)}")
+                        print(f"   - Remaining to process: {len(prompts_to_process)}")
+            except Exception as e:
+                print(f"⚠️  Warning: Could not load existing results: {e}")
+                print(f"   Starting from scratch...")
+                existing_results = []
+                prompts_to_process = abstain_prompts
+
+        if len(prompts_to_process) > 0:
+            print(f"🔄 Processing {len(prompts_to_process)} evaluation requests...")
+            from tqdm import tqdm
+            
+            # Start server for evaluator model if needed (similar to PreciseWikiQA)
+            # This ensures we have a server running for the evaluation
+            server_was_running = lm.check_server_health("http://0.0.0.0:8000")
+            server_manager = None
+
+            if not server_was_running:
+                print(f"🚀 Starting evaluation server for {self.evaluator}...")
+                server_manager = lm.ServerManager(
+                    model=self.evaluator,
+                    host="0.0.0.0",
+                    port=8000,
+                    logger_type="lmdb",
+                    activations_path=None
+                )
+                server_manager.start_server()
+                lm.set_server_manager(server_manager)
+            
+            # Initialize progress tracking for client logging
+            lm.initialize_progress_tracking(len(abstain_prompts), already_completed=len(existing_results))
+
+            try:
+                file_mode = 'a' if existing_results else 'w'
+                new_results = []
+                with open(self.eval_raw_path, file_mode, encoding='utf-8') as f:
+                    for prompt in tqdm(prompts_to_process, desc=f"using {self.evaluator}"):
+                        result = lm.generate(prompt, self.evaluator)
+                        new_results.append(result)
+                        # Save immediately
+                        f.write(json.dumps({"eval_res": result}, ensure_ascii=False) + '\n')
+                        f.flush()
+                abstains_eval_raw = existing_results + new_results
+            finally:
+                if server_manager:
+                    server_manager.stop_server()
+                    lm.set_server_manager(None)
+        else:
+            abstains_eval_raw = existing_results
+                        
         abstains_eval = eval_utils.jsonify_ans(raw_responses=abstains_eval_raw, \
                                     eval_prompts=abstain_prompts, \
                                         evaluator_model=evaluator_model,\
@@ -93,18 +157,19 @@ class NonsenseNameEval:
                 abstains_eval_res.append(not o['does_believe'])
             except:
                 print(f"Error in eval_answer: {o}")
-                exit()
+                # Fallback or exit
+                abstains_eval_res.append(False) 
 
         return abstains_eval_res
 
-    def run_eval(self, overwrite=False):
-        if os.path.exists(self.res_path) and not overwrite:
+    def run_eval(self, overwrite=False, resume=True):
+        if os.path.exists(self.res_path) and not overwrite and not resume:
             print(f'{self.TASKNAME} Evaluation already completed')
             res = json.load(open(self.res_path, "r"))
             return res
         
         generations = [json.loads(line) for line in open(self.generations_file_path, "r")]
-        eval_results = self.automatic_abstention(generations)
+        eval_results = self.automatic_abstention(generations, resume=resume)
         refusal_rate = sum(eval_results) / len(eval_results)
 
         res = {

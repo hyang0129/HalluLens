@@ -201,6 +201,8 @@ def run_task_step(step, task, model, **kwargs):
         # Add resume control
         if not kwargs.get("resume", True):
             cmd.append("--no-resume")
+        if not kwargs.get("resume_eval", True):
+            cmd.append("--no-resume-eval")
 
     elif task == "longwiki":
         cmd = [sys.executable, "-m", "tasks.longwiki.longwiki_main"]
@@ -276,6 +278,12 @@ def run_task_step(step, task, model, **kwargs):
         if kwargs.get("log_file"):
             cmd.extend(["--log_file", kwargs["log_file"]])
 
+        # Add resume control
+        if not kwargs.get("resume", True):
+            cmd.append("--no-resume")
+        if not kwargs.get("resume_eval", True):
+            cmd.append("--no-resume-eval")
+
     elif task == "triviaqa":
         cmd = [sys.executable, "-m", "tasks.triviaqa.triviaqa"]
 
@@ -322,6 +330,8 @@ def run_task_step(step, task, model, **kwargs):
         # Add resume control
         if not kwargs.get("resume", True):
             cmd.append("--no-resume")
+        if not kwargs.get("resume_eval", True):
+            cmd.append("--no-resume-eval")
 
     else:
         raise ValueError(f"Unknown task: {task}")
@@ -394,7 +404,8 @@ def main():
     parser.add_argument("--auto_download", action="store_true", default=True, help="Automatically download TriviaQA data if not found")
 
     # Resume control
-    parser.add_argument("--no-resume", action="store_true", help="Disable automatic resume from existing generations file")
+    parser.add_argument("--no-resume", action="store_true", help="Disable automatic resume from existing generations file (inference and evaluation)")
+    parser.add_argument("--no-resume-eval", action="store_true", help="Disable automatic resume specifically for evaluation step")
 
     args = parser.parse_args()
     
@@ -446,6 +457,7 @@ def main():
             "log_file": log_file_path,
             # Resume control
             "resume": not args.no_resume,
+            "resume_eval": not args.no_resume_eval,
             # LongWiki specific
             "db_path": args.db_path,
             "claim_extractor": args.claim_extractor,

@@ -208,7 +208,11 @@ class FactHalu:
         abstains_eval_raw = utils.read_eval_raw(refusal_path)
         if len(abstains_eval_raw) == len(abstain_prompts):
             print("Read from cache {}".format(refusal_path))
-        else:   
+        else:
+            # Initialize progress tracking for client logging
+            from utils import lm
+            lm.initialize_progress_tracking(len(abstain_prompts), already_completed=len(abstains_eval_raw))
+
             abstains_eval_raw = utils.model_eval_step(self.refusal_evaluator, abstain_prompts, max_token=128, batch_size=64)
             utils.save_eval_raw(abstains_eval_raw, output_file=refusal_path)
         
@@ -242,6 +246,10 @@ class FactHalu:
             if all_claim_extractions != []:
                 print(f"***** [2-1] Resuming extraction from cache, starting from {len(all_claim_extractions)}\n")
                 to_extract_prompts = to_extract_prompts[len(all_claim_extractions):]
+
+            # Initialize progress tracking for client logging
+            from utils import lm
+            lm.initialize_progress_tracking(len(all_sentences), already_completed=len(all_claim_extractions))
 
             mini_bsz = 100
             for i in range(0, len(to_extract_prompts), mini_bsz):
@@ -319,8 +327,18 @@ class FactHalu:
         if len(claim_verification_res) == len(all_claims):
             print("***** [3] Reading verification results from cache {}\n".format(verification_path))
         else:
-            for i in range(0, len(verification_prompts), 100):
-                batch_prompts = verification_prompts[i:i+100]
+            # Handle potential partial results for resume
+            to_verify_prompts = verification_prompts
+            if len(claim_verification_res) > 0:
+                print(f"***** [3] Resuming verification from cache, starting from {len(claim_verification_res)}\n")
+                to_verify_prompts = verification_prompts[len(claim_verification_res):]
+
+            # Initialize progress tracking for client logging
+            from utils import lm
+            lm.initialize_progress_tracking(len(all_claims), already_completed=len(claim_verification_res))
+
+            for i in range(0, len(to_verify_prompts), 100):
+                batch_prompts = to_verify_prompts[i:i+100]
                 batch_results = utils.model_eval_step(self.verifier, batch_prompts, \
                                                     max_token=512, batch_size=8, \
                                                     max_workers=16)

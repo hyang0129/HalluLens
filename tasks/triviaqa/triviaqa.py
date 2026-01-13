@@ -201,7 +201,7 @@ class TriviaQAEval:
             "error_rate": error_rate
         }
     
-    def run_eval(self, eval_results_path=None, log_file=None):
+    def run_eval(self, eval_results_path=None, log_file=None, resume=True):
         """Run complete evaluation pipeline"""
         # Set up basic logging for TriviaQA evaluation (for consistency)
         if log_file:
@@ -213,6 +213,7 @@ class TriviaQAEval:
 
         print(f"Starting TriviaQA evaluation for model: {self.model_name}")
         print(f"📝 Evaluation logs: {client_log_file}")
+        print(f"🔄 Resume mode: {'enabled' if resume else 'disabled'}")
 
         # Evaluate correctness using TriviaQA string matching
         binary_correctness = self.evaluate_correctness()
@@ -418,6 +419,7 @@ if __name__ == '__main__':
 
     # Resume control
     parser.add_argument('--no-resume', action='store_true', help='Disable automatic resume from existing generations file')
+    parser.add_argument('--no-resume-eval', action='store_true', help='Disable automatic resume for evaluation step')
 
     args = parser.parse_args()
     
@@ -477,5 +479,5 @@ if __name__ == '__main__':
             TASKNAME=TASKNAME,
             generations_file_path=args.generations_file_path,
             quick_debug_mode=args.quick_debug_mode
-        ).run_eval(eval_results_path=args.eval_results_path, log_file=args.log_file)
+        ).run_eval(eval_results_path=args.eval_results_path, log_file=args.log_file, resume=not args.no_resume_eval)
         print(f'{TASKNAME} Evaluation completed')

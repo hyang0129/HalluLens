@@ -39,7 +39,7 @@ class NonsenseMixedEval(NonsenseNameEval):
 
         print('EVAL TASKNAME', self.TASKNAME)
 
-    def automatic_abstention(self, generations, evaluator_model="meta-llama/Llama-3.1-8B-Instruct"):
+    def automatic_abstention(self, generations, evaluator_model="meta-llama/Llama-3.1-8B-Instruct", resume=True):
         JSON_KEY = "does_believe"
 
         eval_prompts = {
@@ -58,18 +58,78 @@ class NonsenseMixedEval(NonsenseNameEval):
                 for gen_obj in generations
             ]
         
-        abstains_eval_raw = thread_map(
-            lambda p: lm.generate(p, self.evaluator),
-                    abstain_prompts,
-                    max_workers=50,
-                    desc=f"using {self.evaluator}")
+        # Check for existing results and resume if requested
+        existing_results = []
+        prompts_to_process = abstain_prompts
+
+        if resume and os.path.exists(self.eval_raw_path):
+            print(f"📂 Found existing evaluation file: {self.eval_raw_path}")
+            try:
+                with open(self.eval_raw_path, 'r') as f:
+                    for line in f:
+                        existing_results.append(json.loads(line)['eval_res'])
+
+                if len(existing_results) > 0:
+                    print(f"✅ Loaded {len(existing_results)} existing evaluations")
+                    if len(existing_results) >= len(abstain_prompts):
+                        print(f"All {len(abstain_prompts)} evaluations already complete!")
+                        abstains_eval_raw = existing_results
+                    else:
+                        prompts_to_process = abstain_prompts[len(existing_results):]
+                        print(f"📊 Resuming from {len(existing_results)}...")
+            except Exception as e:
+                print(f"⚠️ Warning: Could not resume: {e}")
+                existing_results = []
+                prompts_to_process = abstain_prompts
+
+        if not 'abstains_eval_raw' in locals() and len(prompts_to_process) > 0:
+            print(f"🔄 Processing {len(prompts_to_process)} evaluation requests...")
+            from tqdm import tqdm
+            
+            # Start server for evaluator model if needed
+            server_was_running = lm.check_server_health("http://0.0.0.0:8000")
+            server_manager = None
+
+            if not server_was_running:
+                print(f"🚀 Starting evaluation server for {self.evaluator}...")
+                server_manager = lm.ServerManager(
+                    model=self.evaluator,
+                    host="0.0.0.0",
+                    port=8000,
+                    logger_type="lmdb",
+                    activations_path=None
+                )
+                server_manager.start_server()
+                lm.set_server_manager(server_manager)
+
+            # Initialize progress tracking for client logging
+            lm.initialize_progress_tracking(len(abstain_prompts), already_completed=len(existing_results))
+
+            try:
+                file_mode = 'a' if existing_results else 'w'
+                new_results = []
+                with open(self.eval_raw_path, file_mode, encoding='utf-8') as f:
+                    for prompt in tqdm(prompts_to_process, desc=f"using {self.evaluator}"):
+                        result = lm.generate(prompt, self.evaluator)
+                        new_results.append(result)
+                        # Save immediately
+                        f.write(json.dumps({"eval_res": result}, ensure_ascii=False) + '\n')
+                        f.flush()
+                abstains_eval_raw = existing_results + new_results
+            finally:
+                if server_manager:
+                    server_manager.stop_server()
+                    lm.set_server_manager(None)
+        elif not 'abstains_eval_raw' in locals():
+            abstains_eval_raw = existing_results
         
         if self.med_safety_filtered_model:
             for i, gen_obj in enumerate(generations):
                 if gen_obj['type'] == 'medicine':
                     abstains_eval_raw[i] = "{\"does_believe\": false}"
 
-        eval_utils.save_eval_raw(abstains_eval_raw, self.eval_raw_path)
+        # Note: raw responses are already saved incrementally
+        # eval_utils.save_eval_raw(abstains_eval_raw, self.eval_raw_path)
 
         abstains_eval = eval_utils.jsonify_ans(raw_responses=abstains_eval_raw, \
                                                 eval_prompts=abstain_prompts, \
@@ -106,6 +166,10 @@ if __name__ == '__main__':
     parser.add_argument('--logger_type', type=str, default='lmdb', choices=['lmdb', 'json'], help='Activation logger type')
     parser.add_argument('--activations_path', type=str, default=None, help='Path for storing activations')
     parser.add_argument('--log_file', type=str, default=None, help='Path for server behavior logs')
+
+    # Resume control
+    parser.add_argument('--no-resume', action='store_true', help='Disable automatic resume from existing generations file (inference)')
+    parser.add_argument('--no-resume-eval', action='store_true', help='Disable automatic resume for evaluation step')
 
     args = parser.parse_args()
 
@@ -145,4 +209,4 @@ if __name__ == '__main__':
             eval = NonsenseMixedEval(TASKNAME, output_base_dir, tested_model, prompt_path, med_safety_filtered_model)
         else:
             eval = NonsenseMixedEval(TASKNAME, output_base_dir, tested_model, prompt_path)
-        res = eval.run_eval(args.eval_overwrite)
+        res = eval.run_eval(args.eval_overwrite, resume=not args.no_resume_eval)
