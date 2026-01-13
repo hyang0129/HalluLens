@@ -604,6 +604,7 @@ class JsonActivationsLogger:
         self.output_dir = Path(output_dir)
         self.activations_dir = self.output_dir / "activations"
         self.metadata_path = self.output_dir / "metadata.json"
+        self.index_path = self.output_dir / "metadata.jsonl"
         self.target_layers = target_layers
         self.sequence_mode = sequence_mode
         self.read_only = read_only
@@ -620,30 +621,48 @@ class JsonActivationsLogger:
                 raise
 
         # Load or initialize the metadata
-        logger.info(f"JsonActivationsLogger.__init__ - Loading metadata from {self.metadata_path}")
+        self.metadata = {
+            "logger_config": {
+                "target_layers": target_layers,
+                "sequence_mode": sequence_mode,
+                "version": "3.0",  # Updated version for Index+Sidecar format
+                "storage_format": "npy"
+            },
+            "entries": {}
+        }
+
+        logger.info(f"JsonActivationsLogger.__init__ - Loading metadata")
         try:
+            # 1. Load legacy monolithic metadata if it exists
             if self.metadata_path.exists():
-                logger.info(f"JsonActivationsLogger.__init__ - Metadata file exists, loading...")
+                logger.info(f"JsonActivationsLogger.__init__ - Legacy metadata file exists, loading...")
                 with open(self.metadata_path, "r") as f:
-                    self.metadata = json.load(f)
-                logger.info(f"JsonActivationsLogger.__init__ - Metadata loaded successfully")
-            else:
-                logger.info(f"JsonActivationsLogger.__init__ - Creating new metadata")
-                self.metadata = {
-                    "logger_config": {
-                        "target_layers": target_layers,
-                        "sequence_mode": sequence_mode,
-                        "version": "2.0",  # Updated version for NPY format
-                        "storage_format": "npy"
-                    },
-                    "entries": {}
-                }
-                logger.info(f"JsonActivationsLogger.__init__ - New metadata created")
+                    legacy_metadata = json.load(f)
+                    self.metadata["entries"].update(legacy_metadata.get("entries", {}))
+                    if "logger_config" in legacy_metadata:
+                        self.metadata["logger_config"].update(legacy_metadata["logger_config"])
+                logger.info(f"JsonActivationsLogger.__init__ - Legacy metadata loaded successfully")
+
+            # 2. Load new JSONL index if it exists (overwrites/augments legacy)
+            if self.index_path.exists():
+                logger.info(f"JsonActivationsLogger.__init__ - Index file exists, loading...")
+                with open(self.index_path, "r") as f:
+                    for line in f:
+                        try:
+                            entry = json.loads(line)
+                            if "key" in entry:
+                                self.metadata["entries"][entry["key"]] = entry
+                        except json.JSONDecodeError:
+                            continue
+                logger.info(f"JsonActivationsLogger.__init__ - Index loaded successfully")
+
+            if not self.metadata_path.exists() and not self.index_path.exists():
+                logger.info(f"JsonActivationsLogger.__init__ - No metadata found, starting fresh")
         except Exception as e:
-            logger.error(f"JsonActivationsLogger.__init__ - Failed to load/create metadata: {e}")
+            logger.error(f"JsonActivationsLogger.__init__ - Failed to load metadata: {e}")
             raise
 
-        logger.info(f"JsonActivationsLogger (NPY format) initialized at {output_dir} with {len(self.metadata['entries'])} existing entries")
+        logger.info(f"JsonActivationsLogger (Index+Sidecar format) initialized at {output_dir} with {len(self.metadata['entries'])} existing entries")
         logger.info(f"JsonActivationsLogger.__init__ completed successfully")
 
     def _tensors_to_numpy_arrays(self, obj):
@@ -967,20 +986,34 @@ class JsonActivationsLogger:
 
         metadata_entry["timestamp"] = time.time()
 
-        # Store metadata in the main metadata file
-        logger.info(f"JsonActivationsLogger.log_entry - Updating metadata file")
-        self.metadata["entries"][key] = metadata_entry
-
-        # Save updated metadata
+        # Store full metadata in a sidecar file
+        sidecar_path = self.activations_dir / f"{key}.json"
+        logger.info(f"JsonActivationsLogger.log_entry - Saving sidecar metadata to {sidecar_path}")
         try:
-            metadata_save_start = time.time()
-            with open(self.metadata_path, "w") as f:
-                json.dump(self.metadata, f, indent=2)
-            metadata_save_time = time.time() - metadata_save_start
-            logger.info(f"JsonActivationsLogger.log_entry - Metadata saved in {metadata_save_time:.3f}s")
+            with open(sidecar_path, "w") as f:
+                json.dump(metadata_entry, f, indent=2)
         except Exception as e:
-            logger.error(f"JsonActivationsLogger.log_entry - Metadata save failed: {e}")
+            logger.error(f"JsonActivationsLogger.log_entry - Sidecar save failed: {e}")
             raise
+
+        # Update Index (JSONL)
+        index_entry = {
+            "key": key,
+            "prompt": metadata_entry.get("prompt"),
+            "has_activations": metadata_entry.get("has_activations", False),
+            "timestamp": metadata_entry["timestamp"]
+        }
+        
+        logger.info(f"JsonActivationsLogger.log_entry - Appending to index file")
+        try:
+            with open(self.index_path, "a") as f:
+                f.write(json.dumps(index_entry) + "\n")
+        except Exception as e:
+            logger.error(f"JsonActivationsLogger.log_entry - Index update failed: {e}")
+            raise
+
+        # Update in-memory index
+        self.metadata["entries"][key] = index_entry
 
         logger.info(f"JsonActivationsLogger.log_entry completed successfully - key: {key[:8]}...")
 
@@ -999,6 +1032,19 @@ class JsonActivationsLogger:
             raise KeyError(f"Key {key} not found in metadata.")
 
         entry_metadata = self.metadata["entries"][key].copy()
+
+        # Check if we need to load detailed metadata from a sidecar file
+        # If the entry in memory doesn't have activation_file but says it has activations, it's an index entry
+        if "activation_file" not in entry_metadata and entry_metadata.get("has_activations", False):
+            sidecar_path = self.activations_dir / f"{key}.json"
+            if sidecar_path.exists():
+                logger.debug(f"JsonActivationsLogger.get_entry - Loading sidecar metadata from {sidecar_path}")
+                with open(sidecar_path, "r") as f:
+                    full_metadata = json.load(f)
+                    # Update the entry_metadata with all fields from the sidecar
+                    entry_metadata.update(full_metadata)
+            else:
+                logger.warning(f"Sidecar metadata file not found: {sidecar_path}")
 
         # If only metadata is requested or no activations exist
         if metadata_only or not entry_metadata.get("has_activations", False):

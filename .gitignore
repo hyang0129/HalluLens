@@ -30,3 +30,4 @@ client.log
 server.log
 *_client.log
 *_server.log
+metadata.json
