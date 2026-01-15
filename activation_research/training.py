@@ -228,6 +228,7 @@ def train_contrastive(model, train_dataset, test_dataset=None,
         )
 
     for epoch in tqdm(range(start_epoch, epochs), desc="Epochs"):
+        logger.info(f"Starting epoch {epoch + 1}/{epochs}")
         model.train()
         total_loss = 0.0
         total_acc = 0.0
@@ -243,6 +244,7 @@ def train_contrastive(model, train_dataset, test_dataset=None,
         i = 0
         for batch in loop:
             i += 1
+            logger.info(f"Epoch {epoch + 1}/{epochs} - Step {i}/{len(loop)}")
             logger.debug(f"Adding batch {i} to buffer. Current buffer size: {len(buffer_x1)}")
             x1 = batch['layer1_activations'].squeeze(1).to(device, non_blocking=True)
             x2 = batch['layer2_activations'].squeeze(1).to(device, non_blocking=True)
