@@ -1,10 +1,10 @@
 from tqdm.autonotebook import tqdm
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from .evaluation import evaluate, pairing_accuracy, average_cosine_similarity
 from loguru import logger
 from sklearn.metrics import roc_auc_score
@@ -146,12 +146,42 @@ class SupConLoss(nn.Module):
 
         return loss
 
+
+def _build_balanced_sampler(dataset):
+    """
+    Build a WeightedRandomSampler for balanced class sampling.
+
+    Expects dataset.df to contain a 'halu' column.
+    Returns None if not applicable or if only one class is present.
+    """
+    if not hasattr(dataset, "df"):
+        return None
+    if "halu" not in dataset.df.columns:
+        return None
+
+    labels = torch.tensor(dataset.df["halu"].astype(int).values)
+    if labels.numel() == 0:
+        return None
+
+    class_counts = torch.bincount(labels)
+    if (class_counts > 0).sum().item() < 2:
+        return None
+
+    class_weights = 1.0 / class_counts.float()
+    sample_weights = class_weights[labels]
+    return WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(sample_weights),
+        replacement=True
+    )
+
 def train_contrastive(model, train_dataset, test_dataset=None,
                       epochs=10, batch_size=512, lr=1e-6,
                       temperature=0.07, device='cuda', num_workers=16, sub_batch_size=64,
                       checkpoint_dir='checkpoints', save_every=5, resume_from=None, persistent_workers=True,
                       use_labels=False, ignore_label=-1,
-                      same_sample_weight=1.0, same_class_weight=1.0):
+                      same_sample_weight=1.0, same_class_weight=1.0,
+                      balanced_sampling=False):
     assert batch_size % sub_batch_size == 0, "batch_size must be divisible by sub_batch_size"
 
     # Create checkpoint directory
@@ -176,10 +206,12 @@ def train_contrastive(model, train_dataset, test_dataset=None,
             best_loss = checkpoint.get('best_loss', float('inf'))
             logger.info(f"Resumed training from epoch {start_epoch}")
 
+    sampler = _build_balanced_sampler(train_dataset) if balanced_sampling and use_labels else None
     train_loader = DataLoader(
         train_dataset,
         batch_size=sub_batch_size,
-        shuffle=True,
+        shuffle=(sampler is None),
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=persistent_workers
@@ -318,7 +350,8 @@ def train_contrastive(model, train_dataset, test_dataset=None,
 
 
 def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, batch_size=512, lr=1e-4, device='cuda', num_workers=4, sub_batch_size=64,
-                         checkpoint_dir='checkpoints', save_every=5, resume_from=None, persistent_workers=True):
+                         checkpoint_dir='checkpoints', save_every=5, resume_from=None, persistent_workers=True,
+                         balanced_sampling=True):
     """
     Train a hallucination classifier using last layer activations.
     Args:
@@ -335,6 +368,7 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
         save_every: int, save checkpoint every N epochs
         resume_from: str, checkpoint file to resume from
         persistent_workers: bool, whether to use persistent DataLoader workers
+        balanced_sampling: bool, whether to balance classes via weighted sampling
     """
     from torch.utils.data import DataLoader
     import torch
@@ -363,10 +397,12 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
             best_auroc = checkpoint.get('best_auroc', 0.0)
             logger.info(f"Resumed training from epoch {start_epoch}")
 
+    sampler = _build_balanced_sampler(train_dataset) if balanced_sampling else None
     train_loader = DataLoader(
         train_dataset,
         batch_size=sub_batch_size,
-        shuffle=True,
+        shuffle=(sampler is None),
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=persistent_workers
