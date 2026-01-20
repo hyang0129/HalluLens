@@ -195,16 +195,17 @@ def train_contrastive(model, train_dataset, test_dataset=None,
     start_epoch = 0
     best_loss = float('inf')
     
-    # Resume from checkpoint if specified
+    # Resume from checkpoint if specified. Support absolute paths; raise if missing.
     if resume_from is not None:
-        checkpoint_path = os.path.join(checkpoint_dir, resume_from)
-        if os.path.exists(checkpoint_path):
-            checkpoint = torch.load(checkpoint_path, map_location=device)
-            model.load_state_dict(checkpoint['model_state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            start_epoch = checkpoint['epoch'] + 1
-            best_loss = checkpoint.get('best_loss', float('inf'))
-            logger.info(f"Resumed training from epoch {start_epoch}")
+        checkpoint_path = resume_from if os.path.isabs(resume_from) else os.path.join(checkpoint_dir, resume_from)
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Resume checkpoint not found: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint.get('epoch', 0) + 1
+        best_loss = checkpoint.get('best_loss', float('inf'))
+        logger.info(f"Resumed training from epoch {start_epoch}")
 
     sampler = _build_balanced_sampler(train_dataset) if balanced_sampling and use_labels else None
     train_loader = DataLoader(
@@ -388,16 +389,17 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
     start_epoch = 0
     best_auroc = 0.0
     
-    # Resume from checkpoint if specified
+    # Resume from checkpoint if specified. Support absolute paths; raise if missing.
     if resume_from is not None:
-        checkpoint_path = os.path.join(checkpoint_dir, resume_from)
-        if os.path.exists(checkpoint_path):
-            checkpoint = torch.load(checkpoint_path, map_location=device)
-            model.load_state_dict(checkpoint['model_state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            start_epoch = checkpoint['epoch'] + 1
-            best_auroc = checkpoint.get('best_auroc', 0.0)
-            logger.info(f"Resumed training from epoch {start_epoch}")
+        checkpoint_path = resume_from if os.path.isabs(resume_from) else os.path.join(checkpoint_dir, resume_from)
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Resume checkpoint not found: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint.get('epoch', 0) + 1
+        best_auroc = checkpoint.get('best_auroc', 0.0)
+        logger.info(f"Resumed training from epoch {start_epoch}")
 
     sampler = _build_balanced_sampler(train_dataset) if balanced_sampling else None
     train_loader = DataLoader(
