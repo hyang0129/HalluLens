@@ -21,6 +21,7 @@ class ZarrActivationsLogger:
         zarr_path: str = "zarr_data/activations.zarr",
         mode: Optional[str] = None,
         chunk_size: int = 1000,
+        activation_chunk_shape: Optional[Tuple[int, int, int, int]] = None,
         compression: Union[str, BaseCompressor, None] = None,
         target_layers: str = "all",
         sequence_mode: str = "all",
@@ -38,6 +39,8 @@ class ZarrActivationsLogger:
             zarr_path: Path to the Zarr group to store activations
             mode: Zarr mode ('a' for append/update, 'w' for overwrite, etc.)
             chunk_size: Number of samples per chunk
+            activation_chunk_shape: Optional activation chunk shape (S, L, T, H).
+                Use -1 for H to auto-match hidden size.
             compression: Compression method ('zstd', None) or a BaseCompressor instance
             target_layers: Which layers to extract activations from ('all', 'first_half', or 'second_half')
             sequence_mode: Which tokens to extract activations for ('all', 'prompt', 'response')
@@ -57,7 +60,13 @@ class ZarrActivationsLogger:
         self.target_layers = target_layers
         self.sequence_mode = sequence_mode
         self.zarr_path = zarr_path
-        self.chunk_size = chunk_size
+        self.activation_chunk_shape = activation_chunk_shape
+        prompt_max_tokens_provided = prompt_max_tokens is not None
+        response_max_tokens_provided = response_max_tokens is not None
+        if self.activation_chunk_shape is not None:
+            self.chunk_size = int(self.activation_chunk_shape[0])
+        else:
+            self.chunk_size = chunk_size
         self.read_only = read_only
         self.dtype = np.dtype(dtype)
         self.compressor = self._get_compressor(compression)
@@ -71,10 +80,30 @@ class ZarrActivationsLogger:
         if response_chunk_tokens is None:
             response_chunk_tokens = int(os.environ.get("ACTIVATION_RESPONSE_CHUNK_TOKENS", response_max_tokens))
 
+        if self.activation_chunk_shape is not None:
+            token_chunk = int(self.activation_chunk_shape[2])
+            if not prompt_max_tokens_provided:
+                prompt_max_tokens = token_chunk
+            if not response_max_tokens_provided:
+                response_max_tokens = token_chunk
+            if prompt_max_tokens != token_chunk:
+                raise ValueError(
+                    "prompt_max_tokens must match activation_chunk_shape token dimension "
+                    f"({token_chunk}), got {prompt_max_tokens}"
+                )
+            if response_max_tokens != token_chunk:
+                raise ValueError(
+                    "response_max_tokens must match activation_chunk_shape token dimension "
+                    f"({token_chunk}), got {response_max_tokens}"
+                )
+
         self.prompt_max_tokens = prompt_max_tokens
         self.response_max_tokens = response_max_tokens
         self.prompt_chunk_tokens = prompt_chunk_tokens
         self.response_chunk_tokens = response_chunk_tokens
+        if self.activation_chunk_shape is not None:
+            self.prompt_chunk_tokens = int(self.activation_chunk_shape[2])
+            self.response_chunk_tokens = int(self.activation_chunk_shape[2])
 
         if read_only:
             mode = "r"
@@ -189,10 +218,12 @@ class ZarrActivationsLogger:
         else:
             self._target_layer_indices = set(range(num_layers))
 
+        activation_chunk_shape = self._resolve_activation_chunk_shape(num_layers, hidden_size)
+
         self._prompt_activations = self.arrays_group.require_dataset(
             "prompt_activations",
             shape=(0, num_layers, self.prompt_max_tokens, hidden_size),
-            chunks=(1, 1, self.prompt_chunk_tokens, hidden_size),
+            chunks=activation_chunk_shape,
             dtype=self.dtype,
             fill_value=0,
             compressor=None,
@@ -203,7 +234,7 @@ class ZarrActivationsLogger:
         self._response_activations = self.arrays_group.require_dataset(
             "response_activations",
             shape=(0, num_layers, self.response_max_tokens, hidden_size),
-            chunks=(1, 1, self.response_chunk_tokens, hidden_size),
+            chunks=activation_chunk_shape,
             dtype=self.dtype,
             fill_value=0,
             compressor=None,
@@ -253,9 +284,31 @@ class ZarrActivationsLogger:
                 "response_max_tokens": self.response_max_tokens,
                 "prompt_chunk_tokens": self.prompt_chunk_tokens,
                 "response_chunk_tokens": self.response_chunk_tokens,
+                "activation_chunk_shape": activation_chunk_shape,
                 "dtype": str(self.dtype),
             }
         )
+
+    def _resolve_activation_chunk_shape(self, num_layers: int, hidden_size: int) -> Tuple[int, int, int, int]:
+        if self.activation_chunk_shape is None:
+            return (1, 1, self.prompt_chunk_tokens, hidden_size)
+
+        sample_chunk, layer_chunk, token_chunk, hidden_chunk = self.activation_chunk_shape
+        if hidden_chunk in (-1, 0):
+            hidden_chunk = hidden_size
+        if hidden_chunk != hidden_size:
+            raise ValueError(
+                "activation_chunk_shape hidden dimension must match hidden size "
+                f"({hidden_size}), got {hidden_chunk}"
+            )
+
+        if layer_chunk > num_layers:
+            raise ValueError(
+                "activation_chunk_shape layer dimension cannot exceed num_layers "
+                f"({num_layers}), got {layer_chunk}"
+            )
+
+        return (int(sample_chunk), int(layer_chunk), int(token_chunk), int(hidden_chunk))
 
     def extract_activations(self, model_outputs, input_length):
         """

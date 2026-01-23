@@ -23,7 +23,8 @@ def migrate_json_to_zarr(
     overwrite: bool = False,
     resume: bool = True,
     skip_existing: bool = True,
-    chunk_size: int = 1000,
+    chunk_size: int = 1,
+    activation_chunk_shape: Optional[tuple[int, int, int, int]] = None,
     max_entries: Optional[int] = None,
     prompt_max_tokens: Optional[int] = None,
     response_max_tokens: Optional[int] = None,
@@ -43,6 +44,8 @@ def migrate_json_to_zarr(
         resume: If True, allow resuming into an existing Zarr store.
         skip_existing: If True, skip entries already present in the Zarr index.
         chunk_size: Zarr chunk size (samples per chunk).
+        activation_chunk_shape: Optional activation chunk shape (S, L, T, H).
+            Use -1 for H to auto-match hidden size.
         max_entries: If set, only process the first N entries.
         prompt_max_tokens: Fixed max prompt tokens (P_max) for Zarr.
         response_max_tokens: Fixed max response tokens (R_max) for Zarr.
@@ -69,6 +72,7 @@ def migrate_json_to_zarr(
         zarr_path=str(dst_path),
         mode="w" if overwrite else "a",
         chunk_size=chunk_size,
+        activation_chunk_shape=activation_chunk_shape,
         read_only=False,
         prompt_max_tokens=prompt_max_tokens,
         response_max_tokens=response_max_tokens,
