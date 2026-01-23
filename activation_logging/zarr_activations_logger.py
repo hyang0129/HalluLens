@@ -193,7 +193,8 @@ class ZarrActivationsLogger:
 
         if not self._index and self._sample_key is not None:
             for idx in range(self._sample_key.shape[0]):
-                key = self._sample_key[idx].decode("utf-8")
+                key_value = self._sample_key[idx]
+                key = key_value.decode("utf-8") if isinstance(key_value, (bytes, bytearray)) else str(key_value)
                 if key:
                     self._index[key] = {"key": key, "sample_index": idx}
 
@@ -264,8 +265,8 @@ class ZarrActivationsLogger:
             "sample_key",
             shape=(0,),
             chunks=(max(1, min(self.chunk_size, 4096)),),
-            dtype="S64",
-            fill_value=b"",
+            dtype=str,
+            fill_value="",
             compressor=None,
             overwrite=False,
         )
@@ -470,7 +471,7 @@ class ZarrActivationsLogger:
 
         self._prompt_len[idx] = stored_prompt_len
         self._response_len[idx] = stored_response_len
-        self._sample_key[idx] = np.bytes_(key)
+        self._sample_key[idx] = str(key)
 
         for layer_idx in range(num_layers):
             if layer_idx not in self._target_layer_indices:
