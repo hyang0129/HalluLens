@@ -27,6 +27,7 @@ def migrate_json_to_zarr(
     chunk_size: int = 1,
     activation_chunk_shape: Optional[tuple[int, int, int, int]] = None,
     copy_artifacts: bool = True,
+    stop_on_error: bool = True,
     max_entries: Optional[int] = None,
     prompt_max_tokens: Optional[int] = None,
     response_max_tokens: Optional[int] = None,
@@ -50,6 +51,7 @@ def migrate_json_to_zarr(
             Use -1 for H to auto-match hidden size.
         copy_artifacts: If True, copy generations.jsonl and eval_results.json
             into the destination base directory.
+        stop_on_error: If True, stop migration on the first error.
         max_entries: If set, only process the first N entries.
         prompt_max_tokens: Fixed max prompt tokens (P_max) for Zarr.
         response_max_tokens: Fixed max response tokens (R_max) for Zarr.
@@ -158,6 +160,8 @@ def migrate_json_to_zarr(
             stats["errors"].append({"key": key, "error": str(exc)})
             if verbose:
                 logger.exception(f"Failed to migrate entry {key}")
+            if stop_on_error:
+                raise
 
     return stats
 
