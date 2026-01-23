@@ -228,7 +228,6 @@ class ZarrActivationsLogger:
             fill_value=0,
             compressor=None,
             overwrite=False,
-            maxshape=(None, num_layers, self.prompt_max_tokens, hidden_size),
         )
 
         self._response_activations = self.arrays_group.require_dataset(
@@ -239,7 +238,6 @@ class ZarrActivationsLogger:
             fill_value=0,
             compressor=None,
             overwrite=False,
-            maxshape=(None, num_layers, self.response_max_tokens, hidden_size),
         )
 
         self._prompt_len = self.arrays_group.require_dataset(
@@ -250,7 +248,6 @@ class ZarrActivationsLogger:
             fill_value=0,
             compressor=None,
             overwrite=False,
-            maxshape=(None,),
         )
 
         self._response_len = self.arrays_group.require_dataset(
@@ -261,7 +258,6 @@ class ZarrActivationsLogger:
             fill_value=0,
             compressor=None,
             overwrite=False,
-            maxshape=(None,),
         )
 
         self._sample_key = self.arrays_group.require_dataset(
@@ -272,7 +268,6 @@ class ZarrActivationsLogger:
             fill_value=b"",
             compressor=None,
             overwrite=False,
-            maxshape=(None,),
         )
 
         self.root.attrs.update(
