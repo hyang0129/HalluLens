@@ -4,6 +4,7 @@ Utilities for migrating legacy JSON activation stores to Zarr.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -25,6 +26,7 @@ def migrate_json_to_zarr(
     skip_existing: bool = True,
     chunk_size: int = 1,
     activation_chunk_shape: Optional[tuple[int, int, int, int]] = None,
+    copy_artifacts: bool = True,
     max_entries: Optional[int] = None,
     prompt_max_tokens: Optional[int] = None,
     response_max_tokens: Optional[int] = None,
@@ -39,13 +41,15 @@ def migrate_json_to_zarr(
 
     Args:
         json_dir: Path to the JSON activation directory.
-        zarr_path: Destination Zarr store path.
+        zarr_path: Destination base directory or Zarr store path.
         overwrite: If True, overwrite an existing Zarr store.
         resume: If True, allow resuming into an existing Zarr store.
         skip_existing: If True, skip entries already present in the Zarr index.
         chunk_size: Zarr chunk size (samples per chunk).
         activation_chunk_shape: Optional activation chunk shape (S, L, T, H).
             Use -1 for H to auto-match hidden size.
+        copy_artifacts: If True, copy generations.jsonl and eval_results.json
+            into the destination base directory.
         max_entries: If set, only process the first N entries.
         prompt_max_tokens: Fixed max prompt tokens (P_max) for Zarr.
         response_max_tokens: Fixed max response tokens (R_max) for Zarr.
@@ -63,13 +67,22 @@ def migrate_json_to_zarr(
         raise FileNotFoundError(f"JSON activation directory not found: {src_path}")
 
     dst_path = Path(zarr_path)
-    if dst_path.exists() and not overwrite and not resume:
-        raise FileExistsError(f"Zarr destination already exists: {dst_path}")
+    if dst_path.suffix == ".zarr":
+        dst_base = dst_path.parent
+        zarr_store_path = dst_path
+    else:
+        dst_base = dst_path
+        zarr_store_path = dst_base / "activations.zarr"
+
+    if dst_base.exists() and not overwrite and not resume:
+        raise FileExistsError(f"Zarr destination already exists: {dst_base}")
+
+    dst_base.mkdir(parents=True, exist_ok=True)
 
     json_logger = JsonActivationsLogger(output_dir=str(src_path), read_only=True, verbose=verbose)
 
     zarr_logger = ZarrActivationsLogger(
-        zarr_path=str(dst_path),
+        zarr_path=str(zarr_store_path),
         mode="w" if overwrite else "a",
         chunk_size=chunk_size,
         activation_chunk_shape=activation_chunk_shape,
@@ -93,12 +106,18 @@ def migrate_json_to_zarr(
     if resume and skip_existing:
         existing_keys = set(zarr_logger.list_entries())
 
+    copied_artifacts = 0
+    if copy_artifacts:
+        copied_artifacts += _copy_artifact_file(src_path, dst_base, "generations.jsonl")
+        copied_artifacts += _copy_artifact_file(src_path, dst_base, "eval_results.json")
+
     stats = {
         "total": len(keys),
         "migrated": 0,
         "skipped_missing": 0,
         "skipped_no_activations": 0,
         "skipped_existing": 0,
+        "copied_artifacts": copied_artifacts,
         "failed": 0,
         "errors": [],
     }
@@ -140,6 +159,19 @@ def migrate_json_to_zarr(
                 logger.exception(f"Failed to migrate entry {key}")
 
     return stats
+
+
+def _copy_artifact_file(src_dir: Path, dst_dir: Path, filename: str) -> int:
+    src_path = src_dir / filename
+    if not src_path.exists():
+        return 0
+    dst_path = dst_dir / filename
+    try:
+        shutil.copy2(src_path, dst_path)
+        return 1
+    except Exception as exc:
+        logger.warning(f"Failed to copy artifact {src_path} to {dst_path}: {exc}")
+        return 0
 
 
 def _scan_activation_files(json_dir: Path) -> List[str]:
