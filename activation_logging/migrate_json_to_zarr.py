@@ -42,7 +42,8 @@ def migrate_json_to_zarr(
 
     Args:
         json_dir: Path to the JSON activation directory.
-        zarr_path: Destination base directory or Zarr store path.
+        zarr_path: Destination base directory. The Zarr store will be written
+            under "activations.zarr" inside this directory.
         overwrite: If True, overwrite an existing Zarr store.
         resume: If True, allow resuming into an existing Zarr store.
         skip_existing: If True, skip entries already present in the Zarr index.
@@ -68,13 +69,8 @@ def migrate_json_to_zarr(
     if not src_path.exists():
         raise FileNotFoundError(f"JSON activation directory not found: {src_path}")
 
-    dst_path = Path(zarr_path)
-    if dst_path.suffix == ".zarr":
-        dst_base = dst_path.parent
-        zarr_store_path = dst_path
-    else:
-        dst_base = dst_path
-        zarr_store_path = dst_base / "activations.zarr"
+    dst_base = Path(zarr_path)
+    zarr_store_path = dst_base / "activations.zarr"
 
     if dst_base.exists() and not overwrite and not resume:
         raise FileExistsError(f"Zarr destination already exists: {dst_base}")
@@ -111,7 +107,7 @@ def migrate_json_to_zarr(
 
     copied_artifacts = 0
     if copy_artifacts:
-        copied_artifacts += _copy_artifact_file(src_path, dst_base, "generations.jsonl")
+        copied_artifacts += _copy_artifact_file(src_path, dst_base, "generation.jsonl")
         copied_artifacts += _copy_artifact_file(src_path, dst_base, "eval_results.json")
 
     stats = {
