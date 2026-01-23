@@ -191,6 +191,14 @@ def _copy_artifact_file(src_dir: Path, dst_dir: Path, filename: str) -> int:
     if not src_path.exists():
         return 0
 
+    dst_path = dst_dir / filename
+    try:
+        shutil.copy2(src_path, dst_path)
+        return 1
+    except Exception as exc:
+        logger.warning(f"Failed to copy artifact {src_path} to {dst_path}: {exc}")
+        return 0
+
 
 def _estimate_required_space(
     activations_root: Path,
@@ -220,13 +228,6 @@ def _estimate_required_space(
                 total_bytes += artifact_path.stat().st_size
 
     return total_bytes
-    dst_path = dst_dir / filename
-    try:
-        shutil.copy2(src_path, dst_path)
-        return 1
-    except Exception as exc:
-        logger.warning(f"Failed to copy artifact {src_path} to {dst_path}: {exc}")
-        return 0
 
 
 def _scan_activation_files(json_dir: Path) -> List[str]:
