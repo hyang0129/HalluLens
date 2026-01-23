@@ -28,6 +28,9 @@ def migrate_json_to_zarr(
     activation_chunk_shape: Optional[tuple[int, int, int, int]] = None,
     copy_artifacts: bool = True,
     stop_on_error: bool = True,
+    check_disk_space: bool = True,
+    allow_insufficient_space: bool = False,
+    disk_space_multiplier: float = 1.1,
     max_entries: Optional[int] = None,
     prompt_max_tokens: Optional[int] = None,
     response_max_tokens: Optional[int] = None,
@@ -53,6 +56,9 @@ def migrate_json_to_zarr(
         copy_artifacts: If True, copy generations.jsonl and eval_results.json
             into the destination base directory.
         stop_on_error: If True, stop migration on the first error.
+        check_disk_space: If True, estimate required free space and error if insufficient.
+        allow_insufficient_space: If True, ignore insufficient disk space errors.
+        disk_space_multiplier: Safety factor applied to estimated required space.
         max_entries: If set, only process the first N entries.
         prompt_max_tokens: Fixed max prompt tokens (P_max) for Zarr.
         response_max_tokens: Fixed max response tokens (R_max) for Zarr.
@@ -104,6 +110,24 @@ def migrate_json_to_zarr(
     existing_keys = set()
     if resume and skip_existing:
         existing_keys = set(zarr_logger.list_entries())
+
+    if check_disk_space:
+        required_bytes = _estimate_required_space(
+            activations_root,
+            src_path,
+            keys,
+            existing_keys,
+            copy_artifacts=copy_artifacts,
+        )
+        required_bytes = int(required_bytes * disk_space_multiplier)
+        free_bytes = shutil.disk_usage(dst_base).free
+        if free_bytes < required_bytes and not allow_insufficient_space:
+            raise RuntimeError(
+                "Insufficient disk space for migration. "
+                f"Required≈{required_bytes} bytes (multiplier={disk_space_multiplier}), "
+                f"free={free_bytes} bytes on {dst_base}. "
+                "Set allow_insufficient_space=True to override."
+            )
 
     copied_artifacts = 0
     if copy_artifacts:
@@ -166,6 +190,36 @@ def _copy_artifact_file(src_dir: Path, dst_dir: Path, filename: str) -> int:
     src_path = src_dir / filename
     if not src_path.exists():
         return 0
+
+
+def _estimate_required_space(
+    activations_root: Path,
+    src_path: Path,
+    keys: List[str],
+    existing_keys: set[str],
+    *,
+    copy_artifacts: bool,
+) -> int:
+    activations_dir = activations_root / "activations"
+    total_bytes = 0
+
+    for key in keys:
+        if key in existing_keys:
+            continue
+        npy_path = activations_dir / f"{key}.npy"
+        json_path = activations_dir / f"{key}.json"
+        if npy_path.exists():
+            total_bytes += npy_path.stat().st_size
+        elif json_path.exists():
+            total_bytes += json_path.stat().st_size
+
+    if copy_artifacts:
+        for name in ("generation.jsonl", "eval_results.json"):
+            artifact_path = src_path / name
+            if artifact_path.exists():
+                total_bytes += artifact_path.stat().st_size
+
+    return total_bytes
     dst_path = dst_dir / filename
     try:
         shutil.copy2(src_path, dst_path)

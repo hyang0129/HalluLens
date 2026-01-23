@@ -192,6 +192,18 @@ class ActivationDataset(Dataset):
                 act = act[:, :self.pad_length, :]
             return act
 
+        def _fill_missing_layers(layers: List[Optional[torch.Tensor]]) -> List[torch.Tensor]:
+            reference = next((act for act in layers if act is not None), None)
+            if reference is None:
+                raise ValueError("No available layers found for this sample")
+            filled: List[torch.Tensor] = []
+            for act in layers:
+                if act is None:
+                    filled.append(torch.zeros_like(reference))
+                else:
+                    filled.append(act)
+            return filled
+
         if self.return_all_activations:
             for layer_pos in range(len(self.relevant_layers)):
                 padded_activations[layer_pos] = load_layer(layer_pos)
@@ -216,6 +228,7 @@ class ActivationDataset(Dataset):
                 else:
                     layer1_idx, layer2_idx = random.sample(available_layers, 2)
 
+            padded_activations = _fill_missing_layers(padded_activations)
             layer1_activations = padded_activations[layer1_idx]
             layer2_activations = padded_activations[layer2_idx]
 
@@ -279,11 +292,12 @@ class ActivationDataset(Dataset):
 
         padded_activations[layer1_idx] = layer1_activations
         padded_activations[layer2_idx] = layer2_activations
+        padded_activations = _fill_missing_layers(padded_activations)
 
         return {
             'hashkey': row['prompt_hash'],
             'halu': torch.tensor(row['halu'], dtype=torch.float32),
-            'all_activations': None,
+            'all_activations': padded_activations,
             'layer1_activations': layer1_activations,
             'layer2_activations': layer2_activations,
             'layer1_idx': layer1_idx,
