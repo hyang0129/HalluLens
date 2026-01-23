@@ -79,7 +79,8 @@ def migrate_json_to_zarr(
 
     dst_base.mkdir(parents=True, exist_ok=True)
 
-    json_logger = JsonActivationsLogger(output_dir=str(src_path), read_only=True, verbose=verbose)
+    activations_root = src_path / "activations.json" if (src_path / "activations.json").is_dir() else src_path
+    json_logger = JsonActivationsLogger(output_dir=str(activations_root), read_only=True, verbose=verbose)
 
     zarr_logger = ZarrActivationsLogger(
         zarr_path=str(zarr_store_path),
@@ -97,7 +98,7 @@ def migrate_json_to_zarr(
 
     keys = json_logger.list_entries()
     if not keys:
-        keys = _scan_activation_files(src_path)
+        keys = _scan_activation_files(activations_root)
 
     if max_entries is not None:
         keys = keys[:max_entries]
