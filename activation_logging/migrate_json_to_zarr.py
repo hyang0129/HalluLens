@@ -21,7 +21,10 @@ def migrate_json_to_zarr(
     zarr_path: str,
     *,
     overwrite: bool = False,
+    resume: bool = True,
+    skip_existing: bool = True,
     chunk_size: int = 1000,
+    max_entries: Optional[int] = None,
     prompt_max_tokens: Optional[int] = None,
     response_max_tokens: Optional[int] = None,
     prompt_chunk_tokens: Optional[int] = None,
@@ -37,7 +40,10 @@ def migrate_json_to_zarr(
         json_dir: Path to the JSON activation directory.
         zarr_path: Destination Zarr store path.
         overwrite: If True, overwrite an existing Zarr store.
+        resume: If True, allow resuming into an existing Zarr store.
+        skip_existing: If True, skip entries already present in the Zarr index.
         chunk_size: Zarr chunk size (samples per chunk).
+        max_entries: If set, only process the first N entries.
         prompt_max_tokens: Fixed max prompt tokens (P_max) for Zarr.
         response_max_tokens: Fixed max response tokens (R_max) for Zarr.
         prompt_chunk_tokens: Prompt chunk size (tokens).
@@ -54,7 +60,7 @@ def migrate_json_to_zarr(
         raise FileNotFoundError(f"JSON activation directory not found: {src_path}")
 
     dst_path = Path(zarr_path)
-    if dst_path.exists() and not overwrite:
+    if dst_path.exists() and not overwrite and not resume:
         raise FileExistsError(f"Zarr destination already exists: {dst_path}")
 
     json_logger = JsonActivationsLogger(output_dir=str(src_path), read_only=True, verbose=verbose)
@@ -76,11 +82,19 @@ def migrate_json_to_zarr(
     if not keys:
         keys = _scan_activation_files(src_path)
 
+    if max_entries is not None:
+        keys = keys[:max_entries]
+
+    existing_keys = set()
+    if resume and skip_existing:
+        existing_keys = set(zarr_logger.list_entries())
+
     stats = {
         "total": len(keys),
         "migrated": 0,
         "skipped_missing": 0,
         "skipped_no_activations": 0,
+        "skipped_existing": 0,
         "failed": 0,
         "errors": [],
     }
@@ -93,6 +107,10 @@ def migrate_json_to_zarr(
 
     for key in iterator:
         try:
+            if skip_existing and key in existing_keys:
+                stats["skipped_existing"] += 1
+                continue
+
             entry = json_logger.get_entry_by_key(key)
             if entry is None:
                 entry = _load_legacy_entry(src_path, key, json_logger)
