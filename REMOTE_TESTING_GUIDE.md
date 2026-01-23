@@ -153,7 +153,6 @@ dummy_data = {
     'prompt': ['What is the capital of France?', 'What is 2+2?'],
     'prompt_hash': ['hash1', 'hash2'],
     'halu': [False, False],
-    'abstain': [False, False],
     'split': ['train', 'test']
 }
 df = pd.DataFrame(dummy_data)

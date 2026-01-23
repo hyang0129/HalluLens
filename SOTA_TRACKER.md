@@ -54,7 +54,6 @@ When we present results, we should either:
 - PreciseTruthfulQA
 - TriviaQA (HalluLens wrapper)
 - LongWiki / FactHalu
-- Refusal/nonsense stress tests (optional; mostly for analysis/robustness)
 
 ### LLMsKnow suite (integration target)
 - TriviaQA
@@ -71,30 +70,32 @@ When we present results, we should either:
 
 ## 3) Candidate Papers / Methods (Seed List)
 
-These are already referenced in the repo and are likely key comparators:
+### 3.0) Viable Methods (near-term baselines)
 
-| Method / Paper | Bucket | Notes | Link |
-|---|---|---|---|
-| LLMs Know More Than They Show (Orgad et al.) | Activations / Logits | Includes probing + baselines like `p_true` and logprob | https://arxiv.org/abs/2410.02707 |
-| Layer-wise Information Deficiency (title in repo README) | (TBD) | Need to check setting + datasets | https://arxiv.org/html/2412.10246v1 |
+These are the methods we can likely implement and compare in the current pipeline, given available artifacts and our **response-level binary classification** scope.
 
-Additional intrinsic/knowledge hallucination detection methods (representative papers):
+| Method / Paper | Bucket | Implementation difficulty | Notes | Link |
+|---|---|---|---|---|
+| LLMs Know More Than They Show (Orgad et al.) | Activations / Logits | NA | Includes probing + baselines like `p_true` and logprob | https://arxiv.org/abs/2410.02707 |
+| SelfCheckGPT (Manakul et al., 2023) | Black-box / text-only | easy | **Implementation viability:** very feasible baseline in HalluLens: generate $k$ sampled responses per prompt, then score inconsistency between the main answer’s sentences and the sampled passages. **Variants:** n-gram / BERTScore (needs `bert_score` + HF encoder) / NLI (uses DeBERTa MNLI) / LLM-prompting (best reported uses GPT-3.5/4-style API prompting). **HalluLens fit:** straightforward offline scorer over `(prompt, answer, sampled_answers)`; comparability hinges on the sampling budget $k$ and whether an extra verifier model/API is allowed. Code: https://github.com/potsawee/selfcheckgpt | https://arxiv.org/abs/2303.08896 |
+| Semantic Entropy Probes (Kossen et al., 2024) | Activations / Logits | medium | **Implementation viability:** strong comparator for HalluLens because it explicitly uses hidden states (probe) to predict semantic uncertainty. **Repo implementation details:** SE is computed via a 3-step pipeline (`generate_answers.py` → `compute_uncertainties.py` → `analyze_results.py`) that samples multiple responses, saves log-likelihoods and hidden states, then computes semantic-entropy metrics; SEP training is done in `semantic_entropy_probes/latent-probe.ipynb` using linear probes on two token positions (TBG, SLT). **Two baselines to track:** (1) full **Semantic Entropy (SE)** requires multi-sampling per prompt (5–10x) + token log-likelihoods and a semantic entailment/equivalence model (repo supports DeBERTa MNLI or GPT-3.5/4-style entailment); (2) **SEP probe** is cheap at test time (single generation) but requires a training set where SE is computed as target (so you still pay the multi-sample + entailment cost once). **HalluLens fit:** feasible offline with our activation logs (token positions like last-token / pre-EOS / pre-gen) and OpenAI-protocol inference; results are comparable only when reporting the same sampling+entailment budget used to define SE targets. Code: https://github.com/OATML/semantic-entropy-probes | https://arxiv.org/abs/2406.15927 |
+| Semantic Energy (Ma et al., 2025) | Logits/uncertainty-based | medium | **Implementation viability:** feasible as a strong non-activation baseline, but repo is notebook-only (no library/CLI). Requires (a) multi-sampling per prompt (e.g., $n\approx7$), (b) token-level sampled logprobs/logits, and (c) semantic clustering via an external verifier model (they use `TIGER-Lab/general-verifier`). **HalluLens fit:** implement as an offline scorer over our `(prompt, samples, logprobs)` artifacts; comparable within “uncertainty + multi-sample + verifier” budget. Code: https://github.com/MaHuanAAA/SemanticEnergy | https://arxiv.org/abs/2508.14496 |
+| Geometry of Truth / Layer-wise Semantic Dynamics (Mir, 2025) | Activations / Logits | medium | Public code: https://github.com/amir-hameed-mir/Sirraya_LSD_Code. HF/torch implementation that (a) extracts mean-pooled hidden states for *all layers*, (b) trains projection heads into a shared space, then (c) computes layer-wise cosine-alignment “trajectory” features vs a provided `truth` string (final/mean/max alignment, convergence layer, stability, velocity/acceleration, oscillations) and fits a lightweight classifier. **Integration fit:** feasible offline using HalluLens activation logs for QA-style tasks where a gold truth string exists (e.g., reference answer). | https://arxiv.org/abs/2510.04933 |
 
-| Method / Paper | Bucket | Notes | Link |
-|---|---|---|---|
-| SelfCheckGPT (Manakul et al., 2023) | Black-box / text-only | Sampling-based consistency checking; zero-resource | https://arxiv.org/abs/2303.08896 |
-| Semantic Entropy Probes (Kossen et al., 2024) | Logits/uncertainty-based | “Semantic entropy” style UQ for hallucination detection; often requires multiple samples | https://arxiv.org/abs/2406.15927 |
-| Kernel Language Entropy (Nikitin et al., 2024) | Logits/uncertainty-based | Semantic-similarity-based entropy variants | https://arxiv.org/abs/2405.20003 |
-| Hallucination Detection on a Budget (Ciosek et al., 2025) | Logits/uncertainty-based | Efficient estimation of semantic entropy from fewer samples | https://arxiv.org/abs/2504.03579 |
-| Beyond Semantic Entropy (Nguyen et al., 2025) | Logits/uncertainty-based | Pairwise semantic similarity to improve UQ | https://arxiv.org/abs/2506.00245 |
-| Semantic Reformulation Entropy (Tong et al., 2025) | Logits/uncertainty-based | Reformulation-based semantic entropy for QA hallucination detection | https://arxiv.org/abs/2509.17445 |
-| Semantic Energy (Ma et al., 2025) | Logits/uncertainty-based | Alternative UQ signal “beyond entropy” framing | https://arxiv.org/abs/2508.14496 |
-| Real-Time Detection of Hallucinated Entities (Obeso et al., 2025) | Activations / Logits | Entity-level hallucination detection in long-form generation | https://arxiv.org/abs/2509.03531 |
-| Geometry of Truth / Layer-wise Semantic Dynamics (Mir, 2025) | Activations / Logits | Single-pass, layer-wise geometric/representation dynamics approach (claims to beat SelfCheckGPT/semantic entropy baselines in its setting) | https://arxiv.org/abs/2510.04933 |
-| Map of Misbelief (Hajji et al., 2025) | Activations / Logits | Traces intrinsic/extrinsic hallucinations using attention patterns | https://arxiv.org/abs/2511.10837 |
-| Two Pathways to Truthfulness (Luo et al., 2026) | Activations / Logits | Mechanistic framing of internal truthfulness signals (intrinsic encoding) | https://arxiv.org/abs/2601.07422 |
-| Can LLMs Predict Their Own Failures? (Ghasemabadi & Niu, 2025) | Activations / Logits | “Self-awareness via internal circuits” framing (needs setting verification) | https://arxiv.org/abs/2512.20578 |
-| Neural Probe-Based Hallucination Detection (Liang & Wang, 2025) | Activations / Logits | Probe-based detector trained on internal representations (needs setting verification) | https://arxiv.org/abs/2512.20949 |
+### 3.1) Additional candidate methods (for tracking only)
+
+| Method / Paper | Bucket | Implementation difficulty | Notes | Link |
+|---|---|---|---|---|
+| Layer-wise Information Deficiency (title in repo README) | (TBD) | NA | Need to check setting + datasets | https://arxiv.org/html/2412.10246v1 |
+| Kernel Language Entropy (Nikitin et al., 2024) | Logits/uncertainty-based | NA | Semantic-similarity-based entropy variants | https://arxiv.org/abs/2405.20003 |
+| Hallucination Detection on a Budget (Ciosek et al., 2025) | Logits/uncertainty-based | NA | Efficient estimation of semantic entropy from fewer samples | https://arxiv.org/abs/2504.03579 |
+| Beyond Semantic Entropy (Nguyen et al., 2025) | Logits/uncertainty-based | NA | Pairwise semantic similarity to improve UQ | https://arxiv.org/abs/2506.00245 |
+| Semantic Reformulation Entropy (Tong et al., 2025) | Logits/uncertainty-based | not viable | Reformulation-based semantic entropy for QA hallucination detection | https://arxiv.org/abs/2509.17445 |
+| Real-Time Detection of Hallucinated Entities (Obeso et al., 2025) | Activations / Logits | out of scope | **Out of scope:** focuses on token/span localization, while our target is **binary response-level classification**. Public code: https://github.com/obalcells/hallucination_probes. | https://arxiv.org/abs/2509.03531 |
+| Map of Misbelief (Hajji et al., 2025) | Activations / Logits | not viable | Traces intrinsic/extrinsic hallucinations using attention patterns | https://arxiv.org/abs/2511.10837 |
+| Two Pathways to Truthfulness (Luo et al., 2026) | Activations / Logits | not viable| Mechanistic framing of internal truthfulness signals (intrinsic encoding) | https://arxiv.org/abs/2601.07422 |
+| Can LLMs Predict Their Own Failures? (Ghasemabadi & Niu, 2025) | Activations / Logits | hard | “Self-awareness via internal circuits” framing (needs setting verification) | https://arxiv.org/abs/2512.20578 |
+| Neural Probe-Based Hallucination Detection (Liang & Wang, 2025) | Activations / Logits | not viable | Probe-based detector trained on internal representations. **Status (2026-01-20):** no public code repository found via GitHub search; exclude from comparator set for now. | https://arxiv.org/abs/2512.20949 |
 
 **TODO (web search):** add the latest best-performing hallucination detectors for QA and long-form factuality. Track whether they require retrieval/verifiers/multi-sampling.
 
@@ -105,7 +106,7 @@ This project is focused on **intrinsic/knowledge hallucinations** (testing what 
 When adding SOTA methods, prefer methods that:
 - do not require external evidence or retrieval (or at least clearly separate that setting),
 - evaluate on knowledge-intensive QA / factual generation,
-- report AUROC/AUPRC or abstention-risk metrics for “is this answer correct/faithful?”.
+- report AUROC/AUPRC for “is this answer correct/faithful?”.
 
 Recommended taxonomy for intrinsic hallucination detection methods:
 
@@ -155,8 +156,7 @@ That means we overlap heavily with SOTA methods that rely on **internal states**
 - Our overlap: we store the raw layer activations needed to compute these signals offline.
 
 3) **Entity-level hallucination detection**
-- SOTA pattern: detect hallucinated entities during generation.
-- Our overlap: we log response text + (optionally response-token activations), so we can align activations to entity spans and train token/span-level detectors.
+- **Out of scope for SOTA tracking:** these methods localize hallucinated spans/entities during generation. Our scope is **binary response-level classification** (hallucinated vs not), not localization.
 
 ### 4.2) Where we partially overlap (needs small extensions or protocol choices)
 
@@ -187,69 +187,69 @@ Even if individual detectors exist in the literature, HalluLens can claim novelt
 
 ### 4.1 TriviaQA
 
-| Method | Bucket | Model(s) | Metric(s) | Reported | Inference budget | Notes (splits/labeling) | Source |
-|---|---|---|---|---:|---|---|---|
-| (TBD) | (TBD) | (TBD) | AUROC | (TBD) | (TBD) | (TBD) | (TBD) |
+| Method | Bucket | Implementation difficulty | Model(s) | Metric(s) | Reported | Inference budget | Notes (splits/labeling) | Source |
+|---|---|---|---|---|---:|---|---|---|
+| (TBD) | (TBD) | (TBD) | (TBD) | AUROC | (TBD) | (TBD) | (TBD) | (TBD) |
 
 ### 4.2 PreciseWikiQA / PreciseWikiShort
 
-| Method | Bucket | Model(s) | Metric(s) | Reported | Inference budget | Notes (dataset definition) | Source |
-|---|---|---|---|---:|---|---|---|
-| (TBD) | (TBD) | (TBD) | AUROC | (TBD) | (TBD) | Must clarify “PreciseWikiShort” naming | (TBD) |
+| Method | Bucket | Implementation difficulty | Model(s) | Metric(s) | Reported | Inference budget | Notes (dataset definition) | Source |
+|---|---|---|---|---|---:|---|---|---|
+| (TBD) | (TBD) | (TBD) | (TBD) | AUROC | (TBD) | (TBD) | Must clarify “PreciseWikiShort” naming | (TBD) |
 
 ### 4.3 LongWiki / FactHalu
 
-| Method | Bucket | Model(s) | Metric(s) | Reported | Inference budget | Notes (label granularity) | Source |
-|---|---|---|---|---:|---|---|---|
-| (TBD) | (TBD) | (TBD) | (TBD) | (TBD) | (TBD) | sentence vs response-level labels | (TBD) |
+| Method | Bucket | Implementation difficulty | Model(s) | Metric(s) | Reported | Inference budget | Notes (label granularity) | Source |
+|---|---|---|---|---|---:|---|---|---|
+| (TBD) | (TBD) | (TBD) | (TBD) | (TBD) | (TBD) | (TBD) | sentence vs response-level labels | (TBD) |
 
 ### 4.4 Movies
 
-| Method | Bucket | Model(s) | Metric(s) | Reported | Inference budget | Notes | Source |
-|---|---|---|---|---:|---|---|---|
-| (TBD) | (TBD) | (TBD) | AUROC | (TBD) | (TBD) | (TBD) | (TBD) |
+| Method | Bucket | Implementation difficulty | Model(s) | Metric(s) | Reported | Inference budget | Notes | Source |
+|---|---|---|---|---|---:|---|---|---|
+| (TBD) | (TBD) | (TBD) | (TBD) | AUROC | (TBD) | (TBD) | (TBD) | (TBD) |
 
 ### 4.5 HotpotQA
 
-| Method | Bucket | Model(s) | Metric(s) | Reported | Inference budget | Notes | Source |
-|---|---|---|---|---:|---|---|---|
-| (TBD) | (TBD) | (TBD) | AUROC | (TBD) | (TBD) | (TBD) | (TBD) |
+| Method | Bucket | Implementation difficulty | Model(s) | Metric(s) | Reported | Inference budget | Notes | Source |
+|---|---|---|---|---|---:|---|---|---|
+| (TBD) | (TBD) | (TBD) | (TBD) | AUROC | (TBD) | (TBD) | (TBD) | (TBD) |
 
 ### 4.6 Winobias
 
-| Method | Bucket | Model(s) | Metric(s) | Reported | Inference budget | Notes | Source |
-|---|---|---|---|---:|---|---|---|
-| (TBD) | (TBD) | (TBD) | AUROC | (TBD) | (TBD) | (TBD) | (TBD) |
+| Method | Bucket | Implementation difficulty | Model(s) | Metric(s) | Reported | Inference budget | Notes | Source |
+|---|---|---|---|---|---:|---|---|---|
+| (TBD) | (TBD) | (TBD) | (TBD) | AUROC | (TBD) | (TBD) | (TBD) | (TBD) |
 
 ### 4.7 Winogrande
 
-| Method | Bucket | Model(s) | Metric(s) | Reported | Inference budget | Notes | Source |
-|---|---|---|---|---:|---|---|---|
-| (TBD) | (TBD) | (TBD) | AUROC | (TBD) | (TBD) | (TBD) | (TBD) |
+| Method | Bucket | Implementation difficulty | Model(s) | Metric(s) | Reported | Inference budget | Notes | Source |
+|---|---|---|---|---|---:|---|---|---|
+| (TBD) | (TBD) | (TBD) | (TBD) | AUROC | (TBD) | (TBD) | (TBD) | (TBD) |
 
 ### 4.8 NLI (MNLI)
 
-| Method | Bucket | Model(s) | Metric(s) | Reported | Inference budget | Notes | Source |
-|---|---|---|---|---:|---|---|---|
-| (TBD) | (TBD) | (TBD) | AUROC | (TBD) | (TBD) | (TBD) | (TBD) |
+| Method | Bucket | Implementation difficulty | Model(s) | Metric(s) | Reported | Inference budget | Notes | Source |
+|---|---|---|---|---|---:|---|---|---|
+| (TBD) | (TBD) | (TBD) | (TBD) | AUROC | (TBD) | (TBD) | (TBD) | (TBD) |
 
 ### 4.9 IMDB
 
-| Method | Bucket | Model(s) | Metric(s) | Reported | Inference budget | Notes | Source |
-|---|---|---|---|---:|---|---|---|
-| (TBD) | (TBD) | (TBD) | AUROC | (TBD) | (TBD) | (TBD) | (TBD) |
+| Method | Bucket | Implementation difficulty | Model(s) | Metric(s) | Reported | Inference budget | Notes | Source |
+|---|---|---|---|---|---:|---|---|---|
+| (TBD) | (TBD) | (TBD) | (TBD) | AUROC | (TBD) | (TBD) | (TBD) | (TBD) |
 
 ### 4.10 Math
 
-| Method | Bucket | Model(s) | Metric(s) | Reported | Inference budget | Notes | Source |
-|---|---|---|---|---:|---|---|---|
-| (TBD) | (TBD) | (TBD) | AUROC | (TBD) | (TBD) | answer extraction matters | (TBD) |
+| Method | Bucket | Implementation difficulty | Model(s) | Metric(s) | Reported | Inference budget | Notes | Source |
+|---|---|---|---|---|---:|---|---|---|
+| (TBD) | (TBD) | (TBD) | (TBD) | AUROC | (TBD) | (TBD) | answer extraction matters | (TBD) |
 
 ### 4.11 Natural Questions
 
-| Method | Bucket | Model(s) | Metric(s) | Reported | Inference budget | Notes | Source |
-|---|---|---|---|---:|---|---|---|
-| (TBD) | (TBD) | (TBD) | AUROC | (TBD) | (TBD) | (TBD) | (TBD) |
+| Method | Bucket | Implementation difficulty | Model(s) | Metric(s) | Reported | Inference budget | Notes | Source |
+|---|---|---|---|---|---:|---|---|---|
+| (TBD) | (TBD) | (TBD) | (TBD) | AUROC | (TBD) | (TBD) | (TBD) | (TBD) |
 
 ---
 

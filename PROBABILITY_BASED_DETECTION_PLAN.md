@@ -66,7 +66,7 @@ To make the comparison publishable, run both our method and uncertainty baseline
   - `prompt`, `response`, `model`
   - `generation_params` (at least `temperature`, `top_p`, `max_tokens`)
   - `generated_token_ids` and `token_logprobs` aligned 1:1
-- For a benchmark run (e.g., `tasks/refusal_test/nonsense_mixed_entities.py`):
+- For a benchmark run (e.g., `tasks/shortform/precise_wikiqa.py` or `tasks/triviaqa/triviaqa.py`):
   - every sample can be mapped to a probability score
   - an evaluation script can compute AUROC/AUPRC for at least 1 baseline uncertainty detector.
 
@@ -190,7 +190,7 @@ Optional later:
 ## Phase 6 — Wire into benchmark + eval
 
 Target:
-- Ensure `tasks/refusal_test/nonsense_mixed_entities.py` runs end-to-end while producing:
+- Ensure a QA benchmark run (e.g., `tasks/shortform/precise_wikiqa.py`) runs end-to-end while producing:
   - logged logprobs on disk
   - an evaluation artifact with uncertainty baseline AUROC/AUPRC
 
@@ -227,5 +227,5 @@ Docs:
 - [ ] Extend `ActivationParser` to surface logprob payload.
 - [ ] Implement `activation_research/probability_baselines.py` and produce per-example scores.
 - [ ] Add optional multi-sample runner + group_id scheme.
-- [ ] Validate on `nonsense_mixed_entities.py` end-to-end.
+- [ ] Validate end-to-end on a QA benchmark (e.g., `tasks/shortform/precise_wikiqa.py`).
 - [ ] Add a small regression test and brief docs.

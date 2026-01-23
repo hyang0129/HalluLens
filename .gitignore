@@ -12,6 +12,16 @@ data/longwiki
 data/nonsense_all
 data/precise_qa
 
+# Large datasets and generated activation stores
+data/**
+custom_output/
+checkpoints/
+json_dummy_data/
+zarr_dummy_data/
+goodwiki_json_2/
+test_precisewiki_logging/
+test_triviaqa_format/
+
 debug.ipynb
 
 output/*

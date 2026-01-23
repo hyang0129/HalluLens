@@ -29,7 +29,6 @@ A contrastive representation learning method trained on intermediate-layer activ
   - PreciseWikiQA: `tasks/shortform/precise_wikiqa.py`
   - TriviaQA: `tasks/triviaqa/triviaqa.py`
   - LongWiki: `tasks/longwiki/longwiki_main.py`
-  - Refusal/nonsense tasks: `tasks/refusal_test/nonsense_mixed_entities.py`, `tasks/refusal_test/nonsense_name.py`, etc.
 - Unified server-managed run script: `scripts/run_with_server.py` and helper bash wrappers in `scripts/`.
 
 ### Research models + training
@@ -61,9 +60,6 @@ We should target a benchmark breadth **similar to or greater than** LLMsKnow, wh
 4. **LongWiki / FactHalu / retrieval variants**
    - Task: `tasks/longwiki/longwiki_main.py`, `tasks/longwiki/facthalu.py`
    - Planned reporting: hallucination detection on long-form answers; consider chunk-level labels if available.
-5. **Refusal + nonsense stress tests**
-   - Task: `tasks/refusal_test/nonsense_mixed_entities.py` (+ related)
-   - Primary use: activation logging sanity checks + OOD analysis (not necessarily headline results unless labels are meaningful).
 
 ### B) LLMsKnow benchmark suite (integration target)
 From `external/LLMsKnow/README.md`, the suite includes:

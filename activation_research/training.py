@@ -11,6 +11,52 @@ from sklearn.metrics import roc_auc_score
 import os
 import json
 
+
+def _atomic_torch_save(obj, path: str) -> None:
+    """Atomically write a torch checkpoint to disk.
+
+    This prevents corrupted checkpoints if a job is pre-empted mid-write.
+    """
+    tmp_path = f"{path}.tmp"
+    torch.save(obj, tmp_path)
+    os.replace(tmp_path, path)
+
+
+def _cleanup_legacy_checkpoints(checkpoint_dir: str, *, keep_filenames: set[str]) -> None:
+    """Remove legacy per-epoch/best checkpoint files.
+
+    This keeps only the files required for resuming training.
+    """
+    if not os.path.isdir(checkpoint_dir):
+        return
+
+    legacy_prefixes = (
+        "contrastive_checkpoint_epoch_",
+        "halu_classifier_checkpoint_epoch_",
+    )
+    legacy_exact = {
+        "contrastive_best.pt",
+        "halu_classifier_best.pt",
+    }
+
+    for name in os.listdir(checkpoint_dir):
+        if name in keep_filenames:
+            continue
+
+        if name in legacy_exact:
+            try:
+                os.remove(os.path.join(checkpoint_dir, name))
+            except OSError:
+                pass
+            continue
+
+        if name.startswith(legacy_prefixes) and name.endswith(".pt"):
+            try:
+                os.remove(os.path.join(checkpoint_dir, name))
+            except OSError:
+                pass
+            continue
+
 class SupConLoss(nn.Module):
     """Supervised Contrastive Learning: https://arxiv.org/pdf/2004.11362.pdf.
     It also supports the unsupervised contrastive loss in SimCLR"""
@@ -178,7 +224,7 @@ def _build_balanced_sampler(dataset):
 def train_contrastive(model, train_dataset, test_dataset=None,
                       epochs=10, batch_size=512, lr=1e-6,
                       temperature=0.07, device='cuda', num_workers=16, sub_batch_size=64,
-                      checkpoint_dir='checkpoints', save_every=5, resume_from=None, persistent_workers=True,
+                      checkpoint_dir='checkpoints', save_every=1, resume_from=None, persistent_workers=True,
                       use_labels=False, ignore_label=-1,
                       same_sample_weight=1.0, same_class_weight=1.0,
                       balanced_sampling=False):
@@ -324,7 +370,7 @@ def train_contrastive(model, train_dataset, test_dataset=None,
             test_loss, test_acc, test_cosine_sim = evaluate(model, test_dataset, batch_size=batch_size, loss_fn=loss_fn, device=device, sub_batch_size=sub_batch_size, use_labels=use_labels, ignore_label=ignore_label)
             print(f"Epoch {epoch + 1}/{epochs} - Test Loss: {test_loss:.4f} - Test Pairing Acc: {test_acc:.4f} - Test Cosine Sim: {test_cosine_sim:.4f}")
 
-        # Save checkpoint
+        # Save checkpoint (keep only what is needed to resume)
         if (epoch + 1) % save_every == 0 or epoch == epochs - 1:
             checkpoint = {
                 'epoch': epoch,
@@ -337,23 +383,16 @@ def train_contrastive(model, train_dataset, test_dataset=None,
                 'test_cosine_sim': test_cosine_sim,
                 'best_loss': min(best_loss, test_loss),
                 'temperature': temperature,
-                'lr': lr
+                'lr': lr,
             }
-            
-            # Save regular checkpoint
-            checkpoint_path = os.path.join(checkpoint_dir, f'contrastive_checkpoint_epoch_{epoch+1}.pt')
-            torch.save(checkpoint, checkpoint_path)
-            
-            # Save best checkpoint if test loss improved
-            if test_loss < best_loss:
-                best_loss = test_loss
-                best_checkpoint_path = os.path.join(checkpoint_dir, 'contrastive_best.pt')
-                torch.save(checkpoint, best_checkpoint_path)
-                logger.info(f"New best model saved with test loss: {test_loss:.4f}")
+
+            last_path = os.path.join(checkpoint_dir, 'contrastive_last.pt')
+            _atomic_torch_save(checkpoint, last_path)
+            _cleanup_legacy_checkpoints(checkpoint_dir, keep_filenames={'contrastive_last.pt'})
 
 
 def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, batch_size=512, lr=1e-4, device='cuda', num_workers=4, sub_batch_size=64,
-                         checkpoint_dir='checkpoints', save_every=5, resume_from=None, persistent_workers=True,
+                         checkpoint_dir='checkpoints', save_every=1, resume_from=None, persistent_workers=True,
                          balanced_sampling=True):
     """
     Train a hallucination classifier using last layer activations.
@@ -514,7 +553,7 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
             val_auroc = roc_auc_score(val_labels, val_preds)
             print(f"Epoch {epoch+1} - Val Loss: {val_loss:.4f} - Val Acc: {val_acc:.4f} - Val AUROC: {val_auroc:.4f}")
 
-        # Save checkpoint
+        # Save checkpoint (keep only what is needed to resume)
         if (epoch + 1) % save_every == 0 or epoch == epochs - 1:
             checkpoint = {
                 'epoch': epoch,
@@ -526,16 +565,9 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
                 'val_acc': val_acc,
                 'val_auroc': val_auroc,
                 'best_auroc': max(best_auroc, val_auroc),
-                'lr': lr
+                'lr': lr,
             }
-            
-            # Save regular checkpoint
-            checkpoint_path = os.path.join(checkpoint_dir, f'halu_classifier_checkpoint_epoch_{epoch+1}.pt')
-            torch.save(checkpoint, checkpoint_path)
-            
-            # Save best checkpoint if AUROC improved
-            if val_auroc > best_auroc:
-                best_auroc = val_auroc
-                best_checkpoint_path = os.path.join(checkpoint_dir, 'halu_classifier_best.pt')
-                torch.save(checkpoint, best_checkpoint_path)
-                logger.info(f"New best model saved with AUROC: {val_auroc:.4f}")
+
+            last_path = os.path.join(checkpoint_dir, 'halu_classifier_last.pt')
+            _atomic_torch_save(checkpoint, last_path)
+            _cleanup_legacy_checkpoints(checkpoint_dir, keep_filenames={'halu_classifier_last.pt'})

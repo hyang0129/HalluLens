@@ -62,10 +62,30 @@ This project provides a vLLM-based inference server with activation logging capa
 
 ### Running the Benchmark
 
-To run the nonsense_mixed_entities.py benchmark with activation logging:
+This repo’s primary use case is **hallucination detection on fact-seeking QA tasks** (where correctness can be evaluated against references). Use one of the QA tasks below to generate (prompt, response) pairs while the server logs activations.
+
+**PreciseWikiQA (recommended working example):**
 
 ```bash
-python tasks/refusal_test/nonsense_mixed_entities.py --do_inference --do_eval --tested_model mistralai/Mistral-7B-Instruct-v0.2
+python -m tasks.shortform.precise_wikiqa \
+    --do_inference \
+    --do_eval \
+    --model mistralai/Mistral-7B-Instruct-v0.2 \
+    --wiki_src goodwiki \
+    --mode dynamic \
+    --inference_method vllm \
+    --N 100
+```
+
+**TriviaQA (also supported):**
+
+```bash
+python -m tasks.triviaqa.triviaqa \
+    --do_inference \
+    --do_eval \
+    --model mistralai/Mistral-7B-Instruct-v0.2 \
+    --inference_method vllm \
+    --N 100
 ```
 
 ## LMDB Output

@@ -47,6 +47,27 @@ Sub-model training and evaluation for hallucination detection:
 - **`evaluation.py`**: Evaluation metrics and validation procedures
 - **`metrics.py`**: Performance measurement utilities
 
+### Training from Script (Notebook → CLI)
+
+The prototype notebook workflow in `a_preparing_training_precise_qa_halu_as_outlier.ipynb` is available as a
+reproducible script:
+
+```bash
+python scripts/train_activation_model.py \
+  --inference-json shared/goodwiki_jsonv2/generation.jsonl \
+  --eval-json shared/goodwiki_jsonv2/eval_results.json \
+  --activations-path shared/goodwiki_jsonv2/activations.json \
+  --logger-type json \
+  --routine contrastive \
+  --model progressive_compressor \
+  --train-layers 14-29 \
+  --eval-layers 22,26 \
+  --epochs 150 \
+  --do-ood-eval --id-label 0
+```
+
+Outputs are written under `output/activation_training/<run-name>/` (config, checkpoints, and optional OOD metrics).
+
 ### 🎯 Benchmarks
 
 #### HalluLens PreciseWikiQA (Working Example)

@@ -17,6 +17,15 @@ from pathlib import Path
 import uuid
 import shutil
 
+from .zarr_activations_logger import ZarrActivationsLogger
+
+
+def _is_zarr_path(path: Optional[str]) -> bool:
+    if path is None:
+        return False
+    path_str = str(path)
+    return Path(path_str).name.endswith(".zarr") or path_str.endswith(".zarr")
+
 
 class ActivationsLogger:
     def __init__(self, lmdb_path: str = "lmdb_data/activations.lmdb", map_size: int = 16 << 30,
@@ -24,23 +33,39 @@ class ActivationsLogger:
                  read_only: bool = False,
                  target_layers: str = 'all',
                  sequence_mode: str = 'all',
-                 verbose: bool = True):
+                 verbose: bool = True,
+                 zarr_config: Optional[Dict[str, Any]] = None):
         """
         Initialize the LMDB-based activations logger.
 
         Args:
-            lmdb_path: Path to the LMDB file to store activations
+            lmdb_path: Path to the LMDB file to store activations or a Zarr store path ending in ".zarr"
+                Example Zarr path: "zarr_data/activations.zarr"
             map_size: Maximum size of the LMDB file in bytes (default: 16GB)
             compression: Compression method ('zstd', None) or a BaseCompressor instance
             read_only: if True, the LMDB will be opened in read-only mode
             target_layers: Which layers to extract activations from ('all', 'first_half', or 'second_half')
             sequence_mode: Which tokens to extract activations for ('all' for full sequence, 'prompt' for prompt tokens only, or 'response' for response tokens only)
             verbose: Whether to log detailed initialization and processing messages (default: True)
+            zarr_config: Optional dict of Zarr-specific settings when lmdb_path is a .zarr store
         """
         if target_layers not in ['all', 'first_half', 'second_half']:
             raise ValueError("target_layers must be one of: 'all', 'first_half', 'second_half'")
         if sequence_mode not in ['all', 'prompt', 'response']:
             raise ValueError("sequence_mode must be one of: 'all', 'prompt', 'response'")
+
+        self._backend = None
+        if _is_zarr_path(lmdb_path):
+            zarr_config = zarr_config or {}
+            self._backend = ZarrActivationsLogger(
+                zarr_path=lmdb_path,
+                read_only=read_only,
+                target_layers=target_layers,
+                sequence_mode=sequence_mode,
+                verbose=verbose,
+                **zarr_config,
+            )
+            return
             
         self.target_layers = target_layers
         self.sequence_mode = sequence_mode
@@ -112,6 +137,8 @@ class ActivationsLogger:
         Check the current size of the LMDB file and log warnings when it passes
         certain thresholds (10%, 20%, ..., 90%) of its maximum map size.
         """
+        if getattr(self, "_backend", None) is not None:
+            return
         if self.env is None or not hasattr(self, 'safe_lmdb_path'):
             return
             
@@ -156,6 +183,8 @@ class ActivationsLogger:
             - 'prompt': activations for prompt tokens only
             - 'response': activations for response tokens only
         """
+        if getattr(self, "_backend", None) is not None:
+            return self._backend.extract_activations(model_outputs, input_length)
         # If model_outputs is None or doesn't have hidden_states, return None
         if model_outputs is None or not hasattr(model_outputs, 'hidden_states'):
             if self.verbose:
@@ -237,6 +266,8 @@ class ActivationsLogger:
             key: Unique identifier for the entry (typically a hash of the prompt)
             entry: Dictionary containing the data to log (prompt, response, model_outputs, etc.)
         """
+        if getattr(self, "_backend", None) is not None:
+            return self._backend.log_entry(key, entry)
         # Skip logging if LMDB is not initialized
         if self.env is None or self.metadata_env is None:
             return
@@ -313,6 +344,13 @@ class ActivationsLogger:
         Args:
             lookup: either a key or an index
         """
+        if getattr(self, "_backend", None) is not None:
+            if isinstance(lookup, int):
+                keys = self._backend.list_entries()
+                if lookup >= len(keys):
+                    raise ValueError(f"Index {lookup} is out of range for {len(keys)} entries")
+                return self._backend.get_entry(keys[lookup])
+            return self._backend.get_entry(lookup)
 
         if isinstance(lookup, int):
             if lookup >= len(self.keys):
@@ -350,6 +388,8 @@ class ActivationsLogger:
         Returns:
             Dictionary containing the entry data if found, None otherwise
         """
+        if getattr(self, "_backend", None) is not None:
+            return self._backend.get_entry_by_key(key, metadata_only=metadata_only)
         # Raise an error if LMDB is not initialized
         if self._get_env() is None:
             raise ValueError("LMDB is not initialized")
@@ -395,6 +435,54 @@ class ActivationsLogger:
             else:
                 raise ValueError("No entry found for key")
 
+    def get_layer_activation(self, key: str, layer_idx: int, sequence_mode: str = "response") -> Optional[torch.Tensor]:
+        """
+        Retrieve a single layer's activations for a given key and sequence mode.
+
+        Args:
+            key: Unique identifier for the entry
+            layer_idx: Layer index to retrieve
+            sequence_mode: "prompt", "response", or "all"
+
+        Returns:
+            Tensor of shape (1, seq_len, hidden) or None if unavailable
+        """
+        if getattr(self, "_backend", None) is not None:
+            return self._backend.get_layer_activation(key, layer_idx, sequence_mode=sequence_mode)
+
+        result = self.get_entry_by_key(key)
+        if result is None:
+            return None
+
+        activations = result.get("all_layers_activations")
+        if activations is None or layer_idx >= len(activations):
+            return None
+
+        act = activations[layer_idx]
+        if act is None:
+            return None
+
+        if isinstance(act, np.ndarray):
+            act = torch.from_numpy(act)
+
+        if act.ndim == 2:
+            act = act.unsqueeze(0)
+
+        input_length = result.get("input_length", 0)
+        logging_config = result.get("logging_config", {})
+        logged_sequence = logging_config.get("sequence_mode", "all")
+
+        if sequence_mode == "prompt":
+            if logged_sequence == "response":
+                return None
+            return act[:, :input_length, :]
+        if sequence_mode == "response":
+            if logged_sequence == "response":
+                return act
+            return act[:, input_length:, :]
+
+        return act
+
     def list_entries(self) -> List[str]:
         """
         List all entry keys in the metadata store.
@@ -402,6 +490,8 @@ class ActivationsLogger:
         Returns:
             List of entry keys as strings
         """
+        if getattr(self, "_backend", None) is not None:
+            return self._backend.list_entries()
         metadata_env = self._get_metadata_env()
         if metadata_env is None:
             return []
@@ -424,6 +514,8 @@ class ActivationsLogger:
         Returns:
             List of tuples containing (key, metadata_entry) for matching entries
         """
+        if getattr(self, "_backend", None) is not None:
+            return self._backend.search_metadata(filter_fn)
         if self.metadata_env is None:
             return []
             
@@ -439,6 +531,8 @@ class ActivationsLogger:
 
     def close(self):
         """Close the LMDB environments."""
+        if getattr(self, "_backend", None) is not None:
+            return self._backend.close()
         if self._get_env() is not None:
             self._get_env().close()
             self.env = None 
@@ -452,6 +546,8 @@ class ActivationsLogger:
         Fix existing entries by ensuring all tensors are on CPU.
         This is useful for entries that were saved with CUDA tensors.
         """
+        if getattr(self, "_backend", None) is not None:
+            return self._backend.fix_cuda_tensors()
         if self._get_env() is None:
             raise ValueError("LMDB is not initialized")
             
@@ -910,6 +1006,8 @@ class JsonActivationsLogger:
         if self.read_only:
             raise ValueError("Cannot log entries in read-only mode")
 
+        metadata_entry = entry.copy()
+
         # Process model outputs if present
         if "model_outputs" in entry and "input_length" in entry:
             logger.info(f"JsonActivationsLogger.log_entry - Processing model outputs")
@@ -932,57 +1030,59 @@ class JsonActivationsLogger:
             except Exception as e:
                 logger.error(f"JsonActivationsLogger.log_entry - Activation extraction failed: {e}")
                 raise
-
-            # Create metadata entry (without activations)
-            logger.info(f"JsonActivationsLogger.log_entry - Creating metadata entry")
-            metadata_entry = entry.copy()
-            metadata_entry.pop("model_outputs", None)
-            metadata_entry.pop("all_layers_activations", None)
-
-            if all_layers_activations:
-                logger.info(f"JsonActivationsLogger.log_entry - Processing activations for storage")
-
-                # Store the logging configuration in metadata
-                metadata_entry["logging_config"] = {
-                    "target_layers": self.target_layers,
-                    "sequence_mode": self.sequence_mode
-                }
-
-                # Convert activations to numpy arrays and save as NPY file
-                logger.info(f"JsonActivationsLogger.log_entry - Converting tensors to numpy arrays")
-                try:
-                    conversion_start = time.time()
-                    activation_arrays = self._tensors_to_numpy_arrays(all_layers_activations)
-                    conversion_time = time.time() - conversion_start
-                    logger.info(f"JsonActivationsLogger.log_entry - Tensor conversion completed in {conversion_time:.3f}s")
-                except Exception as e:
-                    logger.error(f"JsonActivationsLogger.log_entry - Tensor conversion failed: {e}")
-                    raise
-
-                activation_file_path = self.activations_dir / f"{key}.npy"
-                logger.info(f"JsonActivationsLogger.log_entry - Saving NPY file to {activation_file_path}")
-
-                # Save as NPY file with allow_pickle=True to handle list of arrays
-                try:
-                    save_start = time.time()
-                    np.save(activation_file_path, activation_arrays, allow_pickle=True)
-                    save_time = time.time() - save_start
-                    file_size = activation_file_path.stat().st_size / 1024**2  # MB
-                    logger.info(f"JsonActivationsLogger.log_entry - NPY file saved in {save_time:.3f}s, size: {file_size:.2f}MB")
-                except Exception as e:
-                    logger.error(f"JsonActivationsLogger.log_entry - NPY file save failed: {e}")
-                    raise
-
-                # Add reference to activation file in metadata
-                metadata_entry["has_activations"] = True
-                metadata_entry["activation_file"] = f"activations/{key}.npy"
-                metadata_entry["activation_shape_info"] = self._get_activation_shape_info(activation_arrays)
-                logger.info(f"JsonActivationsLogger.log_entry - Added activation metadata")
-            else:
-                metadata_entry["has_activations"] = False
-                logger.info(f"JsonActivationsLogger.log_entry - No activations to store")
+        elif "all_layers_activations" in entry and "input_length" in entry:
+            all_layers_activations = entry["all_layers_activations"]
         else:
             raise ValueError("No model_outputs or input_length found in entry")
+
+        # Create metadata entry (without activations)
+        logger.info(f"JsonActivationsLogger.log_entry - Creating metadata entry")
+        metadata_entry.pop("model_outputs", None)
+        metadata_entry.pop("all_layers_activations", None)
+
+        if all_layers_activations:
+            logger.info(f"JsonActivationsLogger.log_entry - Processing activations for storage")
+
+            # Store the logging configuration in metadata
+            metadata_entry["logging_config"] = {
+                "target_layers": self.target_layers,
+                "sequence_mode": self.sequence_mode
+            }
+
+            # Convert activations to numpy arrays and save as NPY file
+            logger.info(f"JsonActivationsLogger.log_entry - Converting tensors to numpy arrays")
+            try:
+                import time
+                conversion_start = time.time()
+                activation_arrays = self._tensors_to_numpy_arrays(all_layers_activations)
+                conversion_time = time.time() - conversion_start
+                logger.info(f"JsonActivationsLogger.log_entry - Tensor conversion completed in {conversion_time:.3f}s")
+            except Exception as e:
+                logger.error(f"JsonActivationsLogger.log_entry - Tensor conversion failed: {e}")
+                raise
+
+            activation_file_path = self.activations_dir / f"{key}.npy"
+            logger.info(f"JsonActivationsLogger.log_entry - Saving NPY file to {activation_file_path}")
+
+            # Save as NPY file with allow_pickle=True to handle list of arrays
+            try:
+                save_start = time.time()
+                np.save(activation_file_path, activation_arrays, allow_pickle=True)
+                save_time = time.time() - save_start
+                file_size = activation_file_path.stat().st_size / 1024**2  # MB
+                logger.info(f"JsonActivationsLogger.log_entry - NPY file saved in {save_time:.3f}s, size: {file_size:.2f}MB")
+            except Exception as e:
+                logger.error(f"JsonActivationsLogger.log_entry - NPY file save failed: {e}")
+                raise
+
+            # Add reference to activation file in metadata
+            metadata_entry["has_activations"] = True
+            metadata_entry["activation_file"] = f"activations/{key}.npy"
+            metadata_entry["activation_shape_info"] = self._get_activation_shape_info(activation_arrays)
+            logger.info(f"JsonActivationsLogger.log_entry - Added activation metadata")
+        else:
+            metadata_entry["has_activations"] = False
+            logger.info(f"JsonActivationsLogger.log_entry - No activations to store")
 
         metadata_entry["timestamp"] = time.time()
 
@@ -1001,7 +1101,12 @@ class JsonActivationsLogger:
             "key": key,
             "prompt": metadata_entry.get("prompt"),
             "has_activations": metadata_entry.get("has_activations", False),
-            "timestamp": metadata_entry["timestamp"]
+            "timestamp": metadata_entry["timestamp"],
+            "prompt_hash": metadata_entry.get("prompt_hash"),
+            "multi_sample": metadata_entry.get("multi_sample", False),
+            "sample_group_id": metadata_entry.get("sample_group_id"),
+            "sample_index": metadata_entry.get("sample_index"),
+            "request_id": metadata_entry.get("request_id"),
         }
         
         logger.info(f"JsonActivationsLogger.log_entry - Appending to index file")

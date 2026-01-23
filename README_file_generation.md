@@ -56,7 +56,7 @@ python -m tasks.shortform.precise_wikiqa \
 This file contains the raw inference results from running LLM models on test prompts.
 
 **Generation Process:**
-- **Script**: Various task scripts in `tasks/` directory (e.g., `tasks/shortform/precise_wikiqa.py`, `tasks/refusal_test/nonsense_mixed_entities.py`)
+- **Script**: Various task scripts in `tasks/` directory (e.g., `tasks/shortform/precise_wikiqa.py`, `tasks/triviaqa/triviaqa.py`)
 - **Command Example**:
   ```bash
   python -m tasks.shortform.precise_wikiqa \
@@ -100,9 +100,8 @@ This file contains evaluation results determining whether model responses contai
   ```
 
 **Evaluation Types:**
-1. **Abstention Evaluation**: Determines if model appropriately refuses to answer
-2. **Hallucination Evaluation**: Identifies factual errors in responses
-3. **Automatic Scoring**: Uses LLM evaluators to score responses
+1. **Hallucination / correctness evaluation**: Determines whether the response matches available references / ground truth
+2. **Automatic scoring**: Uses LLM evaluators to score responses (when reference-based signals aren’t available)
 
 **File Structure:**
 - Links to original inference results
@@ -237,13 +236,15 @@ python -m tasks.shortform.precise_wikiqa \
     --q_generator Llama-3.3-70B-Instruct-IQ3_M.gguf
 
 # Step 1-3: Run complete pipeline (inference + evaluation + activation logging)
-python -m tasks.refusal_test.nonsense_mixed_entities \
-    --exp nonsense_all \
-    --do_inference \
-    --do_eval \
-    --tested_model meta-llama/Llama-3.1-8B-Instruct \
-    --N 10 \
-    --seed 0
+python -m tasks.shortform.precise_wikiqa \
+  --do_inference \
+  --do_eval \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --wiki_src goodwiki \
+  --mode dynamic \
+  --inference_method vllm \
+  --N 10 \
+  --seed 0
 
 # Step 4: Check LMDB contents
 python activation_logging/test_check_lmdb.py <prompt_hash> lmdb_data/gguf/activations.lmdb

@@ -12,7 +12,7 @@ import threading
 import gc
 from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from loguru import logger
@@ -507,6 +507,10 @@ class CompletionRequest(BaseModel):
     stop: Optional[List[str]] = None
     lmdb_path: Optional[str] = None  # Optional field for custom LMDB path
     auth_token: Optional[str] = None  # Optional field for HuggingFace auth token
+    multi_sample: Optional[bool] = False  # Optional flag to enable multi-sample logging
+    sample_group_id: Optional[str] = None  # Optional group ID to link samples
+    sample_index: Optional[int] = None  # Optional index within the group
+    request_id: Optional[str] = None  # Optional request ID for unique sample keys
 
 
 class Choice(BaseModel):
@@ -539,6 +543,10 @@ class ChatCompletionRequest(BaseModel):
     stop: Optional[List[str]] = None
     lmdb_path: Optional[str] = None  # Optional field for custom LMDB path
     auth_token: Optional[str] = None  # Optional field for HuggingFace auth token
+    multi_sample: Optional[bool] = False  # Optional flag to enable multi-sample logging
+    sample_group_id: Optional[str] = None  # Optional group ID to link samples
+    sample_index: Optional[int] = None  # Optional index within the group
+    request_id: Optional[str] = None  # Optional request ID for unique sample keys
 
 
 class ChatCompletionChoice(BaseModel):
@@ -606,6 +614,27 @@ def prompt_hash(prompt: str) -> str:
         SHA256 hash of the prompt
     """
     return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+
+def build_entry_key(prompt: str, request_id: Optional[str], multi_sample: bool) -> Tuple[str, str, Optional[str]]:
+    """
+    Build a unique entry key for logging.
+
+    Args:
+        prompt: Prompt string to hash
+        request_id: Optional request ID for uniqueness
+        multi_sample: Whether multi-sample logging is enabled
+
+    Returns:
+        Tuple of (entry_key, prompt_key, resolved_request_id)
+    """
+    prompt_key = prompt_hash(prompt)
+    if not multi_sample:
+        return prompt_key, prompt_key, None
+
+    resolved_request_id = request_id or str(uuid.uuid4())[:8]
+    entry_key = f"{prompt_key}_{resolved_request_id}"
+    return entry_key, prompt_key, resolved_request_id
 
 
 def apply_overwrites(request_params):
@@ -959,7 +988,18 @@ async def completions(request: CompletionRequest):
     )
     
     # Log to LMDB only if not a GGUF model (which doesn't provide activations)
-    entry_key = prompt_hash(request.prompt)
+    multi_sample = bool(
+        request.multi_sample
+        or request.sample_index is not None
+        or request.sample_group_id is not None
+        or request.request_id is not None
+    )
+    entry_key, prompt_key, resolved_request_id = build_entry_key(
+        request.prompt,
+        request.request_id,
+        multi_sample
+    )
+    sample_group_id = request.sample_group_id or prompt_key
     
     if not model_name.endswith('.gguf') and model_outputs is not None:
         # Get appropriate logger based on parameters with overwrites
@@ -974,6 +1014,11 @@ async def completions(request: CompletionRequest):
                 "input_length": input_length,    # Pass the input length for reference
                 "model": model_name,
                 "trim_position": trim_pos,       # Pass the trim position
+                "prompt_hash": prompt_key,
+                "multi_sample": multi_sample,
+                "sample_group_id": sample_group_id,
+                "sample_index": request.sample_index,
+                "request_id": resolved_request_id,
             })
         finally:
             # Always close the logger to free up resources
@@ -1025,7 +1070,18 @@ async def chat_completions(request: ChatCompletionRequest):
         logger.info(f"[{request_id}] Applied parameter overwrites: {params}")
 
         # Log activation logging setup
-        entry_key = prompt_hash(prompt)
+        multi_sample = bool(
+            request.multi_sample
+            or request.sample_index is not None
+            or request.sample_group_id is not None
+            or request.request_id is not None
+        )
+        entry_key, prompt_key, resolved_request_id = build_entry_key(
+            prompt,
+            request.request_id,
+            multi_sample
+        )
+        sample_group_id = request.sample_group_id or prompt_key
         logger.info(f"[{request_id}] Generated entry key: {entry_key}")
 
         # Use the extracted inference function
@@ -1062,6 +1118,11 @@ async def chat_completions(request: ChatCompletionRequest):
                     "model": model_name,
                     "messages": [msg.model_dump() for msg in request.messages],
                     "trim_position": trim_pos,       # Pass the trim position
+                    "prompt_hash": prompt_key,
+                    "multi_sample": multi_sample,
+                    "sample_group_id": sample_group_id,
+                    "sample_index": request.sample_index,
+                    "request_id": resolved_request_id,
                 })
 
                 activation_time = time.time() - activation_start
