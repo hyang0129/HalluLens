@@ -348,6 +348,14 @@ class ActivationParser:
     @property
     def activation_logger(self):
         if self._activation_logger is None:
+            # Add staggered initialization to reduce filesystem contention with many workers
+            import time
+            import torch.utils.data
+            worker_info = torch.utils.data.get_worker_info()
+            if worker_info is not None and worker_info.num_workers > 8:
+                # Stagger by 50ms per worker for large worker counts
+                time.sleep(worker_info.id * 0.05)
+            
             if self.logger_type == "json":
                 self._activation_logger = JsonActivationsLogger(output_dir=self.activations_path, read_only=True, verbose=self.verbose)
             else:  # default to lmdb
