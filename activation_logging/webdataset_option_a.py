@@ -31,6 +31,11 @@ except Exception as exc:  # pragma: no cover - optional dependency
 else:
     _WDS_IMPORT_ERROR = None
 
+try:
+    from tqdm import tqdm
+except Exception:  # pragma: no cover - optional dependency
+    tqdm = None
+
 
 @dataclass(frozen=True)
 class WDSOptionAConfig:
@@ -47,8 +52,13 @@ class WDSOptionAConfig:
 
 def _ensure_wds_available() -> None:
     if wds is None:
+        detail = "unknown import error"
+        if _WDS_IMPORT_ERROR is not None:
+            detail = f"{type(_WDS_IMPORT_ERROR).__name__}: {_WDS_IMPORT_ERROR}"
         raise RuntimeError(
-            "webdataset is not available. Install it with `pip install webdataset`."
+            "webdataset is not available in the current Python environment. "
+            f"Import error: {detail}. "
+            "Ensure the runtime uses the same environment where webdataset is installed."
         ) from _WDS_IMPORT_ERROR
 
 
@@ -240,13 +250,16 @@ def convert_zarr_to_wds_option_a(
 
     Args:
         zarr_path: Path to the Zarr store.
-        output_pattern: WebDataset shard pattern (e.g., /path/wds-%06d.tar).
+        output_pattern: WebDataset shard pattern (e.g., /path/wds-%06d.tar). If None,
+            defaults to a webdataset/ folder colocated with the Zarr store.
         shard_size_mb: Target shard size in MB.
         samples_jsonl_path: Optional JSONL to write prompt/response text.
         include_prompt: Whether to include prompt activations in WDS.
     """
     _ensure_wds_available()
     import zarr
+
+    output_pattern = resolve_wds_output_pattern(zarr_path, output_pattern)
 
     root = zarr.open_group(zarr_path, mode="r")
     arrays = root.get("arrays") or root
@@ -269,8 +282,12 @@ def convert_zarr_to_wds_option_a(
     if samples_jsonl_path is not None:
         jsonl_handle = open(samples_jsonl_path, "w", encoding="utf-8")
 
+    iterator = range(num_samples)
+    if tqdm is not None:
+        iterator = tqdm(iterator, desc="Converting Zarr -> WDS", unit="sample")
+
     with wds.ShardWriter(output_pattern, maxsize=shard_bytes) as sink:
-        for idx in range(num_samples):
+        for idx in iterator:
             key = None
             if sample_key is not None:
                 key = str(sample_key[idx])
