@@ -258,11 +258,26 @@ def convert_zarr_to_wds_option_a(
     """
     _ensure_wds_available()
     import zarr
+    from zarr.errors import GroupNotFoundError
+
+    zarr_dir = Path(zarr_path)
+    if zarr_dir.is_dir() and (zarr_dir / "activations.zarr").exists():
+        zarr_path = str(zarr_dir / "activations.zarr")
 
     output_pattern = resolve_wds_output_pattern(zarr_path, output_pattern)
 
-    root = zarr.open_group(zarr_path, mode="r")
-    arrays = root.get("arrays") or root
+    try:
+        root = zarr.open_group(zarr_path, mode="r")
+        arrays = root.get("arrays") or root
+    except GroupNotFoundError:
+        try:
+            root = zarr.open_group(zarr_path, mode="r", path="arrays")
+            arrays = root
+        except GroupNotFoundError as exc:
+            raise GroupNotFoundError(
+                f"No Zarr group found at {zarr_path}. "
+                "Expected a Zarr v2/v3 group or an arrays/ subgroup."
+            ) from exc
 
     prompt_acts = arrays.get("prompt_activations")
     response_acts = arrays.get("response_activations")
@@ -327,7 +342,10 @@ def resolve_wds_output_pattern(zarr_path: str, output_pattern: Optional[str] = N
         """
         if output_pattern:
                 return output_pattern
-        zarr_dir = Path(zarr_path).resolve()
+    zarr_dir = Path(zarr_path).resolve()
+    if zarr_dir.is_dir() and (zarr_dir / "activations.zarr").exists():
+        base_dir = zarr_dir
+    else:
         base_dir = zarr_dir.parent
         wds_dir = base_dir / "webdataset"
         wds_dir.mkdir(parents=True, exist_ok=True)
