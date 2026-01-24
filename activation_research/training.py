@@ -1,7 +1,7 @@
 from tqdm.autonotebook import tqdm
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader, WeightedRandomSampler, IterableDataset
 from tqdm import tqdm
 import torch.nn as nn
 from torch.utils.data import DataLoader, WeightedRandomSampler
@@ -253,11 +253,14 @@ def train_contrastive(model, train_dataset, test_dataset=None,
         best_loss = checkpoint.get('best_loss', float('inf'))
         logger.info(f"Resumed training from epoch {start_epoch}")
 
-    sampler = _build_balanced_sampler(train_dataset) if balanced_sampling and use_labels else None
+    is_iterable = isinstance(train_dataset, IterableDataset)
+    if is_iterable and balanced_sampling and use_labels:
+        logger.warning("Balanced sampling is not supported for iterable datasets; disabling sampler.")
+    sampler = _build_balanced_sampler(train_dataset) if balanced_sampling and use_labels and not is_iterable else None
     train_loader = DataLoader(
         train_dataset,
         batch_size=sub_batch_size,
-        shuffle=(sampler is None),
+        shuffle=(sampler is None and not is_iterable),
         sampler=sampler,
         num_workers=num_workers,
         pin_memory=True,
@@ -282,6 +285,10 @@ def train_contrastive(model, train_dataset, test_dataset=None,
         total_cosine_sim = 0.0
         n_batches = 0  # Track number of full batches processed
         loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False)
+        try:
+            total_steps = len(train_loader)
+        except TypeError:
+            total_steps = None
 
         # Buffers to accumulate mini-batches
         buffer_x1, buffer_x2 = [], []
@@ -291,7 +298,10 @@ def train_contrastive(model, train_dataset, test_dataset=None,
         i = 0
         for batch in loop:
             i += 1
-            logger.info(f"Epoch {epoch + 1}/{epochs} - Step {i}/{len(loop)}")
+            if total_steps is not None:
+                logger.info(f"Epoch {epoch + 1}/{epochs} - Step {i}/{total_steps}")
+            else:
+                logger.info(f"Epoch {epoch + 1}/{epochs} - Step {i}")
             logger.debug(f"Adding batch {i} to buffer. Current buffer size: {len(buffer_x1)}")
             x1 = batch['layer1_activations'].squeeze(1).to(device, non_blocking=True)
             x2 = batch['layer2_activations'].squeeze(1).to(device, non_blocking=True)
@@ -324,7 +334,9 @@ def train_contrastive(model, train_dataset, test_dataset=None,
                 buffer_sample_ids.append(sample_ids)
 
             # Process when buffer is full or at the end of the loop
-            if len(buffer_x1) * sub_batch_size == batch_size or i == len(loop):
+            buffer_full = len(buffer_x1) * sub_batch_size == batch_size
+            last_batch = total_steps is not None and i == total_steps
+            if buffer_full or last_batch:
                 logger.debug(f"Processing buffer at batch {i}. Buffer size: {len(buffer_x1)}")
                 x1_full = torch.cat(buffer_x1, dim=0)
                 x2_full = torch.cat(buffer_x2, dim=0)
@@ -361,6 +373,41 @@ def train_contrastive(model, train_dataset, test_dataset=None,
                 avg_cosine_sim = total_cosine_sim / n_batches
 
                 loop.set_postfix(loss=avg_loss, pairing_acc=avg_acc, cosine_sim=avg_cosine_sim)
+
+        if buffer_x1:
+            logger.debug("Processing remaining buffer after epoch loop")
+            x1_full = torch.cat(buffer_x1, dim=0)
+            x2_full = torch.cat(buffer_x2, dim=0)
+            buffer_x1 = []
+            buffer_x2 = []
+
+            z1 = model(x1_full)
+            z2 = model(x2_full)
+            z_stacked = torch.stack([z1, z2], dim=1)
+
+            if use_labels and buffer_labels:
+                labels_full = torch.cat(buffer_labels, dim=0)
+                sample_ids_full = torch.cat(buffer_sample_ids, dim=0)
+                buffer_labels = []
+                buffer_sample_ids = []
+                loss = loss_fn(z_stacked, labels=labels_full, sample_ids=sample_ids_full)
+            else:
+                loss = loss_fn(z_stacked)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            acc = pairing_accuracy(z1, z2)
+            cosine_sim = average_cosine_similarity(z1, z2)
+            total_loss += loss.item()
+            total_acc += acc
+            total_cosine_sim += cosine_sim
+            n_batches += 1
+
+            avg_loss = total_loss / n_batches
+            avg_acc = total_acc / n_batches
+            avg_cosine_sim = total_cosine_sim / n_batches
 
         print(f"Epoch {epoch + 1}/{epochs} - Train Loss: {avg_loss:.4f} - Train Pairing Acc: {avg_acc:.4f} - Train Cosine Sim: {avg_cosine_sim:.4f}")
 
@@ -440,11 +487,14 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
         best_auroc = checkpoint.get('best_auroc', 0.0)
         logger.info(f"Resumed training from epoch {start_epoch}")
 
-    sampler = _build_balanced_sampler(train_dataset) if balanced_sampling else None
+    is_iterable = isinstance(train_dataset, IterableDataset)
+    if is_iterable and balanced_sampling:
+        logger.warning("Balanced sampling is not supported for iterable datasets; disabling sampler.")
+    sampler = _build_balanced_sampler(train_dataset) if balanced_sampling and not is_iterable else None
     train_loader = DataLoader(
         train_dataset,
         batch_size=sub_batch_size,
-        shuffle=(sampler is None),
+        shuffle=(sampler is None and not is_iterable),
         sampler=sampler,
         num_workers=num_workers,
         pin_memory=True,
@@ -466,6 +516,10 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
         total_correct = 0
         total_samples = 0
         loop = tqdm(train_loader, desc=f"Train Epoch {epoch+1}/{epochs}")
+        try:
+            total_steps = len(train_loader)
+        except TypeError:
+            total_steps = None
 
         # Buffers to accumulate mini-batches
         buffer_acts = []
@@ -483,7 +537,9 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
             buffer_labels.append(labels)
 
             # Process when buffer is full or at the end of the loop
-            if len(buffer_acts) * sub_batch_size == batch_size or i == len(loop):
+            buffer_full = len(buffer_acts) * sub_batch_size == batch_size
+            last_batch = total_steps is not None and i == total_steps
+            if buffer_full or last_batch:
                 acts_full = torch.cat(buffer_acts, dim=0)
                 labels_full = torch.cat(buffer_labels, dim=0)
                 buffer_acts = []
@@ -503,6 +559,26 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
                 avg_loss = total_loss / total_samples
                 avg_acc = total_correct / total_samples
                 loop.set_postfix(loss=avg_loss, acc=avg_acc)
+
+        if buffer_acts:
+            acts_full = torch.cat(buffer_acts, dim=0)
+            labels_full = torch.cat(buffer_labels, dim=0)
+            buffer_acts = []
+            buffer_labels = []
+
+            preds = model(acts_full)
+            loss = loss_fn(preds, labels_full)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item() * labels_full.size(0)
+            preds_binary = (preds > 0.5).float()
+            total_correct += (preds_binary == labels_full).sum().item()
+            total_samples += labels_full.size(0)
+
+            avg_loss = total_loss / total_samples
+            avg_acc = total_correct / total_samples
 
         print(f"Epoch {epoch+1} - Train Loss: {avg_loss:.4f} - Train Acc: {avg_acc:.4f}")
 

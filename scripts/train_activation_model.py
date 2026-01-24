@@ -35,6 +35,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import torch
 
 from activation_logging.activation_parser import ActivationParser
+from activation_logging.webdataset_option_a import infer_activation_dim_from_wds
 from activation_research.evaluation import inference_embeddings
 from activation_research.metrics import cosine_similarity_ood_stats, mahalanobis_ood_stats
 from activation_research.model import (  # noqa: E402
@@ -133,6 +134,8 @@ def _resolve_fixed_layer_index(relevant_layers: List[int], fixed_layer: Optional
 
 def _infer_activation_dim(ap: ActivationParser, candidate_layers: List[int]) -> int:
     """Infer the activation hidden dimension D from the first available sample."""
+    if ap.logger_type == "wds":
+        return infer_activation_dim_from_wds(ap.activations_path)
     row, _result, activations, _input_len = ap.get_activations(0)
     for layer_idx in candidate_layers:
         if layer_idx < 0 or layer_idx >= len(activations):
@@ -287,8 +290,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     parser.add_argument("--inference-json", required=True, help="Path to generation.jsonl")
     parser.add_argument("--eval-json", required=True, help="Path to eval_results.json")
-    parser.add_argument("--activations-path", required=True, help="LMDB path or JSON activations directory")
-    parser.add_argument("--logger-type", choices=["lmdb", "json"], default="json")
+    parser.add_argument("--activations-path", required=True, help="LMDB path, JSON activations directory, or WDS shard pattern")
+    parser.add_argument("--logger-type", choices=["lmdb", "json", "wds"], default="json")
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--routine", choices=["contrastive", "classifier"], default="contrastive")

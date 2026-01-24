@@ -16,6 +16,7 @@ from torch.utils.data import Dataset
 import random
 
 from .activations_logger import ActivationsLogger, JsonActivationsLogger
+from .webdataset_option_a import WDSOptionAConfig, WDSOptionAIterableDataset
 
 class ActivationDataset(Dataset):
     """PyTorch Dataset for loading activation data."""
@@ -338,12 +339,22 @@ class ActivationParser:
         self.verbose = verbose
         self._activation_logger = None
         self._group_index = None
+        self._wds_shards = self._detect_wds_shards(activations_path)
 
         # For backward compatibility, also store as lmdb_path
         self.lmdb_path = activations_path
 
         # Load metadata from JSON or use provided DataFrame
         self.df = df if df is not None else self._load_metadata()
+
+    @staticmethod
+    def _detect_wds_shards(activations_path: str) -> Optional[str]:
+        path = Path(activations_path)
+        if path.is_dir():
+            candidate = path / "webdataset"
+            if candidate.exists() and candidate.is_dir():
+                return str(candidate / "*.tar")
+        return None
 
     @property
     def activation_logger(self):
@@ -355,8 +366,10 @@ class ActivationParser:
             if worker_info is not None and worker_info.num_workers > 8:
                 # Stagger by 50ms per worker for large worker counts
                 time.sleep(worker_info.id * 0.05)
-            
-            if self.logger_type == "json":
+
+            if self.logger_type == "wds" or self._wds_shards is not None:
+                self._activation_logger = None
+            elif self.logger_type == "json":
                 self._activation_logger = JsonActivationsLogger(output_dir=self.activations_path, read_only=True, verbose=self.verbose)
             else:  # default to lmdb
                 self._activation_logger = ActivationsLogger(lmdb_path=self.activations_path, read_only=True, verbose=self.verbose)
@@ -364,11 +377,15 @@ class ActivationParser:
 
     def get_entry_metadata(self, entry_key: str) -> Dict[str, Any]:
         """Retrieve metadata only for a given entry key."""
+        if self.logger_type == "wds" or self.activation_logger is None:
+            return {}
         metadata = self.activation_logger.get_entry_by_key(entry_key, metadata_only=True)
         return metadata or {}
 
     def get_layer_activation(self, entry_key: str, layer_idx: int, sequence_mode: str = "response") -> Optional[torch.Tensor]:
         """Retrieve a single layer activation for the given entry key and sequence mode."""
+        if self.logger_type == "wds" or self.activation_logger is None:
+            return None
         if hasattr(self.activation_logger, "get_layer_activation"):
             return self.activation_logger.get_layer_activation(entry_key, layer_idx, sequence_mode=sequence_mode)
         return None
@@ -388,10 +405,11 @@ class ActivationParser:
 
         gendf = gendf[~gendf['prompt_hash'].duplicated(keep=False)]
 
-        keys = self.activation_logger.list_entries()
-        base_keys = {key.split("_")[0] for key in keys}
+        if self.logger_type != "wds" and self._wds_shards is None:
+            keys = self.activation_logger.list_entries()
+            base_keys = {key.split("_")[0] for key in keys}
+            gendf = gendf[gendf['prompt_hash'].isin(base_keys)]
 
-        gendf = gendf[gendf['prompt_hash'].isin(base_keys)]
         gendf = gendf[~gendf['abstain']]
 
         # Apply train/test split
@@ -556,6 +574,18 @@ class ActivationParser:
         Returns:
             ActivationDataset instance for the specified split
         """
+        if self.logger_type == "wds" or self._wds_shards is not None:
+            config = WDSOptionAConfig(
+                shards=self._wds_shards or self.activations_path,
+                split=split,
+                shuffle_buffer=10_000,
+                pad_length=pad_length,
+                min_target_layers=min_target_layers,
+                relevant_layers=relevant_layers,
+                fixed_layer=fixed_layer,
+            )
+            return WDSOptionAIterableDataset(self.df, config)
+
         return ActivationDataset(
             self.df,
             self.activations_path,

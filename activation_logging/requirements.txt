@@ -8,3 +8,4 @@ pydantic>=2.4.2
 numpy>=1.26.0
 requests>=2.31.0
 zarr>=2.16.1
+webdataset>=0.2.86

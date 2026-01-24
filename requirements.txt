@@ -11,6 +11,9 @@ gdown
 vllm
 openai
 
+# webdataset
+webdataset
+
 # longwiki
 segtok
 sentence-transformers==3.3.1
