@@ -333,20 +333,20 @@ def convert_zarr_to_wds_option_a(
 
 
 def resolve_wds_output_pattern(zarr_path: str, output_pattern: Optional[str] = None) -> str:
-        """Resolve a default WDS output pattern colocated with a Zarr store.
+    """Resolve a default WDS output pattern colocated with a Zarr store.
 
-        Expected layout:
-        <zarr_parent>/
-            activations.zarr/
-            webdataset/wds-%06d.tar
-        """
-        if output_pattern:
-                return output_pattern
+    Expected layout:
+    <zarr_parent>/
+        activations.zarr/
+        webdataset/wds-%06d.tar
+    """
+    if output_pattern:
+        return output_pattern
     zarr_dir = Path(zarr_path).resolve()
     if zarr_dir.is_dir() and (zarr_dir / "activations.zarr").exists():
         base_dir = zarr_dir
     else:
         base_dir = zarr_dir.parent
-        wds_dir = base_dir / "webdataset"
-        wds_dir.mkdir(parents=True, exist_ok=True)
-        return str(wds_dir / "wds-%06d.tar")
+    wds_dir = base_dir / "webdataset"
+    wds_dir.mkdir(parents=True, exist_ok=True)
+    return str(wds_dir / "wds-%06d.tar")
