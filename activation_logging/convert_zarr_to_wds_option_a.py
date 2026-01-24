@@ -11,7 +11,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Convert Zarr activations to WebDataset Option A")
     parser.add_argument("--zarr-path", required=True, help="Path to Zarr store")
     parser.add_argument("--output-pattern", default=None, help="Output shard pattern (e.g., /path/wds-%06d.tar)")
-    parser.add_argument("--shard-size-mb", type=int, default=512)
+    parser.add_argument("--shard-size-mb", type=int, default=1024)
     parser.add_argument("--samples-jsonl", default=None)
     parser.add_argument("--include-prompt", action="store_true")
 

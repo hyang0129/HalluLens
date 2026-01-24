@@ -3,6 +3,12 @@ WebDataset Option A utilities.
 
 Option A stores all layers per sample in a single WebDataset record and streams
 with a shuffle buffer. This favors fewer file opens at the cost of extra bytes.
+
+Expected layout (co-located with Zarr):
+<zarr_parent>/
+    activations.zarr/
+    webdataset/
+        wds-%06d.tar
 """
 from __future__ import annotations
 
