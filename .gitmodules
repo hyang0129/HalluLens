@@ -1,3 +1,6 @@
 [submodule "external/haloscope"]
 	path = external/haloscope
 	url = https://github.com/deeplearning-wisc/haloscope.git
+[submodule "external/LLMsKnow"]
+	path = external/LLMsKnow
+	url = https://github.com/technion-cs-nlp/LLMsKnow.git

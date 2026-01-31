@@ -6,8 +6,15 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
+import sys
 import argparse
 import subprocess
+
+# Add the project root to the Python path
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 # from datasets import load_dataset
 from data.wiki_data.wikidata import wikiData
 ################################################################################

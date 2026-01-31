@@ -1,7 +1,0 @@
-transformers
-torch>=2.1.2
-fastapi
-loguru
-uvicorn
-lmdb
-pydantic

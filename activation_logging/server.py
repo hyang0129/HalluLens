@@ -6,14 +6,18 @@ Designed to be compatible with vLLM serve and the utils/lm.py interface.
 import os
 import hashlib
 import time
-from fastapi import FastAPI, Request
+import uuid
+import psutil
+import threading
+import gc
+from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from loguru import logger
 import uvicorn
-from activation_logging.activations_logger import ActivationsLogger
+from activation_logging.activations_logger import ActivationsLogger, JsonActivationsLogger
 from llama_cpp import Llama  # Import for llama.cpp Python bindings
 
 # Configure logger to use the same log file as parent process if specified
@@ -31,8 +35,15 @@ if "SERVER_LOG_FILE" in os.environ:
 DEFAULT_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
 app = FastAPI()
 
-# Default LMDB path
-DEFAULT_LMDB_PATH = os.environ.get("ACTIVATION_LMDB_PATH", "lmdb_data/activations.lmdb")
+# Default activation storage path (can be LMDB or JSON directory)
+DEFAULT_ACTIVATIONS_PATH = os.environ.get("ACTIVATION_STORAGE_PATH",
+                                        os.environ.get("ACTIVATION_LMDB_PATH", "lmdb_data/activations.lmdb"))
+
+# Default logger type ('lmdb' or 'json')
+DEFAULT_LOGGER_TYPE = os.environ.get("ACTIVATION_LOGGER_TYPE", "lmdb")
+
+# Default LMDB path (for backward compatibility)
+DEFAULT_LMDB_PATH = DEFAULT_ACTIVATIONS_PATH
 
 # Default LMDB map size (16GB if not specified)
 DEFAULT_MAP_SIZE = int(os.environ.get("ACTIVATION_LMDB_MAP_SIZE", 16 * (1 << 30)))
@@ -45,7 +56,13 @@ _llamacpp_model_cache = {}  # Cache for llama.cpp models
 # Temperature overwrite variable, None means use request temperature
 overwrite_temperature = None
 
-# LMDB path overwrite variable, None means use the default path from environment
+# Activation storage path overwrite variable, None means use the default path from environment
+overwrite_activations_path = None
+
+# Logger type overwrite variable, None means use the default type from environment
+overwrite_logger_type = None
+
+# LMDB path overwrite variable, None means use the default path from environment (backward compatibility)
 overwrite_lmdb_path = None
 
 # Top-p overwrite variable, None means use request top_p
@@ -54,6 +71,78 @@ overwrite_top_p = None
 # Default path for GGUF models
 GGUF_MODELS_DIR = os.environ.get("GGUF_MODELS_DIR", "")
 
+# Request tracking for debugging
+active_requests = {}
+request_lock = threading.Lock()
+
+def log_system_resources(context: str = ""):
+    """Log current system resource usage for debugging."""
+    try:
+        # Memory info
+        memory = psutil.virtual_memory()
+
+        # GPU info if available
+        gpu_info = ""
+        if torch.cuda.is_available():
+            gpu_memory = torch.cuda.memory_allocated() / 1024**3  # GB
+            gpu_memory_cached = torch.cuda.memory_reserved() / 1024**3  # GB
+            gpu_info = f"GPU: {gpu_memory:.2f}GB allocated, {gpu_memory_cached:.2f}GB cached"
+
+        # Disk info for activation path
+        disk_usage = ""
+        if DEFAULT_ACTIVATIONS_PATH:
+            try:
+                disk = psutil.disk_usage(os.path.dirname(DEFAULT_ACTIVATIONS_PATH) or ".")
+                disk_usage = f"Disk: {disk.free / 1024**3:.2f}GB free of {disk.total / 1024**3:.2f}GB"
+            except:
+                disk_usage = "Disk: info unavailable"
+
+        # Active requests count
+        with request_lock:
+            active_count = len(active_requests)
+
+        logger.info(f"[{context}] System Resources - "
+                   f"RAM: {memory.percent}% used ({memory.available / 1024**3:.2f}GB free), "
+                   f"{gpu_info}, {disk_usage}, Active requests: {active_count}")
+
+    except Exception as e:
+        logger.warning(f"Failed to log system resources: {e}")
+
+def track_request_start(request_id: str, endpoint: str, model: str):
+    """Track the start of a request for debugging."""
+    with request_lock:
+        active_requests[request_id] = {
+            "start_time": time.time(),
+            "endpoint": endpoint,
+            "model": model,
+            "status": "started"
+        }
+    logger.info(f"[{request_id}] Request started - Endpoint: {endpoint}, Model: {model}")
+    log_system_resources(f"Request Start {request_id}")
+
+def track_request_end(request_id: str, status: str = "completed"):
+    """Track the end of a request for debugging."""
+    with request_lock:
+        if request_id in active_requests:
+            duration = time.time() - active_requests[request_id]["start_time"]
+            active_requests[request_id]["status"] = status
+            active_requests[request_id]["duration"] = duration
+            logger.info(f"[{request_id}] Request {status} - Duration: {duration:.2f}s")
+            del active_requests[request_id]
+        else:
+            logger.warning(f"[{request_id}] Request end tracked but not found in active requests")
+    log_system_resources(f"Request End {request_id}")
+
+def log_long_running_requests():
+    """Log any requests that have been running for more than 5 minutes."""
+    current_time = time.time()
+    with request_lock:
+        for request_id, info in active_requests.items():
+            duration = current_time - info["start_time"]
+            if duration > 300:  # 5 minutes
+                logger.warning(f"[{request_id}] Long-running request detected - "
+                             f"Duration: {duration:.2f}s, Endpoint: {info['endpoint']}, "
+                             f"Model: {info['model']}, Status: {info['status']}")
 
 def get_model_and_tokenizer(model_name: str, auth_token: Optional[str] = None):
     """
@@ -282,7 +371,7 @@ def trim_response(tokenizer, gen_ids, response_text):
 def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MODEL, auth_token=None):
     """
     Run inference using the model and tokenizer.
-    
+
     Args:
         prompt: The input prompt text
         max_tokens: Maximum number of tokens to generate
@@ -290,7 +379,7 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
         top_p: Top-p sampling parameter
         model_name: Name of the model to use (HuggingFace model ID)
         auth_token: HuggingFace authentication token for gated models
-        
+
     Returns:
         Tuple of (response_text, model_outputs, input_length, trim_position)
         - response_text: Generated text
@@ -300,63 +389,112 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
     """
     logger.info(f"Starting inference with model: {model_name}")
     logger.info(f"Inference parameters: max_tokens={max_tokens}, temperature={temperature}, top_p={top_p}")
-    
+    logger.info(f"Prompt length: {len(prompt)} characters")
+
     start_time = time.time()
-    
+
+    # Log system resources before inference
+    log_system_resources("Pre-inference")
+
     # Check if this is a GGUF model path for llama.cpp
     if model_name.endswith('.gguf'):
         logger.info(f"Detected GGUF model, using llama.cpp for inference")
-        return run_inference_llamacpp(
-            prompt=prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            model_path=model_name
-        )
-    
+        try:
+            result = run_inference_llamacpp(
+                prompt=prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                model_path=model_name
+            )
+            logger.info(f"GGUF inference completed successfully")
+            return result
+        except Exception as e:
+            logger.error(f"GGUF inference failed: {e}")
+            raise
+
     # Otherwise use the standard Hugging Face model loading
     logger.info(f"Using Hugging Face transformers for inference")
-    
-    # Get model and tokenizer
-    model, tokenizer = get_model_and_tokenizer(model_name, auth_token)
-    
-    # Ensure input_ids are on the same device as the model
-    device = next(model.parameters()).device
-    tokens = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True).to(device)
-    input_ids = tokens.input_ids
-    attention_mask = tokens.attention_mask
 
-    logger.info(f"Input tokenized to {input_ids.shape[1]} tokens")
-    
-    # Start generation
-    logger.info(f"Starting generation with {model_name}")
-    with torch.no_grad():
-        outputs = model.generate(
-            input_ids,
-            attention_mask=attention_mask, 
-            max_new_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            return_dict_in_generate=True,
-            output_hidden_states=True,
-            do_sample=True if temperature > 0.0 else False, 
-            pad_token_id=tokenizer.pad_token_id
-        )
-    
-    inference_time = time.time() - start_time
-    logger.info(f"Inference completed in {inference_time:.2f} seconds")
-    
-    # Get generated tokens (excluding prompt)
-    gen_ids = outputs.sequences[0][input_ids.shape[1]:]
-    response_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
-    
-    # Trim the response if needed
-    response_text, trim_pos = trim_response(tokenizer, gen_ids, response_text)
-    
-    logger.info(f"Generated {len(gen_ids)} new tokens ({len(response_text)} characters)")
-    
-    # Return the full outputs object for the activation logger to process
-    return response_text, outputs, input_ids.shape[1], trim_pos
+    try:
+        # Get model and tokenizer
+        logger.info(f"Loading model and tokenizer for {model_name}")
+        model_load_start = time.time()
+        model, tokenizer = get_model_and_tokenizer(model_name, auth_token)
+        model_load_time = time.time() - model_load_start
+        logger.info(f"Model and tokenizer loaded in {model_load_time:.2f} seconds")
+
+        # Ensure input_ids are on the same device as the model
+        device = next(model.parameters()).device
+        logger.info(f"Model device: {device}")
+
+        # Tokenization
+        tokenization_start = time.time()
+        tokens = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True).to(device)
+        input_ids = tokens.input_ids
+        attention_mask = tokens.attention_mask
+        tokenization_time = time.time() - tokenization_start
+
+        logger.info(f"Input tokenized to {input_ids.shape[1]} tokens in {tokenization_time:.3f} seconds")
+
+        # Log memory before generation
+        if torch.cuda.is_available():
+            gpu_memory_before = torch.cuda.memory_allocated() / 1024**3
+            logger.info(f"GPU memory before generation: {gpu_memory_before:.2f}GB")
+
+        # Start generation
+        logger.info(f"Starting generation with {model_name}")
+        generation_start = time.time()
+
+        with torch.no_grad():
+            outputs = model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                return_dict_in_generate=True,
+                output_hidden_states=True,
+                do_sample=True if temperature > 0.0 else False,
+                pad_token_id=tokenizer.pad_token_id
+            )
+
+        generation_time = time.time() - generation_start
+        logger.info(f"Generation completed in {generation_time:.2f} seconds")
+
+        # Log memory after generation
+        if torch.cuda.is_available():
+            gpu_memory_after = torch.cuda.memory_allocated() / 1024**3
+            logger.info(f"GPU memory after generation: {gpu_memory_after:.2f}GB")
+
+        # Get generated tokens (excluding prompt)
+        gen_ids = outputs.sequences[0][input_ids.shape[1]:]
+        response_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
+
+        # Trim the response if needed
+        trim_start = time.time()
+        response_text, trim_pos = trim_response(tokenizer, gen_ids, response_text)
+        trim_time = time.time() - trim_start
+
+        inference_time = time.time() - start_time
+        logger.info(f"Inference completed in {inference_time:.2f} seconds")
+        logger.info(f"Generated {len(gen_ids)} new tokens ({len(response_text)} characters)")
+        logger.info(f"Timing breakdown - Model load: {model_load_time:.2f}s, "
+                   f"Tokenization: {tokenization_time:.3f}s, Generation: {generation_time:.2f}s, "
+                   f"Trimming: {trim_time:.3f}s")
+
+        # Log system resources after inference
+        log_system_resources("Post-inference")
+
+        # Return the full outputs object for the activation logger to process
+        return response_text, outputs, input_ids.shape[1], trim_pos
+
+    except Exception as e:
+        logger.error(f"Inference failed with error: {e}")
+        logger.error(f"Error type: {type(e).__name__}")
+        # Log system resources on error
+        log_system_resources("Error during inference")
+        raise
 
 
 # OpenAI API request/response models for compatibility
@@ -369,6 +507,10 @@ class CompletionRequest(BaseModel):
     stop: Optional[List[str]] = None
     lmdb_path: Optional[str] = None  # Optional field for custom LMDB path
     auth_token: Optional[str] = None  # Optional field for HuggingFace auth token
+    multi_sample: Optional[bool] = False  # Optional flag to enable multi-sample logging
+    sample_group_id: Optional[str] = None  # Optional group ID to link samples
+    sample_index: Optional[int] = None  # Optional index within the group
+    request_id: Optional[str] = None  # Optional request ID for unique sample keys
 
 
 class Choice(BaseModel):
@@ -401,6 +543,10 @@ class ChatCompletionRequest(BaseModel):
     stop: Optional[List[str]] = None
     lmdb_path: Optional[str] = None  # Optional field for custom LMDB path
     auth_token: Optional[str] = None  # Optional field for HuggingFace auth token
+    multi_sample: Optional[bool] = False  # Optional flag to enable multi-sample logging
+    sample_group_id: Optional[str] = None  # Optional group ID to link samples
+    sample_index: Optional[int] = None  # Optional index within the group
+    request_id: Optional[str] = None  # Optional request ID for unique sample keys
 
 
 class ChatCompletionChoice(BaseModel):
@@ -470,6 +616,27 @@ def prompt_hash(prompt: str) -> str:
     return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
 
+def build_entry_key(prompt: str, request_id: Optional[str], multi_sample: bool) -> Tuple[str, str, Optional[str]]:
+    """
+    Build a unique entry key for logging.
+
+    Args:
+        prompt: Prompt string to hash
+        request_id: Optional request ID for uniqueness
+        multi_sample: Whether multi-sample logging is enabled
+
+    Returns:
+        Tuple of (entry_key, prompt_key, resolved_request_id)
+    """
+    prompt_key = prompt_hash(prompt)
+    if not multi_sample:
+        return prompt_key, prompt_key, None
+
+    resolved_request_id = request_id or str(uuid.uuid4())[:8]
+    entry_key = f"{prompt_key}_{resolved_request_id}"
+    return entry_key, prompt_key, resolved_request_id
+
+
 def apply_overwrites(request_params):
     """
     Apply global overwrites to request parameters.
@@ -504,70 +671,189 @@ def apply_overwrites(request_params):
         params['top_p'] = overwrite_top_p
         logger.info(f"Using overwrite top_p: {overwrite_top_p} instead of request top_p: {original_top_p}")
     
-    # Apply LMDB path overwrite if set
+    # Apply activation storage path overwrite if set
+    if overwrite_activations_path is not None:
+        params['activations_path'] = overwrite_activations_path
+        logger.info(f"Using overwrite activations path: {overwrite_activations_path}")
+    elif 'activations_path' not in params or not params.get('activations_path'):
+        # If no path specified and no overwrite, use the environment variable
+        params['activations_path'] = DEFAULT_ACTIVATIONS_PATH
+        logger.info(f"Using default activations path from environment: {params['activations_path']}")
+
+    # Apply logger type overwrite if set
+    if overwrite_logger_type is not None:
+        params['logger_type'] = overwrite_logger_type
+        logger.info(f"Using overwrite logger type: {overwrite_logger_type}")
+    elif 'logger_type' not in params or not params.get('logger_type'):
+        # If no logger type specified and no overwrite, use the environment variable
+        params['logger_type'] = DEFAULT_LOGGER_TYPE
+        logger.info(f"Using default logger type from environment: {params['logger_type']}")
+
+    # Apply LMDB path overwrite if set (backward compatibility)
     if overwrite_lmdb_path is not None:
         params['lmdb_path'] = overwrite_lmdb_path
+        params['activations_path'] = overwrite_lmdb_path  # Also set activations_path for consistency
         logger.info(f"Using overwrite LMDB path: {overwrite_lmdb_path}")
     elif 'lmdb_path' not in params or not params.get('lmdb_path'):
-        # If no path specified and no overwrite, use the environment variable
-        params['lmdb_path'] = os.environ.get("ACTIVATION_LMDB_PATH", DEFAULT_LMDB_PATH)
-        logger.info(f"Using default LMDB path from environment: {params['lmdb_path']}")
-        
+        # If no path specified and no overwrite, use the activations_path or environment variable
+        params['lmdb_path'] = params.get('activations_path', DEFAULT_ACTIVATIONS_PATH)
+        logger.info(f"Using activations path as LMDB path for backward compatibility: {params['lmdb_path']}")
+
     return params
 
 
 def get_logger_for_request(request_params):
     """
     Create a new logger instance for each request to avoid LMDB assertion errors.
-    
+
     Args:
         request_params: Dictionary containing request parameters (with overwrites applied)
-        
+
     Returns:
         Tuple of (logger_to_use, custom_logger, used_custom_path)
         - logger_to_use: Logger to use for this request
         - custom_logger: Custom logger instance if created (to be closed after use)
         - used_custom_path: Boolean indicating if a custom path was used
     """
-    lmdb_path = request_params.get('lmdb_path')
-    
+    activations_path = request_params.get('activations_path', request_params.get('lmdb_path'))
+    logger_type = request_params.get('logger_type', DEFAULT_LOGGER_TYPE)
+
     # Get target layers and sequence mode from environment variables
     target_layers = os.environ.get("ACTIVATION_TARGET_LAYERS", "all")
     sequence_mode = os.environ.get("ACTIVATION_SEQUENCE_MODE", "all")
-    
-    # Always create a new logger instance to avoid LMDB assertion errors
-    if lmdb_path and lmdb_path.strip():
-        # Create and use a custom logger with the specified path
-        custom_logger = ActivationsLogger(
-            lmdb_path=lmdb_path, 
-            map_size=DEFAULT_MAP_SIZE,
-            target_layers=target_layers,
-            sequence_mode=sequence_mode
-        )
-        return custom_logger, custom_logger, True
-    else:
-        # Create a new logger with the default path from environment
-        # This avoids the 'Assertion mp->mp_pgno != pgno failed in mdb_page_touch()' error
-        default_path = os.environ.get("ACTIVATION_LMDB_PATH", DEFAULT_LMDB_PATH)
-        new_logger = ActivationsLogger(
-            lmdb_path=default_path, 
-            map_size=DEFAULT_MAP_SIZE,
-            target_layers=target_layers,
-            sequence_mode=sequence_mode
-        )
-        return new_logger, new_logger, False
+
+    logger.info(f"Creating activation logger - Type: {logger_type}, Path: {activations_path}, "
+               f"Target layers: {target_layers}, Sequence mode: {sequence_mode}")
+
+    try:
+        # Always create a new logger instance to avoid assertion errors
+        if activations_path and activations_path.strip():
+            # Create and use a custom logger with the specified path and type
+            logger.info(f"Using custom activations path: {activations_path}")
+
+            if logger_type == "json":
+                # Check if directory exists and log directory info
+                if os.path.exists(activations_path):
+                    file_count = len([f for f in os.listdir(activations_path) if f.endswith('.npy')])
+                    dir_size = sum(os.path.getsize(os.path.join(activations_path, f))
+                                 for f in os.listdir(activations_path)) / 1024**2  # MB
+                    logger.info(f"Existing JSON activation directory: {file_count} files, {dir_size:.2f}MB")
+
+                custom_logger = JsonActivationsLogger(
+                    output_dir=activations_path,
+                    target_layers=target_layers,
+                    sequence_mode=sequence_mode,
+                    read_only=False
+                )
+                logger.info(f"Created JsonActivationsLogger for {activations_path}")
+            else:  # default to lmdb
+                # Check if LMDB exists and log info
+                if os.path.exists(activations_path):
+                    file_size = os.path.getsize(activations_path) / 1024**2  # MB
+                    logger.info(f"Existing LMDB file: {file_size:.2f}MB")
+
+                custom_logger = ActivationsLogger(
+                    lmdb_path=activations_path,
+                    map_size=DEFAULT_MAP_SIZE,
+                    target_layers=target_layers,
+                    sequence_mode=sequence_mode
+                )
+                logger.info(f"Created ActivationsLogger for {activations_path}")
+
+            return custom_logger, custom_logger, True
+        else:
+            # Create a new logger with the default path from environment
+            default_path = DEFAULT_ACTIVATIONS_PATH
+            logger.info(f"Using default activations path: {default_path}")
+
+            if logger_type == "json":
+                new_logger = JsonActivationsLogger(
+                    output_dir=default_path,
+                    target_layers=target_layers,
+                    sequence_mode=sequence_mode,
+                    read_only=False
+                )
+                logger.info(f"Created default JsonActivationsLogger")
+            else:  # default to lmdb
+                new_logger = ActivationsLogger(
+                    lmdb_path=default_path,
+                    map_size=DEFAULT_MAP_SIZE,
+                    target_layers=target_layers,
+                    sequence_mode=sequence_mode
+                )
+                logger.info(f"Created default ActivationsLogger")
+
+            return new_logger, new_logger, False
+
+    except Exception as e:
+        logger.error(f"Failed to create activation logger: {e}")
+        logger.error(f"Logger type: {logger_type}, Path: {activations_path}")
+        raise
 
 
 @app.get("/health")
 async def health_check():
     """
     Simple health check endpoint to verify the server is running.
-    
+
     Returns:
         Dict with status and timestamp
     """
     return {
         "status": "ok",
+        "timestamp": time.time()
+    }
+
+@app.post("/restart")
+async def restart_server():
+    """
+    Restart the server by triggering a graceful shutdown and restart.
+    This endpoint should be called when the server becomes unresponsive.
+
+    Returns:
+        Dict with restart status
+    """
+    logger.warning("=" * 80)
+    logger.warning("SERVER RESTART REQUESTED")
+    logger.warning("=" * 80)
+
+    # Log current state
+    with request_lock:
+        if active_requests:
+            logger.warning(f"Restarting with {len(active_requests)} active requests:")
+            for request_id, info in active_requests.items():
+                duration = time.time() - info["start_time"]
+                logger.warning(f"  [{request_id}] {info['endpoint']} - {duration:.2f}s")
+        else:
+            logger.info("No active requests at restart")
+
+    log_system_resources("Pre-Restart")
+
+    # Clear GPU cache if available
+    if torch.cuda.is_available():
+        logger.info("Clearing CUDA cache...")
+        torch.cuda.empty_cache()
+        logger.info("CUDA cache cleared")
+
+    # Clear model caches
+    logger.info("Clearing model caches...")
+    _model_cache.clear()
+    _tokenizer_cache.clear()
+    _llamacpp_model_cache.clear()
+    logger.info("Model caches cleared")
+
+    # Schedule restart in background
+    import asyncio
+    async def do_restart():
+        await asyncio.sleep(1)  # Give time to send response
+        logger.warning("Initiating server restart...")
+        os._exit(0)  # Force exit, supervisor/systemd should restart
+
+    asyncio.create_task(do_restart())
+
+    return {
+        "status": "restarting",
+        "message": "Server restart initiated",
         "timestamp": time.time()
     }
 
@@ -702,7 +988,18 @@ async def completions(request: CompletionRequest):
     )
     
     # Log to LMDB only if not a GGUF model (which doesn't provide activations)
-    entry_key = prompt_hash(request.prompt)
+    multi_sample = bool(
+        request.multi_sample
+        or request.sample_index is not None
+        or request.sample_group_id is not None
+        or request.request_id is not None
+    )
+    entry_key, prompt_key, resolved_request_id = build_entry_key(
+        request.prompt,
+        request.request_id,
+        multi_sample
+    )
+    sample_group_id = request.sample_group_id or prompt_key
     
     if not model_name.endswith('.gguf') and model_outputs is not None:
         # Get appropriate logger based on parameters with overwrites
@@ -717,6 +1014,11 @@ async def completions(request: CompletionRequest):
                 "input_length": input_length,    # Pass the input length for reference
                 "model": model_name,
                 "trim_position": trim_pos,       # Pass the trim position
+                "prompt_hash": prompt_key,
+                "multi_sample": multi_sample,
+                "sample_group_id": sample_group_id,
+                "sample_index": request.sample_index,
+                "request_id": resolved_request_id,
             })
         finally:
             # Always close the logger to free up resources
@@ -737,74 +1039,190 @@ async def completions(request: CompletionRequest):
 async def chat_completions(request: ChatCompletionRequest):
     """
     OpenAI API-compatible endpoint for chat completions with activation logging.
-    
+
     Args:
         request: ChatCompletionRequest object containing messages and generation parameters
-        
+
     Returns:
         ChatCompletionResponse with generated message
     """
+    # Generate unique request ID for tracking
+    request_id = str(uuid.uuid4())[:8]
+
     # Allow override of model via request, else use default
     model_name = request.model if request.model else DEFAULT_MODEL
-    logger.info(f"Received chat completion request for model: {model_name}")
-    
-    # Convert chat messages to a single prompt - simplified for most models
-    prompt = "\n".join([f"{msg.role}: {msg.content}" for msg in request.messages])
-    
-    # Apply any overwrites to request parameters
-    params = apply_overwrites({
-        'temperature': request.temperature,
-        'top_p': request.top_p,
-        'lmdb_path': request.lmdb_path if hasattr(request, 'lmdb_path') else None
-    })
-    
-    # Use the extracted inference function
-    response_text, model_outputs, input_length, trim_pos = run_inference(
-        prompt=prompt,
-        max_tokens=request.max_tokens,
-        temperature=params['temperature'],
-        top_p=params['top_p'],
-        model_name=model_name,
-        auth_token=request.auth_token
-    )
-    
-    # Log to LMDB only if not a GGUF model (which doesn't provide activations)
-    entry_key = prompt_hash(prompt)
-    
-    if not model_name.endswith('.gguf') and model_outputs is not None:
-        # Get appropriate logger based on parameters with overwrites
-        logger_to_use, _, _ = get_logger_for_request(params)
-        
-        try:
-            # Pass the model outputs directly to the logger
-            logger_to_use.log_entry(entry_key, {
-                "prompt": prompt,
-                "response": response_text,
-                "model_outputs": model_outputs,  # Pass the full model outputs
-                "input_length": input_length,    # Pass the input length for reference
-                "model": model_name,
-                "messages": [msg.dict() for msg in request.messages],
-                "trim_position": trim_pos,       # Pass the trim position
-            })
-        finally:
-            # Always close the logger to free up resources
-            logger_to_use.close()
-    else:
-        logger.info(f"Skipping activation logging for GGUF model: {model_name}")
-    
-    # Build OpenAI-compatible response
-    return ChatCompletionResponse(
-        id=entry_key,
-        created=int(time.time()),
-        model=model_name,
-        choices=[
-            ChatCompletionChoice(
-                message=Message(role="assistant", content=response_text),
-                index=0
-            )
-        ]
-    )
+    logger.info(f"[{request_id}] Received chat completion request for model: {model_name}")
 
+    # Track request start
+    track_request_start(request_id, "chat_completions", model_name)
+
+    try:
+        # Convert chat messages to a single prompt - simplified for most models
+        prompt = "\n".join([f"{msg.role}: {msg.content}" for msg in request.messages])
+        logger.info(f"[{request_id}] Converted {len(request.messages)} messages to prompt of {len(prompt)} characters")
+
+        # Apply any overwrites to request parameters
+        params = apply_overwrites({
+            'temperature': request.temperature,
+            'top_p': request.top_p,
+            'lmdb_path': request.lmdb_path if hasattr(request, 'lmdb_path') else None
+        })
+        logger.info(f"[{request_id}] Applied parameter overwrites: {params}")
+
+        # Log activation logging setup
+        multi_sample = bool(
+            request.multi_sample
+            or request.sample_index is not None
+            or request.sample_group_id is not None
+            or request.request_id is not None
+        )
+        entry_key, prompt_key, resolved_request_id = build_entry_key(
+            prompt,
+            request.request_id,
+            multi_sample
+        )
+        sample_group_id = request.sample_group_id or prompt_key
+        logger.info(f"[{request_id}] Generated entry key: {entry_key}")
+
+        # Use the extracted inference function
+        logger.info(f"[{request_id}] Starting inference")
+        inference_start = time.time()
+
+        response_text, model_outputs, input_length, trim_pos = run_inference(
+            prompt=prompt,
+            max_tokens=request.max_tokens,
+            temperature=params['temperature'],
+            top_p=params['top_p'],
+            model_name=model_name,
+            auth_token=request.auth_token
+        )
+
+        inference_time = time.time() - inference_start
+        logger.info(f"[{request_id}] Inference completed in {inference_time:.2f} seconds")
+
+        # Log activation logging
+        if not model_name.endswith('.gguf') and model_outputs is not None:
+            logger.info(f"[{request_id}] Starting activation logging")
+            activation_start = time.time()
+
+            # Get appropriate logger based on parameters with overwrites
+            logger_to_use, _, _ = get_logger_for_request(params)
+
+            try:
+                # Pass the model outputs directly to the logger
+                logger_to_use.log_entry(entry_key, {
+                    "prompt": prompt,
+                    "response": response_text,
+                    "model_outputs": model_outputs,  # Pass the full model outputs
+                    "input_length": input_length,    # Pass the input length for reference
+                    "model": model_name,
+                    "messages": [msg.model_dump() for msg in request.messages],
+                    "trim_position": trim_pos,       # Pass the trim position
+                    "prompt_hash": prompt_key,
+                    "multi_sample": multi_sample,
+                    "sample_group_id": sample_group_id,
+                    "sample_index": request.sample_index,
+                    "request_id": resolved_request_id,
+                })
+
+                activation_time = time.time() - activation_start
+                logger.info(f"[{request_id}] Activation logging completed in {activation_time:.2f} seconds")
+
+            finally:
+                # Always close the logger to free up resources
+                logger_to_use.close()
+        else:
+            logger.info(f"[{request_id}] Skipping activation logging for GGUF model: {model_name}")
+
+        # Build OpenAI-compatible response
+        response = ChatCompletionResponse(
+            id=entry_key,
+            created=int(time.time()),
+            model=model_name,
+            choices=[
+                ChatCompletionChoice(
+                    message=Message(role="assistant", content=response_text),
+                    index=0
+                )
+            ]
+        )
+
+        # Track successful completion
+        track_request_end(request_id, "completed")
+        logger.info(f"[{request_id}] Request completed successfully")
+        logger.info(f"[{request_id}] Sending response to client - Response size: {len(response_text)} chars")
+
+        return response
+
+    except Exception as e:
+        # Track failed completion
+        track_request_end(request_id, "failed")
+        logger.error(f"[{request_id}] Request failed with error: {e}")
+        logger.error(f"[{request_id}] Error type: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+# Add startup event to log system info and start monitoring
+@app.on_event("startup")
+async def startup_event():
+    """Log system information on startup and start monitoring."""
+    logger.info("=" * 80)
+    logger.info("ACTIVATION LOGGING SERVER STARTUP")
+    logger.info("=" * 80)
+
+    # Log configuration
+    logger.info(f"Default model: {DEFAULT_MODEL}")
+    logger.info(f"Default activations path: {DEFAULT_ACTIVATIONS_PATH}")
+    logger.info(f"Default logger type: {DEFAULT_LOGGER_TYPE}")
+    logger.info(f"GGUF models directory: {GGUF_MODELS_DIR}")
+
+    # Log system resources
+    log_system_resources("Startup")
+
+    # Log GPU information
+    if torch.cuda.is_available():
+        logger.info(f"CUDA available: {torch.cuda.is_available()}")
+        logger.info(f"CUDA device count: {torch.cuda.device_count()}")
+        for i in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(i)
+            logger.info(f"GPU {i}: {props.name}, Memory: {props.total_memory / 1024**3:.2f}GB")
+    else:
+        logger.info("CUDA not available, using CPU")
+
+    # Start monitoring thread
+    import threading
+    def monitor_requests():
+        while True:
+            time.sleep(300)  # Check every 5 minutes
+            log_long_running_requests()
+
+    monitor_thread = threading.Thread(target=monitor_requests, daemon=True)
+    monitor_thread.start()
+    logger.info("Started request monitoring thread")
+
+    logger.info("Server startup completed")
+    logger.info("=" * 80)
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Log shutdown information."""
+    logger.info("=" * 80)
+    logger.info("ACTIVATION LOGGING SERVER SHUTDOWN")
+    logger.info("=" * 80)
+
+    # Log any remaining active requests
+    with request_lock:
+        if active_requests:
+            logger.warning(f"Shutting down with {len(active_requests)} active requests:")
+            for request_id, info in active_requests.items():
+                duration = time.time() - info["start_time"]
+                logger.warning(f"  [{request_id}] {info['endpoint']} - {duration:.2f}s")
+        else:
+            logger.info("No active requests at shutdown")
+
+    log_system_resources("Shutdown")
+    logger.info("Server shutdown completed")
+    logger.info("=" * 80)
 
 if __name__ == "__main__":
-    uvicorn.run("activation_logging.server:app", host="0.0.0.0", port=8000, reload=False) 
+    uvicorn.run("activation_logging.server:app", host="0.0.0.0", port=8000, reload=False)

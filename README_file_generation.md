@@ -56,7 +56,7 @@ python -m tasks.shortform.precise_wikiqa \
 This file contains the raw inference results from running LLM models on test prompts.
 
 **Generation Process:**
-- **Script**: Various task scripts in `tasks/` directory (e.g., `tasks/shortform/precise_wikiqa.py`, `tasks/refusal_test/nonsense_mixed_entities.py`)
+- **Script**: Various task scripts in `tasks/` directory (e.g., `tasks/shortform/precise_wikiqa.py`, `tasks/triviaqa/triviaqa.py`)
 - **Command Example**:
   ```bash
   python -m tasks.shortform.precise_wikiqa \
@@ -100,9 +100,8 @@ This file contains evaluation results determining whether model responses contai
   ```
 
 **Evaluation Types:**
-1. **Abstention Evaluation**: Determines if model appropriately refuses to answer
-2. **Hallucination Evaluation**: Identifies factual errors in responses
-3. **Automatic Scoring**: Uses LLM evaluators to score responses
+1. **Hallucination / correctness evaluation**: Determines whether the response matches available references / ground truth
+2. **Automatic scoring**: Uses LLM evaluators to score responses (when reference-based signals aren’t available)
 
 **File Structure:**
 - Links to original inference results
@@ -121,11 +120,39 @@ This database stores neural network activations captured during model inference.
 
 **Setup Steps:**
 
+### Option 1: Unified Script (Recommended)
+
+**Prerequisites:** First check setup and download required data:
+```bash
+# Check if all required data is available
+python scripts/check_setup.py
+
+# Download missing data if needed
+python data/download_data.py --all
+```
+
+The unified script automatically manages server startup/shutdown and checks dependencies:
+
+```bash
+# Run all steps (generate, inference, eval) with automatic server management
+python scripts/run_with_server.py \
+    --step all \
+    --task precisewikiqa \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --N 100
+
+# Or run individual steps
+python scripts/run_with_server.py --step generate --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --N 100
+python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct
+python scripts/run_with_server.py --step eval --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct
+```
+
+### Option 2: Manual Server Management (Original Method)
 1. **Start Activation Logging Server:**
    ```bash
    # Set LMDB path (optional)
    export ACTIVATION_LMDB_PATH=lmdb_data/gguf/activations.lmdb
-   
+
    # Start server with vLLM
    python -m activation_logging.vllm_serve \
        --model meta-llama/Llama-3.1-8B-Instruct \
@@ -133,12 +160,12 @@ This database stores neural network activations captured during model inference.
        --port 8000
    ```
 
-2. **Run Inference with Activation Logging:**
+2. **Run Tasks (in separate terminal):**
    ```bash
-   python -m activation_logging.run_benchmark \
+   python -m tasks.shortform.precise_wikiqa \
+       --do_generate_prompt --do_inference --do_eval \
        --model meta-llama/Llama-3.1-8B-Instruct \
-       --lmdb_path lmdb_data/gguf/activations.lmdb \
-       --exp test_experiment
+       --wiki_src goodwiki --mode dynamic --N 100
    ```
 
 **LMDB Structure:**
@@ -148,6 +175,33 @@ This database stores neural network activations captured during model inference.
   - `response`: Generated response
   - `activations`: NumPy array of neural activations
   - `all_layers_activations`: Activations from all transformer layers
+
+## Unified Server Management
+
+### Benefits of the Unified Approach
+
+✅ **No Manual Server Management**: Server automatically starts and stops
+✅ **Health Checking**: Waits for server to be ready before running tasks
+✅ **Proper Cleanup**: Server stops even if task fails or is interrupted
+✅ **Configurable Storage**: Easy to specify custom activation storage paths
+✅ **Multiple Formats**: Support for LMDB, JSON, and other storage formats
+✅ **Drop-in Replacement**: Compatible with existing task parameters
+
+### Usage Patterns
+
+```bash
+# Quick single experiment
+python scripts/run_with_server.py --step all --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --N 10
+
+# Custom activation storage
+python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --activations-path experiments/exp1.lmdb
+
+# JSON logging instead of LMDB
+python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --logger-type json --activations-path json_data/activations
+
+# Enhanced bash script (drop-in replacement)
+bash scripts/task1_precisewikiqa_with_server.sh --N 100 --step all
+```
   - `model`: Model identifier
   - `timestamp`: Generation timestamp
 
@@ -182,13 +236,15 @@ python -m tasks.shortform.precise_wikiqa \
     --q_generator Llama-3.3-70B-Instruct-IQ3_M.gguf
 
 # Step 1-3: Run complete pipeline (inference + evaluation + activation logging)
-python -m tasks.refusal_test.nonsense_mixed_entities \
-    --exp nonsense_all \
-    --do_inference \
-    --do_eval \
-    --tested_model meta-llama/Llama-3.1-8B-Instruct \
-    --N 10 \
-    --seed 0
+python -m tasks.shortform.precise_wikiqa \
+  --do_inference \
+  --do_eval \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --wiki_src goodwiki \
+  --mode dynamic \
+  --inference_method vllm \
+  --N 10 \
+  --seed 0
 
 # Step 4: Check LMDB contents
 python activation_logging/test_check_lmdb.py <prompt_hash> lmdb_data/gguf/activations.lmdb

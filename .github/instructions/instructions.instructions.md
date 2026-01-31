@@ -1,0 +1,30 @@
+---
+applyTo: '**'
+---
+---
+description: 
+globs: 
+alwaysApply: true
+---
+We are trying to build an LLM activation logging system to evaluate the nature of activations when an LLM is hallucinating vs not hallucinating. Remember that your goal is to use the existing evaluation methods provided by Meta Platforms and focus on building the activation logging system. 
+
+You will need to create a vLLM server that can be used to run inference and is compatible with how inference is done in the utils/lm.py file. 
+
+Focus on getting the nonsense_mixed_entities.py benchmark to successfully log activations on disk, such that we know which prompt + answer generated which question and whether or not the answer was hallucinated. 
+
+Everything should follow the OpenAI API protocol and we should be able to run the inference server using vllm serve. 
+
+Use a virtual environment (venv or conda) to isolate dependencies.
+Pin dependencies in requirements.txt or environment.yml.
+Use a consistent Python version, documented in README or .python-version.
+Add a .gitignore to avoid committing large files, cache, or unnecessary outputs.
+Follow PEP8 style guide (use black or ruff for formatting).
+Write modular, reusable code with clear functions and classes.
+Document functions and classes with docstrings.
+Use Git for version control; prepare commits with clear messages. 
+Use branching (main for stable, dev or feature branches for experiments).
+Write basic unit tests or checks to catch silent errors.
+Avoid editing files with Copyright (c) Meta Platforms, Inc. and affiliates, unless specifically instructed to do so.
+
+
+For this project, there are two readme files. The readme in the repository root refers to the hallulens package. The readme in activation_logging is the actual research project. 

@@ -170,7 +170,7 @@ openai
 segtok
 sentence-transformers==3.3.1
 
-# refusal
+# optional (legacy / robustness experiments)
 ratelimit
 retry
 ```

@@ -77,6 +77,16 @@ if __name__ == '__main__':
     parser.add_argument('--k', type=int, default=32)
     parser.add_argument('--max_tokens', type=int, default=1024)
     parser.add_argument('--max_workers', type=int, default=64)
+
+    # Resume control
+    parser.add_argument('--no-resume', action='store_true', help='Disable automatic resume from existing generations file (inference)')
+    parser.add_argument('--no-resume-eval', action='store_true', help='Disable automatic resume for evaluation step')
+
+    # Activation logging parameters
+    parser.add_argument('--logger_type', type=str, default='lmdb', choices=['lmdb', 'json'], help='Activation logger type')
+    parser.add_argument('--activations_path', type=str, default=None, help='Path for storing activations')
+    parser.add_argument('--log_file', type=str, default=None, help='Path for server behavior logs')
+
     args = parser.parse_args()
 
     # save all args details in  
@@ -111,11 +121,14 @@ if __name__ == '__main__':
 
         print(f"Start Inference for {args.model} ", args.exp_mode, args.N)
 
-        exp.run_exp(task=f"{TASKNAME}-{args.exp_mode}", 
+        exp.run_exp(task=f"{TASKNAME}-{args.exp_mode}",
                     model_path=args.model,
                     all_prompts=all_prompts,
                     inference_method=args.inference_method,
-                    max_tokens=args.max_tokens)
+                    max_tokens=args.max_tokens,
+                    logger_type=args.logger_type,
+                    activations_path=args.activations_path,
+                    log_file_path=args.log_file)
 
         print('\n***Inference completed')
 

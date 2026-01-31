@@ -17,32 +17,61 @@ from pathlib import Path
 import uuid
 import shutil
 
+from .zarr_activations_logger import ZarrActivationsLogger
+
+
+def _is_zarr_path(path: Optional[str]) -> bool:
+    if path is None:
+        return False
+    path_str = str(path)
+    return Path(path_str).name.endswith(".zarr") or path_str.endswith(".zarr")
+
 
 class ActivationsLogger:
     def __init__(self, lmdb_path: str = "lmdb_data/activations.lmdb", map_size: int = 16 << 30,
-                 compression: Union[str, BaseCompressor, None] = None, 
+                 compression: Union[str, BaseCompressor, None] = None,
                  read_only: bool = False,
                  target_layers: str = 'all',
-                 sequence_mode: str = 'all'):
+                 sequence_mode: str = 'all',
+                 verbose: bool = True,
+                 zarr_config: Optional[Dict[str, Any]] = None):
         """
         Initialize the LMDB-based activations logger.
-        
+
         Args:
-            lmdb_path: Path to the LMDB file to store activations
+            lmdb_path: Path to the LMDB file to store activations or a Zarr store path ending in ".zarr"
+                Example Zarr path: "zarr_data/activations.zarr"
             map_size: Maximum size of the LMDB file in bytes (default: 16GB)
             compression: Compression method ('zstd', None) or a BaseCompressor instance
             read_only: if True, the LMDB will be opened in read-only mode
             target_layers: Which layers to extract activations from ('all', 'first_half', or 'second_half')
             sequence_mode: Which tokens to extract activations for ('all' for full sequence, 'prompt' for prompt tokens only, or 'response' for response tokens only)
+            verbose: Whether to log detailed initialization and processing messages (default: True)
+            zarr_config: Optional dict of Zarr-specific settings when lmdb_path is a .zarr store
         """
         if target_layers not in ['all', 'first_half', 'second_half']:
             raise ValueError("target_layers must be one of: 'all', 'first_half', 'second_half'")
         if sequence_mode not in ['all', 'prompt', 'response']:
             raise ValueError("sequence_mode must be one of: 'all', 'prompt', 'response'")
+
+        self._backend = None
+        if _is_zarr_path(lmdb_path):
+            zarr_config = zarr_config or {}
+            self._backend = ZarrActivationsLogger(
+                zarr_path=lmdb_path,
+                read_only=read_only,
+                target_layers=target_layers,
+                sequence_mode=sequence_mode,
+                verbose=verbose,
+                **zarr_config,
+            )
+            return
             
         self.target_layers = target_layers
         self.sequence_mode = sequence_mode
-        logger.info(f"ActivationsLogger initialized to target '{target_layers}' layers with '{sequence_mode}' sequence mode")
+        self.verbose = verbose
+        if self.verbose:
+            logger.info(f"ActivationsLogger initialized to target '{target_layers}' layers with '{sequence_mode}' sequence mode")
         self.lmdb_path = lmdb_path
         self.env = None
         self.metadata_env = None  # Separate environment for metadata
@@ -108,6 +137,8 @@ class ActivationsLogger:
         Check the current size of the LMDB file and log warnings when it passes
         certain thresholds (10%, 20%, ..., 90%) of its maximum map size.
         """
+        if getattr(self, "_backend", None) is not None:
+            return
         if self.env is None or not hasattr(self, 'safe_lmdb_path'):
             return
             
@@ -152,9 +183,12 @@ class ActivationsLogger:
             - 'prompt': activations for prompt tokens only
             - 'response': activations for response tokens only
         """
+        if getattr(self, "_backend", None) is not None:
+            return self._backend.extract_activations(model_outputs, input_length)
         # If model_outputs is None or doesn't have hidden_states, return None
         if model_outputs is None or not hasattr(model_outputs, 'hidden_states'):
-            logger.info("No hidden states found in model outputs")
+            if self.verbose:
+                logger.info("No hidden states found in model outputs")
             return None
             
         # Get the generated tokens (excluding prompt)
@@ -170,7 +204,8 @@ class ActivationsLogger:
         if hasattr(model_outputs, 'trim_position'):
             trim_pos = model_outputs.trim_position
             if trim_pos is not None:
-                logger.info(f"Trimming activations at position {trim_pos}")
+                if self.verbose:
+                    logger.info(f"Trimming activations at position {trim_pos}")
                 gen_hiddens = gen_hiddens[:trim_pos]
                         
         # Determine which layers to extract based on target_layers setting
@@ -231,6 +266,8 @@ class ActivationsLogger:
             key: Unique identifier for the entry (typically a hash of the prompt)
             entry: Dictionary containing the data to log (prompt, response, model_outputs, etc.)
         """
+        if getattr(self, "_backend", None) is not None:
+            return self._backend.log_entry(key, entry)
         # Skip logging if LMDB is not initialized
         if self.env is None or self.metadata_env is None:
             return
@@ -307,6 +344,13 @@ class ActivationsLogger:
         Args:
             lookup: either a key or an index
         """
+        if getattr(self, "_backend", None) is not None:
+            if isinstance(lookup, int):
+                keys = self._backend.list_entries()
+                if lookup >= len(keys):
+                    raise ValueError(f"Index {lookup} is out of range for {len(keys)} entries")
+                return self._backend.get_entry(keys[lookup])
+            return self._backend.get_entry(lookup)
 
         if isinstance(lookup, int):
             if lookup >= len(self.keys):
@@ -344,6 +388,8 @@ class ActivationsLogger:
         Returns:
             Dictionary containing the entry data if found, None otherwise
         """
+        if getattr(self, "_backend", None) is not None:
+            return self._backend.get_entry_by_key(key, metadata_only=metadata_only)
         # Raise an error if LMDB is not initialized
         if self._get_env() is None:
             raise ValueError("LMDB is not initialized")
@@ -389,6 +435,54 @@ class ActivationsLogger:
             else:
                 raise ValueError("No entry found for key")
 
+    def get_layer_activation(self, key: str, layer_idx: int, sequence_mode: str = "response") -> Optional[torch.Tensor]:
+        """
+        Retrieve a single layer's activations for a given key and sequence mode.
+
+        Args:
+            key: Unique identifier for the entry
+            layer_idx: Layer index to retrieve
+            sequence_mode: "prompt", "response", or "all"
+
+        Returns:
+            Tensor of shape (1, seq_len, hidden) or None if unavailable
+        """
+        if getattr(self, "_backend", None) is not None:
+            return self._backend.get_layer_activation(key, layer_idx, sequence_mode=sequence_mode)
+
+        result = self.get_entry_by_key(key)
+        if result is None:
+            return None
+
+        activations = result.get("all_layers_activations")
+        if activations is None or layer_idx >= len(activations):
+            return None
+
+        act = activations[layer_idx]
+        if act is None:
+            return None
+
+        if isinstance(act, np.ndarray):
+            act = torch.from_numpy(act)
+
+        if act.ndim == 2:
+            act = act.unsqueeze(0)
+
+        input_length = result.get("input_length", 0)
+        logging_config = result.get("logging_config", {})
+        logged_sequence = logging_config.get("sequence_mode", "all")
+
+        if sequence_mode == "prompt":
+            if logged_sequence == "response":
+                return None
+            return act[:, :input_length, :]
+        if sequence_mode == "response":
+            if logged_sequence == "response":
+                return act
+            return act[:, input_length:, :]
+
+        return act
+
     def list_entries(self) -> List[str]:
         """
         List all entry keys in the metadata store.
@@ -396,6 +490,8 @@ class ActivationsLogger:
         Returns:
             List of entry keys as strings
         """
+        if getattr(self, "_backend", None) is not None:
+            return self._backend.list_entries()
         metadata_env = self._get_metadata_env()
         if metadata_env is None:
             return []
@@ -418,6 +514,8 @@ class ActivationsLogger:
         Returns:
             List of tuples containing (key, metadata_entry) for matching entries
         """
+        if getattr(self, "_backend", None) is not None:
+            return self._backend.search_metadata(filter_fn)
         if self.metadata_env is None:
             return []
             
@@ -433,6 +531,8 @@ class ActivationsLogger:
 
     def close(self):
         """Close the LMDB environments."""
+        if getattr(self, "_backend", None) is not None:
+            return self._backend.close()
         if self._get_env() is not None:
             self._get_env().close()
             self.env = None 
@@ -446,6 +546,8 @@ class ActivationsLogger:
         Fix existing entries by ensuring all tensors are on CPU.
         This is useful for entries that were saved with CUDA tensors.
         """
+        if getattr(self, "_backend", None) is not None:
+            return self._backend.fix_cuda_tensors()
         if self._get_env() is None:
             raise ValueError("LMDB is not initialized")
             
@@ -523,11 +625,11 @@ class ActivationsLogger:
                 
         logger.info(f"Finished fixing CUDA tensors. Fixed {fixed_count} entries, skipped {skipped_count} entries (already on CPU), encountered {error_count} errors")
 
-    def export_to_npy_format(self, output_dir: str, indices: Optional[List[int]] = None):
+    def export_to_json_npy_format(self, output_dir: str, indices: Optional[List[int]] = None):
         """
-        Export entries to the NpyActivationsLogger format.
+        Export entries to the JsonActivationsLogger NPY format.
         Args:
-            output_dir: Directory to write the NpyActivationsLogger files
+            output_dir: Directory to write the JsonActivationsLogger files
             indices: Optional list of indices to export (default: all entries)
         """
         # Disk space check
@@ -550,61 +652,683 @@ class ActivationsLogger:
         if free_space < total_size:
             print("ERROR: Available disk space is less than the estimated required space! Aborting export.")
             return
-        # Proceed with export
-        npy_logger = NpyActivationsLogger(output_dir=output_dir, target_layers=self.target_layers, sequence_mode=self.sequence_mode)
+        # Proceed with export using JsonActivationsLogger with NPY storage
+        json_logger = JsonActivationsLogger(output_dir=output_dir, target_layers=self.target_layers, sequence_mode=self.sequence_mode)
         for key in entries_to_export:
             entry = self.get_entry_by_key(key)
-            npy_logger.log_entry(key, entry)
-        npy_logger.close()
+            json_logger.log_entry(key, entry)
+        json_logger.close()
 
 
-class NpyActivationsLogger:
+
+
+
+class JsonActivationsLogger:
     """
-    Handles logging for LLM activations using a master index.json file for all metadata and .npy files for activations.
-    The index maps hashkeys to {file_id, metadata}.
+    Handles logging for LLM activations using JSON metadata and NPY activation files.
+    Structure:
+    - Folder/
+      - metadata.json (contains metadata for all entries)
+      - activations/
+        - <key1>.npy (activation tensor data for key1)
+        - <key2>.npy (activation tensor data for key2)
+        - ...
     """
-    def __init__(self, output_dir: str = "npy_data/", target_layers: str = 'all', sequence_mode: str = 'all', read_only: bool = False):
+    def __init__(self, output_dir: str = "json_data/", target_layers: str = 'all',
+                 sequence_mode: str = 'all', read_only: bool = False, verbose: bool = True):
+        """
+        Initialize the JSON-based activations logger with NPY tensor storage.
+
+        Args:
+            output_dir: Directory to store the JSON metadata and NPY activation files
+            target_layers: Which layers to extract activations from ('all', 'first_half', or 'second_half')
+            sequence_mode: Which tokens to extract activations for ('all', 'prompt', 'response')
+            read_only: If True, open in read-only mode
+            verbose: Whether to log detailed initialization and processing messages (default: True)
+        """
+        self.verbose = verbose
+        if self.verbose:
+            logger.info(f"JsonActivationsLogger.__init__ starting - output_dir: {output_dir}, target_layers: {target_layers}, sequence_mode: {sequence_mode}, read_only: {read_only}")
+
+        if target_layers not in ['all', 'first_half', 'second_half']:
+            raise ValueError("target_layers must be one of: 'all', 'first_half', 'second_half'")
+        if sequence_mode not in ['all', 'prompt', 'response']:
+            raise ValueError("sequence_mode must be one of: 'all', 'prompt', 'response'")
+
+        if self.verbose:
+            logger.info(f"JsonActivationsLogger.__init__ - Setting up paths")
         self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.index_path = self.output_dir / "index.json"
+        self.activations_dir = self.output_dir / "activations"
+        self.metadata_path = self.output_dir / "metadata.json"
+        self.index_path = self.output_dir / "metadata.jsonl"
         self.target_layers = target_layers
         self.sequence_mode = sequence_mode
         self.read_only = read_only
-        # Load or initialize the index
-        if self.index_path.exists():
-            with open(self.index_path, "r") as f:
-                self.index = json.load(f)
+
+        # Create directories if they don't exist
+        if not read_only:
+            logger.info(f"JsonActivationsLogger.__init__ - Creating directories")
+            try:
+                self.output_dir.mkdir(parents=True, exist_ok=True)
+                self.activations_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"JsonActivationsLogger.__init__ - Directories created successfully")
+            except Exception as e:
+                logger.error(f"JsonActivationsLogger.__init__ - Failed to create directories: {e}")
+                raise
+
+        # Load or initialize the metadata
+        self.metadata = {
+            "logger_config": {
+                "target_layers": target_layers,
+                "sequence_mode": sequence_mode,
+                "version": "3.0",  # Updated version for Index+Sidecar format
+                "storage_format": "npy"
+            },
+            "entries": {}
+        }
+
+        logger.info(f"JsonActivationsLogger.__init__ - Loading metadata")
+        try:
+            # 1. Load legacy monolithic metadata if it exists
+            if self.metadata_path.exists():
+                logger.info(f"JsonActivationsLogger.__init__ - Legacy metadata file exists, loading...")
+                with open(self.metadata_path, "r") as f:
+                    legacy_metadata = json.load(f)
+                    self.metadata["entries"].update(legacy_metadata.get("entries", {}))
+                    if "logger_config" in legacy_metadata:
+                        self.metadata["logger_config"].update(legacy_metadata["logger_config"])
+                logger.info(f"JsonActivationsLogger.__init__ - Legacy metadata loaded successfully")
+
+            # 2. Load new JSONL index if it exists (overwrites/augments legacy)
+            if self.index_path.exists():
+                logger.info(f"JsonActivationsLogger.__init__ - Index file exists, loading...")
+                with open(self.index_path, "r") as f:
+                    for line in f:
+                        try:
+                            entry = json.loads(line)
+                            if "key" in entry:
+                                self.metadata["entries"][entry["key"]] = entry
+                        except json.JSONDecodeError:
+                            continue
+                logger.info(f"JsonActivationsLogger.__init__ - Index loaded successfully")
+
+            if not self.metadata_path.exists() and not self.index_path.exists():
+                logger.info(f"JsonActivationsLogger.__init__ - No metadata found, starting fresh")
+        except Exception as e:
+            logger.error(f"JsonActivationsLogger.__init__ - Failed to load metadata: {e}")
+            raise
+
+        logger.info(f"JsonActivationsLogger (Index+Sidecar format) initialized at {output_dir} with {len(self.metadata['entries'])} existing entries")
+        logger.info(f"JsonActivationsLogger.__init__ completed successfully")
+
+    def _tensors_to_numpy_arrays(self, obj):
+        """Convert tensors to numpy arrays for NPY storage."""
+        if isinstance(obj, torch.Tensor):
+            logger.debug(f"JsonActivationsLogger._tensors_to_numpy_arrays - Converting tensor of shape {obj.shape} to numpy")
+            try:
+                result = obj.cpu().numpy()
+                logger.debug(f"JsonActivationsLogger._tensors_to_numpy_arrays - Tensor conversion successful")
+                return result
+            except Exception as e:
+                logger.error(f"JsonActivationsLogger._tensors_to_numpy_arrays - Tensor conversion failed: {e}")
+                raise
+        elif isinstance(obj, np.ndarray):
+            logger.debug(f"JsonActivationsLogger._tensors_to_numpy_arrays - Object is already numpy array")
+            return obj
+        elif isinstance(obj, list):
+            logger.debug(f"JsonActivationsLogger._tensors_to_numpy_arrays - Converting list of {len(obj)} items")
+            try:
+                result = [self._tensors_to_numpy_arrays(item) for item in obj]
+                logger.debug(f"JsonActivationsLogger._tensors_to_numpy_arrays - List conversion successful")
+                return result
+            except Exception as e:
+                logger.error(f"JsonActivationsLogger._tensors_to_numpy_arrays - List conversion failed: {e}")
+                raise
+        elif isinstance(obj, dict):
+            logger.debug(f"JsonActivationsLogger._tensors_to_numpy_arrays - Converting dict with {len(obj)} keys")
+            try:
+                result = {k: self._tensors_to_numpy_arrays(v) for k, v in obj.items()}
+                logger.debug(f"JsonActivationsLogger._tensors_to_numpy_arrays - Dict conversion successful")
+                return result
+            except Exception as e:
+                logger.error(f"JsonActivationsLogger._tensors_to_numpy_arrays - Dict conversion failed: {e}")
+                raise
+        elif obj is None:
+            return None
         else:
-            self.index = {}
+            logger.debug(f"JsonActivationsLogger._tensors_to_numpy_arrays - Object type {type(obj)} passed through unchanged")
+            return obj
+
+    def _get_activation_shape_info(self, activation_arrays):
+        """Get shape information for activation arrays to store in metadata."""
+        if isinstance(activation_arrays, np.ndarray):
+            return {
+                "shape": list(activation_arrays.shape),
+                "dtype": str(activation_arrays.dtype)
+            }
+        elif isinstance(activation_arrays, list):
+            return [self._get_activation_shape_info(item) for item in activation_arrays]
+        elif isinstance(activation_arrays, dict):
+            return {k: self._get_activation_shape_info(v) for k, v in activation_arrays.items()}
+        elif activation_arrays is None:
+            return None
+        else:
+            return {"type": type(activation_arrays).__name__}
+
+    def _tensor_to_json_serializable(self, obj):
+        """Convert tensors and other non-JSON-serializable objects to JSON-serializable format.
+
+        Note: This method is kept for backward compatibility but is no longer used
+        for activation storage in NPY format.
+        """
+        if isinstance(obj, torch.Tensor):
+            return {
+                "_type": "torch.Tensor",
+                "data": obj.cpu().numpy().tolist(),
+                "shape": list(obj.shape),
+                "dtype": str(obj.dtype)
+            }
+        elif isinstance(obj, np.ndarray):
+            return {
+                "_type": "numpy.ndarray",
+                "data": obj.tolist(),
+                "shape": list(obj.shape),
+                "dtype": str(obj.dtype)
+            }
+        elif isinstance(obj, list):
+            return [self._tensor_to_json_serializable(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {k: self._tensor_to_json_serializable(v) for k, v in obj.items()}
+        elif obj is None:
+            return None
+        else:
+            return obj
+
+    def _numpy_arrays_to_tensors(self, obj):
+        """Convert numpy arrays back to tensors."""
+        if isinstance(obj, np.ndarray):
+            return torch.from_numpy(obj)
+        elif isinstance(obj, list):
+            return [self._numpy_arrays_to_tensors(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {k: self._numpy_arrays_to_tensors(v) for k, v in obj.items()}
+        elif obj is None:
+            return None
+        else:
+            return obj
+
+    def _json_to_tensor(self, obj):
+        """Convert JSON-serializable format back to tensors.
+
+        Note: This method is kept for backward compatibility with old JSON activation files.
+        """
+        if isinstance(obj, dict) and "_type" in obj:
+            if obj["_type"] == "torch.Tensor":
+                data = np.array(obj["data"])
+                tensor = torch.from_numpy(data)
+                # Convert dtype string back to torch dtype
+                if "dtype" in obj:
+                    dtype_str = obj["dtype"].replace("torch.", "")
+                    if hasattr(torch, dtype_str):
+                        tensor = tensor.to(getattr(torch, dtype_str))
+                return tensor
+            elif obj["_type"] == "numpy.ndarray":
+                return np.array(obj["data"], dtype=obj.get("dtype", "float32"))
+        elif isinstance(obj, list):
+            return [self._json_to_tensor(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {k: self._json_to_tensor(v) for k, v in obj.items()}
+        else:
+            return obj
+
+    def extract_activations(self, model_outputs, input_length):
+        """
+        Extract activations from model outputs.
+        This method is identical to the one in ActivationsLogger for compatibility.
+        """
+        logger.info(f"JsonActivationsLogger.extract_activations starting - input_length: {input_length}")
+
+        # If model_outputs is None or doesn't have hidden_states, return None
+        if model_outputs is None or not hasattr(model_outputs, 'hidden_states'):
+            logger.info("JsonActivationsLogger.extract_activations - No hidden states found in model outputs")
+            return None
+
+        logger.info(f"JsonActivationsLogger.extract_activations - Processing model outputs")
+
+        # Get the generated tokens (excluding prompt)
+        try:
+            gen_sequence = model_outputs.sequences[0]
+            gen_ids = gen_sequence[input_length:]
+            logger.info(f"JsonActivationsLogger.extract_activations - Generated sequence length: {len(gen_ids)}")
+        except Exception as e:
+            logger.error(f"JsonActivationsLogger.extract_activations - Failed to extract generated sequence: {e}")
+            raise
+
+        try:
+            all_hidden_states = model_outputs.hidden_states
+            prompt_hidden = all_hidden_states[0]  # first set of tokens, the prompt tokens. It has len = num_layers
+            gen_hiddens = all_hidden_states[1:]  # all subsequent sets of tokens, the generated tokens. The structure of this list is [token_num, layer_num, ...]
+            logger.info(f"JsonActivationsLogger.extract_activations - Hidden states structure: {len(all_hidden_states)} steps, {len(prompt_hidden)} layers")
+        except Exception as e:
+            logger.error(f"JsonActivationsLogger.extract_activations - Failed to extract hidden states: {e}")
+            raise
+
+        # If there's a trim position, only use activations up to that point
+        trim_pos = None
+        if hasattr(model_outputs, 'trim_position'):
+            trim_pos = model_outputs.trim_position
+            if trim_pos is not None:
+                logger.info(f"JsonActivationsLogger.extract_activations - Trimming activations at position {trim_pos}")
+                gen_hiddens = gen_hiddens[:trim_pos]
+
+        # Determine which layers to extract based on target_layers setting
+        num_layers = len(prompt_hidden)
+        if self.target_layers == 'first_half':
+            target_layer_indices = range(num_layers // 2)
+            logger.info(f"JsonActivationsLogger.extract_activations - Extracting first {num_layers // 2} layers")
+        elif self.target_layers == 'second_half':
+            start_idx = num_layers // 2
+            target_layer_indices = range(start_idx, num_layers)
+            logger.info(f"JsonActivationsLogger.extract_activations - Extracting second half of layers ({start_idx} to {num_layers-1})")
+        else:  # 'all'
+            target_layer_indices = range(num_layers)
+            logger.info(f"JsonActivationsLogger.extract_activations - Extracting all {num_layers} layers")
+
+        logger.info(f"JsonActivationsLogger.extract_activations - Processing sequence mode: {self.sequence_mode}")
+
+        if self.sequence_mode == 'prompt':
+            # Only return prompt activations
+            logger.info("JsonActivationsLogger.extract_activations - Extracting activations for prompt tokens only")
+            full_hidden_states = []
+            try:
+                for layer_idx in range(num_layers):
+                    if layer_idx in target_layer_indices:
+                        full_hidden_states.append(prompt_hidden[layer_idx])
+                    else:
+                        full_hidden_states.append(None)
+                logger.info(f"JsonActivationsLogger.extract_activations - Prompt activations extracted successfully")
+            except Exception as e:
+                logger.error(f"JsonActivationsLogger.extract_activations - Failed to extract prompt activations: {e}")
+                raise
+
+        elif self.sequence_mode == 'response':
+            # Only return response activations
+            logger.info("JsonActivationsLogger.extract_activations - Extracting activations for response tokens only")
+            full_hidden_states = []
+            try:
+                for layer_idx in range(num_layers):
+                    if layer_idx in target_layer_indices:
+                        # Only concatenate steps for target layers
+                        logger.debug(f"JsonActivationsLogger.extract_activations - Concatenating response activations for layer {layer_idx}")
+                        layer_acts = torch.cat([step[layer_idx] for step in gen_hiddens], dim=1)
+                        full_hidden_states.append(layer_acts)
+                    else:
+                        full_hidden_states.append(None)
+                logger.info(f"JsonActivationsLogger.extract_activations - Response activations extracted successfully")
+            except Exception as e:
+                logger.error(f"JsonActivationsLogger.extract_activations - Failed to extract response activations: {e}")
+                raise
+
+        else:  # 'all'
+            # Concatenate prompt and generated token activations
+            logger.info("JsonActivationsLogger.extract_activations - Extracting activations for full sequence (prompt + generated tokens)")
+
+            full_hidden_states = []
+            try:
+                for layer_idx in range(num_layers):
+                    if layer_idx in target_layer_indices:
+                        # Only concatenate steps for target layers
+                        logger.debug(f"JsonActivationsLogger.extract_activations - Processing layer {layer_idx}/{num_layers}")
+                        gen_layer_acts = torch.cat([step[layer_idx] for step in gen_hiddens], dim=1)
+                        # Concatenate prompt and generated activations
+                        layer_acts = torch.cat([prompt_hidden[layer_idx], gen_layer_acts], dim=1)
+                        full_hidden_states.append(layer_acts)
+                    else:
+                        full_hidden_states.append(None)
+                logger.info(f"JsonActivationsLogger.extract_activations - Full sequence activations extracted successfully")
+            except Exception as e:
+                logger.error(f"JsonActivationsLogger.extract_activations - Failed to extract full sequence activations: {e}")
+                raise
+
+        logger.info(f"JsonActivationsLogger.extract_activations completed - extracted {len([x for x in full_hidden_states if x is not None])} layers")
+        return full_hidden_states
 
     def log_entry(self, key: str, entry: Dict[str, Any]):
-        file_id = str(uuid.uuid4())
-        meta = {k: v for k, v in entry.items() if k != "all_layers_activations"}
-        # Save activations if present
-        if "all_layers_activations" in entry:
-            acts = entry["all_layers_activations"]
-            npy_path = self.output_dir / f"{file_id}.npy"
-            np.save(npy_path, acts, allow_pickle=True)
-            meta["activations_file"] = f"{file_id}.npy"
-        # Store metadata in the index
-        self.index[key] = {"file_id": file_id, "metadata": meta}
-        with open(self.index_path, "w") as f:
-            json.dump(self.index, f)
+        """
+        Log an entry to the JSON store with NPY activation files.
 
-    def get_entry(self, key: str) -> Dict[str, Any]:
-        if key not in self.index:
-            raise KeyError(f"Key {key} not found in index.")
-        entry_info = self.index[key]
-        meta = dict(entry_info["metadata"])
-        result = dict(meta)
-        if "activations_file" in meta:
-            npy_path = self.output_dir / meta["activations_file"]
-            acts = np.load(npy_path, allow_pickle=True)
-            result["all_layers_activations"] = acts.tolist() if isinstance(acts, np.ndarray) else acts
-        return result
+        Args:
+            key: Unique identifier for the entry (typically a hash of the prompt)
+            entry: Dictionary containing the data to log (prompt, response, model_outputs, etc.)
+        """
+        logger.info(f"JsonActivationsLogger.log_entry starting - key: {key[:8]}...")
+
+        if self.read_only:
+            raise ValueError("Cannot log entries in read-only mode")
+
+        metadata_entry = entry.copy()
+
+        # Process model outputs if present
+        if "model_outputs" in entry and "input_length" in entry:
+            logger.info(f"JsonActivationsLogger.log_entry - Processing model outputs")
+            model_outputs = entry["model_outputs"]
+            input_length = entry["input_length"]
+
+            # Add trim position to model_outputs for use in extract_activations
+            if "trim_position" in entry:
+                model_outputs.trim_position = entry["trim_position"]
+                logger.info(f"JsonActivationsLogger.log_entry - Added trim position: {entry['trim_position']}")
+
+            # Extract activations from model outputs
+            logger.info(f"JsonActivationsLogger.log_entry - Starting activation extraction")
+            try:
+                import time
+                extraction_start = time.time()
+                all_layers_activations = self.extract_activations(model_outputs, input_length)
+                extraction_time = time.time() - extraction_start
+                logger.info(f"JsonActivationsLogger.log_entry - Activation extraction completed in {extraction_time:.3f}s")
+            except Exception as e:
+                logger.error(f"JsonActivationsLogger.log_entry - Activation extraction failed: {e}")
+                raise
+        elif "all_layers_activations" in entry and "input_length" in entry:
+            all_layers_activations = entry["all_layers_activations"]
+        else:
+            raise ValueError("No model_outputs or input_length found in entry")
+
+        # Create metadata entry (without activations)
+        logger.info(f"JsonActivationsLogger.log_entry - Creating metadata entry")
+        metadata_entry.pop("model_outputs", None)
+        metadata_entry.pop("all_layers_activations", None)
+
+        if all_layers_activations:
+            logger.info(f"JsonActivationsLogger.log_entry - Processing activations for storage")
+
+            # Store the logging configuration in metadata
+            metadata_entry["logging_config"] = {
+                "target_layers": self.target_layers,
+                "sequence_mode": self.sequence_mode
+            }
+
+            # Convert activations to numpy arrays and save as NPY file
+            logger.info(f"JsonActivationsLogger.log_entry - Converting tensors to numpy arrays")
+            try:
+                import time
+                conversion_start = time.time()
+                activation_arrays = self._tensors_to_numpy_arrays(all_layers_activations)
+                conversion_time = time.time() - conversion_start
+                logger.info(f"JsonActivationsLogger.log_entry - Tensor conversion completed in {conversion_time:.3f}s")
+            except Exception as e:
+                logger.error(f"JsonActivationsLogger.log_entry - Tensor conversion failed: {e}")
+                raise
+
+            activation_file_path = self.activations_dir / f"{key}.npy"
+            logger.info(f"JsonActivationsLogger.log_entry - Saving NPY file to {activation_file_path}")
+
+            # Save as NPY file with allow_pickle=True to handle list of arrays
+            try:
+                save_start = time.time()
+                np.save(activation_file_path, activation_arrays, allow_pickle=True)
+                save_time = time.time() - save_start
+                file_size = activation_file_path.stat().st_size / 1024**2  # MB
+                logger.info(f"JsonActivationsLogger.log_entry - NPY file saved in {save_time:.3f}s, size: {file_size:.2f}MB")
+            except Exception as e:
+                logger.error(f"JsonActivationsLogger.log_entry - NPY file save failed: {e}")
+                raise
+
+            # Add reference to activation file in metadata
+            metadata_entry["has_activations"] = True
+            metadata_entry["activation_file"] = f"activations/{key}.npy"
+            metadata_entry["activation_shape_info"] = self._get_activation_shape_info(activation_arrays)
+            logger.info(f"JsonActivationsLogger.log_entry - Added activation metadata")
+        else:
+            metadata_entry["has_activations"] = False
+            logger.info(f"JsonActivationsLogger.log_entry - No activations to store")
+
+        metadata_entry["timestamp"] = time.time()
+
+        # Store full metadata in a sidecar file
+        sidecar_path = self.activations_dir / f"{key}.json"
+        logger.info(f"JsonActivationsLogger.log_entry - Saving sidecar metadata to {sidecar_path}")
+        try:
+            with open(sidecar_path, "w") as f:
+                json.dump(metadata_entry, f, indent=2)
+        except Exception as e:
+            logger.error(f"JsonActivationsLogger.log_entry - Sidecar save failed: {e}")
+            raise
+
+        # Update Index (JSONL)
+        index_entry = {
+            "key": key,
+            "prompt": metadata_entry.get("prompt"),
+            "has_activations": metadata_entry.get("has_activations", False),
+            "timestamp": metadata_entry["timestamp"],
+            "prompt_hash": metadata_entry.get("prompt_hash"),
+            "multi_sample": metadata_entry.get("multi_sample", False),
+            "sample_group_id": metadata_entry.get("sample_group_id"),
+            "sample_index": metadata_entry.get("sample_index"),
+            "request_id": metadata_entry.get("request_id"),
+        }
+        
+        logger.info(f"JsonActivationsLogger.log_entry - Appending to index file")
+        try:
+            with open(self.index_path, "a") as f:
+                f.write(json.dumps(index_entry) + "\n")
+        except Exception as e:
+            logger.error(f"JsonActivationsLogger.log_entry - Index update failed: {e}")
+            raise
+
+        # Update in-memory index
+        self.metadata["entries"][key] = index_entry
+
+        logger.info(f"JsonActivationsLogger.log_entry completed successfully - key: {key[:8]}...")
+
+    def get_entry(self, key: str, metadata_only: bool = False) -> Dict[str, Any]:
+        """
+        Retrieve an entry from the JSON store with NPY activation loading.
+
+        Args:
+            key: Unique identifier for the entry to retrieve
+            metadata_only: If True, only retrieve metadata without activations
+
+        Returns:
+            Dictionary containing the entry data if found
+        """
+        if key not in self.metadata["entries"]:
+            raise KeyError(f"Key {key} not found in metadata.")
+
+        entry_metadata = self.metadata["entries"][key].copy()
+
+        # Check if we need to load detailed metadata from a sidecar file
+        # If the entry in memory doesn't have activation_file but says it has activations, it's an index entry
+        if "activation_file" not in entry_metadata and entry_metadata.get("has_activations", False):
+            sidecar_path = self.activations_dir / f"{key}.json"
+            if sidecar_path.exists():
+                logger.debug(f"JsonActivationsLogger.get_entry - Loading sidecar metadata from {sidecar_path}")
+                with open(sidecar_path, "r") as f:
+                    full_metadata = json.load(f)
+                    # Update the entry_metadata with all fields from the sidecar
+                    entry_metadata.update(full_metadata)
+            else:
+                logger.warning(f"Sidecar metadata file not found: {sidecar_path}")
+
+        # If only metadata is requested or no activations exist
+        if metadata_only or not entry_metadata.get("has_activations", False):
+            return entry_metadata
+
+        # Load activations from NPY file
+        activation_file = entry_metadata.get("activation_file")
+        if activation_file:
+            activation_path = self.output_dir / activation_file
+            if activation_path.exists():
+                # Check if it's an NPY file (new format) or JSON file (old format)
+                if activation_path.suffix == '.npy':
+                    # Load NPY file and convert back to tensors
+                    activation_arrays = np.load(activation_path, allow_pickle=True)
+                    activations = self._numpy_arrays_to_tensors(activation_arrays)
+                    entry_metadata["all_layers_activations"] = activations
+                else:
+                    # Backward compatibility: load old JSON format
+                    with open(activation_path, "r") as f:
+                        activation_data = json.load(f)
+                    activations = self._json_to_tensor(activation_data["all_layers_activations"])
+                    entry_metadata["all_layers_activations"] = activations
+            else:
+                logger.warning(f"Activation file not found: {activation_path}")
+                entry_metadata["has_activations"] = False
+
+        return entry_metadata
+
+    def get_entry_by_key(self, key: str, metadata_only: bool = False) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve an entry from the JSON store by key.
+        This method provides compatibility with the LMDB logger interface.
+
+        Args:
+            key: Unique identifier for the entry to retrieve
+            metadata_only: If True, only retrieve metadata without activations
+
+        Returns:
+            Dictionary containing the entry data if found, None otherwise
+        """
+        try:
+            return self.get_entry(key, metadata_only)
+        except KeyError:
+            return None
 
     def list_entries(self) -> List[str]:
-        return list(self.index.keys())
+        """
+        List all entry keys in the JSON store.
+
+        Returns:
+            List of entry keys as strings
+        """
+        return list(self.metadata["entries"].keys())
+
+    def search_metadata(self, filter_fn: Callable[[Dict[str, Any]], bool]) -> List[Tuple[str, Dict[str, Any]]]:
+        """
+        Search through metadata entries using a filter function.
+
+        Args:
+            filter_fn: Function that takes a metadata entry and returns True if it matches the search criteria
+
+        Returns:
+            List of tuples containing (key, metadata_entry) for matching entries
+        """
+        results = []
+        for key, metadata in self.metadata["entries"].items():
+            if filter_fn(metadata):
+                results.append((key, metadata))
+        return results
 
     def close(self):
+        """Close the JSON logger (no-op for JSON files)."""
         pass
+
+    def fix_cuda_tensors(self):
+        """
+        Fix existing entries by ensuring all tensors are on CPU.
+        This method provides compatibility with the LMDB logger interface.
+        """
+        if self.read_only:
+            raise ValueError("Cannot fix CUDA tensors in read-only mode")
+
+        logger.info("Starting to fix CUDA tensors in existing JSON entries...")
+        fixed_count = 0
+        skipped_count = 0
+        error_count = 0
+
+        keys = self.list_entries()
+        total_entries = len(keys)
+        logger.info(f"Found {total_entries} entries to process")
+
+        for key in keys:
+            try:
+                # Check if this entry has activations
+                metadata = self.metadata["entries"][key]
+                if not metadata.get("has_activations", False):
+                    skipped_count += 1
+                    continue
+
+                activation_file = metadata.get("activation_file")
+                if not activation_file:
+                    skipped_count += 1
+                    continue
+
+                activation_path = self.output_dir / activation_file
+                if not activation_path.exists():
+                    error_count += 1
+                    continue
+
+                # Load activation data
+                with open(activation_path, "r") as f:
+                    activation_data = json.load(f)
+
+                # Convert to tensors to check device
+                activations = self._json_to_tensor(activation_data["all_layers_activations"])
+
+                # Check if any tensors need to be moved to CPU
+                needs_fixing = False
+                fixed_tensors = []
+                for tensor in activations:
+                    if isinstance(tensor, torch.Tensor):
+                        if tensor.device.type != 'cpu':
+                            needs_fixing = True
+                            fixed_tensors.append(tensor.cpu())
+                        else:
+                            fixed_tensors.append(tensor)
+                    else:
+                        fixed_tensors.append(tensor)
+
+                # Only write back if tensors needed fixing
+                if needs_fixing:
+                    # Convert back to JSON-serializable format
+                    fixed_activation_data = {
+                        "all_layers_activations": self._tensor_to_json_serializable(fixed_tensors)
+                    }
+
+                    # Save back to file
+                    with open(activation_path, "w") as f:
+                        json.dump(fixed_activation_data, f, indent=2)
+
+                    fixed_count += 1
+                else:
+                    skipped_count += 1
+
+            except Exception as e:
+                logger.error(f"Error fixing entry {key[:8]}: {e}")
+                error_count += 1
+
+        logger.info(f"Finished fixing CUDA tensors. Fixed {fixed_count} entries, skipped {skipped_count} entries (already on CPU), encountered {error_count} errors")
+
+    def _tensors_to_numpy_arrays(self, obj):
+        """Convert tensors to numpy arrays for NPY storage."""
+        if isinstance(obj, torch.Tensor):
+            return obj.cpu().numpy()
+        elif isinstance(obj, list):
+            return [self._tensors_to_numpy_arrays(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {key: self._tensors_to_numpy_arrays(value) for key, value in obj.items()}
+        else:
+            return obj
+
+    def _numpy_arrays_to_tensors(self, obj):
+        """Convert numpy arrays back to tensors."""
+        if isinstance(obj, np.ndarray):
+            return torch.from_numpy(obj)
+        elif isinstance(obj, list):
+            return [self._numpy_arrays_to_tensors(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {key: self._numpy_arrays_to_tensors(value) for key, value in obj.items()}
+        else:
+            return obj
+
+    def _get_activation_shape_info(self, activation_arrays):
+        """Get shape information for activation arrays for debugging purposes."""
+        if isinstance(activation_arrays, np.ndarray):
+            return {"shape": activation_arrays.shape, "dtype": str(activation_arrays.dtype)}
+        elif isinstance(activation_arrays, list):
+            return [self._get_activation_shape_info(item) for item in activation_arrays]
+        elif isinstance(activation_arrays, dict):
+            return {key: self._get_activation_shape_info(value) for key, value in activation_arrays.items()}
+        else:
+            return {"type": type(activation_arrays).__name__}
