@@ -188,7 +188,7 @@ def run_task_step(step, task, model, **kwargs):
             cmd.extend(["--eval_results_path", kwargs["eval_results_path"]])
         # Use --model for question generation if q_generator not explicitly specified
         if step == "generate":
-            q_gen = kwargs.get("q_generator", model)
+            q_gen = kwargs.get("q_generator") or model
             cmd.extend(["--q_generator", q_gen])
         elif kwargs.get("q_generator"):
             cmd.extend(["--q_generator", kwargs["q_generator"]])
