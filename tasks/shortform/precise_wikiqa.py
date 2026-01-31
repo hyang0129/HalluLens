@@ -564,21 +564,46 @@ if __name__ == '__main__':
     print(QA_OUTPUT_PATH)
 
     if args.do_generate_prompt:
-        # 1. Generate QA pairs
+        # 1. Generate QA pairs with resume capability
 
         if os.path.exists(QA_OUTPUT_PATH):
             QAs = [line for line in jsonlines.open(QA_OUTPUT_PATH, 'r')]
-            print("DATA EXISTS!! Reading from existing file ", len(QAs))
-            if len(QAs) != args.N:
-                print(f"Data size mismatch! N={args.N}, Data size= {len(QAs)}")
+            print(f"📂 Found existing QA file: {QA_OUTPUT_PATH}")
+            print(f"✅ Loaded {len(QAs)} existing QA pairs")
+            
+            if len(QAs) >= args.N:
+                print(f"✅ Target already reached! {len(QAs)} >= {args.N}")
+                print(f"   Using first {args.N} QA pairs")
+            else:
+                # Need to generate more to reach target
+                remaining = args.N - len(QAs)
+                print(f"📊 Resume statistics:")
+                print(f"   - Target: {args.N}")
+                print(f"   - Already completed: {len(QAs)}")
+                print(f"   - Remaining to generate: {remaining}")
+                print(f"   - Progress: {len(QAs)/args.N*100:.1f}%")
+                
+                if 'goodwiki' in args.wiki_src:
+                    print(f"🚀 Generating {remaining} additional QA pairs...")
+                    new_QAs = precise_qa.precise_QA_generation_run_batch(
+                        wiki_input_path=f"{base_path}/data/wiki_data/doc_goodwiki_h_score.jsonl",
+                        N=remaining,
+                        q_generator=args.q_generator,
+                        output_path=QA_OUTPUT_PATH)
+                    print(f"✅ Generated {len(new_QAs)} new QA pairs")
+                    print(f"📊 Total QA pairs now: {len(QAs) + len(new_QAs)}")
+                else:
+                    raise NotImplementedError(f"mode {args.wiki_src} not implemented")
         else:
+            # No existing file, generate from scratch
             if 'goodwiki' in args.wiki_src:
+                print(f"🚀 Generating {args.N} QA pairs from scratch...")
                 QAs = precise_qa.precise_QA_generation_run_batch(
                     wiki_input_path=f"{base_path}/data/wiki_data/doc_goodwiki_h_score.jsonl",
                     N=args.N,
                     q_generator=args.q_generator,
                     output_path=QA_OUTPUT_PATH)
-                print(f"Generated {len(QAs)} QA pairs")
+                print(f"✅ Generated {len(QAs)} QA pairs")
 
             else:
                 raise NotImplementedError(f"mode {args.wiki_src} not implemented")

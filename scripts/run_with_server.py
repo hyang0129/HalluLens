@@ -440,9 +440,42 @@ def main():
         log_file_path = str(generations_dir / "server_behavior.log")
 
     logger.info("=" * 80)
-    logger.info("NOTE: Server management is now handled by run_exp()")
-    logger.info("The server will be started automatically when needed during inference")
+    logger.info("HalluLens Task Runner with Automatic Server Management")
+    logger.info("Server will be started automatically when needed")
     logger.info("=" * 80)
+
+    # Determine which model needs the server
+    server_model = None
+    if args.step in ["generate", "all"]:
+        # For generate step, use q_generator model if specified, otherwise use main model
+        server_model = args.q_generator or args.model
+    elif args.step in ["inference"]:
+        # For inference step, use main model
+        server_model = args.model
+
+    # Start server if needed and not already running
+    server_manager = None
+    server_was_running = False
+
+    if server_model and args.inference_method == "vllm":
+        server_was_running = lm.check_server_health(f"http://{args.host}:{args.port}")
+
+        if not server_was_running:
+            logger.info(f"🚀 Starting vLLM server for model: {server_model}")
+            server_manager = lm.ServerManager(
+                model=server_model,
+                host=args.host,
+                port=args.port,
+                logger_type=args.logger_type,
+                activations_path=args.activations_path,
+                log_file_path=log_file_path
+            )
+            server_manager.start_server()
+            lm.set_server_manager(server_manager)
+            logger.success(f"✅ Server started at http://{args.host}:{args.port}")
+        else:
+            logger.info(f"✅ Server already running at http://{args.host}:{args.port}")
+            logger.warning("⚠️  Note: Using existing server (not managed by this script)")
 
     try:
 
@@ -509,7 +542,16 @@ def main():
         logger.info("Interrupted by user")
     except Exception as e:
         logger.error(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
+    finally:
+        # Stop server if we started it
+        if server_manager:
+            logger.info("🛑 Stopping vLLM server...")
+            server_manager.stop_server()
+            lm.set_server_manager(None)
+            logger.success("✅ Server stopped")
 
 if __name__ == "__main__":
     main()
