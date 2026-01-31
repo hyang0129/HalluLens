@@ -1,5 +1,5 @@
 # Core dependencies
-python>=3.9
+# Note: Python version must be >= 3.9 (installed separately, not via pip)
 
 # General utilities
 jsonlines>=3.1.0
