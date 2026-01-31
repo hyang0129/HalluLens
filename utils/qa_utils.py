@@ -86,7 +86,7 @@ def split_context(one_input, MAX_LEN, language, encoding, keep_end, keep_colon):
         else:
             if keep_end:
                 this_segment = this_segment + subsent
-            elif language == "en" or (language == "zh" and (not re.search("\W$", this_segment))):
+            elif language == "en" or (language == "zh" and (not re.search(r"\W$", this_segment))):
                 this_segment = this_segment+" "+subsent
             else:
                 this_segment = this_segment + subsent
@@ -96,7 +96,7 @@ def split_context(one_input, MAX_LEN, language, encoding, keep_end, keep_colon):
     if len_sent_1 <= MIN_LEN or (len(encoding.encode(subsent)) + len_sent_1 <= MAX_LEN):
         if keep_end:
             this_segment = this_segment + sents[-1]
-        elif language == "en" or (language == "zh" and (not re.search("\W$", this_segment))):
+        elif language == "en" or (language == "zh" and (not re.search(r"\W$", this_segment))):
             this_segment = this_segment+" "+sents[-1]
         else:
             this_segment = this_segment + sents[-1]
@@ -126,15 +126,15 @@ def sentence_tokenize_process_dot(text, recover=False):
         text = re.sub(r"(\W|^)(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sept|Oct|Nov|Dec|No|Op|D|Dr|St)\.", r"\1\2. ", text)
         text = re.sub(r"(\W|^)(et al)\.([a-z])", r"\1\2. \3", text)
         
-        text = re.sub("O\.S\.B\.M\.", "O.S.B.M. ", text)
-        text = re.sub("U\. +S\.", "U.S.", text)
-        text = re.sub("U\.S\. *S\. *R\.", "U.S.S.R.", text)
-        text = re.sub("D\. +C\.", "D.C.", text)
-        text = re.sub("D\. +Roosevelt", "D. Roosevelt", text)
-        text = re.sub("A\. *D\. *(\W)", r"A.D.\1", text)
-        text = re.sub("A\. +D\.", r"A.D.", text)
-        text = re.sub("F\. +C\.", r"F.C.", text)
-        text = re.sub("J\. +League", r"J.League", text)
+        text = re.sub(r"O\.S\.B\.M\.", "O.S.B.M. ", text)
+        text = re.sub(r"U\. +S\.", "U.S.", text)
+        text = re.sub(r"U\.S\. *S\. *R\.", "U.S.S.R.", text)
+        text = re.sub(r"D\. +C\.", "D.C.", text)
+        text = re.sub(r"D\. +Roosevelt", "D. Roosevelt", text)
+        text = re.sub(r"A\. *D\. *(\W)", r"A.D.\1", text)
+        text = re.sub(r"A\. +D\.", r"A.D.", text)
+        text = re.sub(r"F\. +C\.", r"F.C.", text)
+        text = re.sub(r"J\. +League", r"J.League", text)
         text = re.sub(r"Alexander v\. *Holmes", r"Alexander v. Holmes", text)
         text = re.sub(r"Brown v\. *Board", r"Brown v. Board", text)
     return text
@@ -165,7 +165,7 @@ def sentence_tokenize(text, language, keep_end, keep_colon=False):
             text = re.sub(r"([:：])(\s+)", r"\1 ", text) # more space than Chinese
         
         sents2 = []
-        sents = re.split("((?:[.!?;]\s+)|(?:\n+))", text)
+        sents = re.split(r"((?:[.!?;]\s+)|(?:\n+))", text)
         # print(sents)
         for i in range(0, len(sents), 2):
             if i+1<len(sents):

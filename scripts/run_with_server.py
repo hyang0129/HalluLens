@@ -9,8 +9,11 @@ Usage:
     python scripts/run_with_server.py --step [generate|inference|eval] [task_options...]
 
 Examples:
-    # Generate prompts (PreciseWikiQA)
+    # Generate prompts (PreciseWikiQA) - uses --model for question generation
     python scripts/run_with_server.py --step generate --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --N 100
+
+    # Generate with different model for questions vs inference
+    python scripts/run_with_server.py --step generate --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --q_generator meta-llama/Llama-3.1-70B-Instruct --N 100
 
     # Run inference (PreciseWikiQA)
     python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct
@@ -183,7 +186,11 @@ def run_task_step(step, task, model, **kwargs):
             cmd.extend(["--generations_file_path", kwargs["generations_file_path"]])
         if kwargs.get("eval_results_path"):
             cmd.extend(["--eval_results_path", kwargs["eval_results_path"]])
-        if kwargs.get("q_generator"):
+        # Use --model for question generation if q_generator not explicitly specified
+        if step == "generate":
+            q_gen = kwargs.get("q_generator", model)
+            cmd.extend(["--q_generator", q_gen])
+        elif kwargs.get("q_generator"):
             cmd.extend(["--q_generator", kwargs["q_generator"]])
         if kwargs.get("qa_output_path"):
             cmd.extend(["--qa_output_path", kwargs["qa_output_path"]])
