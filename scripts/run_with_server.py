@@ -38,6 +38,7 @@ import argparse
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from loguru import logger
 
@@ -504,29 +505,87 @@ def main():
             )
             
             if is_gguf:
-                logger.warning("⚠️  GGUF model detected - currently vLLM doesn't support GGUF files")
-                logger.warning("    Please use one of these alternatives:")
-                logger.warning("    1. Use the HuggingFace version: --model 'meta-llama/Llama-3.3-70B-Instruct'")
-                logger.warning("    2. Manually start activation_logging/server.py which supports GGUF via llama.cpp")
-                logger.warning("")
-                logger.warning(f"    To start GGUF server manually:")
-                logger.warning(f"    python -m activation_logging.server --model-path '{server_model}' \\")
-                logger.warning(f"           --host {args.host} --port {args.port}")
-                logger.error("Cannot start vLLM server with GGUF model - please use alternatives above")
-                sys.exit(1)
-            
-            logger.info(f"🚀 Starting vLLM server for model: {server_model}")
-            server_manager = lm.ServerManager(
-                model=server_model,
-                host=args.host,
-                port=args.port,
-                logger_type=args.logger_type,
-                activations_path=args.activations_path,
-                log_file_path=log_file_path
-            )
-            server_manager.start_server()
-            lm.set_server_manager(server_manager)
-            logger.success(f"✅ Server started at http://{args.host}:{args.port}")
+                logger.info(f"🔧 GGUF model detected - using llama.cpp server instead of vLLM")
+                logger.info(f"🚀 Starting llama.cpp server for model: {server_model}")
+                
+                # Set environment variables for server configuration
+                env = os.environ.copy()
+                if args.activations_path:
+                    env["ACTIVATION_STORAGE_PATH"] = args.activations_path
+                if args.logger_type:
+                    env["ACTIVATION_LOGGER_TYPE"] = args.logger_type
+                if log_file_path:
+                    env["SERVER_LOG_FILE"] = log_file_path
+                
+                # Set the default model to the GGUF model path
+                env["DEFAULT_MODEL"] = server_model
+                
+                # Set GGUF models directory if model contains a directory path
+                if '/' in server_model:
+                    gguf_dir = os.path.dirname(server_model)
+                    env["GGUF_MODELS_DIR"] = gguf_dir
+                    logger.info(f"GGUF models directory: {gguf_dir}")
+                
+                # Build server command for llama.cpp
+                cmd = [sys.executable, "-m", "uvicorn", "activation_logging.server:app",
+                       "--host", args.host,
+                       "--port", str(args.port)]
+                    
+                logger.info(f"Server command: {' '.join(cmd)}")
+                logger.info(f"Environment: DEFAULT_MODEL={server_model}")
+                
+                # Start server process
+                server_process = subprocess.Popen(
+                    cmd,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                
+                # Wait for server to be ready
+                logger.info("Waiting for llama.cpp server to be ready...")
+                max_wait = 120  # seconds (GGUF models can take longer to load)
+                start_time = time.time()
+                
+                while time.time() - start_time < max_wait:
+                    if lm.check_server_health(f"http://{args.host}:{args.port}"):
+                        logger.success(f"✅ Llama.cpp server started at http://{args.host}:{args.port}")
+                        # Create a simple server manager-like object to track the process
+                        class SimpleServerManager:
+                            def __init__(self, process):
+                                self.server_process = process
+                            def stop_server(self):
+                                if self.server_process:
+                                    logger.info("Terminating llama.cpp server...")
+                                    self.server_process.terminate()
+                                    try:
+                                        self.server_process.wait(timeout=10)
+                                    except subprocess.TimeoutExpired:
+                                        logger.warning("Server didn't terminate gracefully, killing...")
+                                        self.server_process.kill()
+                        
+                        server_manager = SimpleServerManager(server_process)
+                        break
+                    time.sleep(3)
+                else:
+                    logger.error("Failed to start llama.cpp server within timeout")
+                    logger.error("Check server logs for details")
+                    server_process.terminate()
+                    sys.exit(1)
+            else:
+                logger.info(f"🚀 Starting vLLM server for model: {server_model}")
+                server_manager = lm.ServerManager(
+                    model=server_model,
+                    host=args.host,
+                    port=args.port,
+                    logger_type=args.logger_type,
+                    activations_path=args.activations_path,
+                    log_file_path=log_file_path
+                )
+                server_manager.start_server()
+                lm.set_server_manager(server_manager)
+                logger.success(f"✅ Server started at http://{args.host}:{args.port}")
         else:
             logger.info(f"✅ Server already running at http://{args.host}:{args.port}")
             logger.warning("⚠️  Note: Using existing server (not managed by this script)")
