@@ -51,6 +51,45 @@ def set_server_manager(manager):
     global _global_server_manager
     _global_server_manager = manager
 
+def kill_process_on_port(port):
+    """Kill any process using the specified port."""
+    import signal
+    try:
+        # Find and kill process on the port
+        if os.name != 'nt':  # Unix-like systems
+            result = subprocess.run(
+                ["lsof", "-ti", f":{port}"],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                pids = result.stdout.strip().split('\n')
+                for pid in pids:
+                    try:
+                        os.kill(int(pid), signal.SIGKILL)
+                        logger.info(f"Killed process {pid} on port {port}")
+                    except ProcessLookupError:
+                        pass
+                return True
+        else:  # Windows
+            result = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True,
+                text=True
+            )
+            for line in result.stdout.split('\n'):
+                if f":{port}" in line and "LISTENING" in line:
+                    pid = line.strip().split()[-1]
+                    try:
+                        subprocess.run(["taskkill", "/F", "/PID", pid])
+                        logger.info(f"Killed process {pid} on port {port}")
+                    except:
+                        pass
+                    return True
+    except Exception as e:
+        logger.error(f"Error killing process on port {port}: {e}")
+    return False
+
 class ServerManager:
     """Manages the activation logging server lifecycle."""
 
@@ -66,6 +105,12 @@ class ServerManager:
     def start_server(self):
         """Start the activation logging server."""
         logger.info(f"Starting activation logging server for model: {self.model}")
+        
+        # Clean up any orphaned processes on the port before starting
+        logger.info(f"Checking for orphaned processes on port {self.port}...")
+        if kill_process_on_port(self.port):
+            logger.warning(f"Cleaned up orphaned process on port {self.port}")
+            time.sleep(2)  # Wait for port to be fully released
 
         # Set environment variables for activation logging
         env = os.environ.copy()
@@ -91,14 +136,26 @@ class ServerManager:
 
         logger.info(f"Server command: {' '.join(cmd)}")
 
-        # Start server process
-        self.server_process = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
+        # Start server process in a new process group (Unix) for easier cleanup
+        if hasattr(os, 'setsid'):
+            # Unix-like systems: create new process group
+            self.server_process = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                preexec_fn=os.setsid
+            )
+        else:
+            # Windows: regular process creation
+            self.server_process = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
 
         # Wait for server to be ready
         self._wait_for_server()
@@ -131,13 +188,42 @@ class ServerManager:
         """Stop the activation logging server."""
         if self.server_process:
             logger.info("Stopping activation logging server...")
-            self.server_process.terminate()
             try:
-                self.server_process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                logger.warning("Server didn't stop gracefully, killing...")
-                self.server_process.kill()
-                self.server_process.wait()
+                # Kill the entire process group to ensure all child processes are terminated
+                import signal
+                if hasattr(os, 'killpg'):
+                    # Unix-like systems: kill the process group
+                    os.killpg(os.getpgid(self.server_process.pid), signal.SIGTERM)
+                    try:
+                        self.server_process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        logger.warning("Server didn't stop gracefully, force killing...")
+                        os.killpg(os.getpgid(self.server_process.pid), signal.SIGKILL)
+                        self.server_process.wait()
+                else:
+                    # Windows: just terminate the process
+                    self.server_process.terminate()
+                    try:
+                        self.server_process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        logger.warning("Server didn't stop gracefully, killing...")
+                        self.server_process.kill()
+                        self.server_process.wait()
+            except ProcessLookupError:
+                logger.warning("Server process already terminated")
+            except Exception as e:
+                logger.error(f"Error stopping server: {e}")
+                # Try force kill as last resort
+                try:
+                    self.server_process.kill()
+                except:
+                    pass
+            
+            # Final cleanup: kill any remaining processes on the port
+            logger.info(f"Ensuring port {self.port} is clean...")
+            kill_process_on_port(self.port)
+            time.sleep(1)  # Give the OS time to release the port
+            
             logger.info("Server stopped")
 
     def restart_server(self):
@@ -150,15 +236,32 @@ class ServerManager:
         if self.server_process:
             logger.info("Killing current server process...")
             try:
-                self.server_process.terminate()
-                try:
-                    self.server_process.wait(timeout=5)
-                    logger.info("Server terminated gracefully")
-                except subprocess.TimeoutExpired:
-                    logger.warning("Server didn't stop gracefully, force killing...")
-                    self.server_process.kill()
-                    self.server_process.wait()
-                    logger.info("Server killed")
+                import signal
+                # Kill the entire process group to ensure all child processes are terminated
+                if hasattr(os, 'killpg'):
+                    # Unix-like systems: kill the process group
+                    os.killpg(os.getpgid(self.server_process.pid), signal.SIGTERM)
+                    try:
+                        self.server_process.wait(timeout=5)
+                        logger.info("Server terminated gracefully")
+                    except subprocess.TimeoutExpired:
+                        logger.warning("Server didn't stop gracefully, force killing...")
+                        os.killpg(os.getpgid(self.server_process.pid), signal.SIGKILL)
+                        self.server_process.wait()
+                        logger.info("Server killed")
+                else:
+                    # Windows: just terminate the process
+                    self.server_process.terminate()
+                    try:
+                        self.server_process.wait(timeout=5)
+                        logger.info("Server terminated gracefully")
+                    except subprocess.TimeoutExpired:
+                        logger.warning("Server didn't stop gracefully, force killing...")
+                        self.server_process.kill()
+                        self.server_process.wait()
+                        logger.info("Server killed")
+            except ProcessLookupError:
+                logger.warning("Server process already terminated")
             except Exception as e:
                 logger.error(f"Error stopping server: {e}")
 

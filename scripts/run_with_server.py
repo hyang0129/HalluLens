@@ -350,16 +350,45 @@ def run_task_step(step, task, model, **kwargs):
         logger.info(f"Step {step} skipped for task {task}")
         return None
 
-    # Run the task with environment variables
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
-
-    if result.returncode != 0:
-        logger.error(f"Task failed with return code {result.returncode}")
-        logger.error(f"STDERR: {result.stderr}")
-        raise RuntimeError(f"Task execution failed: {result.stderr}")
+    # Run the task with environment variables, streaming output in real-time
+    logger.info("=" * 80)
+    logger.info(f"Starting {step} step - output will be shown below:")
+    logger.info("=" * 80)
+    
+    # Use Popen to stream output in real-time
+    process = subprocess.Popen(
+        cmd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,  # Combine stderr with stdout
+        text=True,
+        bufsize=1,  # Line buffered
+        universal_newlines=True
+    )
+    
+    # Stream output line by line
+    for line in process.stdout:
+        print(line, end='', flush=True)
+    
+    # Wait for process to complete
+    return_code = process.wait()
+    
+    logger.info("=" * 80)
+    
+    if return_code != 0:
+        logger.error(f"Task failed with return code {return_code}")
+        raise RuntimeError(f"Task execution failed with return code {return_code}")
 
     logger.success(f"Task {step} completed successfully")
-    return result
+    
+    # Return a simple result object for compatibility
+    class Result:
+        def __init__(self, returncode):
+            self.returncode = returncode
+            self.stdout = ""
+            self.stderr = ""
+    
+    return Result(return_code)
 
 def main():
     parser = argparse.ArgumentParser(description="Run HalluLens tasks with automatic server management")
