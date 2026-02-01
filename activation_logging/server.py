@@ -31,16 +31,20 @@ if "SERVER_LOG_FILE" in os.environ:
         format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}"
     )
 
-# Default model if none specified in request
-DEFAULT_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
+# Default model if none specified in request (read from environment or use default)
+DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "mistralai/Mistral-7B-Instruct-v0.2")
+logger.info(f"Server initialization - DEFAULT_MODEL set to: {DEFAULT_MODEL}")
+logger.info(f"Server initialization - Environment DEFAULT_MODEL: {os.environ.get('DEFAULT_MODEL', 'not set')}")
 app = FastAPI()
 
 # Default activation storage path (can be LMDB or JSON directory)
 DEFAULT_ACTIVATIONS_PATH = os.environ.get("ACTIVATION_STORAGE_PATH",
                                         os.environ.get("ACTIVATION_LMDB_PATH", "lmdb_data/activations.lmdb"))
+logger.info(f"Server initialization - DEFAULT_ACTIVATIONS_PATH: {DEFAULT_ACTIVATIONS_PATH}")
 
 # Default logger type ('lmdb' or 'json')
 DEFAULT_LOGGER_TYPE = os.environ.get("ACTIVATION_LOGGER_TYPE", "lmdb")
+logger.info(f"Server initialization - DEFAULT_LOGGER_TYPE: {DEFAULT_LOGGER_TYPE}")
 
 # Default LMDB path (for backward compatibility)
 DEFAULT_LMDB_PATH = DEFAULT_ACTIVATIONS_PATH
@@ -237,14 +241,21 @@ def get_llamacpp_model(model_path):
         Loaded llama.cpp model instance
     """
     # Check if the model path is relative and if so, join with models directory
+    logger.info(f"llama.cpp model path resolution - Input: {model_path}")
+    logger.info(f"GGUF_MODELS_DIR from environment: {GGUF_MODELS_DIR}")
+    logger.info(f"Is absolute path: {os.path.isabs(model_path)}")
+    
     if not os.path.isabs(model_path):
         full_model_path = os.path.join(GGUF_MODELS_DIR, model_path)
+        logger.info(f"Converted relative path to: {full_model_path}")
     else:
         full_model_path = model_path
+        logger.info(f"Using absolute path as-is: {full_model_path}")
     
     # Cache model by full path
     if full_model_path not in _llamacpp_model_cache:
-        logger.info(f"Loading llama.cpp model: {full_model_path}")
+        logger.info(f"Model not in cache, loading from disk: {full_model_path}")
+        logger.info(f"Checking if path exists: {os.path.exists(full_model_path)}")
         
         # Check if model file exists
         if not os.path.exists(full_model_path):
@@ -284,16 +295,27 @@ def run_inference_llamacpp(prompt, max_tokens, temperature, top_p, model_path):
         - model_outputs: None for llama.cpp models (activations not available)
         - input_length: Approximate input length (estimated)
     """
+    logger.info(f"-" * 80)
+    logger.info(f"run_inference_llamacpp() ENTRY")
+    logger.info(f"  model_path: {model_path}")
+    logger.info(f"  prompt length: {len(prompt)} chars")
+    logger.info(f"  max_tokens: {max_tokens}, temperature: {temperature}, top_p: {top_p}")
+    logger.info(f"-" * 80)
+    
     logger.info(f"Starting llama.cpp inference with model: {model_path}")
     logger.info(f"Inference parameters: max_tokens={max_tokens}, temperature={temperature}, top_p={top_p}")
     
     start_time = time.time()
     
     # Get model from cache or load it
+    logger.info(f"Getting llama.cpp model from cache or loading...")
     llm = get_llamacpp_model(model_path)
+    logger.info(f"✓ Model loaded/retrieved successfully")
     
     # Run inference
     logger.info(f"Running llama.cpp inference with prompt of length {len(prompt)} characters")
+    logger.info(f"Starting generation...")
+    inference_start = time.time()
     output = llm(
         prompt=prompt,
         max_tokens=max_tokens,
@@ -302,8 +324,10 @@ def run_inference_llamacpp(prompt, max_tokens, temperature, top_p, model_path):
         echo=False,  # Don't include prompt in output
     )
     
-    inference_time = time.time() - start_time
-    logger.info(f"llama.cpp inference completed in {inference_time:.2f} seconds")
+    inference_time = time.time() - inference_start
+    logger.info(f"✓ llama.cpp inference completed in {inference_time:.2f} seconds")
+    logger.info(f"  Output type: {type(output)}")
+    logger.info(f"  Output keys: {output.keys() if isinstance(output, dict) else 'N/A'}")
     
     # Extract the generated text
     if isinstance(output, dict):
@@ -387,6 +411,16 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
         - input_length: Length of input tokens
         - trim_position: Position where response was trimmed (or None if no trimming)
     """
+    logger.info(f"=" * 80)
+    logger.info(f"run_inference() ENTRY")
+    logger.info(f"  model_name: {model_name}")
+    logger.info(f"  prompt length: {len(prompt)} chars")
+    logger.info(f"  max_tokens: {max_tokens}")
+    logger.info(f"  temperature: {temperature}")
+    logger.info(f"  top_p: {top_p}")
+    logger.info(f"  auth_token: {'provided' if auth_token else 'not provided'}")
+    logger.info(f"=" * 80)
+    
     logger.info(f"Starting inference with model: {model_name}")
     logger.info(f"Inference parameters: max_tokens={max_tokens}, temperature={temperature}, top_p={top_p}")
     logger.info(f"Prompt length: {len(prompt)} characters")
@@ -399,21 +433,30 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
     # Check if this is a GGUF model path for llama.cpp
     # Match by file extension or directory/model name patterns
     model_lower = model_name.lower()
-    is_gguf = (
-        model_lower.endswith('.gguf') or
-        '/gguf' in model_lower or
-        'gguf/' in model_lower or
-        '-gguf' in model_lower or
-        'q6_k' in model_lower or
-        'q4_k' in model_lower or
-        'q5_k' in model_lower or
-        'iq3_m' in model_lower or
-        'iq4' in model_lower
-    )
+    logger.info(f"Checking model type - Original: {model_name}, Lowercase: {model_lower}")
+    
+    # Log each detection condition
+    detection_checks = {
+        "ends_with_gguf": model_lower.endswith('.gguf'),
+        "contains_slash_gguf": '/gguf' in model_lower,
+        "contains_gguf_slash": 'gguf/' in model_lower,
+        "contains_dash_gguf": '-gguf' in model_lower,
+        "contains_q6_k": 'q6_k' in model_lower,
+        "contains_q4_k": 'q4_k' in model_lower,
+        "contains_q5_k": 'q5_k' in model_lower,
+        "contains_iq3_m": 'iq3_m' in model_lower,
+        "contains_iq4": 'iq4' in model_lower
+    }
+    logger.info(f"GGUF detection checks: {detection_checks}")
+    
+    is_gguf = any(detection_checks.values())
+    logger.info(f"GGUF detection result: {is_gguf}")
     
     if is_gguf:
-        logger.info(f"Detected GGUF model, using llama.cpp for inference")
+        logger.info(f"✓ Detected GGUF model, using llama.cpp for inference")
+        logger.info(f"Calling run_inference_llamacpp() with model_path={model_name}")
         try:
+            logger.info(f"Entering run_inference_llamacpp()...")
             result = run_inference_llamacpp(
                 prompt=prompt,
                 max_tokens=max_tokens,
@@ -421,10 +464,14 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
                 top_p=top_p,
                 model_path=model_name
             )
-            logger.info(f"GGUF inference completed successfully")
+            logger.info(f"✓ GGUF inference completed successfully")
+            logger.info(f"  Response length: {len(result[0]) if result and result[0] else 0} chars")
             return result
         except Exception as e:
-            logger.error(f"GGUF inference failed: {e}")
+            logger.error(f"✗ GGUF inference failed with exception: {type(e).__name__}")
+            logger.error(f"  Error message: {e}")
+            import traceback
+            logger.error(f"  Traceback:\n{traceback.format_exc()}")
             raise
 
     # Otherwise use the standard Hugging Face model loading
@@ -813,10 +860,65 @@ async def health_check():
     Returns:
         Dict with status and timestamp
     """
+    logger.info("Health check endpoint called")
     return {
         "status": "ok",
         "timestamp": time.time()
     }
+
+
+@app.get("/status")
+async def status_check():
+    """
+    Detailed status check endpoint showing server state.
+
+    Returns:
+        Dict with detailed server status information
+    """
+    logger.info("Status check endpoint called")
+    
+    # Get active requests info
+    with request_lock:
+        active_count = len(active_requests)
+        active_list = [
+            {
+                "request_id": req_id,
+                "endpoint": info["endpoint"],
+                "model": info["model"],
+                "duration": time.time() - info["start_time"]
+            }
+            for req_id, info in active_requests.items()
+        ]
+    
+    # Get resource info
+    memory = psutil.virtual_memory()
+    gpu_info = {}
+    if torch.cuda.is_available():
+        gpu_info = {
+            "available": True,
+            "device_count": torch.cuda.device_count(),
+            "memory_allocated_gb": torch.cuda.memory_allocated() / 1024**3,
+            "memory_reserved_gb": torch.cuda.memory_reserved() / 1024**3
+        }
+    else:
+        gpu_info = {"available": False}
+    
+    return {
+        "status": "ok",
+        "timestamp": time.time(),
+        "default_model": DEFAULT_MODEL,
+        "activations_path": DEFAULT_ACTIVATIONS_PATH,
+        "logger_type": DEFAULT_LOGGER_TYPE,
+        "active_requests": active_count,
+        "active_request_details": active_list,
+        "memory_percent": memory.percent,
+        "memory_available_gb": memory.available / 1024**3,
+        "gpu": gpu_info,
+        "model_cache_size": len(_model_cache),
+        "tokenizer_cache_size": len(_tokenizer_cache),
+        "llamacpp_cache_size": len(_llamacpp_model_cache)
+    }
+
 
 @app.post("/restart")
 async def restart_server():
@@ -980,18 +1082,32 @@ async def completions(request: CompletionRequest):
     Returns:
         CompletionResponse with generated text
     """
+    # Generate unique request ID for tracking
+    req_id = str(uuid.uuid4())[:8]
+    
     # Allow override of model via request, else use default
     model_name = request.model if request.model else DEFAULT_MODEL
-    logger.info(f"Received completion request for model: {model_name}")
+    logger.info(f"[{req_id}] ========== NEW COMPLETION REQUEST ==========")
+    logger.info(f"[{req_id}] Received completion request for model: {model_name}")
+    logger.info(f"[{req_id}] Request model field: {request.model}")
+    logger.info(f"[{req_id}] DEFAULT_MODEL value: {DEFAULT_MODEL}")
+    logger.info(f"[{req_id}] Prompt length: {len(request.prompt)} characters")
+    logger.info(f"[{req_id}] Max tokens: {request.max_tokens}")
+    
+    # Track request start
+    track_request_start(req_id, "completions", model_name)
     
     # Apply any overwrites to request parameters
+    logger.info(f"[{req_id}] Applying parameter overwrites...")
     params = apply_overwrites({
         'temperature': request.temperature,
         'top_p': request.top_p,
         'lmdb_path': request.lmdb_path if hasattr(request, 'lmdb_path') else None
     })
+    logger.info(f"[{req_id}] Final parameters after overwrites: {params}")
     
     # Use the extracted inference function
+    logger.info(f"[{req_id}] Starting inference with run_inference()...")
     response_text, model_outputs, input_length, trim_pos = run_inference(
         prompt=request.prompt,
         max_tokens=request.max_tokens,
@@ -1041,12 +1157,19 @@ async def completions(request: CompletionRequest):
         logger.info(f"Skipping activation logging for GGUF model: {model_name}")
     
     # Build OpenAI-compatible response
-    return CompletionResponse(
+    logger.info(f"[{req_id}] Building response - Generated text length: {len(response_text)} characters")
+    response = CompletionResponse(
         id=entry_key,
         created=int(time.time()),
         model=model_name,
         choices=[Choice(text=response_text, index=0)]
     )
+    
+    # Track request completion
+    track_request_end(req_id, "completed")
+    logger.info(f"[{req_id}] ========== REQUEST COMPLETED ==========")
+    
+    return response
 
 
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
@@ -1189,6 +1312,23 @@ async def startup_event():
     logger.info(f"Default activations path: {DEFAULT_ACTIVATIONS_PATH}")
     logger.info(f"Default logger type: {DEFAULT_LOGGER_TYPE}")
     logger.info(f"GGUF models directory: {GGUF_MODELS_DIR}")
+    
+    # Log all relevant environment variables
+    logger.info("-" * 80)
+    logger.info("ENVIRONMENT VARIABLES:")
+    env_vars_to_log = [
+        "DEFAULT_MODEL", "ACTIVATION_STORAGE_PATH", "ACTIVATION_LMDB_PATH",
+        "ACTIVATION_LOGGER_TYPE", "GGUF_MODELS_DIR", "HF_TOKEN",
+        "ACTIVATION_TARGET_LAYERS", "ACTIVATION_SEQUENCE_MODE",
+        "TRIM_OUTPUT_AT", "SERVER_LOG_FILE"
+    ]
+    for var in env_vars_to_log:
+        value = os.environ.get(var, "not set")
+        # Mask token for security
+        if var == "HF_TOKEN" and value != "not set":
+            value = value[:10] + "..." if len(value) > 10 else "***"
+        logger.info(f"  {var}: {value}")
+    logger.info("-" * 80)
 
     # Log system resources
     log_system_resources("Startup")
