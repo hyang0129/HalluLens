@@ -490,6 +490,21 @@ def main():
         server_was_running = lm.check_server_health(f"http://{args.host}:{args.port}")
 
         if not server_was_running:
+            # Check if it's a GGUF model
+            is_gguf = server_model.endswith('.gguf') or 'gguf' in server_model.lower() or server_model.endswith('/')
+            
+            if is_gguf:
+                logger.warning("⚠️  GGUF model detected - currently vLLM doesn't support GGUF files")
+                logger.warning("    Please use one of these alternatives:")
+                logger.warning("    1. Use the HuggingFace version: --model 'meta-llama/Llama-3.3-70B-Instruct'")
+                logger.warning("    2. Manually start activation_logging/server.py which supports GGUF via llama.cpp")
+                logger.warning("")
+                logger.warning(f"    To start GGUF server manually:")
+                logger.warning(f"    python -m activation_logging.server --model-path '{server_model}' \\")
+                logger.warning(f"           --host {args.host} --port {args.port}")
+                logger.error("Cannot start vLLM server with GGUF model - please use alternatives above")
+                sys.exit(1)
+            
             logger.info(f"🚀 Starting vLLM server for model: {server_model}")
             server_manager = lm.ServerManager(
                 model=server_model,
