@@ -452,22 +452,11 @@ def main():
 
     # Determine log file path for server behavior logs
     log_file_path = args.log_file
-    if not log_file_path and (args.step == "inference" or args.step == "all"):
-        # For inference steps, place server logs in same directory as generations file
-        task_kwargs_for_name = {
-            "wiki_src": args.wiki_src,
-            "mode": args.mode,
-            "exp": args.exp,
-            "dataset_variant": args.dataset_variant,
-            "split": args.split
-        }
-        task_name = get_task_name(args.task, **task_kwargs_for_name)
-        generations_path = determine_generations_file_path(task_name, args.model, args.generations_file_path)
-
-        # Create log file path in same directory as generations file
-        generations_dir = Path(generations_path).parent
-        generations_dir.mkdir(parents=True, exist_ok=True)
-        log_file_path = str(generations_dir / "server_behavior.log")
+    if not log_file_path:
+        # Default to server.log in current working directory
+        log_file_path = "server.log"
+    
+    logger.info(f"Server log file: {log_file_path}")
 
     logger.info("=" * 80)
     logger.info("HalluLens Task Runner with Automatic Server Management")
