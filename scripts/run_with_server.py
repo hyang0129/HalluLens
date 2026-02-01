@@ -490,8 +490,18 @@ def main():
         server_was_running = lm.check_server_health(f"http://{args.host}:{args.port}")
 
         if not server_was_running:
-            # Check if it's a GGUF model
-            is_gguf = server_model.endswith('.gguf') or 'gguf' in server_model.lower() or server_model.endswith('/')
+            # Check if it's a GGUF model (file or directory)
+            model_lower = server_model.lower()
+            is_gguf = (
+                model_lower.endswith('.gguf') or 
+                '/gguf' in model_lower or 
+                'gguf/' in model_lower or
+                '-gguf' in model_lower or
+                'q6_k' in model_lower or
+                'q4_k' in model_lower or
+                'iq3_m' in model_lower or
+                'iq4' in model_lower
+            )
             
             if is_gguf:
                 logger.warning("⚠️  GGUF model detected - currently vLLM doesn't support GGUF files")
