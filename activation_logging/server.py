@@ -397,7 +397,21 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
     log_system_resources("Pre-inference")
 
     # Check if this is a GGUF model path for llama.cpp
-    if model_name.endswith('.gguf'):
+    # Match by file extension or directory/model name patterns
+    model_lower = model_name.lower()
+    is_gguf = (
+        model_lower.endswith('.gguf') or
+        '/gguf' in model_lower or
+        'gguf/' in model_lower or
+        '-gguf' in model_lower or
+        'q6_k' in model_lower or
+        'q4_k' in model_lower or
+        'q5_k' in model_lower or
+        'iq3_m' in model_lower or
+        'iq4' in model_lower
+    )
+    
+    if is_gguf:
         logger.info(f"Detected GGUF model, using llama.cpp for inference")
         try:
             result = run_inference_llamacpp(
