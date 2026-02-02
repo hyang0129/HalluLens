@@ -235,7 +235,7 @@ def get_llamacpp_model(model_path):
     Get or load a llama.cpp model from cache.
     
     Args:
-        model_path: Path to the GGUF model file
+        model_path: Path to the GGUF model file or directory containing GGUF files
         
     Returns:
         Loaded llama.cpp model instance
@@ -246,11 +246,39 @@ def get_llamacpp_model(model_path):
     logger.info(f"Is absolute path: {os.path.isabs(model_path)}")
     
     if not os.path.isabs(model_path):
-        full_model_path = os.path.join(GGUF_MODELS_DIR, model_path)
+        full_model_path = os.path.join(GGUF_MODELS_DIR, model_path) if GGUF_MODELS_DIR else model_path
         logger.info(f"Converted relative path to: {full_model_path}")
     else:
         full_model_path = model_path
         logger.info(f"Using absolute path as-is: {full_model_path}")
+    
+    # If path is a directory, search for .gguf files
+    if os.path.isdir(full_model_path):
+        logger.info(f"Path is a directory, searching for .gguf files...")
+        gguf_files = []
+        for root, dirs, files in os.walk(full_model_path):
+            for file in files:
+                if file.endswith('.gguf'):
+                    gguf_files.append(os.path.join(root, file))
+        
+        if not gguf_files:
+            raise FileNotFoundError(f"No .gguf files found in directory: {full_model_path}")
+        
+        logger.info(f"Found {len(gguf_files)} .gguf file(s)")
+        
+        # Check for split models (e.g., -00001-of-00002.gguf)
+        split_files = [f for f in gguf_files if '-00001-of-' in f or '00001-of-' in f]
+        
+        if len(gguf_files) == 1:
+            full_model_path = gguf_files[0]
+            logger.info(f"Using single .gguf file: {os.path.basename(full_model_path)}")
+        elif split_files:
+            full_model_path = split_files[0]
+            logger.info(f"Split model detected, using first part: {os.path.basename(full_model_path)}")
+        else:
+            # Use the first file found
+            full_model_path = gguf_files[0]
+            logger.warning(f"Multiple .gguf files found, using: {os.path.basename(full_model_path)}")
     
     # Cache model by full path
     if full_model_path not in _llamacpp_model_cache:
