@@ -531,6 +531,9 @@ model_map = {   'meta-llama/Llama-3.1-405B-Instruct-FP8': {'name': 'llama3.1_405
                 "models/Llama-3.3-70B-Instruct-Q6_K_L": {'name': 'Llama-3.3-70B-Q6_K_L',
                                                         'server_urls': [f"http://{CUSTOM_SERVER}:8000/v1"],
                                                     },
+                "Llama-3.3-70B-Instruct-Q6_K_L": {'name': 'Llama-3.3-70B-Q6_K_L',
+                                                        'server_urls': [f"http://{CUSTOM_SERVER}:8000/v1"],
+                                                    },
 
                                                     
             }
