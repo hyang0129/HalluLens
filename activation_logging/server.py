@@ -10,6 +10,7 @@ import uuid
 import psutil
 import threading
 import gc
+import glob
 from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, Tuple
@@ -74,6 +75,132 @@ overwrite_top_p = None
 
 # Default path for GGUF models
 GGUF_MODELS_DIR = os.environ.get("GGUF_MODELS_DIR", "")
+
+
+def _is_split_first_part_gguf(path: str) -> bool:
+    """Return True if the file name looks like the first shard of a split GGUF."""
+    base = os.path.basename(path)
+    return ("-00001-of-" in base) or ("00001-of-" in base)
+
+
+def _candidate_gguf_search_dirs() -> List[str]:
+    """Return directories to search for GGUF models.
+
+    Order matters: earlier directories are preferred.
+    """
+    dirs: List[str] = []
+
+    if GGUF_MODELS_DIR:
+        dirs.append(GGUF_MODELS_DIR)
+
+    # Common repo-local conventions
+    cwd = os.getcwd()
+    dirs.extend(
+        [
+            cwd,
+            os.path.join(cwd, "models"),
+            os.path.join(cwd, "checkpoints"),
+        ]
+    )
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique_dirs: List[str] = []
+    for d in dirs:
+        d_norm = os.path.abspath(d)
+        if d_norm not in seen:
+            seen.add(d_norm)
+            unique_dirs.append(d_norm)
+    return unique_dirs
+
+
+def _find_best_gguf_match(paths: List[str]) -> Optional[str]:
+    """Pick the best GGUF file from a set of candidates.
+
+    Prefers the first part of split models (e.g. *-00001-of-00002.gguf).
+    """
+    if not paths:
+        return None
+
+    # Prefer explicit first shard of split models
+    split_first = [p for p in paths if _is_split_first_part_gguf(p)]
+    if split_first:
+        return sorted(split_first)[0]
+
+    # Otherwise pick a stable deterministic first
+    return sorted(paths)[0]
+
+
+def resolve_gguf_model_path(model_path: str) -> str:
+    """Resolve a user-provided GGUF model identifier to a concrete path.
+
+    Accepts:
+      - absolute path to a .gguf file
+      - absolute path to a directory containing .gguf files
+      - relative path to a .gguf file or directory
+      - bare model name (e.g. "Llama-3.3-70B-Instruct-Q6_K_L")
+
+    For split GGUF models, returns the first shard (llama.cpp auto-loads the rest).
+    """
+    logger.info(f"llama.cpp model path resolution - Input: {model_path}")
+    logger.info(f"GGUF_MODELS_DIR from environment: {GGUF_MODELS_DIR}")
+    logger.info(f"Is absolute path: {os.path.isabs(model_path)}")
+
+    # Fast path: absolute file/dir
+    if os.path.isabs(model_path) and os.path.exists(model_path):
+        return model_path
+
+    # Build candidate concrete paths first (cheap existence checks)
+    candidates: List[str] = []
+    search_dirs = _candidate_gguf_search_dirs()
+    model_path_norm = model_path
+
+    # If the user provided a relative path like models/foo, try it directly too.
+    candidates.append(model_path_norm)
+
+    if not model_path_norm.lower().endswith(".gguf"):
+        candidates.append(model_path_norm + ".gguf")
+
+    for base_dir in search_dirs:
+        candidates.append(os.path.join(base_dir, model_path_norm))
+        if not model_path_norm.lower().endswith(".gguf"):
+            candidates.append(os.path.join(base_dir, model_path_norm + ".gguf"))
+
+    # Try concrete candidates
+    for cand in candidates:
+        if os.path.exists(cand):
+            return cand
+
+    # If nothing exists yet, attempt a targeted glob search.
+    # This supports split models when the user only provides the base name.
+    glob_hits: List[str] = []
+    if os.path.sep not in model_path_norm and "/" not in model_path_norm and "\\" not in model_path_norm:
+        pattern = model_path_norm + "*.gguf"
+        for base_dir in search_dirs:
+            if not os.path.isdir(base_dir):
+                continue
+            # 1) Look in the directory itself
+            glob_hits.extend(glob.glob(os.path.join(base_dir, pattern)))
+            # 2) Look one level down (common layout: models/<name>/*.gguf)
+            glob_hits.extend(glob.glob(os.path.join(base_dir, model_path_norm, "*.gguf")))
+
+    best = _find_best_gguf_match(glob_hits)
+    if best and os.path.exists(best):
+        return best
+
+    searched = []
+    for d in search_dirs:
+        if os.path.isdir(d):
+            searched.append(d)
+    hint = (
+        "Could not resolve GGUF model path. "
+        "If you downloaded via download_q6k_model.sh, pass --model 'models/Llama-3.3-70B-Instruct-Q6_K_L' "
+        "or set GGUF_MODELS_DIR to the directory that contains your model folder/files."
+    )
+    raise FileNotFoundError(
+        f"Model file/directory not found for: {model_path}. "
+        f"Searched in: {searched}. {hint}"
+    )
 
 # Request tracking for debugging
 active_requests = {}
@@ -240,17 +367,8 @@ def get_llamacpp_model(model_path):
     Returns:
         Loaded llama.cpp model instance
     """
-    # Check if the model path is relative and if so, join with models directory
-    logger.info(f"llama.cpp model path resolution - Input: {model_path}")
-    logger.info(f"GGUF_MODELS_DIR from environment: {GGUF_MODELS_DIR}")
-    logger.info(f"Is absolute path: {os.path.isabs(model_path)}")
-    
-    if not os.path.isabs(model_path):
-        full_model_path = os.path.join(GGUF_MODELS_DIR, model_path) if GGUF_MODELS_DIR else model_path
-        logger.info(f"Converted relative path to: {full_model_path}")
-    else:
-        full_model_path = model_path
-        logger.info(f"Using absolute path as-is: {full_model_path}")
+    full_model_path = resolve_gguf_model_path(model_path)
+    logger.info(f"Resolved GGUF model path: {full_model_path}")
     
     # If path is a directory, search for .gguf files
     if os.path.isdir(full_model_path):
@@ -267,7 +385,7 @@ def get_llamacpp_model(model_path):
         logger.info(f"Found {len(gguf_files)} .gguf file(s)")
         
         # Check for split models (e.g., -00001-of-00002.gguf)
-        split_files = [f for f in gguf_files if '-00001-of-' in f or '00001-of-' in f]
+        split_files = [f for f in gguf_files if _is_split_first_part_gguf(f)]
         
         if len(gguf_files) == 1:
             full_model_path = gguf_files[0]
