@@ -122,7 +122,9 @@ def main():
     uvicorn_cmd = [
         "uvicorn", "activation_logging.server:app",
         "--host", args.host,
-        "--port", str(args.port)
+        "--port", str(args.port),
+        "--log-level", "warning",
+        "--no-access-log",
     ]
     
     # 2. Using vllm serve (recommended for production)
@@ -140,7 +142,11 @@ def main():
     
     try:
         # Use uvicorn in development (comment this out to use vllm serve instead)
-        subprocess.run(uvicorn_cmd)
+        # IMPORTANT: ServerManager starts this process with stdout/stderr piped;
+        # if we don't drain those pipes, the server can deadlock once buffers fill.
+        # Redirect all child stdout/stderr into the log file to prevent backpressure hangs.
+        with open(args.log_file, "a", encoding="utf-8") as log_f:
+            subprocess.run(uvicorn_cmd, stdout=log_f, stderr=log_f)
         
         # Use vllm serve in production (uncomment to use)
         # subprocess.run(vllm_cmd)

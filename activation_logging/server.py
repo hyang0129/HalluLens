@@ -11,6 +11,9 @@ import psutil
 import threading
 import gc
 import glob
+import faulthandler
+import sys
+import traceback
 from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, Tuple
@@ -206,6 +209,59 @@ def resolve_gguf_model_path(model_path: str) -> str:
 active_requests = {}
 request_lock = threading.Lock()
 
+# Serialize inference to avoid thread-safety issues while keeping the event loop responsive.
+inference_lock = threading.Lock()
+
+# Optional: dump stacks automatically when a request exceeds this duration.
+# Default ON (3 minutes) so hangs are diagnosable without manual intervention.
+_DUMP_STACKS_ON_HANG_SEC = float(os.environ.get("DUMP_STACKS_ON_HANG_SEC", "180") or 0)
+
+# How often to scan active requests for long-runners/hangs.
+_REQUEST_MONITOR_INTERVAL_SEC = float(os.environ.get("REQUEST_MONITOR_INTERVAL_SEC", "30") or 30)
+
+# Optional: where to write stack dumps.
+_STACK_DUMP_DIR = os.environ.get("STACK_DUMP_DIR", os.path.join(os.getcwd(), "debug_dumps"))
+_FAULTHANDLER_LOG_FH = None
+
+
+def _safe_mkdir(path: str) -> None:
+    try:
+        os.makedirs(path, exist_ok=True)
+    except Exception:
+        pass
+
+
+def _dump_all_thread_stacks(reason: str) -> str:
+    """Dump stack traces of all threads to a file and return the filepath."""
+    _safe_mkdir(_STACK_DUMP_DIR)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    out_path = os.path.join(_STACK_DUMP_DIR, f"stacks_{ts}_{reason}.log")
+    try:
+        with open(out_path, "a", encoding="utf-8") as f:
+            f.write(f"\n===== STACK DUMP ({ts}) reason={reason} pid={os.getpid()} =====\n")
+            faulthandler.dump_traceback(file=f, all_threads=True)
+        logger.warning(f"Wrote stack dump to: {out_path}")
+    except Exception as e:
+        logger.error(f"Failed to dump stacks: {type(e).__name__}: {e}")
+    return out_path
+
+
+def _client_request_id_from_prompt_text(prompt_text: str) -> str:
+    """Match utils.lm.generate_request_id(): sha256(prompt)[:8]."""
+    try:
+        return hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()[:8]
+    except Exception:
+        return "unknown"
+
+
+def _chat_fingerprint(messages: List["Message"]) -> str:
+    """Fingerprint chat input in a way that matches the client when it sends a single user message."""
+    try:
+        joined = "\n".join([m.content for m in messages])
+        return _client_request_id_from_prompt_text(joined)
+    except Exception:
+        return "unknown"
+
 def log_system_resources(context: str = ""):
     """Log current system resource usage for debugging."""
     try:
@@ -274,6 +330,11 @@ def log_long_running_requests():
                 logger.warning(f"[{request_id}] Long-running request detected - "
                              f"Duration: {duration:.2f}s, Endpoint: {info['endpoint']}, "
                              f"Model: {info['model']}, Status: {info['status']}")
+            if _DUMP_STACKS_ON_HANG_SEC and duration > _DUMP_STACKS_ON_HANG_SEC:
+                # Dump stacks once per request by marking it.
+                if not info.get("stacks_dumped"):
+                    info["stacks_dumped"] = True
+                    _dump_all_thread_stacks(reason=f"hang_{request_id}")
 
 def get_model_and_tokenizer(model_name: str, auth_token: Optional[str] = None):
     """
@@ -1006,10 +1067,22 @@ async def health_check():
     Returns:
         Dict with status and timestamp
     """
-    logger.info("Health check endpoint called")
+    # Keep this quiet: health checks can be frequent and noisy.
     return {
         "status": "ok",
         "timestamp": time.time()
+    }
+
+
+@app.post("/debug/dump_stacks")
+def debug_dump_stacks(http_request: Request):
+    """Force a stack dump to help diagnose server hangs."""
+    path = _dump_all_thread_stacks(reason="manual")
+    return {
+        "status": "ok",
+        "dump_path": path,
+        "timestamp": time.time(),
+        "client": str(http_request.client) if http_request.client else None,
     }
 
 
@@ -1218,7 +1291,7 @@ async def set_overwrite_top_p(request: SetOverwriteTopPRequest):
 
 
 @app.post("/v1/completions", response_model=CompletionResponse)
-async def completions(request: CompletionRequest):
+def completions(request: CompletionRequest, http_request: Request):
     """
     OpenAI API-compatible endpoint for text completions with activation logging.
     
@@ -1230,6 +1303,7 @@ async def completions(request: CompletionRequest):
     """
     # Generate unique request ID for tracking
     req_id = str(uuid.uuid4())[:8]
+    client_req_id = _client_request_id_from_prompt_text(request.prompt)
     
     # Allow override of model via request, else use default
     model_name = request.model if request.model else DEFAULT_MODEL
@@ -1237,6 +1311,8 @@ async def completions(request: CompletionRequest):
     logger.info(f"[{req_id}] Received completion request for model: {model_name}")
     logger.info(f"[{req_id}] Request model field: {request.model}")
     logger.info(f"[{req_id}] DEFAULT_MODEL value: {DEFAULT_MODEL}")
+    logger.info(f"[{req_id}] Client request id (sha256(prompt)[:8]): {client_req_id}")
+    logger.info(f"[{req_id}] Client: {http_request.client.host if http_request.client else 'unknown'}")
     logger.info(f"[{req_id}] Prompt length: {len(request.prompt)} characters")
     logger.info(f"[{req_id}] Max tokens: {request.max_tokens}")
     
@@ -1254,14 +1330,22 @@ async def completions(request: CompletionRequest):
     
     # Use the extracted inference function
     logger.info(f"[{req_id}] Starting inference with run_inference()...")
-    response_text, model_outputs, input_length, trim_pos = run_inference(
-        prompt=request.prompt,
-        max_tokens=request.max_tokens,
-        temperature=params['temperature'],
-        top_p=params['top_p'],
-        model_name=model_name,
-        auth_token=request.auth_token
-    )
+    inference_lock_wait_start = time.time()
+    with inference_lock:
+        inference_lock_wait = time.time() - inference_lock_wait_start
+        if inference_lock_wait > 0.5:
+            logger.warning(f"[{req_id}] Waited {inference_lock_wait:.2f}s for inference_lock")
+
+        inference_start = time.time()
+        response_text, model_outputs, input_length, trim_pos = run_inference(
+            prompt=request.prompt,
+            max_tokens=request.max_tokens,
+            temperature=params['temperature'],
+            top_p=params['top_p'],
+            model_name=model_name,
+            auth_token=request.auth_token
+        )
+        logger.info(f"[{req_id}] Inference time: {time.time() - inference_start:.2f}s")
     
     # Log to LMDB only if not a GGUF model (which doesn't provide activations)
     multi_sample = bool(
@@ -1283,6 +1367,7 @@ async def completions(request: CompletionRequest):
         
         try:
             # Pass the model outputs directly to the logger
+            activation_start = time.time()
             logger_to_use.log_entry(entry_key, {
                 "prompt": request.prompt,
                 "response": response_text,
@@ -1296,6 +1381,7 @@ async def completions(request: CompletionRequest):
                 "sample_index": request.sample_index,
                 "request_id": resolved_request_id,
             })
+            logger.info(f"[{req_id}] Activation logging time: {time.time() - activation_start:.2f}s")
         finally:
             # Always close the logger to free up resources
             logger_to_use.close()
@@ -1319,7 +1405,7 @@ async def completions(request: CompletionRequest):
 
 
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
-async def chat_completions(request: ChatCompletionRequest):
+def chat_completions(request: ChatCompletionRequest, http_request: Request):
     """
     OpenAI API-compatible endpoint for chat completions with activation logging.
 
@@ -1331,17 +1417,25 @@ async def chat_completions(request: ChatCompletionRequest):
     """
     # Generate unique request ID for tracking
     request_id = str(uuid.uuid4())[:8]
+    client_req_id = _chat_fingerprint(request.messages)
 
     # Allow override of model via request, else use default
     model_name = request.model if request.model else DEFAULT_MODEL
     logger.info(f"[{request_id}] Received chat completion request for model: {model_name}")
+    logger.info(f"[{request_id}] Client request id (chat fingerprint): {client_req_id}")
+    logger.info(f"[{request_id}] Client: {http_request.client.host if http_request.client else 'unknown'}")
 
     # Track request start
     track_request_start(request_id, "chat_completions", model_name)
 
     try:
-        # Convert chat messages to a single prompt - simplified for most models
-        prompt = "\n".join([f"{msg.role}: {msg.content}" for msg in request.messages])
+        # Convert chat messages to a single prompt.
+        # Keep compatibility with the client: if it's a single user message, use the raw content.
+        # Otherwise fall back to a simple role-tagged concatenation.
+        if len(request.messages) == 1 and request.messages[0].role == "user":
+            prompt = request.messages[0].content
+        else:
+            prompt = "\n".join([f"{msg.role}: {msg.content}" for msg in request.messages])
         logger.info(f"[{request_id}] Converted {len(request.messages)} messages to prompt of {len(prompt)} characters")
 
         # Apply any overwrites to request parameters
@@ -1369,19 +1463,23 @@ async def chat_completions(request: ChatCompletionRequest):
 
         # Use the extracted inference function
         logger.info(f"[{request_id}] Starting inference")
-        inference_start = time.time()
+        inference_lock_wait_start = time.time()
+        with inference_lock:
+            inference_lock_wait = time.time() - inference_lock_wait_start
+            if inference_lock_wait > 0.5:
+                logger.warning(f"[{request_id}] Waited {inference_lock_wait:.2f}s for inference_lock")
 
-        response_text, model_outputs, input_length, trim_pos = run_inference(
-            prompt=prompt,
-            max_tokens=request.max_tokens,
-            temperature=params['temperature'],
-            top_p=params['top_p'],
-            model_name=model_name,
-            auth_token=request.auth_token
-        )
+            inference_start = time.time()
+            response_text, model_outputs, input_length, trim_pos = run_inference(
+                prompt=prompt,
+                max_tokens=request.max_tokens,
+                temperature=params['temperature'],
+                top_p=params['top_p'],
+                model_name=model_name,
+                auth_token=request.auth_token
+            )
 
-        inference_time = time.time() - inference_start
-        logger.info(f"[{request_id}] Inference completed in {inference_time:.2f} seconds")
+            logger.info(f"[{request_id}] Inference completed in {time.time() - inference_start:.2f} seconds")
 
         # Log activation logging
         if not model_name.endswith('.gguf') and model_outputs is not None:
@@ -1493,12 +1591,23 @@ async def startup_event():
     import threading
     def monitor_requests():
         while True:
-            time.sleep(300)  # Check every 5 minutes
+            time.sleep(_REQUEST_MONITOR_INTERVAL_SEC)
             log_long_running_requests()
 
     monitor_thread = threading.Thread(target=monitor_requests, daemon=True)
     monitor_thread.start()
     logger.info("Started request monitoring thread")
+
+    # Enable faulthandler to make hard crashes and deadlocks diagnosable.
+    global _FAULTHANDLER_LOG_FH
+    try:
+        _safe_mkdir(_STACK_DUMP_DIR)
+        fh_path = os.path.join(_STACK_DUMP_DIR, "faulthandler.log")
+        _FAULTHANDLER_LOG_FH = open(fh_path, "a", encoding="utf-8")
+        faulthandler.enable(file=_FAULTHANDLER_LOG_FH, all_threads=True)
+        logger.info(f"faulthandler enabled (all threads) -> {fh_path}")
+    except Exception as e:
+        logger.warning(f"Could not enable faulthandler: {type(e).__name__}: {e}")
 
     logger.info("Server startup completed")
     logger.info("=" * 80)
@@ -1523,6 +1632,14 @@ async def shutdown_event():
     log_system_resources("Shutdown")
     logger.info("Server shutdown completed")
     logger.info("=" * 80)
+
+    global _FAULTHANDLER_LOG_FH
+    try:
+        if _FAULTHANDLER_LOG_FH:
+            _FAULTHANDLER_LOG_FH.close()
+            _FAULTHANDLER_LOG_FH = None
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     uvicorn.run("activation_logging.server:app", host="0.0.0.0", port=8000, reload=False)
