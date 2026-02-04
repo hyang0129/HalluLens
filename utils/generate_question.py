@@ -16,6 +16,9 @@ import os
 from utils.qa_utils import split_doc, sentence_tokenize
 
 
+QA_GENERATION_CHUNK_SIZE = int(os.environ.get("QA_GENERATION_CHUNK_SIZE", "5"))
+
+
 ####
 """
     NOTE:
@@ -176,67 +179,98 @@ class WikiQA:
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
 
-        # 1. GENERATE QUESTIONS
-        # print("Making prompts to generate questions...")
-        all_data, Q_MAKING_PROMPTS = [], []
-        for line in wiki_data:
+        chunk_size = max(1, QA_GENERATION_CHUNK_SIZE)
+        print(f"Processing wiki_data in chunks of {chunk_size} for frequent saving...")
 
-            title = line["title"]
-            document = line["document"]
-            obj = {"title": title, "h_score_cat": line['h_score_cat'],
-                    'pageid': line['pageid'], 'revid': line['revid'], 'description': line['description'], 'categories': line['categories']} # meta data
-
-            # select section from the document
-            sections = split_doc(document, "en", self.encoding, keep_end=False, keep_colon=False, MIN_LEN=self.min_len, MAX_LEN=self.max_len)
-            if len(sections) > 2: sections = sections[:-1] 
-            section = random.sample(sections, 1)[0] # always selecting one section
-            obj['reference'] = section
-
-            # make prompt
-            instruct = self.Q_GENERATION_PROMPT 
-            prompt = instruct.format(wiki_title=title, wiki_document=section.strip())
-            
-            # append prompt and data
-            Q_MAKING_PROMPTS.append(prompt)
-            all_data.append(obj)
-
-        print("Generating questions...")
-        results = thread_map(lambda p: lm.call_vllm_api(p, self.q_generator, temperature=0.7, top_p=0.9),
-                                Q_MAKING_PROMPTS,
-                                max_workers=1,
-                                desc=f"using {self.q_generator}")
-        for i, r in enumerate(results):
-            all_data[i]['prompt'] = r
-
-
-        # 2. CHECK ANSWERABILITY
-        print("Making prompts to check answerability...")
-        instruct = self.ANSWERABILITY_PROMPT
-        prompts_answerability = [instruct.format(ref_document=obj['reference'], question=obj['prompt']) \
-                                    for obj in all_data]
-        print("Generating answers...")
-        ans_results = thread_map(lambda p: lm.generate(p, self.q_generator),
-                                    prompts_answerability,
-                                    max_workers=1,
-                                    desc=f"using {self.q_generator}")
         filter_count = 0
-        print("Filtering out unanswerable questions...")
-        for i, answer in enumerate(ans_results):
-            answer_justified = self.justify_answerability(answer)
-            if answer_justified == -1:
-                filter_count += 1
-                continue # filter out unanswerable questions
-            else:
+
+        # Process in small chunks so we reach the acceptance+write loop early.
+        for chunk_start in range(0, len(wiki_data), chunk_size):
+            if len(QAs) >= N:
+                break
+
+            chunk = wiki_data[chunk_start:chunk_start + chunk_size]
+
+            # 1. GENERATE QUESTIONS (same logic, just chunked)
+            all_data, Q_MAKING_PROMPTS = [], []
+            for line in chunk:
+                title = line["title"]
+                document = line["document"]
+                obj = {
+                    "title": title,
+                    "h_score_cat": line['h_score_cat'],
+                    'pageid': line['pageid'],
+                    'revid': line['revid'],
+                    'description': line['description'],
+                    'categories': line['categories'],
+                }  # meta data
+
+                # select section from the document
+                sections = split_doc(
+                    document,
+                    "en",
+                    self.encoding,
+                    keep_end=False,
+                    keep_colon=False,
+                    MIN_LEN=self.min_len,
+                    MAX_LEN=self.max_len,
+                )
+                if len(sections) > 2:
+                    sections = sections[:-1]
+                section = random.sample(sections, 1)[0]  # always selecting one section
+                obj['reference'] = section
+
+                # make prompt
+                instruct = self.Q_GENERATION_PROMPT
+                prompt = instruct.format(wiki_title=title, wiki_document=section.strip())
+
+                # append prompt and data
+                Q_MAKING_PROMPTS.append(prompt)
+                all_data.append(obj)
+
+            print("Generating questions...")
+            results = thread_map(
+                lambda p: lm.call_vllm_api(p, self.q_generator, temperature=0.7, top_p=0.9),
+                Q_MAKING_PROMPTS,
+                max_workers=1,
+                desc=f"using {self.q_generator}",
+            )
+            for i, r in enumerate(results):
+                all_data[i]['prompt'] = r
+
+            # 2. CHECK ANSWERABILITY (same logic, just chunked)
+            print("Making prompts to check answerability...")
+            instruct = self.ANSWERABILITY_PROMPT
+            prompts_answerability = [
+                instruct.format(ref_document=obj['reference'], question=obj['prompt'])
+                for obj in all_data
+            ]
+            print("Generating answers...")
+            ans_results = thread_map(
+                lambda p: lm.generate(p, self.q_generator),
+                prompts_answerability,
+                max_workers=1,
+                desc=f"using {self.q_generator}",
+            )
+
+            print("Filtering out unanswerable questions...")
+            for i, answer in enumerate(ans_results):
+                answer_justified = self.justify_answerability(answer)
+                if answer_justified == -1:
+                    filter_count += 1
+                    continue  # filter out unanswerable questions
+
                 all_data[i]['answer'] = answer
                 QAs.append(all_data[i])
+                # Save immediately so progress survives interruptions.
                 with jsonlines.open(output_path, 'a') as writer:
                     writer.write(all_data[i])
 
-            if len(QAs) >= N:
-                print("Finished. Filter out {} unanswerable questions.".format(filter_count))
-                break
+                if len(QAs) >= N:
+                    print("Finished. Filter out {} unanswerable questions.".format(filter_count))
+                    break
+
         print(filter_count)
-            
         return QAs
 
 ############################################################################################################

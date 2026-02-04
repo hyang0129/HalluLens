@@ -357,8 +357,11 @@ def run_task_step(step, task, model, **kwargs):
     logger.info("=" * 80)
     
     # Use Popen to stream output in real-time
+    # Important: run tasks from the repository root so any relative paths
+    # (e.g., data/precise_qa/save/...) resolve consistently.
     process = subprocess.Popen(
         cmd,
+        cwd=str(project_root),
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,  # Combine stderr with stdout
