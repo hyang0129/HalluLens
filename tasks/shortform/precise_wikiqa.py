@@ -538,6 +538,7 @@ if __name__ == '__main__':
     parser.add_argument('--N', type=int, default=5000)
     parser.add_argument('--quick_debug_mode', action='store_true', default=False, help='if True, only evaluate first 50 questions')
     parser.add_argument('--q_generator', type=str, default='Llama-3.3-70B-Instruct-IQ3_M.gguf', help='model to use for question generation')
+    parser.add_argument('--max_workers_qgen', type=int, default=1, help='maximum concurrent requests for question generation (default: 1)')
 
     # Activation logging parameters
     parser.add_argument('--logger_type', type=str, default='lmdb', choices=['lmdb', 'json'], help='Activation logger type')
@@ -589,7 +590,8 @@ if __name__ == '__main__':
                         wiki_input_path=f"{base_path}/data/wiki_data/doc_goodwiki_h_score.jsonl",
                         N=remaining,
                         q_generator=args.q_generator,
-                        output_path=QA_OUTPUT_PATH)
+                        output_path=QA_OUTPUT_PATH,
+                        max_workers=args.max_workers_qgen)
                     print(f"✅ Generated {len(new_QAs)} new QA pairs")
                     print(f"📊 Total QA pairs now: {len(QAs) + len(new_QAs)}")
                 else:
@@ -602,7 +604,8 @@ if __name__ == '__main__':
                     wiki_input_path=f"{base_path}/data/wiki_data/doc_goodwiki_h_score.jsonl",
                     N=args.N,
                     q_generator=args.q_generator,
-                    output_path=QA_OUTPUT_PATH)
+                    output_path=QA_OUTPUT_PATH,
+                    max_workers=args.max_workers_qgen)
                 print(f"✅ Generated {len(QAs)} QA pairs")
 
             else:

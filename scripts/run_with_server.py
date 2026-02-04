@@ -30,9 +30,24 @@ Examples:
     # TriviaQA with custom dataset variant
     python scripts/run_with_server.py --step inference --task triviaqa --model meta-llama/Llama-3.1-8B-Instruct --dataset_variant unfiltered --split dev
 
+    # Natural Questions inference and evaluation
+    python scripts/run_with_server.py --step all --task naturalquestions --model meta-llama/Llama-3.1-8B-Instruct --N 1000
+
+    # Natural Questions with custom settings
+    python scripts/run_with_server.py --step inference --task naturalquestions --model meta-llama/Llama-3.1-8B-Instruct --max_tokens 64 --temperature 0.0
+
     # Custom server log file
     python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --log-file custom/server.log
-"""
+
+    # Question generation with increased concurrency (8 parallel requests)
+    python scripts/run_with_server.py --step generate --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --N 100 --max-workers-qgen 8
+
+    # LongWiki with concurrent question generation
+    python scripts/run_with_server.py --step generate --task longwiki --model meta-llama/Llama-3.1-70B-Instruct --N 50 --max-workers-qgen 4
+
+    # name for the q generator 
+     Llama-3.3-70B-Instruct-Q6_K_L 
+    """
 
 import argparse
 import os
@@ -100,6 +115,17 @@ def check_dependencies(task, step):
         output_dir = project_root / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
 
+    elif task == "naturalquestions":
+        # Check for Natural Questions data file
+        nq_data_file = project_root / "external" / "LLMsKnow" / "data" / "nq_wc_dataset.csv"
+        if not nq_data_file.exists():
+            missing_deps.append(f"Natural Questions data file: {nq_data_file}")
+            missing_deps.append("This file should be available in external/LLMsKnow/data/")
+
+        # Ensure output directory exists
+        output_dir = project_root / "output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
     if missing_deps:
         logger.error("Missing required dependencies:")
         for dep in missing_deps:
@@ -129,6 +155,8 @@ def get_task_name(task, **kwargs):
         dataset_variant = kwargs.get("dataset_variant", "unfiltered")
         split = kwargs.get("split", "dev")
         return f"triviaqa_{dataset_variant}_{split}"
+    elif task == "naturalquestions":
+        return "natural_questions"
     else:
         return task
 
@@ -197,6 +225,8 @@ def run_task_step(step, task, model, **kwargs):
             cmd.extend(["--qa_output_path", kwargs["qa_output_path"]])
         if kwargs.get("quick_debug_mode"):
             cmd.append("--quick_debug_mode")
+        if kwargs.get("max_workers_qgen"):
+            cmd.extend(["--max_workers_qgen", str(kwargs["max_workers_qgen"])])
 
         # Add activation logging parameters
         if kwargs.get("logger_type"):
@@ -249,6 +279,8 @@ def run_task_step(step, task, model, **kwargs):
             cmd.extend(["--max_tokens", str(kwargs["max_tokens"])])
         if kwargs.get("max_workers"):
             cmd.extend(["--max_workers", str(kwargs["max_workers"])])
+        if kwargs.get("max_workers_qgen"):
+            cmd.extend(["--max_workers_qgen", str(kwargs["max_workers_qgen"])])
 
         # Add activation logging parameters
         if kwargs.get("logger_type"):
@@ -341,6 +373,47 @@ def run_task_step(step, task, model, **kwargs):
         if not kwargs.get("resume_eval", True):
             cmd.append("--no-resume-eval")
 
+    elif task == "naturalquestions":
+        cmd = [sys.executable, "-m", "tasks.llmsknow.natural_questions"]
+
+        # Add step-specific flags (NQ only has inference and eval, no generate)
+        if step == "generate":
+            # Natural Questions doesn't have a generate step, skip
+            logger.info("Natural Questions doesn't have a generate step - skipping")
+            return None
+        elif step == "inference":
+            cmd.append("--do_inference")
+        elif step == "eval":
+            cmd.append("--do_eval")
+
+        # Add common parameters
+        cmd.extend([
+            "--model", model,
+            "--inference_method", kwargs.get("inference_method", "vllm"),
+            "--max_tokens", str(kwargs.get("max_tokens", 64)),
+            "--temperature", str(kwargs.get("temperature", 0.0)),
+            "--N", str(kwargs.get("N")) if kwargs.get("N") is not None else "--N"
+        ])
+
+        # Remove --N flag if N is None (process all samples)
+        if kwargs.get("N") is None:
+            # Remove the last two items (--N and its value)
+            cmd = cmd[:-2]
+
+        # Add optional parameters
+        if kwargs.get("data_dir"):
+            cmd.extend(["--data_dir", kwargs["data_dir"]])
+        if kwargs.get("output_dir"):
+            cmd.extend(["--output_dir", kwargs["output_dir"]])
+        if kwargs.get("generations_file_path"):
+            cmd.extend(["--generations_file_path", kwargs["generations_file_path"]])
+        if kwargs.get("eval_results_path"):
+            cmd.extend(["--eval_results_path", kwargs["eval_results_path"]])
+        if kwargs.get("log_file"):
+            cmd.extend(["--log_file", kwargs["log_file"]])
+        if kwargs.get("quick_debug_mode"):
+            cmd.append("--quick_debug_mode")
+
     else:
         raise ValueError(f"Unknown task: {task}")
 
@@ -400,7 +473,7 @@ def main():
     # Required arguments
     parser.add_argument("--step", required=True, choices=["generate", "inference", "eval", "all"],
                        help="Which step to run (or 'all' for all steps)")
-    parser.add_argument("--task", required=True, choices=["precisewikiqa", "longwiki", "mixedentities", "triviaqa"],
+    parser.add_argument("--task", required=True, choices=["precisewikiqa", "longwiki", "mixedentities", "triviaqa", "naturalquestions"],
                        help="Which task to run")
     parser.add_argument("--model", required=True, help="Model to use")
     
@@ -423,6 +496,7 @@ def main():
     parser.add_argument("--q_generator", help="Question generator model")
     parser.add_argument("--qa_output_path", help="Custom QA output path")
     parser.add_argument("--quick_debug_mode", action="store_true", help="Quick debug mode (first 5 questions)")
+    parser.add_argument("--max-workers-qgen", type=int, default=1, help="Maximum concurrent requests for question generation (default: 1)")
 
     # LongWiki specific
     parser.add_argument("--db_path", help="Database path for longwiki")
@@ -442,6 +516,10 @@ def main():
     parser.add_argument("--split", default="dev", help="TriviaQA split (train/dev)")
     parser.add_argument("--data_dir", help="Directory containing TriviaQA data files")
     parser.add_argument("--auto_download", action="store_true", default=True, help="Automatically download TriviaQA data if not found")
+
+    # Natural Questions specific
+    parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature for Natural Questions")
+    parser.add_argument("--output_dir", help="Base output directory")
 
     # Resume control
     parser.add_argument("--no-resume", action="store_true", help="Disable automatic resume from existing generations file (inference and evaluation)")
@@ -596,6 +674,7 @@ def main():
             "q_generator": args.q_generator,
             "qa_output_path": args.qa_output_path,
             "quick_debug_mode": args.quick_debug_mode,
+            "max_workers_qgen": args.max_workers_qgen,
             # Activation logging parameters
             "logger_type": args.logger_type,
             "activations_path": args.activations_path,

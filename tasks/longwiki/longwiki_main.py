@@ -77,6 +77,7 @@ if __name__ == '__main__':
     parser.add_argument('--k', type=int, default=32)
     parser.add_argument('--max_tokens', type=int, default=1024)
     parser.add_argument('--max_workers', type=int, default=64)
+    parser.add_argument('--max_workers_qgen', type=int, default=1, help='maximum concurrent requests for question generation (default: 1)')
 
     # Resume control
     parser.add_argument('--no-resume', action='store_true', help='Disable automatic resume from existing generations file (inference)')
@@ -108,7 +109,8 @@ if __name__ == '__main__':
                         N=args.N,
                         q_generator=args.q_generator, # "meta-llama/Meta-Llama-3.1-405B-Instruct", 
                         output_path=QA_OUTPUT_PATH,
-                        from_scratch=False
+                        from_scratch=False,
+                        max_workers=args.max_workers_qgen
                     )
                 all_prompts = pd.DataFrame(QAs)
             else:

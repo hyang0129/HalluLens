@@ -84,11 +84,12 @@ Question: {question}"""
 
 
 class WikiQA:
-    def __init__(self, q_generator_path, task):
+    def __init__(self, q_generator_path, task, max_workers=1):
         self.task = task # 'longform' or 'precise'
         assert task in ['longform', 'precise']
 
         self.q_generator = q_generator_path
+        self.max_workers = max_workers
         self.Q_FAIL_TIME = 3 if task == 'precise' else 2
         self.min_len = 200 if task == 'precise' else 500
         self.max_len = 500 if task == 'precise' else 750
@@ -232,7 +233,7 @@ class WikiQA:
             results = thread_map(
                 lambda p: lm.call_vllm_api(p, self.q_generator, temperature=0.7, top_p=0.9),
                 Q_MAKING_PROMPTS,
-                max_workers=1,
+                max_workers=self.max_workers,
                 desc=f"using {self.q_generator}",
             )
             for i, r in enumerate(results):
@@ -249,7 +250,7 @@ class WikiQA:
             ans_results = thread_map(
                 lambda p: lm.generate(p, self.q_generator),
                 prompts_answerability,
-                max_workers=1,
+                max_workers=self.max_workers,
                 desc=f"using {self.q_generator}",
             )
 
@@ -280,10 +281,12 @@ def precise_QA_generation_run_batch(
         q_generator="meta-llama/Meta-Llama-3.1-70B-Instruct",
         output_path="",
         from_scratch=False,
+        max_workers=1,
     ):
     
     print("Wiki Source ={}...".format(wiki_input_path))
-    qa = WikiQA(q_generator, task='precise')
+    print(f"Question generation concurrency: max_workers={max_workers}")
+    qa = WikiQA(q_generator, task='precise', max_workers=max_workers)
 
     wiki_data_all = pd.read_json(wiki_input_path, orient='records', lines=True)
 
@@ -315,9 +318,11 @@ def longform_QA_generation_run_batch(
         output_path="",
         from_scratch=False,
         low_level=5,
-        high_level=10
+        high_level=10,
+        max_workers=1,
     ):
-    qa = WikiQA(q_generator, task='longform')
+    print(f"Question generation concurrency: max_workers={max_workers}")
+    qa = WikiQA(q_generator, task='longform', max_workers=max_workers)
 
     print("START TO GENERATE QUESTION N={}...".format(N))
     print("Wiki Source ={}...".format(wiki_input_path))
