@@ -24,6 +24,114 @@ import uvicorn
 from activation_logging.activations_logger import ActivationsLogger, JsonActivationsLogger
 from llama_cpp import Llama  # Import for llama.cpp Python bindings
 
+
+# -----------------------------------------------------------------------------
+# Short-form response controls
+# -----------------------------------------------------------------------------
+# The client in utils/lm.py may send large max_tokens defaults for some tasks
+# (e.g., PreciseWikiQA question/answerability generation). To avoid wasting
+# compute, we cap max_tokens and shrink responses for prompts that explicitly
+# request short outputs.
+
+SHORTFORM_MAX_RESPONSE_CHARS = int(os.environ.get("SHORTFORM_MAX_RESPONSE_CHARS", "500"))
+SHORTFORM_QUESTION_MAX_TOKENS = int(os.environ.get("SHORTFORM_QUESTION_MAX_TOKENS", "96"))
+SHORTFORM_ANSWER_MAX_TOKENS = int(os.environ.get("SHORTFORM_ANSWER_MAX_TOKENS", "48"))
+SHORTFORM_ONESENT_MAX_TOKENS = int(os.environ.get("SHORTFORM_ONESENT_MAX_TOKENS", "96"))
+
+
+def _detect_shortform_intent(prompt: str) -> Optional[str]:
+    """Detect whether the prompt is requesting a short-form output.
+
+    Returns one of: "question", "answer", "one_sentence", or None.
+    """
+    prompt_l = (prompt or "").lower()
+    if "reply with the question only" in prompt_l or "question only" in prompt_l:
+        return "question"
+    if "reply with the answer only" in prompt_l or "answer only" in prompt_l:
+        return "answer"
+    if "answer in one sentence" in prompt_l:
+        return "one_sentence"
+    return None
+
+
+def _cap_max_tokens(requested_max_tokens: int, intent: Optional[str]) -> int:
+    """Cap max_tokens for short-form requests to reduce wasted generation."""
+    if not intent:
+        return requested_max_tokens
+
+    if intent == "question":
+        cap = SHORTFORM_QUESTION_MAX_TOKENS
+    elif intent == "answer":
+        cap = SHORTFORM_ANSWER_MAX_TOKENS
+    elif intent == "one_sentence":
+        cap = SHORTFORM_ONESENT_MAX_TOKENS
+    else:
+        cap = requested_max_tokens
+
+    # Never increase the requested value.
+    try:
+        requested = int(requested_max_tokens)
+    except Exception:
+        requested = SHORTFORM_ONESENT_MAX_TOKENS
+    return min(requested, cap)
+
+
+def _clean_prefix(text: str, prefixes: List[str]) -> str:
+    text_stripped = (text or "").strip()
+    text_l = text_stripped.lower()
+    for p in prefixes:
+        p_l = p.lower()
+        if text_l.startswith(p_l):
+            # Remove the prefix while preserving original casing after it.
+            return text_stripped[len(p):].lstrip(" \t:-")
+    return text_stripped
+
+
+def _shrink_shortform_response(response_text: str, intent: Optional[str], max_chars: int) -> str:
+    """Shrink short-form responses to be <= max_chars.
+
+    Uses heuristics to extract the likely question/answer line if the model
+    echoed the reference passage or added extra formatting.
+    """
+    if not intent or not response_text:
+        return (response_text or "").strip()
+
+    if len(response_text) <= max_chars:
+        return response_text.strip()
+
+    raw = response_text.strip()
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if not lines:
+        return raw[:max_chars]
+
+    chosen = raw
+
+    if intent == "question":
+        # Prefer the last line that looks like a question.
+        question_lines = [ln for ln in lines if "?" in ln]
+        chosen = question_lines[-1] if question_lines else lines[-1]
+        chosen = _clean_prefix(chosen, ["question:", "q:", "prompt:"])
+    elif intent == "answer":
+        chosen = lines[0]
+        # Common formats: "Answer: X", "A: X"
+        chosen = _clean_prefix(chosen, ["answer:", "a:"])
+        # If the answer is on a later line, try to find it.
+        for ln in lines:
+            ln_l = ln.lower()
+            if ln_l.startswith("answer") or ln_l.startswith("a:"):
+                chosen = _clean_prefix(ln, ["answer:", "a:"])
+        chosen = chosen.strip()
+    elif intent == "one_sentence":
+        chosen = lines[0]
+
+    # Remove surrounding quotes if present.
+    if (chosen.startswith('"') and chosen.endswith('"')) or (chosen.startswith("'") and chosen.endswith("'")):
+        chosen = chosen[1:-1].strip()
+
+    if len(chosen) > max_chars:
+        chosen = chosen[:max_chars].rstrip()
+    return chosen
+
 # Configure logger to use the same log file as parent process if specified
 if "SERVER_LOG_FILE" in os.environ:
     logger.remove()  # Remove default handler
@@ -1314,7 +1422,13 @@ def completions(request: CompletionRequest, http_request: Request):
     logger.info(f"[{req_id}] Client request id (sha256(prompt)[:8]): {client_req_id}")
     logger.info(f"[{req_id}] Client: {http_request.client.host if http_request.client else 'unknown'}")
     logger.info(f"[{req_id}] Prompt length: {len(request.prompt)} characters")
-    logger.info(f"[{req_id}] Max tokens: {request.max_tokens}")
+    intent = _detect_shortform_intent(request.prompt)
+    effective_max_tokens = _cap_max_tokens(request.max_tokens, intent)
+    logger.info(f"[{req_id}] Max tokens (requested): {request.max_tokens}")
+    if effective_max_tokens != request.max_tokens:
+        logger.info(
+            f"[{req_id}] Capping max_tokens for intent={intent}: {request.max_tokens} -> {effective_max_tokens}"
+        )
     
     # Track request start
     track_request_start(req_id, "completions", model_name)
@@ -1339,13 +1453,24 @@ def completions(request: CompletionRequest, http_request: Request):
         inference_start = time.time()
         response_text, model_outputs, input_length, trim_pos = run_inference(
             prompt=request.prompt,
-            max_tokens=request.max_tokens,
+            max_tokens=effective_max_tokens,
             temperature=params['temperature'],
             top_p=params['top_p'],
             model_name=model_name,
             auth_token=request.auth_token
         )
         logger.info(f"[{req_id}] Inference time: {time.time() - inference_start:.2f}s")
+
+    shrunk = _shrink_shortform_response(
+        response_text,
+        intent=intent,
+        max_chars=SHORTFORM_MAX_RESPONSE_CHARS,
+    )
+    if shrunk != response_text:
+        logger.info(
+            f"[{req_id}] Shrunk response for intent={intent}: {len(response_text)} -> {len(shrunk)} chars"
+        )
+        response_text = shrunk
     
     # Log to LMDB only if not a GGUF model (which doesn't provide activations)
     multi_sample = bool(
@@ -1438,6 +1563,14 @@ def chat_completions(request: ChatCompletionRequest, http_request: Request):
             prompt = "\n".join([f"{msg.role}: {msg.content}" for msg in request.messages])
         logger.info(f"[{request_id}] Converted {len(request.messages)} messages to prompt of {len(prompt)} characters")
 
+        intent = _detect_shortform_intent(prompt)
+        effective_max_tokens = _cap_max_tokens(request.max_tokens, intent)
+        logger.info(f"[{request_id}] Max tokens (requested): {request.max_tokens}")
+        if effective_max_tokens != request.max_tokens:
+            logger.info(
+                f"[{request_id}] Capping max_tokens for intent={intent}: {request.max_tokens} -> {effective_max_tokens}"
+            )
+
         # Apply any overwrites to request parameters
         params = apply_overwrites({
             'temperature': request.temperature,
@@ -1472,7 +1605,7 @@ def chat_completions(request: ChatCompletionRequest, http_request: Request):
             inference_start = time.time()
             response_text, model_outputs, input_length, trim_pos = run_inference(
                 prompt=prompt,
-                max_tokens=request.max_tokens,
+                max_tokens=effective_max_tokens,
                 temperature=params['temperature'],
                 top_p=params['top_p'],
                 model_name=model_name,
@@ -1480,6 +1613,17 @@ def chat_completions(request: ChatCompletionRequest, http_request: Request):
             )
 
             logger.info(f"[{request_id}] Inference completed in {time.time() - inference_start:.2f} seconds")
+
+        shrunk = _shrink_shortform_response(
+            response_text,
+            intent=intent,
+            max_chars=SHORTFORM_MAX_RESPONSE_CHARS,
+        )
+        if shrunk != response_text:
+            logger.info(
+                f"[{request_id}] Shrunk response for intent={intent}: {len(response_text)} -> {len(shrunk)} chars"
+            )
+            response_text = shrunk
 
         # Log activation logging
         if not model_name.endswith('.gguf') and model_outputs is not None:
