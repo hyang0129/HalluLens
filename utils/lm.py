@@ -15,6 +15,8 @@ from loguru import logger
 import hashlib
 import json
 import requests
+import threading
+from urllib.parse import urlparse
 
 class SampleSkippedException(Exception):
     """Exception raised when a sample is skipped due to repeated failures."""
@@ -38,6 +40,17 @@ progress_stats = {
 # Global flag to enable/disable server restart on timeout
 ENABLE_SERVER_RESTART = os.environ.get("ENABLE_SERVER_RESTART", "true").lower() == "true"
 SERVER_RESTART_WAIT_TIME = int(os.environ.get("SERVER_RESTART_WAIT_TIME", "30"))  # seconds to wait for server restart
+
+# If restart fails (or restart budget exhausted), abort the run instead of continuing
+# to burn time on repeated timeouts.
+FAIL_FAST_ON_RESTART_FAILURE = os.environ.get("FAIL_FAST_ON_RESTART_FAILURE", "true").lower() == "true"
+
+# Maximum number of server restarts per client process
+MAX_SERVER_RESTARTS = int(os.environ.get("MAX_SERVER_RESTARTS", "10"))
+
+_restart_lock = threading.Lock()
+_restart_in_progress = False
+_restart_count = 0
 
 # Global server manager instance (set when server is started in run_exp)
 _global_server_manager = None
@@ -136,26 +149,45 @@ class ServerManager:
 
         logger.info(f"Server command: {' '.join(cmd)}")
 
-        # Start server process in a new process group (Unix) for easier cleanup
-        if hasattr(os, 'setsid'):
-            # Unix-like systems: create new process group
-            self.server_process = subprocess.Popen(
-                cmd,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                preexec_fn=os.setsid
-            )
-        else:
-            # Windows: regular process creation
-            self.server_process = subprocess.Popen(
-                cmd,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
+        # Redirect child stdout/stderr to avoid deadlocks from unconsumed PIPE buffers.
+        # Prefer the explicit log file if provided, otherwise silence output.
+        log_f = None
+        stdout_target = subprocess.DEVNULL
+        stderr_target = subprocess.DEVNULL
+        if self.log_file_path:
+            log_f = open(self.log_file_path, "a", encoding="utf-8")
+            stdout_target = log_f
+            stderr_target = log_f
+
+        try:
+            # Start server process in a new process group (Unix) for easier cleanup
+            if hasattr(os, 'setsid'):
+                # Unix-like systems: create new process group
+                self.server_process = subprocess.Popen(
+                    cmd,
+                    env=env,
+                    stdout=stdout_target,
+                    stderr=stderr_target,
+                    text=True,
+                    preexec_fn=os.setsid
+                )
+            else:
+                # Windows: regular process creation
+                self.server_process = subprocess.Popen(
+                    cmd,
+                    env=env,
+                    stdout=stdout_target,
+                    stderr=stderr_target,
+                    text=True
+                )
+        finally:
+            # Keep the log file handle open only long enough to hand it to the child.
+            # Popen duplicates the handle; closing here is safe.
+            if log_f:
+                try:
+                    log_f.close()
+                except Exception:
+                    pass
 
         # Wait for server to be ready
         self._wait_for_server()
@@ -318,14 +350,46 @@ def check_server_health(port, timeout=5):
         bool: True if server is healthy, False otherwise
     """
     try:
-        health_url = f"{port}/health"
+        root_url = _server_root_url(port)
+        health_url = f"{root_url}/health"
         response = requests.get(health_url, timeout=timeout)
         return response.status_code == 200
     except Exception as e:
         logger.debug(f"Health check failed: {e}")
         return False
 
-def restart_server(port, wait_time=30):
+def _server_root_url(api_base_url: str) -> str:
+    """Return the scheme://host:port portion of an OpenAI-style base_url.
+
+    The client uses OpenAI-compatible base URLs that typically end with `/v1`.
+    Control endpoints like `/health` and `/restart` are mounted at the root.
+    """
+    if not api_base_url:
+        return ""
+
+    try:
+        parsed = urlparse(api_base_url)
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}"
+    except Exception:
+        pass
+
+    # Fallback: strip a trailing /v1 or any path components.
+    base = str(api_base_url).strip()
+    if "/v1" in base:
+        base = base.split("/v1", 1)[0]
+    return base.rstrip("/")
+
+
+def _parse_host_port(root_url: str):
+    """Parse host/port from a root URL like http://0.0.0.0:8000."""
+    parsed = urlparse(root_url)
+    host = parsed.hostname
+    port = parsed.port
+    return host, port
+
+
+def restart_server(port, wait_time=30, model=None):
     """
     Restart the server by killing and restarting the process.
 
@@ -342,48 +406,103 @@ def restart_server(port, wait_time=30):
     try:
         logger.warning(f"Attempting to restart server at {port}...")
 
-        # Try to use ServerManager if available (preferred method)
-        server_manager = get_server_manager()
+        # If another thread is already restarting, wait for it to finish.
+        with _restart_lock:
+            global _restart_in_progress
+            if _restart_in_progress:
+                logger.warning("Server restart already in progress; waiting for server to recover...")
 
-        if server_manager:
-            logger.info("Using ServerManager to restart server (process kill + restart)...")
-            server_manager.restart_server()
-            logger.success("Server restarted successfully via ServerManager")
-            return True
-        else:
-            logger.warning("ServerManager not available, falling back to REST endpoint method")
-
-        # Fallback: Try calling the /restart endpoint (won't work if server is truly hung)
-        logger.info("Attempting restart via /restart endpoint (may not work if server is hung)...")
-        restart_url = f"{port}/restart"
-
-        try:
-            response = requests.post(restart_url, timeout=5)
-            if response.status_code == 200:
-                logger.info("Restart request sent successfully")
-            else:
-                logger.warning(f"Restart request returned status {response.status_code}")
-        except Exception as e:
-            logger.warning(f"Failed to send restart request (server may be unresponsive): {e}")
-            logger.error("Cannot restart server - no ServerManager and REST endpoint failed")
+        if _restart_in_progress:
+            start_time = time.time()
+            while time.time() - start_time < wait_time:
+                if check_server_health(port):
+                    elapsed = time.time() - start_time
+                    logger.success(f"Server became healthy after {elapsed:.1f}s (restart handled by another thread)")
+                    return True
+                time.sleep(2)
+            logger.error(f"Server did not become healthy within {wait_time}s while restart was in progress")
             return False
 
-        # Wait for server to go down
-        logger.info("Waiting for server to shut down...")
-        time.sleep(5)
+        # Enforce restart budget.
+        with _restart_lock:
+            global _restart_count
+            if _restart_count >= MAX_SERVER_RESTARTS:
+                logger.error(
+                    f"Restart budget exhausted ({_restart_count}/{MAX_SERVER_RESTARTS}). "
+                    "Not attempting further restarts this run."
+                )
+                return False
 
-        # Wait for server to come back up
-        logger.info(f"Waiting up to {wait_time}s for server to restart...")
-        start_time = time.time()
-        while time.time() - start_time < wait_time:
-            if check_server_health(port):
-                elapsed = time.time() - start_time
-                logger.success(f"Server restarted successfully after {elapsed:.1f}s")
+            _restart_count += 1
+            attempt_no = _restart_count
+            _restart_in_progress = True
+
+        logger.warning(f"Server restart attempt {attempt_no}/{MAX_SERVER_RESTARTS}")
+
+        try:
+            # Preferred: use a pre-configured ServerManager (process kill + restart)
+            server_manager = get_server_manager()
+            if server_manager:
+                logger.info("Using ServerManager to restart server (process kill + restart)...")
+                server_manager.restart_server()
+                logger.success("Server restarted successfully via ServerManager")
                 return True
+
+            # Client-controlled kill+respawn path (works even if server API is hung)
+            root_url = _server_root_url(port)
+            host, port_num = _parse_host_port(root_url)
+
+            if not host or not port_num:
+                logger.error(f"Could not parse host/port from base URL: {port} (root: {root_url})")
+                return False
+
+            logger.warning(
+                "No ServerManager registered; performing client-side kill+respawn "
+                f"on {host}:{port_num}"
+            )
+
+            # Kill anything currently bound to the port.
+            kill_process_on_port(port_num)
             time.sleep(2)
 
-        logger.error(f"Server did not restart within {wait_time}s")
-        return False
+            if not model:
+                logger.error(
+                    "Cannot respawn server without a model identifier. "
+                    "Provide model=... to restart_server(), or run tasks via scripts/run_with_server.py."
+                )
+                # Best-effort fallback: request /restart if the server is responsive.
+                try:
+                    restart_url = f"{root_url}/restart"
+                    requests.post(restart_url, timeout=5)
+                except Exception:
+                    pass
+                return False
+
+            logger_type = os.environ.get("ACTIVATION_LOGGER_TYPE", "lmdb")
+            activations_path = os.environ.get("ACTIVATION_STORAGE_PATH")
+            log_file_path = os.environ.get("SERVER_LOG_FILE")
+
+            logger.info(
+                f"Respawning server with model={model}, logger_type={logger_type}, "
+                f"activations_path={activations_path}, log_file={log_file_path}"
+            )
+
+            new_manager = ServerManager(
+                model=model,
+                host=host,
+                port=port_num,
+                logger_type=logger_type,
+                activations_path=activations_path,
+                log_file_path=log_file_path,
+            )
+            new_manager.start_server()
+            set_server_manager(new_manager)
+
+            logger.success("Server restarted successfully via client-side kill+respawn")
+            return True
+        finally:
+            with _restart_lock:
+                _restart_in_progress = False
 
     except Exception as e:
         logger.error(f"Error during server restart: {e}")
@@ -622,12 +741,21 @@ def call_vllm_api(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512, por
                     # Trigger server restart on first timeout if enabled
                     if ENABLE_SERVER_RESTART:
                         logger.warning(f"[CLIENT {request_id}] First timeout detected - triggering server restart")
-                        if restart_server(port, wait_time=SERVER_RESTART_WAIT_TIME):
+                        if restart_server(port, wait_time=SERVER_RESTART_WAIT_TIME, model=model):
                             logger.success(f"[CLIENT {request_id}] Server restarted successfully, will retry request")
                             # Skip the normal delay since we already waited for restart
                             continue
                         else:
-                            logger.error(f"[CLIENT {request_id}] Server restart failed, continuing with normal retry")
+                            logger.error(f"[CLIENT {request_id}] Server restart failed")
+                            if FAIL_FAST_ON_RESTART_FAILURE:
+                                raise RuntimeError(
+                                    "Server restart failed or restart budget exhausted; "
+                                    "aborting run to avoid repeated timeouts. "
+                                    "Set FAIL_FAST_ON_RESTART_FAILURE=false to keep skipping samples instead."
+                                )
+                            logger.error(
+                                f"[CLIENT {request_id}] FAIL_FAST_ON_RESTART_FAILURE=false; continuing with normal retry"
+                            )
 
                 time.sleep(delay)
             else:
