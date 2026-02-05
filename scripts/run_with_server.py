@@ -190,105 +190,180 @@ def run_task_step(step, task, model, **kwargs):
 
     # Build command based on task and step
     if task == "precisewikiqa":
-        cmd = [sys.executable, "-m", "tasks.shortform.precise_wikiqa"]
+        # If the user requested TensorRT-LLM for question generation, bypass the
+        # Meta-authored task's internal qgen (which uses utils.lm/vLLM) and instead
+        # produce the same QA JSONL output directly.
+        if step == "generate" and kwargs.get("qgen_backend") == "tensorrt-llm":
+            wiki_src = kwargs.get("wiki_src", "goodwiki")
+            mode = kwargs.get("mode", "dynamic")
+            model_name = model.split("/")[-1]
+            qa_output_path = kwargs.get("qa_output_path")
+            if not qa_output_path:
+                qa_output_path = f"data/precise_qa/save/qa_{wiki_src}_{model_name}_{mode}.jsonl"
+
+            cmd = [
+                sys.executable,
+                "-m",
+                "question_generation.wikiqa_trtllm",
+                "--task",
+                "precise",
+                "--wiki_input_path",
+                str(project_root / "data" / "wiki_data" / "doc_goodwiki_h_score.jsonl"),
+                "--output_path",
+                qa_output_path,
+                "--N",
+                str(kwargs.get("N", 1)),
+                "--q_model",
+                (kwargs.get("q_generator") or "nvidia/Llama-3.3-70B-Instruct-FP8"),
+                "--seed",
+                str(kwargs.get("seed", 1)),
+            ]
+            # Keep chunk size / sampling defaults inside the module.
+            if kwargs.get("max_workers_qgen"):
+                # Currently implemented as batching, not threads; accept the flag
+                # for forwards compatibility without breaking CLI.
+                pass
+        else:
+            cmd = [sys.executable, "-m", "tasks.shortform.precise_wikiqa"]
+
+        is_precise_task_entrypoint = "tasks.shortform.precise_wikiqa" in " ".join(cmd)
 
         # Add step-specific flags
-        if step == "generate":
-            cmd.append("--do_generate_prompt")
-        elif step == "inference":
-            cmd.append("--do_inference")
-        elif step == "eval":
-            cmd.append("--do_eval")
+        if is_precise_task_entrypoint:
+            if step == "generate":
+                cmd.append("--do_generate_prompt")
+            elif step == "inference":
+                cmd.append("--do_inference")
+            elif step == "eval":
+                cmd.append("--do_eval")
 
-        # Add common parameters
-        cmd.extend([
-            "--model", model,
-            "--wiki_src", kwargs.get("wiki_src", "goodwiki"),
-            "--mode", kwargs.get("mode", "dynamic"),
-            "--inference_method", kwargs.get("inference_method", "vllm"),
-            "--max_inference_tokens", str(kwargs.get("max_inference_tokens", 256)),
-            "--N", str(kwargs.get("N", 1))
-        ])
+        # Add common parameters (only for the Meta task entrypoint)
+        if is_precise_task_entrypoint:
+            cmd.extend([
+                "--model", model,
+                "--wiki_src", kwargs.get("wiki_src", "goodwiki"),
+                "--mode", kwargs.get("mode", "dynamic"),
+                "--inference_method", kwargs.get("inference_method", "vllm"),
+                "--max_inference_tokens", str(kwargs.get("max_inference_tokens", 256)),
+                "--N", str(kwargs.get("N", 1))
+            ])
 
-        # Add optional parameters
-        if kwargs.get("generations_file_path"):
-            cmd.extend(["--generations_file_path", kwargs["generations_file_path"]])
-        if kwargs.get("eval_results_path"):
-            cmd.extend(["--eval_results_path", kwargs["eval_results_path"]])
-        # Use --model for question generation if q_generator not explicitly specified
-        if step == "generate":
-            q_gen = kwargs.get("q_generator") or model
-            cmd.extend(["--q_generator", q_gen])
-        elif kwargs.get("q_generator"):
-            cmd.extend(["--q_generator", kwargs["q_generator"]])
-        if kwargs.get("qa_output_path"):
-            cmd.extend(["--qa_output_path", kwargs["qa_output_path"]])
-        if kwargs.get("quick_debug_mode"):
-            cmd.append("--quick_debug_mode")
-        if kwargs.get("max_workers_qgen"):
-            cmd.extend(["--max_workers_qgen", str(kwargs["max_workers_qgen"])])
+        # Add optional parameters (only for the Meta task entrypoint)
+        if is_precise_task_entrypoint:
+            if kwargs.get("generations_file_path"):
+                cmd.extend(["--generations_file_path", kwargs["generations_file_path"]])
+            if kwargs.get("eval_results_path"):
+                cmd.extend(["--eval_results_path", kwargs["eval_results_path"]])
+            # Use --model for question generation if q_generator not explicitly specified
+            if step == "generate":
+                q_gen = kwargs.get("q_generator") or model
+                cmd.extend(["--q_generator", q_gen])
+            elif kwargs.get("q_generator"):
+                cmd.extend(["--q_generator", kwargs["q_generator"]])
+            if kwargs.get("qa_output_path"):
+                cmd.extend(["--qa_output_path", kwargs["qa_output_path"]])
+            if kwargs.get("quick_debug_mode"):
+                cmd.append("--quick_debug_mode")
+            if kwargs.get("max_workers_qgen"):
+                cmd.extend(["--max_workers_qgen", str(kwargs["max_workers_qgen"])])
 
-        # Add activation logging parameters
-        if kwargs.get("logger_type"):
-            cmd.extend(["--logger_type", kwargs["logger_type"]])
-        if kwargs.get("activations_path"):
-            cmd.extend(["--activations_path", kwargs["activations_path"]])
-        if kwargs.get("log_file"):
-            cmd.extend(["--log_file", kwargs["log_file"]])
+            # Add activation logging parameters
+            if kwargs.get("logger_type"):
+                cmd.extend(["--logger_type", kwargs["logger_type"]])
+            if kwargs.get("activations_path"):
+                cmd.extend(["--activations_path", kwargs["activations_path"]])
+            if kwargs.get("log_file"):
+                cmd.extend(["--log_file", kwargs["log_file"]])
 
-        # Add resume control
-        if not kwargs.get("resume", True):
-            cmd.append("--no-resume")
-        if not kwargs.get("resume_eval", True):
-            cmd.append("--no-resume-eval")
+            # Add resume control
+            if not kwargs.get("resume", True):
+                cmd.append("--no-resume")
+            if not kwargs.get("resume_eval", True):
+                cmd.append("--no-resume-eval")
 
     elif task == "longwiki":
-        cmd = [sys.executable, "-m", "tasks.longwiki.longwiki_main"]
+        if step == "generate" and kwargs.get("qgen_backend") == "tensorrt-llm":
+            model_name = model.split("/")[-1]
+            qa_output_path = f"data/longwiki/save/longwiki_{model_name}.jsonl"
+            if kwargs.get("qa_output_path"):
+                qa_output_path = kwargs["qa_output_path"]
+
+            cmd = [
+                sys.executable,
+                "-m",
+                "question_generation.wikiqa_trtllm",
+                "--task",
+                "longform",
+                "--wiki_input_path",
+                str(project_root / "data" / "wiki_data" / "doc_goodwiki_h_score.jsonl"),
+                "--output_path",
+                qa_output_path,
+                "--N",
+                str(kwargs.get("N", 1)),
+                "--q_model",
+                (kwargs.get("q_generator") or "nvidia/Llama-3.3-70B-Instruct-FP8"),
+                "--seed",
+                str(kwargs.get("seed", 1)),
+                "--min_ref_chars",
+                "500",
+                "--max_ref_chars",
+                "750",
+                "--low_level",
+                "5",
+                "--high_level",
+                "10",
+            ]
+        else:
+            cmd = [sys.executable, "-m", "tasks.longwiki.longwiki_main"]
+
+        is_longwiki_task_entrypoint = "tasks.longwiki.longwiki_main" in " ".join(cmd)
 
         # Add step-specific flags
-        if step == "generate":
-            cmd.append("--do_generate_prompt")
-        elif step == "inference":
-            cmd.append("--do_inference")
-        elif step == "eval":
-            cmd.append("--do_eval")
+        if is_longwiki_task_entrypoint:
+            if step == "generate":
+                cmd.append("--do_generate_prompt")
+            elif step == "inference":
+                cmd.append("--do_inference")
+            elif step == "eval":
+                cmd.append("--do_eval")
 
-        # Add common parameters
-        cmd.extend([
-            "--model", model,
-            "--exp_mode", "longwiki",
-            "--inference_method", kwargs.get("inference_method", "vllm"),
-            "--N", str(kwargs.get("N", 5))
-        ])
+        if is_longwiki_task_entrypoint:
+            # Add common parameters
+            cmd.extend([
+                "--model", model,
+                "--exp_mode", "longwiki",
+                "--inference_method", kwargs.get("inference_method", "vllm"),
+                "--N", str(kwargs.get("N", 5))
+            ])
 
-        # Add required parameters for longwiki
-        db_path = kwargs.get("db_path", "data/wiki_data/.cache/enwiki-20230401.db")
-        cmd.extend(["--db_path", db_path])
+            # Add required parameters for longwiki
+            db_path = kwargs.get("db_path", "data/wiki_data/.cache/enwiki-20230401.db")
+            cmd.extend(["--db_path", db_path])
 
-        if kwargs.get("q_generator"):
-            cmd.extend(["--q_generator", kwargs["q_generator"]])
-        if kwargs.get("claim_extractor"):
-            cmd.extend(["--claim_extractor", kwargs["claim_extractor"]])
-        if kwargs.get("abstain_evaluator"):
-            cmd.extend(["--abstain_evaluator", kwargs["abstain_evaluator"]])
-        if kwargs.get("verifier"):
-            cmd.extend(["--verifier", kwargs["verifier"]])
-        if kwargs.get("k"):
-            cmd.extend(["--k", str(kwargs["k"])])
-        if kwargs.get("max_tokens"):
-            cmd.extend(["--max_tokens", str(kwargs["max_tokens"])])
-        if kwargs.get("max_workers"):
-            cmd.extend(["--max_workers", str(kwargs["max_workers"])])
-        if kwargs.get("max_workers_qgen"):
-            cmd.extend(["--max_workers_qgen", str(kwargs["max_workers_qgen"])])
+            if kwargs.get("q_generator"):
+                cmd.extend(["--q_generator", kwargs["q_generator"]])
+            if kwargs.get("claim_extractor"):
+                cmd.extend(["--claim_extractor", kwargs["claim_extractor"]])
+            if kwargs.get("abstain_evaluator"):
+                cmd.extend(["--abstain_evaluator", kwargs["abstain_evaluator"]])
+            if kwargs.get("verifier"):
+                cmd.extend(["--verifier", kwargs["verifier"]])
+            if kwargs.get("k"):
+                cmd.extend(["--k", str(kwargs["k"])])
+            if kwargs.get("max_tokens"):
+                cmd.extend(["--max_tokens", str(kwargs["max_tokens"])])
+            if kwargs.get("max_workers"):
+                cmd.extend(["--max_workers", str(kwargs["max_workers"])])
+            if kwargs.get("max_workers_qgen"):
+                cmd.extend(["--max_workers_qgen", str(kwargs["max_workers_qgen"])])
 
-        # Add activation logging parameters
-        if kwargs.get("logger_type"):
-            cmd.extend(["--logger_type", kwargs["logger_type"]])
-        if kwargs.get("activations_path"):
-            cmd.extend(["--activations_path", kwargs["activations_path"]])
-        if kwargs.get("log_file"):
-            cmd.extend(["--log_file", kwargs["log_file"]])
+            # Add activation logging parameters
+            if kwargs.get("logger_type"):
+                cmd.extend(["--logger_type", kwargs["logger_type"]])
+            if kwargs.get("activations_path"):
+                cmd.extend(["--activations_path", kwargs["activations_path"]])
+            if kwargs.get("log_file"):
+                cmd.extend(["--log_file", kwargs["log_file"]])
 
     elif task == "mixedentities":
         cmd = [sys.executable, "-m", "tasks.refusal_test.nonsense_mixed_entities"]
@@ -494,6 +569,12 @@ def main():
     parser.add_argument("--generations_file_path", help="Path for generations file")
     parser.add_argument("--eval_results_path", help="Path for evaluation results (default: co-located with generations file)")
     parser.add_argument("--q_generator", help="Question generator model")
+    parser.add_argument(
+        "--qgen-backend",
+        default=os.environ.get("HALLULENS_QGEN_BACKEND", "vllm"),
+        choices=["vllm", "tensorrt-llm"],
+        help="Backend used only for question generation (default: vllm).",
+    )
     parser.add_argument("--qa_output_path", help="Custom QA output path")
     parser.add_argument("--quick_debug_mode", action="store_true", help="Quick debug mode (first 5 questions)")
     parser.add_argument("--max-workers-qgen", type=int, default=1, help="Maximum concurrent requests for question generation (default: 1)")
@@ -546,9 +627,14 @@ def main():
 
     # Determine which model needs the server
     server_model = None
-    if args.step in ["generate", "all"]:
-        # For generate step, use q_generator model if specified, otherwise use main model
-        server_model = args.q_generator or args.model
+    if args.step == "generate":
+        # For generate step, only start server when qgen uses vLLM.
+        if args.qgen_backend == "vllm":
+            server_model = args.q_generator or args.model
+    elif args.step == "all":
+        # For all steps, we start the server for inference (activation logging happens there).
+        if args.inference_method == "vllm":
+            server_model = args.model
     elif args.step in ["inference"]:
         # For inference step, use main model
         server_model = args.model
@@ -672,6 +758,7 @@ def main():
             "generations_file_path": args.generations_file_path,
             "eval_results_path": args.eval_results_path,
             "q_generator": args.q_generator,
+            "qgen_backend": args.qgen_backend,
             "qa_output_path": args.qa_output_path,
             "quick_debug_mode": args.quick_debug_mode,
             "max_workers_qgen": args.max_workers_qgen,
