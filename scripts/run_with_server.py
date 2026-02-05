@@ -188,6 +188,12 @@ def run_task_step(step, task, model, **kwargs):
     # Use default environment
     env = os.environ.copy()
 
+    # Optional: control QA generation chunk size via env var.
+    # This affects question generation code paths that batch work in chunks (default is 5).
+    qa_chunk_size = kwargs.get("qa_generation_chunk_size")
+    if qa_chunk_size is not None:
+        env["QA_GENERATION_CHUNK_SIZE"] = str(int(qa_chunk_size))
+
     # Build command based on task and step
     if task == "precisewikiqa":
         cmd = [sys.executable, "-m", "tasks.shortform.precise_wikiqa"]
@@ -497,6 +503,16 @@ def main():
     parser.add_argument("--qa_output_path", help="Custom QA output path")
     parser.add_argument("--quick_debug_mode", action="store_true", help="Quick debug mode (first 5 questions)")
     parser.add_argument("--max-workers-qgen", type=int, default=1, help="Maximum concurrent requests for question generation (default: 1)")
+    parser.add_argument(
+        "--qa-generation-chunk-size",
+        type=int,
+        default=None,
+        help=(
+            "Chunk size for QA generation batching (sets env QA_GENERATION_CHUNK_SIZE). "
+            "Increase this to >= --max-workers-qgen to fully utilize concurrency. "
+            "Default is controlled by the code (typically 5)."
+        ),
+    )
 
     # LongWiki specific
     parser.add_argument("--db_path", help="Database path for longwiki")
@@ -675,6 +691,7 @@ def main():
             "qa_output_path": args.qa_output_path,
             "quick_debug_mode": args.quick_debug_mode,
             "max_workers_qgen": args.max_workers_qgen,
+            "qa_generation_chunk_size": args.qa_generation_chunk_size,
             # Activation logging parameters
             "logger_type": args.logger_type,
             "activations_path": args.activations_path,
