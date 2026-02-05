@@ -84,6 +84,7 @@ def main():
     os.environ["SERVER_LOG_FILE"] = args.log_file  # Add log file path to environment
     os.environ["ACTIVATION_TARGET_LAYERS"] = args.target_layers  # Add target layers setting
     os.environ["ACTIVATION_SEQUENCE_MODE"] = args.sequence_mode  # Add sequence mode setting
+    os.environ["DEFAULT_MODEL"] = args.model
     if args.auth_token:
         os.environ["HF_TOKEN"] = args.auth_token
         logger.info("Using provided HuggingFace token for model access")

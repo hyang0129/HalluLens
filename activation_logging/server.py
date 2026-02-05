@@ -24,6 +24,16 @@ import uvicorn
 from activation_logging.activations_logger import ActivationsLogger, JsonActivationsLogger
 from llama_cpp import Llama  # Import for llama.cpp Python bindings
 
+try:
+    from vllm import LLM as VllmLLM
+    from vllm import SamplingParams as VllmSamplingParams
+
+    _VLLM_AVAILABLE = True
+except Exception:
+    VllmLLM = None
+    VllmSamplingParams = None
+    _VLLM_AVAILABLE = False
+
 
 # -----------------------------------------------------------------------------
 # Short-form response controls
@@ -168,6 +178,7 @@ DEFAULT_MAP_SIZE = int(os.environ.get("ACTIVATION_LMDB_MAP_SIZE", 16 * (1 << 30)
 _model_cache = {}
 _tokenizer_cache = {}
 _llamacpp_model_cache = {}  # Cache for llama.cpp models
+_vllm_model_cache = {}  # Cache for vLLM engines (used for fast/quantized generation)
 
 # Temperature overwrite variable, None means use request temperature
 overwrite_temperature = None
@@ -186,6 +197,157 @@ overwrite_top_p = None
 
 # Default path for GGUF models
 GGUF_MODELS_DIR = os.environ.get("GGUF_MODELS_DIR", "")
+
+
+def _env_float(name: str, default: float) -> float:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    try:
+        return float(v)
+    except Exception:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    try:
+        return int(v)
+    except Exception:
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return v.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _should_use_vllm_backend(model_name: str) -> bool:
+    """Decide whether to route inference through vLLM.
+
+    We primarily use vLLM for HF-hosted quantized checkpoints that are known
+    to work well via vLLM (e.g. Neural Magic w8a8). For those models, the
+    transformers path may be unsupported or may silently de-quantize.
+
+    Note: vLLM inference path does NOT provide hidden states, so activation
+    logging will be skipped for requests routed here.
+    """
+    if not model_name:
+        return False
+
+    model_l = model_name.lower()
+    if model_l.endswith(".gguf"):
+        return False
+
+    # Automatic heuristic for known quantized naming conventions.
+    if ".w8a8" in model_l or model_l.endswith("w8a8") or "quantized.w8a8" in model_l:
+        return True
+
+    # Optional override: regex list to force vLLM for matching model ids.
+    force_regex = os.environ.get("VLLM_FORCE_MODELS_REGEX")
+    if force_regex:
+        try:
+            import re
+
+            return re.search(force_regex, model_name) is not None
+        except Exception:
+            logger.warning("Invalid VLLM_FORCE_MODELS_REGEX; ignoring")
+            return False
+
+    return False
+
+
+def get_vllm_engine(model_name: str) -> Any:
+    """Get or create a cached vLLM engine for a given model."""
+    if not _VLLM_AVAILABLE:
+        raise RuntimeError(
+            "vLLM is not available in this environment. Install 'vllm' to use the vLLM backend."
+        )
+
+    if model_name in _vllm_model_cache:
+        return _vllm_model_cache[model_name]
+
+    gpu_mem_util = _env_float("VLLM_GPU_MEMORY_UTILIZATION", 0.95)
+    max_model_len = _env_int("VLLM_MAX_MODEL_LEN", 4096)
+    enable_chunked_prefill = _env_bool("VLLM_ENABLE_CHUNKED_PREFILL", True)
+    max_num_seqs = _env_int("VLLM_MAX_NUM_SEQS", 128)
+    tensor_parallel_size = _env_int("VLLM_TENSOR_PARALLEL_SIZE", 1)
+    dtype = os.environ.get("VLLM_DTYPE", "auto")
+
+    logger.info(
+        "Creating vLLM engine for model=%s (tp=%s, max_model_len=%s, gpu_mem_util=%.2f)",
+        model_name,
+        tensor_parallel_size,
+        max_model_len,
+        gpu_mem_util,
+    )
+
+    engine = VllmLLM(
+        model=model_name,
+        dtype=dtype,
+        tensor_parallel_size=tensor_parallel_size,
+        gpu_memory_utilization=gpu_mem_util,
+        max_model_len=max_model_len,
+        enable_chunked_prefill=enable_chunked_prefill,
+        max_num_seqs=max_num_seqs,
+    )
+    _vllm_model_cache[model_name] = engine
+    return engine
+
+
+def _format_chat_prompt_for_model(model_name: str, messages: List[Dict[str, str]]) -> str:
+    """Format OpenAI-style messages into a model prompt string."""
+    tokenizer = _tokenizer_cache.get(model_name)
+    if tokenizer is None:
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        _tokenizer_cache[model_name] = tokenizer
+
+    if hasattr(tokenizer, "apply_chat_template"):
+        return tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+
+    # Fallback: role-tag concatenation
+    return "\n".join([f"{m.get('role', 'user')}: {m.get('content', '')}" for m in messages])
+
+
+def run_inference_vllm(
+    prompt: str,
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
+    model_name: str,
+) -> Tuple[str, None, int, Optional[int]]:
+    """Run inference using vLLM.
+
+    Returns (response_text, model_outputs=None, input_length, trim_position=None).
+    """
+    engine = get_vllm_engine(model_name)
+
+    sampling_params = VllmSamplingParams(
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+    )
+
+    # Best-effort input length for metadata. Use tokenizer if we have it.
+    input_length = 0
+    try:
+        tok = _tokenizer_cache.get(model_name)
+        if tok is None:
+            tok = AutoTokenizer.from_pretrained(model_name)
+            _tokenizer_cache[model_name] = tok
+        input_length = len(tok(prompt).get("input_ids", []))
+    except Exception:
+        input_length = max(0, len(prompt) // 4)
+
+    outputs = engine.generate([prompt], sampling_params)
+    if not outputs or not outputs[0].outputs:
+        return "", None, input_length, None
+    response_text = outputs[0].outputs[0].text
+    return (response_text or ""), None, input_length, None
 
 
 def _is_split_first_part_gguf(path: str) -> bool:
@@ -787,6 +949,21 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
             logger.error(f"  Error message: {e}")
             import traceback
             logger.error(f"  Traceback:\n{traceback.format_exc()}")
+            raise
+
+    # vLLM fast path for certain quantized HF checkpoints.
+    if _should_use_vllm_backend(model_name):
+        logger.info("✓ Detected vLLM-target model, using vLLM backend for inference")
+        try:
+            return run_inference_vllm(
+                prompt=prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                model_name=model_name,
+            )
+        except Exception as e:
+            logger.error("✗ vLLM inference failed (%s): %s", type(e).__name__, e)
             raise
 
     # Otherwise use the standard Hugging Face model loading
@@ -1556,9 +1733,14 @@ def chat_completions(request: ChatCompletionRequest, http_request: Request):
     try:
         # Convert chat messages to a single prompt.
         # Keep compatibility with the client: if it's a single user message, use the raw content.
-        # Otherwise fall back to a simple role-tagged concatenation.
+        # For vLLM-routed models, prefer the tokenizer chat template when available.
         if len(request.messages) == 1 and request.messages[0].role == "user":
             prompt = request.messages[0].content
+        elif _should_use_vllm_backend(model_name):
+            prompt = _format_chat_prompt_for_model(
+                model_name,
+                [msg.model_dump() for msg in request.messages],
+            )
         else:
             prompt = "\n".join([f"{msg.role}: {msg.content}" for msg in request.messages])
         logger.info(f"[{request_id}] Converted {len(request.messages)} messages to prompt of {len(prompt)} characters")
