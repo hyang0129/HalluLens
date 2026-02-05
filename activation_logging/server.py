@@ -485,18 +485,8 @@ def get_model_and_tokenizer(model_name: str, auth_token: Optional[str] = None):
         # Use GPU if available, else CPU
         if torch.cuda.is_available():
             device_map = "cuda"
-            # Check if model is FP8 (nvidia FP8 models)
-            if "fp8" in model_name.lower():
-                # For FP8 models, use torch.float8_e4m3fn if available, otherwise bfloat16
-                if hasattr(torch, 'float8_e4m3fn'):
-                    torch_dtype = torch.bfloat16  # Load in bfloat16, FP8 weights will be handled automatically
-                    logger.info("Detected FP8 model, using bfloat16 for computation with FP8 weights")
-                else:
-                    torch_dtype = torch.bfloat16
-                    logger.warning("FP8 dtype not available in this PyTorch version, using bfloat16")
-            else:
-                torch_dtype = torch.float16
-            logger.info(f"Using GPU for inference with dtype: {torch_dtype}")
+            torch_dtype = torch.float16
+            logger.info("Using GPU for inference.")
         else:
             device_map = "cpu"
             torch_dtype = torch.float32
