@@ -631,6 +631,9 @@ model_map = {   'meta-llama/Llama-3.1-405B-Instruct-FP8': {'name': 'llama3.1_405
                                                     'server_urls': [f"http://{CUSTOM_SERVER}:8000/v1"]},
                 'nvidia/Llama-3.3-70B-Instruct-FP8': {'name': 'llama3.3_70B_fp8',
                                                     'server_urls': [f"http://{CUSTOM_SERVER}:8000/v1"]},
+                'neuralmagic-ent/Llama-3.3-70B-Instruct-quantized.w8a8': {
+                                                    'name': 'llama3.3_70B_w8a8',
+                                                    'server_urls': [f"http://{CUSTOM_SERVER}:8000/v1"]},
                 'meta-llama/Llama-3.1-70B-Instruct': {'name': 'llama3.1_70B',
                                                         'server_urls': [f"http://{CUSTOM_SERVER}:8000/v1"],
                                                     },
@@ -689,7 +692,13 @@ def call_vllm_api(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512, por
     request_id = generate_request_id(prompt)
 
     if port == None:
-        port = model_map[model]["server_urls"][i]
+        cfg = model_map.get(model)
+        if cfg is None:
+            raise KeyError(
+                f"Unknown model id: {model}. Add it to model_map in utils/lm.py or pass port= explicitly. "
+                f"Known models: {sorted(model_map.keys())}"
+            )
+        port = cfg["server_urls"][i]
 
     # Get current progress for logging
     current_progress = get_progress_stats()
