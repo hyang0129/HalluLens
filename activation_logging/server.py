@@ -1900,6 +1900,38 @@ async def startup_event():
         logger.info(f"  {var}: {value}")
     logger.info("-" * 80)
 
+    # Optional: preload vLLM engine on startup for vLLM-routed models.
+    # This makes latency predictable and ensures we fail fast with clear logs
+    # if the GPU doesn't have enough free memory.
+    preload_enabled = _env_bool("VLLM_PRELOAD_ON_STARTUP", True)
+    if preload_enabled and _should_use_vllm_backend(DEFAULT_MODEL):
+        logger.info("VLLM_PRELOAD_ON_STARTUP enabled; preloading vLLM engine for DEFAULT_MODEL")
+
+        if torch.cuda.is_available():
+            try:
+                free_b, total_b = torch.cuda.mem_get_info()
+                logger.info(
+                    "CUDA mem before vLLM preload: free=%.2f GiB total=%.2f GiB",
+                    free_b / (1024**3),
+                    total_b / (1024**3),
+                )
+            except Exception:
+                pass
+
+        try:
+            _ = get_vllm_engine(DEFAULT_MODEL)
+            logger.success("Preloaded vLLM engine for DEFAULT_MODEL=%s", DEFAULT_MODEL)
+        except Exception as e:
+            logger.error("Failed to preload vLLM engine for DEFAULT_MODEL=%s", DEFAULT_MODEL)
+            logger.error("Error type: %s", type(e).__name__)
+            logger.error("Error: %s", str(e))
+            logger.error(
+                "If you see a free-memory/utilization error, it means another process is using the GPU. "
+                "Free GPU memory (e.g. stop other jobs) or lower VLLM_GPU_MEMORY_UTILIZATION / VLLM_MAX_MODEL_LEN."
+            )
+            # Fail fast so run_with_server doesn't proceed with a broken server.
+            raise
+
     # Log system resources
     log_system_resources("Startup")
 
