@@ -562,6 +562,7 @@ class ActivationParser:
         pad_length: int = 63,
         min_target_layers: int = 2,
         return_all_activations: bool = False,
+        backend: Literal["auto", "zarr", "wds"] = "auto",
     ) -> ActivationDataset:
         """
         Get a PyTorch Dataset for the specified split.
@@ -574,7 +575,18 @@ class ActivationParser:
         Returns:
             ActivationDataset instance for the specified split
         """
-        if self.logger_type == "wds" or self._wds_shards is not None:
+        if backend not in {"auto", "zarr", "wds"}:
+            raise ValueError("backend must be one of: 'auto', 'zarr', 'wds'")
+
+        use_wds = False
+        if backend == "wds":
+            use_wds = True
+        elif backend == "zarr":
+            use_wds = False
+        else:  # auto
+            use_wds = self.logger_type == "wds" or self._wds_shards is not None
+
+        if use_wds:
             config = WDSOptionAConfig(
                 shards=self._wds_shards or self.activations_path,
                 split=split,

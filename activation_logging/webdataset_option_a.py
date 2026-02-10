@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 import json
+import glob
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union
@@ -90,14 +91,27 @@ def _get_sample_field(sample: Dict[str, Any], *keys: str) -> Any:
 
 def _build_stream(shards: Union[str, Sequence[str]], shuffle_buffer: int) -> Iterable[Dict[str, Any]]:
     _ensure_wds_available()
+
+    # webdataset supports brace expansion patterns, but support for shell-style
+    # globs like "*.tar" can vary by version/environment. Expand local globs
+    # ourselves when we can.
+    if isinstance(shards, str) and any(ch in shards for ch in ["*", "?", "["]):
+        expanded = sorted(glob.glob(shards))
+        if expanded:
+            shards = expanded
     # NOTE: Do not call `.decode("numpy")`.
     # Newer `webdataset` versions treat decode() as image decoding and will
     # raise `ValueError: Unknown imagespec: numpy`.
     # We keep payloads as bytes and decode `.npy` / `.json` ourselves.
+    # NOTE: When using many PyTorch DataLoader workers, WebDataset may assign
+    # zero shards to some workers (e.g., num_workers > num_shards). Newer
+    # webdataset versions raise `ValueError: No samples found in dataset`.
+    # `empty_check=False` keeps those workers from erroring.
     dataset = wds.WebDataset(
         shards,
         shardshuffle=100,
         handler=wds.handlers.warn_and_continue,
+        empty_check=False,
     )
     if shuffle_buffer and shuffle_buffer > 0:
         dataset = dataset.shuffle(shuffle_buffer)

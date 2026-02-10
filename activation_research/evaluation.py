@@ -20,7 +20,7 @@ def evaluate(model, test_dataloader, batch_size=32, loss_fn=None, device='cuda',
         # Buffers to accumulate mini-batches
         buffer_x1, buffer_x2 = [], []
         buffer_labels = [] if use_labels else None
-        subsinbatch = batch_size // sub_batch_size
+        buffer_hashkeys = [] if evaluator_manager is not None else None
 
         for i, batch in enumerate(test_dataloader):
             x1 = batch['layer1_activations'].squeeze(1).to(device, non_blocking=True)
@@ -28,6 +28,17 @@ def evaluate(model, test_dataloader, batch_size=32, loss_fn=None, device='cuda',
 
             buffer_x1.append(x1)
             buffer_x2.append(x2)
+
+            if buffer_hashkeys is not None:
+                hk = None
+                if hasattr(batch, 'get') and 'hashkey' in batch:
+                    hk = batch['hashkey']
+                elif hasattr(batch, 'get') and 'hashkeys' in batch:
+                    hk = batch['hashkeys']
+                if hk is not None:
+                    if isinstance(hk, str):
+                        hk = [hk]
+                    buffer_hashkeys.extend(list(hk))
 
             if use_labels:
                 labels = batch['halu'].to(device, non_blocking=True)
@@ -43,7 +54,7 @@ def evaluate(model, test_dataloader, batch_size=32, loss_fn=None, device='cuda',
                 buffer_labels.append(labels)
 
             # Process when buffer is full or at the end of the loop
-            if len(buffer_x1) * sub_batch_size == batch_size or i == len(test_dataloader) - 1:
+            if len(buffer_x1) * sub_batch_size == batch_size:
                 x1_full = torch.cat(buffer_x1, dim=0)
                 x2_full = torch.cat(buffer_x2, dim=0)
                 buffer_x1 = []
@@ -54,19 +65,9 @@ def evaluate(model, test_dataloader, batch_size=32, loss_fn=None, device='cuda',
 
                 # Accumulate embeddings if evaluator manager is provided
                 if evaluator_manager is not None:
-                    # Extract hashkeys if available in the batch
-                    hashkeys = None
-                    if hasattr(batch, 'get') and 'hashkey' in batch:
-                        hashkeys = batch['hashkey']
-                    elif hasattr(batch, 'get') and 'hashkeys' in batch:
-                        hashkeys = batch['hashkeys']
-
-                    # Get labels if using them
-                    labels = None
-                    if use_labels:
-                        labels = torch.cat(buffer_labels, dim=0) if buffer_labels else None
-
-                    evaluator_manager.accumulate_batch(z1, z2, hashkeys, labels)
+                    labels = torch.cat(buffer_labels, dim=0) if (use_labels and buffer_labels) else None
+                    evaluator_manager.accumulate_batch(z1, z2, buffer_hashkeys, labels)
+                    buffer_hashkeys = []
 
                 z_stacked = torch.stack([z1, z2], dim=1)
 
@@ -85,9 +86,37 @@ def evaluate(model, test_dataloader, batch_size=32, loss_fn=None, device='cuda',
                 total_cosine_sim += cosine_sim
                 n_batches += 1
 
-    avg_loss = total_loss / n_batches
-    avg_acc = total_acc / n_batches
-    avg_cosine_sim = total_cosine_sim / n_batches
+        # Process any remaining partial buffer
+        if buffer_x1:
+            x1_full = torch.cat(buffer_x1, dim=0)
+            x2_full = torch.cat(buffer_x2, dim=0)
+
+            z1 = model(x1_full)
+            z2 = model(x2_full)
+
+            if evaluator_manager is not None:
+                labels = torch.cat(buffer_labels, dim=0) if (use_labels and buffer_labels) else None
+                evaluator_manager.accumulate_batch(z1, z2, buffer_hashkeys, labels)
+
+            z_stacked = torch.stack([z1, z2], dim=1)
+
+            if use_labels:
+                labels_full = torch.cat(buffer_labels, dim=0)
+                loss = loss_fn(z_stacked, labels=labels_full)
+            else:
+                loss = loss_fn(z_stacked)
+
+            acc = pairing_accuracy(z1, z2)
+            cosine_sim = average_cosine_similarity(z1, z2)
+
+            total_loss += loss.item()
+            total_acc += acc
+            total_cosine_sim += cosine_sim
+            n_batches += 1
+
+    avg_loss = total_loss / max(1, n_batches)
+    avg_acc = total_acc / max(1, n_batches)
+    avg_cosine_sim = total_cosine_sim / max(1, n_batches)
     return avg_loss, avg_acc, avg_cosine_sim
 
 def pairing_accuracy(z1, z2):

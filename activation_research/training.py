@@ -12,6 +12,37 @@ import os
 import json
 
 
+def _contrastive_collate_min(batch):
+    """Collate only the fields used by contrastive training.
+
+    This avoids default-collate trying to batch large/irregular fields like
+    `all_activations` (which may include None values depending on backend).
+    """
+    if batch is None:
+        return batch
+
+    layer1 = torch.stack([b["layer1_activations"] for b in batch], dim=0)
+    layer2 = torch.stack([b["layer2_activations"] for b in batch], dim=0)
+    halu = torch.stack([b["halu"] for b in batch], dim=0)
+    hashkeys = [b["hashkey"] for b in batch]
+
+    out = {
+        "layer1_activations": layer1,
+        "layer2_activations": layer2,
+        "halu": halu,
+        "hashkey": hashkeys,
+    }
+
+    if "layer1_idx" in batch[0]:
+        out["layer1_idx"] = torch.tensor([b["layer1_idx"] for b in batch], dtype=torch.long)
+    if "layer2_idx" in batch[0]:
+        out["layer2_idx"] = torch.tensor([b["layer2_idx"] for b in batch], dtype=torch.long)
+    if "input_length" in batch[0]:
+        out["input_length"] = torch.tensor([b["input_length"] for b in batch], dtype=torch.long)
+
+    return out
+
+
 def _atomic_torch_save(obj, path: str) -> None:
     """Atomically write a torch checkpoint to disk.
 
@@ -257,6 +288,8 @@ def train_contrastive(model, train_dataset, test_dataset=None,
     if is_iterable and balanced_sampling and use_labels:
         logger.warning("Balanced sampling is not supported for iterable datasets; disabling sampler.")
     sampler = _build_balanced_sampler(train_dataset) if balanced_sampling and use_labels and not is_iterable else None
+
+    use_persistent_workers = bool(persistent_workers and num_workers and num_workers > 0)
     train_loader = DataLoader(
         train_dataset,
         batch_size=sub_batch_size,
@@ -264,7 +297,8 @@ def train_contrastive(model, train_dataset, test_dataset=None,
         sampler=sampler,
         num_workers=num_workers,
         pin_memory=True,
-        persistent_workers=persistent_workers
+        persistent_workers=use_persistent_workers,
+        collate_fn=_contrastive_collate_min,
     )
 
     if test_dataset is not None:
@@ -274,7 +308,8 @@ def train_contrastive(model, train_dataset, test_dataset=None,
             shuffle=False,
             num_workers=num_workers,
             pin_memory=True,
-            persistent_workers=persistent_workers
+            persistent_workers=use_persistent_workers,
+            collate_fn=_contrastive_collate_min,
         )
 
     for epoch in tqdm(range(start_epoch, epochs), desc="Epochs"):
@@ -414,7 +449,7 @@ def train_contrastive(model, train_dataset, test_dataset=None,
         test_loss = float('inf')
         test_cosine_sim = 0.0
         if test_dataset is not None:
-            test_loss, test_acc, test_cosine_sim = evaluate(model, test_dataset, batch_size=batch_size, loss_fn=loss_fn, device=device, sub_batch_size=sub_batch_size, use_labels=use_labels, ignore_label=ignore_label)
+            test_loss, test_acc, test_cosine_sim = evaluate(model, test_loader, batch_size=batch_size, loss_fn=loss_fn, device=device, sub_batch_size=sub_batch_size, use_labels=use_labels, ignore_label=ignore_label)
             print(f"Epoch {epoch + 1}/{epochs} - Test Loss: {test_loss:.4f} - Test Pairing Acc: {test_acc:.4f} - Test Cosine Sim: {test_cosine_sim:.4f}")
 
         # Save checkpoint (keep only what is needed to resume)
