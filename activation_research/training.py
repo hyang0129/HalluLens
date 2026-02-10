@@ -10,7 +10,6 @@ from loguru import logger
 from sklearn.metrics import roc_auc_score
 import os
 import json
-import time
 
 
 def _contrastive_collate_min(batch):
@@ -259,9 +258,7 @@ def train_contrastive(model, train_dataset, test_dataset=None,
                       checkpoint_dir='checkpoints', save_every=1, resume_from=None, persistent_workers=True,
                       use_labels=False, ignore_label=-1,
                       same_sample_weight=1.0, same_class_weight=1.0,
-                      balanced_sampling=False,
-                      prefetch_factor: int = 2,
-                      warm_prefetch_next_epoch: bool = False):
+                      balanced_sampling=False):
     assert batch_size % sub_batch_size == 0, "batch_size must be divisible by sub_batch_size"
 
     # Create checkpoint directory
@@ -293,7 +290,6 @@ def train_contrastive(model, train_dataset, test_dataset=None,
     sampler = _build_balanced_sampler(train_dataset) if balanced_sampling and use_labels and not is_iterable else None
 
     use_persistent_workers = bool(persistent_workers and num_workers and num_workers > 0)
-    dl_prefetch_factor = int(prefetch_factor) if (num_workers and num_workers > 0) else None
     train_loader = DataLoader(
         train_dataset,
         batch_size=sub_batch_size,
@@ -302,7 +298,6 @@ def train_contrastive(model, train_dataset, test_dataset=None,
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=use_persistent_workers,
-        prefetch_factor=dl_prefetch_factor,
         collate_fn=_contrastive_collate_min,
     )
 
@@ -314,15 +309,8 @@ def train_contrastive(model, train_dataset, test_dataset=None,
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=use_persistent_workers,
-            prefetch_factor=dl_prefetch_factor,
             collate_fn=_contrastive_collate_min,
         )
-
-    # Optional warm-prefetch: pull the first batch of the next epoch early.
-    # This doesn't reduce total work, but it can hide the "epoch start" stall
-    # inside evaluation/checkpoint time (or at the end of the previous epoch).
-    prefetched_first_batch = None
-    prefetched_iter = None
 
     for epoch in tqdm(range(start_epoch, epochs), desc="Epochs"):
         logger.info(f"Starting epoch {epoch + 1}/{epochs}")
@@ -331,18 +319,7 @@ def train_contrastive(model, train_dataset, test_dataset=None,
         total_acc = 0.0
         total_cosine_sim = 0.0
         n_batches = 0  # Track number of full batches processed
-        # Build the epoch iterator. If we already prefetched the next epoch's
-        # first batch, reuse that iterator and feed the prefetched batch first.
-        if prefetched_iter is not None:
-            epoch_iter = prefetched_iter
-            first_batch = prefetched_first_batch
-            prefetched_iter = None
-            prefetched_first_batch = None
-        else:
-            epoch_iter = iter(train_loader)
-            first_batch = None
-
-        loop = tqdm(epoch_iter, desc=f"Epoch {epoch+1}/{epochs}", leave=False)
+        loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False)
         try:
             total_steps = len(train_loader)
         except TypeError:
@@ -354,84 +331,6 @@ def train_contrastive(model, train_dataset, test_dataset=None,
         buffer_sample_ids = [] if use_labels else None
 
         i = 0
-
-        # If present, process the prefetched first batch before entering the
-        # main iterator loop so we avoid waiting at epoch start.
-        if first_batch is not None:
-            batches_to_process = [first_batch]
-        else:
-            batches_to_process = []
-
-        for batch in batches_to_process:
-            i += 1
-            if total_steps is not None:
-                logger.info(f"Epoch {epoch + 1}/{epochs} - Step {i}/{total_steps}")
-            else:
-                logger.info(f"Epoch {epoch + 1}/{epochs} - Step {i}")
-            logger.debug(f"Adding batch {i} to buffer. Current buffer size: {len(buffer_x1)}")
-            x1 = batch['layer1_activations'].squeeze(1).to(device, non_blocking=True)
-            x2 = batch['layer2_activations'].squeeze(1).to(device, non_blocking=True)
-
-            buffer_x1.append(x1)
-            buffer_x2.append(x2)
-
-            if use_labels:
-                labels = batch['halu'].to(device, non_blocking=True)
-                if labels.dim() == 0:
-                    labels = labels.unsqueeze(0)
-                elif labels.dim() == 1 and labels.size(0) == 1:
-                    pass
-                else:
-                    labels = labels.view(-1)
-                buffer_labels.append(labels)
-
-                hashkeys = batch['hashkey']
-                if isinstance(hashkeys, str):
-                    hashkeys = [hashkeys]
-                sample_ids = torch.tensor([hash(hk) % 1000000 for hk in hashkeys],
-                                        dtype=torch.long, device=device)
-                buffer_sample_ids.append(sample_ids)
-
-            buffer_full = len(buffer_x1) * sub_batch_size == batch_size
-            last_batch = total_steps is not None and i == total_steps
-            if buffer_full or last_batch:
-                logger.debug(f"Processing buffer at batch {i}. Buffer size: {len(buffer_x1)}")
-                x1_full = torch.cat(buffer_x1, dim=0)
-                x2_full = torch.cat(buffer_x2, dim=0)
-                buffer_x1 = []
-                buffer_x2 = []
-
-                z1 = model(x1_full)
-                z2 = model(x2_full)
-
-                z_stacked = torch.stack([z1, z2], dim=1)
-
-                if use_labels:
-                    labels_full = torch.cat(buffer_labels, dim=0)
-                    sample_ids_full = torch.cat(buffer_sample_ids, dim=0)
-                    buffer_labels = []
-                    buffer_sample_ids = []
-                    loss = loss_fn(z_stacked, labels=labels_full, sample_ids=sample_ids_full)
-                else:
-                    loss = loss_fn(z_stacked)
-
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-                acc = pairing_accuracy(z1, z2)
-                cosine_sim = average_cosine_similarity(z1, z2)
-                total_loss += loss.item()
-                total_acc += acc
-                total_cosine_sim += cosine_sim
-                n_batches += 1
-
-                avg_loss = total_loss / n_batches
-                avg_acc = total_acc / n_batches
-                avg_cosine_sim = total_cosine_sim / n_batches
-
-                loop.set_postfix(loss=avg_loss, pairing_acc=avg_acc, cosine_sim=avg_cosine_sim)
-
         for batch in loop:
             i += 1
             if total_steps is not None:
@@ -546,19 +445,6 @@ def train_contrastive(model, train_dataset, test_dataset=None,
             avg_cosine_sim = total_cosine_sim / n_batches
 
         print(f"Epoch {epoch + 1}/{epochs} - Train Loss: {avg_loss:.4f} - Train Pairing Acc: {avg_acc:.4f} - Train Cosine Sim: {avg_cosine_sim:.4f}")
-
-        # Optionally warm-prefetch the next epoch's first batch before running
-        # evaluation/checkpointing, so the next epoch starts immediately.
-        if warm_prefetch_next_epoch and epoch < epochs - 1:
-            try:
-                t0 = time.perf_counter()
-                prefetched_iter = iter(train_loader)
-                prefetched_first_batch = next(prefetched_iter)
-                dt = time.perf_counter() - t0
-                logger.info(f"Prefetched next-epoch first batch in {dt:.2f}s")
-            except StopIteration:
-                prefetched_iter = None
-                prefetched_first_batch = None
 
         test_loss = float('inf')
         test_cosine_sim = 0.0
