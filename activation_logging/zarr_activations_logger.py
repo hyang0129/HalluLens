@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional, List, Callable, Tuple, Union
 import numpy as np
 import torch
 import zarr
+from zarr.errors import GroupNotFoundError
 from loguru import logger
 
 from .compression import BaseCompressor, NoCompression, ZstdCompression, ZSTD_AVAILABLE
@@ -111,7 +112,43 @@ class ZarrActivationsLogger:
             mode = "a"
         self.mode = mode
 
-        self.root = zarr.open_group(zarr_path, mode=mode)
+        # Some pipelines create a base output directory (which may itself end
+        # with ".zarr") and write the actual Zarr store under
+        # "<base>/activations.zarr". If callers pass the base directory, Zarr
+        # will raise GroupNotFoundError. Detect and fall back.
+        store_path = Path(zarr_path)
+        try:
+            self.root = zarr.open_group(str(store_path), mode=mode)
+        except GroupNotFoundError as exc:
+            candidate = store_path / "activations.zarr"
+            if candidate.exists():
+                logger.warning(
+                    "No Zarr group found at %s; falling back to nested store %s",
+                    store_path,
+                    candidate,
+                )
+                self.zarr_path = str(candidate)
+                store_path = candidate
+                self.root = zarr.open_group(str(store_path), mode=mode)
+            elif mode == "r":
+                # Best-effort recovery: if the directory is intended to be a Zarr
+                # store but is missing root group metadata, create the root group
+                # (requires write access) and reopen read-only.
+                try:
+                    logger.warning(
+                        "No Zarr group found at %s in read-only mode; attempting to initialize root group metadata.",
+                        store_path,
+                    )
+                    zarr.open_group(str(store_path), mode="a")
+                    self.root = zarr.open_group(str(store_path), mode="r")
+                except Exception:
+                    raise GroupNotFoundError(
+                        f"No group found in store '{zarr_path}'. If this is a base directory, "
+                        f"try passing '{candidate}'."
+                    ) from exc
+            else:
+                raise
+
         if self.read_only:
             if "arrays" not in self.root:
                 raise ValueError("Zarr store is missing required 'arrays' group")
@@ -128,8 +165,8 @@ class ZarrActivationsLogger:
         self._hidden_size = None
         self._target_layer_indices = None
 
-        self._meta_dir = Path(zarr_path) / "meta"
-        self._text_dir = Path(zarr_path) / "text"
+        self._meta_dir = Path(self.zarr_path) / "meta"
+        self._text_dir = Path(self.zarr_path) / "text"
         self._index_path = self._meta_dir / "index.jsonl"
         self._index = {}
         self._load_index()
