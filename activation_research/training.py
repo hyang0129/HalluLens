@@ -1,7 +1,7 @@
 from tqdm.autonotebook import tqdm
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, WeightedRandomSampler, IterableDataset
+from torch.utils.data import DataLoader, WeightedRandomSampler, IterableDataset, get_worker_info
 from tqdm import tqdm
 import torch.nn as nn
 from torch.utils.data import DataLoader, WeightedRandomSampler
@@ -10,6 +10,53 @@ from loguru import logger
 from sklearn.metrics import roc_auc_score
 import os
 import json
+import math
+
+
+class InfiniteIndexStream(IterableDataset):
+    """Wrap a map-style dataset as an infinite IterableDataset.
+
+    This keeps DataLoader workers alive and continuously producing samples.
+    Each worker receives a disjoint shard of indices.
+    """
+
+    def __init__(self, dataset, *, shuffle: bool = True, seed: int = 0):
+        super().__init__()
+        self.dataset = dataset
+        self.shuffle = bool(shuffle)
+        self.seed = int(seed)
+
+    def __iter__(self):
+        if not hasattr(self.dataset, "__len__"):
+            raise TypeError("InfiniteIndexStream requires an underlying dataset with __len__")
+
+        n = len(self.dataset)
+        if n <= 0:
+            return
+
+        worker = get_worker_info()
+        if worker is None:
+            worker_id = 0
+            num_workers = 1
+        else:
+            worker_id = worker.id
+            num_workers = worker.num_workers
+
+        g = torch.Generator()
+        epoch = 0
+
+        while True:
+            g.manual_seed(self.seed + epoch)
+            if self.shuffle:
+                order = torch.randperm(n, generator=g).tolist()
+            else:
+                order = list(range(n))
+
+            shard = order[worker_id::num_workers]
+            for idx in shard:
+                yield self.dataset[idx]
+
+            epoch += 1
 
 
 def _contrastive_collate_min(batch):
@@ -258,7 +305,24 @@ def train_contrastive(model, train_dataset, test_dataset=None,
                       checkpoint_dir='checkpoints', save_every=1, resume_from=None, persistent_workers=True,
                       use_labels=False, ignore_label=-1,
                       same_sample_weight=1.0, same_class_weight=1.0,
-                      balanced_sampling=False):
+                      balanced_sampling=False,
+                      use_infinite_index_stream: bool = False,
+                      infinite_stream_shuffle: bool = True,
+                      infinite_stream_seed: int = 0):
+
+    base_dataset_len = None
+    if use_infinite_index_stream:
+        if not hasattr(train_dataset, "__len__"):
+            raise TypeError("use_infinite_index_stream=True requires train_dataset to have __len__")
+        base_dataset_len = len(train_dataset)
+
+        if sub_batch_size != batch_size:
+            logger.warning(
+                "use_infinite_index_stream=True forces sub_batch_size=batch_size "
+                "(disabling microbatch buffering)."
+            )
+        sub_batch_size = batch_size
+
     assert batch_size % sub_batch_size == 0, "batch_size must be divisible by sub_batch_size"
 
     # Create checkpoint directory
@@ -285,6 +349,13 @@ def train_contrastive(model, train_dataset, test_dataset=None,
         logger.info(f"Resumed training from epoch {start_epoch}")
 
     is_iterable = isinstance(train_dataset, IterableDataset)
+    if use_infinite_index_stream and not is_iterable:
+        train_dataset = InfiniteIndexStream(
+            train_dataset,
+            shuffle=bool(infinite_stream_shuffle),
+            seed=int(infinite_stream_seed),
+        )
+        is_iterable = True
     if is_iterable and balanced_sampling and use_labels:
         logger.warning("Balanced sampling is not supported for iterable datasets; disabling sampler.")
     sampler = _build_balanced_sampler(train_dataset) if balanced_sampling and use_labels and not is_iterable else None
@@ -312,6 +383,14 @@ def train_contrastive(model, train_dataset, test_dataset=None,
             collate_fn=_contrastive_collate_min,
         )
 
+    # For infinite streaming we keep one iterator across epochs, but we still
+    # run a fixed number of steps per epoch to preserve epoch semantics.
+    steps_per_epoch = None
+    train_iter = None
+    if use_infinite_index_stream:
+        steps_per_epoch = int(math.ceil(base_dataset_len / float(batch_size)))
+        train_iter = iter(train_loader)
+
     for epoch in tqdm(range(start_epoch, epochs), desc="Epochs"):
         logger.info(f"Starting epoch {epoch + 1}/{epochs}")
         model.train()
@@ -319,11 +398,15 @@ def train_contrastive(model, train_dataset, test_dataset=None,
         total_acc = 0.0
         total_cosine_sim = 0.0
         n_batches = 0  # Track number of full batches processed
-        loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False)
-        try:
-            total_steps = len(train_loader)
-        except TypeError:
-            total_steps = None
+        if use_infinite_index_stream:
+            total_steps = steps_per_epoch
+            loop = tqdm(range(total_steps), desc=f"Epoch {epoch+1}/{epochs}", leave=False)
+        else:
+            loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False)
+            try:
+                total_steps = len(train_loader)
+            except TypeError:
+                total_steps = None
 
         # Buffers to accumulate mini-batches
         buffer_x1, buffer_x2 = [], []
@@ -332,6 +415,13 @@ def train_contrastive(model, train_dataset, test_dataset=None,
 
         i = 0
         for batch in loop:
+            if use_infinite_index_stream:
+                try:
+                    batch = next(train_iter)
+                except StopIteration:
+                    train_iter = iter(train_loader)
+                    batch = next(train_iter)
+
             i += 1
             if total_steps is not None:
                 logger.info(f"Epoch {epoch + 1}/{epochs} - Step {i}/{total_steps}")
