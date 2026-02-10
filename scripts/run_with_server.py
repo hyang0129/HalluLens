@@ -486,6 +486,15 @@ def main():
     # Server configuration
     parser.add_argument("--host", default="0.0.0.0", help="Server host")
     parser.add_argument("--port", type=int, default=8000, help="Server port")
+    parser.add_argument(
+        "--server-startup-timeout",
+        type=int,
+        default=None,
+        help=(
+            "Seconds to wait for the inference server to become healthy. "
+            "If omitted, defaults to 600s (or env SERVER_STARTUP_TIMEOUT/VLLM_SERVER_STARTUP_TIMEOUT if set)."
+        ),
+    )
     parser.add_argument("--logger-type", default="lmdb", choices=["lmdb", "json"],
                        help="Activation logger type")
     parser.add_argument("--activations-path", help="Path for storing activations")
@@ -631,7 +640,7 @@ def main():
                 
                 # Wait for server to be ready
                 logger.info("Waiting for llama.cpp server to be ready...")
-                max_wait = 120  # seconds (GGUF models can take longer to load)
+                max_wait = args.server_startup_timeout or 120  # seconds (GGUF models can take longer to load)
                 start_time = time.time()
                 
                 while time.time() - start_time < max_wait:
@@ -667,7 +676,8 @@ def main():
                     port=args.port,
                     logger_type=args.logger_type,
                     activations_path=args.activations_path,
-                    log_file_path=log_file_path
+                    log_file_path=log_file_path,
+                    startup_timeout=args.server_startup_timeout,
                 )
                 server_manager.start_server()
                 lm.set_server_manager(server_manager)

@@ -90,11 +90,17 @@ def _get_sample_field(sample: Dict[str, Any], *keys: str) -> Any:
 
 def _build_stream(shards: Union[str, Sequence[str]], shuffle_buffer: int) -> Iterable[Dict[str, Any]]:
     _ensure_wds_available()
-    dataset = (
-        wds.WebDataset(shards, shardshuffle=True, handler=wds.handlers.warn_and_continue)
-        .shuffle(shuffle_buffer)
-        .decode("numpy")
+    # NOTE: Do not call `.decode("numpy")`.
+    # Newer `webdataset` versions treat decode() as image decoding and will
+    # raise `ValueError: Unknown imagespec: numpy`.
+    # We keep payloads as bytes and decode `.npy` / `.json` ourselves.
+    dataset = wds.WebDataset(
+        shards,
+        shardshuffle=100,
+        handler=wds.handlers.warn_and_continue,
     )
+    if shuffle_buffer and shuffle_buffer > 0:
+        dataset = dataset.shuffle(shuffle_buffer)
     return dataset
 
 
@@ -226,7 +232,7 @@ class WDSOptionAIterableDataset(IterableDataset):
 def infer_activation_dim_from_wds(shards: Union[str, Sequence[str]]) -> int:
     """Infer activation hidden dim H from the first available WDS sample."""
     _ensure_wds_available()
-    dataset = wds.WebDataset(shards, shardshuffle=False, handler=wds.handlers.warn_and_continue).decode("numpy")
+    dataset = wds.WebDataset(shards, shardshuffle=False, handler=wds.handlers.warn_and_continue)
     for sample in dataset:
         response_raw = _get_sample_field(sample, "response_acts.npy", "response_acts")
         if response_raw is None:

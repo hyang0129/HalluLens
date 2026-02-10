@@ -288,6 +288,18 @@ def precise_QA_generation_run_batch(
     print(f"Question generation concurrency: max_workers={max_workers}")
     qa = WikiQA(q_generator, task='precise', max_workers=max_workers)
 
+    # Progress tracking for client-side API calls.
+    # Each candidate QA requires (at least) two model calls: question generation + answerability.
+    # We track API-call progress rather than accepted-QA progress.
+    already_completed = 0
+    if output_path and (not from_scratch) and os.path.exists(output_path):
+        try:
+            with jsonlines.open(output_path) as reader:
+                already_completed = sum(1 for _ in reader)
+        except Exception:
+            already_completed = 0
+    lm.initialize_progress_tracking(total_requests=int(2 * N), already_completed=int(2 * already_completed))
+
     wiki_data_all = pd.read_json(wiki_input_path, orient='records', lines=True)
 
     # level set up
@@ -323,6 +335,15 @@ def longform_QA_generation_run_batch(
     ):
     print(f"Question generation concurrency: max_workers={max_workers}")
     qa = WikiQA(q_generator, task='longform', max_workers=max_workers)
+
+    already_completed = 0
+    if output_path and (not from_scratch) and os.path.exists(output_path):
+        try:
+            with jsonlines.open(output_path) as reader:
+                already_completed = sum(1 for _ in reader)
+        except Exception:
+            already_completed = 0
+    lm.initialize_progress_tracking(total_requests=int(2 * N), already_completed=int(2 * already_completed))
 
     print("START TO GENERATE QUESTION N={}...".format(N))
     print("Wiki Source ={}...".format(wiki_input_path))

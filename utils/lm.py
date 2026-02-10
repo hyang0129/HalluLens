@@ -18,6 +18,44 @@ import requests
 import threading
 from urllib.parse import urlparse
 
+
+def _normalize_connect_host(host: str) -> str:
+    """Normalize a server bind address into a usable client connect address.
+
+    `0.0.0.0` (and `::`) are valid bind addresses but are generally not valid
+    destinations for a client HTTP request.
+    """
+    if not host:
+        return host
+    host = str(host).strip()
+    if host in {"0.0.0.0", "::", "[::]"}:
+        return "127.0.0.1"
+    return host
+
+def _normalize_base_url_for_client(api_base_url: str) -> str:
+    """Normalize an OpenAI-compatible base_url for use by an HTTP client.
+
+    If the URL host is a bind address like 0.0.0.0/::, replace it with 127.0.0.1.
+    This keeps server binding flexible while making client connections reliable.
+    """
+    if not api_base_url:
+        return api_base_url
+
+    try:
+        parsed = urlparse(str(api_base_url))
+        if not parsed.scheme or not parsed.netloc:
+            return api_base_url
+        connect_host = _normalize_connect_host(parsed.hostname)
+        if not connect_host or connect_host == parsed.hostname:
+            return api_base_url
+
+        # Preserve path/query/fragment exactly.
+        port = f":{parsed.port}" if parsed.port else ""
+        netloc = f"{connect_host}{port}"
+        return parsed._replace(netloc=netloc).geturl()
+    except Exception:
+        return api_base_url
+
 class SampleSkippedException(Exception):
     """Exception raised when a sample is skipped due to repeated failures."""
     def __init__(self, request_id, reason, attempts):
@@ -106,7 +144,16 @@ def kill_process_on_port(port):
 class ServerManager:
     """Manages the activation logging server lifecycle."""
 
-    def __init__(self, model, host="0.0.0.0", port=8000, logger_type="lmdb", activations_path=None, log_file_path=None):
+    def __init__(
+        self,
+        model,
+        host="0.0.0.0",
+        port=8000,
+        logger_type="lmdb",
+        activations_path=None,
+        log_file_path=None,
+        startup_timeout=None,
+    ):
         self.model = model
         self.host = host
         self.port = port
@@ -114,6 +161,9 @@ class ServerManager:
         self.activations_path = activations_path or f"lmdb_data/{model.replace('/', '_')}_activations.lmdb"
         self.log_file_path = log_file_path
         self.server_process = None
+        if startup_timeout is None:
+            startup_timeout = os.environ.get("SERVER_STARTUP_TIMEOUT") or os.environ.get("VLLM_SERVER_STARTUP_TIMEOUT")
+        self.startup_timeout = int(startup_timeout) if startup_timeout is not None else 600
 
     def start_server(self):
         """Start the activation logging server."""
@@ -192,14 +242,23 @@ class ServerManager:
         # Wait for server to be ready
         self._wait_for_server()
 
-    def _wait_for_server(self, timeout=120):
+    def _wait_for_server(self, timeout=None):
         """Wait for server to be ready to accept requests."""
-        logger.info("Waiting for server to be ready...")
+        if timeout is None:
+            timeout = self.startup_timeout
+
+        connect_host = _normalize_connect_host(self.host)
+        if connect_host != self.host:
+            logger.debug(
+                f"Server bind host is {self.host}; using {connect_host} for client health checks"
+            )
+
+        logger.info(f"Waiting for server to be ready (timeout={timeout}s)...")
         start_time = time.time()
 
         while time.time() - start_time < timeout:
             try:
-                response = requests.get(f"http://{self.host}:{self.port}/health", timeout=5)
+                response = requests.get(f"http://{connect_host}:{self.port}/health", timeout=5)
                 if response.status_code == 200:
                     logger.success("Server is ready!")
                     return
@@ -351,7 +410,13 @@ def check_server_health(port, timeout=5):
     """
     try:
         root_url = _server_root_url(port)
-        health_url = f"{root_url}/health"
+        parsed = urlparse(root_url)
+        connect_host = _normalize_connect_host(parsed.hostname)
+        scheme = parsed.scheme or "http"
+        netloc = parsed.netloc
+        if connect_host and parsed.port:
+            netloc = f"{connect_host}:{parsed.port}"
+        health_url = f"{scheme}://{netloc}/health"
         response = requests.get(health_url, timeout=timeout)
         return response.status_code == 200
     except Exception as e:
@@ -623,7 +688,9 @@ def generate(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512, port=Non
     # return custom_api(prompt, model, temperature, top_p, max_tokens, port)
     return call_vllm_api(prompt, model, temperature, top_p, max_tokens, port, i, max_retries, base_delay)
 
-CUSTOM_SERVER = "0.0.0.0" # you may need to change the port
+# NOTE: 0.0.0.0 is a bind address, not a connect address.
+# Default to localhost for client requests; override via env for remote servers.
+CUSTOM_SERVER = os.environ.get("VLLM_SERVER_HOST", "127.0.0.1")  # you may need to change the port
 
 model_map = {   'meta-llama/Llama-3.1-405B-Instruct-FP8': {'name': 'llama3.1_405B',
                                                             'server_urls': [f"http://{CUSTOM_SERVER}:8000/v1"]},
@@ -700,15 +767,26 @@ def call_vllm_api(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512, por
             )
         port = cfg["server_urls"][i]
 
+    # Normalize the base_url so we never attempt to connect to 0.0.0.0/::.
+    client_base_url = _normalize_base_url_for_client(port)
+
     # Get current progress for logging
     current_progress = get_progress_stats()
-    remaining = current_progress["total_requests"] - current_progress["completed_requests"] - current_progress["failed_requests"]
+    total = int(current_progress.get("total_requests") or 0)
+    completed = int(current_progress.get("completed_requests") or 0)
+    failed = int(current_progress.get("failed_requests") or 0)
+    remaining = None
+    if total > 0:
+        remaining = max(total - completed - failed, 0)
 
     logger.info(f"[CLIENT {request_id}] Starting API call - Model: {model}, Prompt length: {len(prompt)} chars")
-    logger.info(f"[CLIENT {request_id}] Progress: {current_progress['completed_requests']}/{current_progress['total_requests']} completed, {remaining} remaining")
+    if total > 0:
+        logger.info(f"[CLIENT {request_id}] Progress: {completed}/{total} completed, {remaining} remaining")
+    else:
+        logger.info(f"[CLIENT {request_id}] Progress: {completed} completed (total unknown; initialize_progress_tracking not called)")
 
     client = openai.OpenAI(
-        base_url=f"{port}",
+        base_url=f"{client_base_url}",
         api_key="NOT A REAL KEY",
         timeout=60.0  # 1 minute timeout
     )
@@ -717,7 +795,7 @@ def call_vllm_api(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512, por
         try:
             import time
             start_time = time.time()
-            logger.info(f"[CLIENT {request_id}] Sending request to {port} (attempt {attempt + 1}/{max_retries + 1})")
+            logger.info(f"[CLIENT {request_id}] Sending request to {client_base_url} (attempt {attempt + 1}/{max_retries + 1})")
 
             chat_completion = client.chat.completions.create(
                 model=model,
@@ -735,10 +813,16 @@ def call_vllm_api(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512, por
             # Update progress tracking
             update_progress(success=True)
             current_progress = get_progress_stats()
-            remaining = current_progress["total_requests"] - current_progress["completed_requests"] - current_progress["failed_requests"]
+            total = int(current_progress.get("total_requests") or 0)
+            completed = int(current_progress.get("completed_requests") or 0)
+            failed = int(current_progress.get("failed_requests") or 0)
+            remaining = max(total - completed - failed, 0) if total > 0 else None
 
             logger.info(f"[CLIENT {request_id}] Request completed successfully in {request_time:.2f}s - Response length: {len(response_content)} chars")
-            logger.info(f"[CLIENT {request_id}] Progress: {current_progress['completed_requests']}/{current_progress['total_requests']} completed, {remaining} remaining")
+            if total > 0:
+                logger.info(f"[CLIENT {request_id}] Progress: {completed}/{total} completed, {remaining} remaining")
+            else:
+                logger.info(f"[CLIENT {request_id}] Progress: {completed} completed (total unknown)")
             return response_content
 
         except APITimeoutError as e:
@@ -784,11 +868,17 @@ def call_vllm_api(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512, por
                 # Update progress tracking
                 update_progress(success=False)
                 current_progress = get_progress_stats()
-                remaining = current_progress["total_requests"] - current_progress["completed_requests"] - current_progress["failed_requests"]
+                total = int(current_progress.get("total_requests") or 0)
+                completed = int(current_progress.get("completed_requests") or 0)
+                failed = int(current_progress.get("failed_requests") or 0)
+                remaining = max(total - completed - failed, 0) if total > 0 else None
 
                 # Return a placeholder response instead of raising exception
                 logger.warning(f"[CLIENT {request_id}] Returning placeholder response to continue with next sample")
-                logger.warning(f"[CLIENT {request_id}] Progress: {current_progress['completed_requests']}/{current_progress['total_requests']} completed, {current_progress['failed_requests']} failed, {remaining} remaining")
+                if total > 0:
+                    logger.warning(f"[CLIENT {request_id}] Progress: {completed}/{total} completed, {failed} failed, {remaining} remaining")
+                else:
+                    logger.warning(f"[CLIENT {request_id}] Progress: {completed} completed, {failed} failed (total unknown)")
                 return f"[TIMEOUT_SKIPPED] Request {request_id} timed out after {max_retries + 1} attempts. Total skipped: {skip_stats['total_skipped']}"
         except Exception as e:
             request_time = time.time() - start_time
@@ -805,11 +895,17 @@ def call_vllm_api(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512, por
             # Update progress tracking
             update_progress(success=False)
             current_progress = get_progress_stats()
-            remaining = current_progress["total_requests"] - current_progress["completed_requests"] - current_progress["failed_requests"]
+            total = int(current_progress.get("total_requests") or 0)
+            completed = int(current_progress.get("completed_requests") or 0)
+            failed = int(current_progress.get("failed_requests") or 0)
+            remaining = max(total - completed - failed, 0) if total > 0 else None
 
             # Return placeholder instead of raising exception
             logger.warning(f"[CLIENT {request_id}] Returning placeholder response due to error: {type(e).__name__}")
-            logger.warning(f"[CLIENT {request_id}] Progress: {current_progress['completed_requests']}/{current_progress['total_requests']} completed, {current_progress['failed_requests']} failed, {remaining} remaining")
+            if total > 0:
+                logger.warning(f"[CLIENT {request_id}] Progress: {completed}/{total} completed, {failed} failed, {remaining} remaining")
+            else:
+                logger.warning(f"[CLIENT {request_id}] Progress: {completed} completed, {failed} failed (total unknown)")
             return f"[ERROR_SKIPPED] Request {request_id} failed with {type(e).__name__}: {str(e)[:100]}. Total skipped: {skip_stats['total_skipped']}"
 
 def openai_generate(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512):
