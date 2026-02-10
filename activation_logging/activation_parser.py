@@ -367,7 +367,11 @@ class ActivationParser:
                 # Stagger by 50ms per worker for large worker counts
                 time.sleep(worker_info.id * 0.05)
 
-            if self.logger_type == "wds" or self._wds_shards is not None:
+            # IMPORTANT: Do not disable the activation logger just because a
+            # `webdataset/` folder exists next to the Zarr store.
+            # We still need random-access reads (Zarr/LMDB) for the non-WDS
+            # dataset backend.
+            if self.logger_type == "wds":
                 self._activation_logger = None
             elif self.logger_type == "json":
                 self._activation_logger = JsonActivationsLogger(output_dir=self.activations_path, read_only=True, verbose=self.verbose)
