@@ -308,7 +308,10 @@ def train_contrastive(model, train_dataset, test_dataset=None,
                       balanced_sampling=False,
                       use_infinite_index_stream: bool = False,
                       infinite_stream_shuffle: bool = True,
-                      infinite_stream_seed: int = 0):
+                      infinite_stream_seed: int = 0,
+                      use_infinite_index_stream_eval: bool = False,
+                      infinite_eval_shuffle: bool = False,
+                      infinite_eval_seed: int = 0):
 
     base_dataset_len = None
     if use_infinite_index_stream:
@@ -372,7 +375,24 @@ def train_contrastive(model, train_dataset, test_dataset=None,
         collate_fn=_contrastive_collate_min,
     )
 
+    test_loader = None
+    eval_max_batches = None
     if test_dataset is not None:
+        test_is_iterable = isinstance(test_dataset, IterableDataset)
+        base_test_len = None
+        if use_infinite_index_stream_eval:
+            if not hasattr(test_dataset, "__len__"):
+                raise TypeError("use_infinite_index_stream_eval=True requires test_dataset to have __len__")
+            base_test_len = len(test_dataset)
+            if not test_is_iterable:
+                test_dataset = InfiniteIndexStream(
+                    test_dataset,
+                    shuffle=bool(infinite_eval_shuffle),
+                    seed=int(infinite_eval_seed),
+                )
+                test_is_iterable = True
+            eval_max_batches = int(math.ceil(base_test_len / float(batch_size)))
+
         test_loader = DataLoader(
             test_dataset,
             batch_size=batch_size,
@@ -538,8 +558,18 @@ def train_contrastive(model, train_dataset, test_dataset=None,
 
         test_loss = float('inf')
         test_cosine_sim = 0.0
-        if test_dataset is not None:
-            test_loss, test_acc, test_cosine_sim = evaluate(model, test_loader, batch_size=batch_size, loss_fn=loss_fn, device=device, sub_batch_size=sub_batch_size, use_labels=use_labels, ignore_label=ignore_label)
+        if test_loader is not None:
+            test_loss, test_acc, test_cosine_sim = evaluate(
+                model,
+                test_loader,
+                batch_size=batch_size,
+                loss_fn=loss_fn,
+                device=device,
+                sub_batch_size=sub_batch_size,
+                use_labels=use_labels,
+                ignore_label=ignore_label,
+                max_batches=eval_max_batches,
+            )
             print(f"Epoch {epoch + 1}/{epochs} - Test Loss: {test_loss:.4f} - Test Pairing Acc: {test_acc:.4f} - Test Cosine Sim: {test_cosine_sim:.4f}")
 
         # Save checkpoint (keep only what is needed to resume)

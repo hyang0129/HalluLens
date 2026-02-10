@@ -9,7 +9,18 @@ from sklearn.metrics import roc_auc_score
 from scipy.spatial import distance
 
 
-def evaluate(model, test_dataloader, batch_size=32, loss_fn=None, device='cuda', sub_batch_size=64, use_labels=False, ignore_label=-1, evaluator_manager=None):
+def evaluate(
+    model,
+    test_dataloader,
+    batch_size=32,
+    loss_fn=None,
+    device='cuda',
+    sub_batch_size=64,
+    use_labels=False,
+    ignore_label=-1,
+    evaluator_manager=None,
+    max_batches=None,
+):
     model.eval()
     total_loss = 0.0
     total_acc = 0.0
@@ -23,6 +34,8 @@ def evaluate(model, test_dataloader, batch_size=32, loss_fn=None, device='cuda',
         buffer_hashkeys = [] if evaluator_manager is not None else None
 
         for i, batch in enumerate(test_dataloader):
+            if max_batches is not None and i >= int(max_batches):
+                break
             x1 = batch['layer1_activations'].squeeze(1).to(device, non_blocking=True)
             x2 = batch['layer2_activations'].squeeze(1).to(device, non_blocking=True)
 
