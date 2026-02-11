@@ -20,6 +20,63 @@ A contrastive representation learning method trained on intermediate-layer activ
   - train/evaluate over multiple seeds and hyperparameters,
   - emit tables/figures with confidence intervals.
 
+## IDEAS_TO_TEST
+
+This section summarizes concrete variations to explore (with brief theory justification) for the current contrastive-representation + distance-based hallucination detection pipeline.
+
+### A) Scoring / OOD detection variations (inference-time)
+1. **Replace Mahalanobis with KNN distance in embedding space**
+  - Motivation: Mahalanobis assumes a unimodal Gaussian embedding distribution; contrastive embeddings can be multi-modal.
+  - Test: score each example by its distance to the $k$-th nearest neighbor in the *training* embedding set (tune $k$ on dev).
+2. **Relative Mahalanobis distance (control for “input difficulty”)**
+  - Motivation: absolute distance can conflate generic “unusualness” with hallucination-specific deviation.
+  - Test: fit (i) non-hallucination Gaussian and (ii) background Gaussian over all training points; score as $d(x;\mu_{id},\Sigma_{id}) - d(x;\mu_{bg},\Sigma_{bg})$.
+3. **Multi-layer Mahalanobis fusion with learned weights**
+  - Motivation: different layers carry different hallucination signal; uniform averaging assumes equal informativeness.
+  - Test: compute per-layer distances and learn a linear combiner (logistic regression) on dev.
+4. **Score fusion: Mahalanobis + inter-layer agreement**
+  - Motivation: “distance from typical” and “layer-wise inconsistency” are distinct signals.
+  - Test: combine Mahalanobis with negative cosine similarity between the two layer embeddings.
+
+### B) Representation choices (what activations we embed)
+5. **Answer-tokens-only pooling (response-only) vs prompt+response**
+  - Motivation: hallucination signal should concentrate in generated tokens; prompt tokens add noise.
+  - Test: use activation logging `sequence_mode='response'` and compare to `sequence_mode='all'`.
+6. **Token selection ablations**
+  - Motivation: mean pooling may dilute localized failure modes.
+  - Test grid: last-token only; mean-pool; max-pool; attention-weighted pooling (learned weights over tokens).
+7. **Residual-stream deltas instead of raw activations**
+  - Motivation: $\Delta_l = h_l - h_{l-1}$ isolates what layer $l$ *adds*, potentially making hallucination-specific computation more separable.
+  - Test: log/construct deltas and train the same compressor on $(\Delta_{l1}, \Delta_{l2})$ views.
+
+### C) Contrastive objective / training variations
+8. **Layer pair sweep and “best pair” discovery**
+  - Motivation: the strongest signal may come from specific layer pairs (where internal representations diverge most under hallucination).
+  - Test: sweep $(l_1, l_2)$ across early/mid/late ranges; report best AUROC and stability across seeds.
+9. **Multi-view contrastive (K > 2 layers as views)**
+  - Motivation: more views provide richer constraints than a single pair.
+  - Test: use $K$ layers as $n_{views}=K$ in SupConLoss and compare to $K=2$.
+10. **Temperature sweep / learnable temperature / alternative SSL losses**
+  - Motivation: optimal temperature depends on embedding geometry; avoid brittle tuning.
+  - Test: $\tau \in \{0.01, 0.05, 0.07, 0.1, 0.25, 0.5\}$; optionally learn $\tau$; consider VICReg as a no-negatives baseline.
+11. **Asymmetric encoders (BYOL/SimSiam-style) across layers**
+  - Motivation: different layers are not true “random augmentations”; separate encoders can reduce representational mismatch.
+  - Test: online encoder + target encoder (EMA) with stop-gradient on target branch.
+12. **Layer-conditioned encoder (single encoder + layer ID embedding / FiLM)**
+  - Motivation: keep a single shared encoder for parameter efficiency, but let it adapt to systematic distribution shifts across layers.
+  - Test: pass `layer_id` to the compressor and add a learned layer embedding to token states (or use FiLM-style scale/shift per block).
+  - Expected outcome: approximates “separate encoders” while still sharing most parameters; should improve alignment when layers have different statistics.
+
+### D) Analysis / interpretability (to understand *why* it works)
+13. **Spectral analysis of covariance in embedding space**
+  - Motivation: Mahalanobis emphasizes low-variance directions; identify whether separation lives in high- or low-variance subspaces.
+  - Test: compute AUROC using distances restricted to top-$k$ vs bottom-$k$ eigen-directions; track which components dominate.
+
+### Suggested priority order (best effortokto-impact first)
+- KNN scoring; response-only pooling; relative Mahalanobis; learned layer-weight fusion.
+- Then: residual deltas; cosine+Mahalanobis fusion; temperature sweep.
+- Finally: K>2 views; asymmetric encoders; spectral analysis (interpretability-first).
+
 ## 1) What We Already Have (Repo Reality)
 
 ### Activation logging + inference (data generation)
