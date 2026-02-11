@@ -260,12 +260,12 @@ class ContrastiveTrainerConfig(TrainerConfig):
     balanced_sampling: bool = False
 
     # Optional infinite index streaming (keeps workers alive)
-    use_infinite_index_stream: bool = False
+    use_infinite_index_stream: bool = True
     infinite_stream_shuffle: bool = True
     infinite_stream_seed: int = 0
 
-    use_infinite_index_stream_eval: bool = False
-    infinite_eval_shuffle: bool = False
+    use_infinite_index_stream_eval: bool = True
+    infinite_eval_shuffle: bool = True
     infinite_eval_seed: int = 0
 
 

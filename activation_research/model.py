@@ -176,18 +176,78 @@ class HallucinationClassifier(nn.Module):
         return torch.sigmoid(self.net(last_token))  # (B, 1) - removed squeeze()
 
 
+class FiLMConditioner(nn.Module):
+    """Feature-wise Linear Modulation (FiLM) conditioner.
+
+    Learns per-index scale (gamma) and shift (beta) vectors so that:
+        h' = gamma(n) * h + beta(n)
+
+    Initialised to identity (gamma=1, beta=0) so the model starts as
+    if unconditioned and gradually learns layer-specific modulation.
+    """
+
+    def __init__(self, num_indices: int, feature_dim: int):
+        super().__init__()
+        self.gamma = nn.Embedding(num_indices, feature_dim)
+        self.beta = nn.Embedding(num_indices, feature_dim)
+        nn.init.ones_(self.gamma.weight)
+        nn.init.zeros_(self.beta.weight)
+
+    def forward(self, h: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
+        """h: (B, D) or (B, L, D), idx: (B,) long → same shape as h."""
+        g = self.gamma(idx)  # (B, D)
+        b = self.beta(idx)   # (B, D)
+        if h.dim() == 3:
+            # Broadcast over sequence dimension: (B, D) → (B, 1, D)
+            g = g.unsqueeze(1)
+            b = b.unsqueeze(1)
+        return g * h + b
+
+
 class LayerAwareProgressiveCompressor(nn.Module):
     """Layer-aware variant of `ProgressiveCompressor`.
 
     Encodes activations into a fixed-size embedding and conditions the
-    representation on `layer_idx` via an embedding table.
+    representation on `layer_idx` using one of several strategies:
 
-    This model is designed to be drop-in for contrastive training where
-    each view may come from a different layer.
+    * ``"film_in"`` – FiLM applied to the **raw input** before the
+      encoder.  Normalises cross-layer distribution shift so the
+      encoder sees standardised activations.
+    * ``"film_out"`` – FiLM applied to the **encoder output**.
+      Post-hoc rescaling of the learned representation.
+    * ``"film_both"`` – FiLM on both input and output (two independent
+      FiLM modules).  Input-side handles distribution normalisation,
+      output-side handles representation-space calibration.
+    * ``"positional"`` – additive conditioning.  A learned layer
+      embedding is added to the encoder output: ``z' = z + e(n)``.
+      Lightweight but assumes activations are already roughly
+      homogeneous across layers.
+    * ``"concatenate"`` – the original strategy.  Layer embedding is
+      projected, concatenated with ``z``, and fused through a linear
+      layer.
 
     Forward accepts keyword arguments so evaluation utilities can pass
     `layer_idx=...` without positional coupling.
+
+    Parameters
+    ----------
+    num_layers : int
+        Number of distinct layer indices.
+    input_dim : int
+        Activation dimension (e.g. 4096 for Llama-7B).
+    final_dim : int
+        Output embedding dimension.
+    layer_embed_dim : int
+        Intermediate layer embedding size (used by ``"concatenate"`` and
+        ``"positional"`` modes).
+    conditioning : str
+        One of ``"film_in"``, ``"film_out"``, ``"film_both"``,
+        ``"positional"``, ``"concatenate"``.
+    dropout, input_dropout : float
+        Dropout rates forwarded to the inner encoder.
     """
+
+    VALID_CONDITIONING = {"film_in", "film_out", "film_both", "positional", "concatenate"}
 
     def __init__(
         self,
@@ -196,12 +256,20 @@ class LayerAwareProgressiveCompressor(nn.Module):
         input_dim: int = 4096,
         final_dim: int = 512,
         layer_embed_dim: int = 128,
+        conditioning: str = "film_both",
         dropout: float = 0.1,
         input_dropout: float = 0.2,
     ):
         super().__init__()
+        conditioning = conditioning.lower()
+        if conditioning not in self.VALID_CONDITIONING:
+            raise ValueError(
+                f"conditioning must be one of {self.VALID_CONDITIONING}, got '{conditioning}'"
+            )
         if int(num_layers) <= 0:
             raise ValueError("num_layers must be > 0")
+
+        self.conditioning = conditioning
 
         self.encoder = ProgressiveCompressor(
             input_dim=int(input_dim),
@@ -210,33 +278,76 @@ class LayerAwareProgressiveCompressor(nn.Module):
             input_dropout=float(input_dropout),
         )
 
-        self.layer_embedding = nn.Embedding(int(num_layers), int(layer_embed_dim))
-        self.layer_proj = nn.Linear(int(layer_embed_dim), int(final_dim))
-        self.fuse = nn.Linear(int(final_dim) * 2, int(final_dim))
+        # --- conditioning-specific modules ---
+        if conditioning in ("film_in", "film_both"):
+            # Input-side FiLM: operates on (B, L, input_dim)
+            self.film_in = FiLMConditioner(int(num_layers), int(input_dim))
+
+        if conditioning in ("film_out", "film_both"):
+            # Output-side FiLM: operates on (B, final_dim)
+            self.film_out = FiLMConditioner(int(num_layers), int(final_dim))
+
+        if conditioning == "positional":
+            self.layer_embedding = nn.Embedding(int(num_layers), int(final_dim))
+
+        elif conditioning == "concatenate":
+            self.layer_embedding = nn.Embedding(int(num_layers), int(layer_embed_dim))
+            self.layer_proj = nn.Linear(int(layer_embed_dim), int(final_dim))
+            self.fuse = nn.Linear(int(final_dim) * 2, int(final_dim))
+
         self.norm = nn.LayerNorm(int(final_dim))
 
-    def forward(self, x, *, layer_idx=None, **kwargs):
+    # ------------------------------------------------------------------ #
+    #  Helpers
+    # ------------------------------------------------------------------ #
+    def _coerce_layer_idx(self, layer_idx, batch_size: int, device: torch.device) -> torch.Tensor:
+        """Normalise ``layer_idx`` to a (B,) long tensor on the right device."""
+        if isinstance(layer_idx, int):
+            return torch.full((batch_size,), layer_idx, dtype=torch.long, device=device)
+
+        if isinstance(layer_idx, torch.Tensor):
+            layer_idx = layer_idx.to(device=device, dtype=torch.long, non_blocking=True)
+            if layer_idx.dim() == 0:
+                return layer_idx.view(1).expand(batch_size)
+            if layer_idx.dim() > 1:
+                layer_idx = layer_idx.view(-1)
+            if layer_idx.shape[0] != batch_size:
+                raise ValueError(
+                    f"layer_idx batch size {layer_idx.shape[0]} != x batch size {batch_size}"
+                )
+            return layer_idx
+
+        raise TypeError(f"layer_idx must be int or Tensor, got {type(layer_idx)}")
+
+    # ------------------------------------------------------------------ #
+    #  Forward
+    # ------------------------------------------------------------------ #
+    def forward(self, x: torch.Tensor, *, layer_idx=None, **kwargs) -> torch.Tensor:
         _ = kwargs
-        z = self.encoder(x)
 
         if layer_idx is None:
+            z = self.encoder(x)
             return z
 
-        if isinstance(layer_idx, int):
-            layer_idx = torch.full((z.shape[0],), layer_idx, dtype=torch.long, device=z.device)
-        elif isinstance(layer_idx, torch.Tensor):
-            layer_idx = layer_idx.to(device=z.device, dtype=torch.long, non_blocking=True)
-            if layer_idx.dim() == 0:
-                layer_idx = layer_idx.view(1).expand(z.shape[0])
-            elif layer_idx.dim() > 1:
-                layer_idx = layer_idx.view(-1)
+        idx = self._coerce_layer_idx(layer_idx, x.shape[0], x.device)
 
-        if layer_idx.shape[0] != z.shape[0]:
-            raise ValueError(
-                f"layer_idx batch size {layer_idx.shape[0]} does not match x batch size {z.shape[0]}"
-            )
+        # --- input-side FiLM ---
+        if self.conditioning in ("film_in", "film_both"):
+            x = self.film_in(x, idx)  # (B, L, D) → (B, L, D)
 
-        e = self.layer_embedding(layer_idx)
-        e = self.layer_proj(e)
-        fused = self.fuse(torch.cat([z, e], dim=-1))
-        return self.norm(fused)
+        z = self.encoder(x)  # (B, final_dim)
+
+        # --- output-side FiLM ---
+        if self.conditioning in ("film_out", "film_both"):
+            z = self.film_out(z, idx)  # (B, final_dim) → (B, final_dim)
+
+        elif self.conditioning == "positional":
+            e = self.layer_embedding(idx)  # (B, final_dim)
+            z = z + e
+
+        elif self.conditioning == "concatenate":
+            e = self.layer_embedding(idx)
+            e = self.layer_proj(e)
+            z = self.fuse(torch.cat([z, e], dim=-1))
+
+        return self.norm(z)
