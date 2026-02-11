@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 from sklearn.metrics import roc_auc_score
+from sklearn.neighbors import NearestNeighbors
 from scipy.spatial import distance
 import torch.nn.functional as F
 
@@ -133,6 +134,72 @@ def classifier_ood_stats(test_records):
         'classifier_mean_ood': ood_probs.mean().item(),
         'classifier_std_ood': ood_probs.std().item(),
         'classifier_auroc': roc_auc_score(test_labels, test_probs.numpy())
+    }
+
+    return stats
+
+
+def knn_ood_stats(
+    train_records,
+    test_records,
+    outlier_class: int = 1,
+    k: int = 5,
+    metric: str = "euclidean",
+):
+    """Compute OOD statistics using k-nearest-neighbor distance in embedding space.
+
+    This uses the distance from each test embedding (z1) to its k nearest neighbors
+    among training embeddings (z1). Larger distances indicate more OOD-like samples.
+
+    Args:
+        train_records: List of training records containing 'z1' tensors.
+        test_records: List of test records containing 'z1' tensors and 'halu' labels.
+        outlier_class: Which class to treat as outlier for ID/OOD summary stats.
+        k: Number of neighbors to use.
+        metric: Distance metric for NearestNeighbors (e.g. 'euclidean', 'cosine').
+
+    Returns:
+        dict: Contains KNN distance statistics for ID/OOD detection.
+    """
+    k = int(k)
+    if k <= 0:
+        raise ValueError("k must be a positive integer")
+
+    # Stack train/test embeddings (z1). Use CPU numpy for sklearn.
+    train_z = torch.stack([r["z1"] for r in train_records]).detach().cpu().numpy()
+    test_z = torch.stack([r["z1"] for r in test_records]).detach().cpu().numpy()
+    test_labels = torch.tensor([r["halu"] for r in test_records], dtype=torch.int32).squeeze()
+
+    n_train = train_z.shape[0]
+    n_neighbors = min(k, n_train)
+    if n_neighbors < k:
+        # Keep behavior reasonable for tiny train sets.
+        k = n_neighbors
+
+    nn = NearestNeighbors(n_neighbors=n_neighbors, metric=metric)
+    nn.fit(train_z)
+    distances, _ = nn.kneighbors(test_z)
+
+    # Use mean kNN distance as the OOD score.
+    knn_scores = torch.tensor(distances.mean(axis=1), dtype=torch.float32)
+
+    id_scores = knn_scores[test_labels == 0]
+    ood_scores = knn_scores[test_labels == 1]
+
+    if outlier_class == 0:
+        id_scores = knn_scores[test_labels == 1]
+        ood_scores = knn_scores[test_labels == 0]
+
+    stats = {
+        "knn_k": int(k),
+        "knn_metric": str(metric),
+        "knn_mean_id": id_scores.mean().item() if id_scores.numel() else float("nan"),
+        "knn_std_id": id_scores.std().item() if id_scores.numel() else float("nan"),
+        "knn_mean_ood": ood_scores.mean().item() if ood_scores.numel() else float("nan"),
+        "knn_std_ood": ood_scores.std().item() if ood_scores.numel() else float("nan"),
+        # AUROC is computed with the original labels (halu==1 as positive), consistent
+        # with mahalanobis_ood_stats() in this module.
+        "knn_auroc": roc_auc_score(test_labels.numpy(), knn_scores.numpy()),
     }
 
     return stats

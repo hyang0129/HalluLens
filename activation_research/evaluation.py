@@ -9,6 +9,22 @@ from sklearn.metrics import roc_auc_score
 from scipy.spatial import distance
 
 
+def _call_model(model, x, **kwargs):
+    """Call `model` using kwargs when supported.
+
+    This keeps backward compatibility with encoders that only accept `forward(x)`.
+    """
+    if not kwargs:
+        return model(x)
+    try:
+        return model(x, **kwargs)
+    except TypeError as e:
+        msg = str(e)
+        if "unexpected keyword argument" in msg or "got an unexpected keyword" in msg:
+            return model(x)
+        raise
+
+
 def evaluate(
     model,
     test_dataloader,
@@ -30,6 +46,7 @@ def evaluate(
     with torch.no_grad():
         # Buffers to accumulate mini-batches
         buffer_x1, buffer_x2 = [], []
+        buffer_l1, buffer_l2 = [], []
         buffer_labels = [] if use_labels else None
         buffer_hashkeys = [] if evaluator_manager is not None else None
 
@@ -41,6 +58,11 @@ def evaluate(
 
             buffer_x1.append(x1)
             buffer_x2.append(x2)
+
+            if isinstance(batch, dict) and 'layer1_idx' in batch:
+                buffer_l1.append(batch['layer1_idx'].to(device, non_blocking=True))
+            if isinstance(batch, dict) and 'layer2_idx' in batch:
+                buffer_l2.append(batch['layer2_idx'].to(device, non_blocking=True))
 
             if buffer_hashkeys is not None:
                 hk = None
@@ -73,8 +95,13 @@ def evaluate(
                 buffer_x1 = []
                 buffer_x2 = []
 
-                z1 = model(x1_full)
-                z2 = model(x2_full)
+                l1_full = torch.cat(buffer_l1, dim=0) if buffer_l1 else None
+                l2_full = torch.cat(buffer_l2, dim=0) if buffer_l2 else None
+                buffer_l1 = []
+                buffer_l2 = []
+
+                z1 = _call_model(model, x1_full, layer_idx=l1_full)
+                z2 = _call_model(model, x2_full, layer_idx=l2_full)
 
                 # Accumulate embeddings if evaluator manager is provided
                 if evaluator_manager is not None:
@@ -104,8 +131,11 @@ def evaluate(
             x1_full = torch.cat(buffer_x1, dim=0)
             x2_full = torch.cat(buffer_x2, dim=0)
 
-            z1 = model(x1_full)
-            z2 = model(x2_full)
+            l1_full = torch.cat(buffer_l1, dim=0) if buffer_l1 else None
+            l2_full = torch.cat(buffer_l2, dim=0) if buffer_l2 else None
+
+            z1 = _call_model(model, x1_full, layer_idx=l1_full)
+            z2 = _call_model(model, x2_full, layer_idx=l2_full)
 
             if evaluator_manager is not None:
                 labels = torch.cat(buffer_labels, dim=0) if (use_labels and buffer_labels) else None
@@ -273,6 +303,7 @@ def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, devi
     )
 
     buffer_x1, buffer_x2, buffer_hash = [], [], []
+    buffer_l1, buffer_l2 = [], []
     if layers is not None:
         buffer_layers = {layer_idx: [] for layer_idx in layers}
     results = []
@@ -286,6 +317,11 @@ def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, devi
                 x2 = batch['layer2_activations'].squeeze(1).to(device, non_blocking=True)
                 buffer_x1.append(x1)
                 buffer_x2.append(x2)
+
+                if isinstance(batch, dict) and 'layer1_idx' in batch:
+                    buffer_l1.append(batch['layer1_idx'].to(device, non_blocking=True))
+                if isinstance(batch, dict) and 'layer2_idx' in batch:
+                    buffer_l2.append(batch['layer2_idx'].to(device, non_blocking=True))
             else:
                 all_activations = batch['all_activations']
                 for layer_idx, layer_acts in zip(layers, all_activations):
@@ -304,8 +340,12 @@ def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, devi
                     x2_full = torch.cat(buffer_x2, dim=0)
                     buffer_x1, buffer_x2 = [], []
 
-                    z1 = model(x1_full)
-                    z2 = model(x2_full)
+                    l1_full = torch.cat(buffer_l1, dim=0) if buffer_l1 else None
+                    l2_full = torch.cat(buffer_l2, dim=0) if buffer_l2 else None
+                    buffer_l1, buffer_l2 = [], []
+
+                    z1 = _call_model(model, x1_full, layer_idx=l1_full)
+                    z2 = _call_model(model, x2_full, layer_idx=l2_full)
 
                     for h, z1_i, z2_i in zip(buffer_hash, z1, z2):
                         results.append({
@@ -318,7 +358,13 @@ def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, devi
                     for layer_idx in layers:
                         layer_buffer = buffer_layers[layer_idx]
                         layer_full = torch.cat(layer_buffer, dim=0)
-                        z = model(layer_full)
+                        layer_idx_tensor = torch.full(
+                            (layer_full.shape[0],),
+                            int(layer_idx),
+                            dtype=torch.long,
+                            device=layer_full.device,
+                        )
+                        z = _call_model(model, layer_full, layer_idx=layer_idx_tensor)
                         layer_embeddings[f"layer_{layer_idx}"] = z.cpu()
                         buffer_layers[layer_idx] = []
 

@@ -174,3 +174,69 @@ class HallucinationClassifier(nn.Module):
         
         # Pass through feed-forward layers
         return torch.sigmoid(self.net(last_token))  # (B, 1) - removed squeeze()
+
+
+class LayerAwareProgressiveCompressor(nn.Module):
+    """Layer-aware variant of `ProgressiveCompressor`.
+
+    Encodes activations into a fixed-size embedding and conditions the
+    representation on `layer_idx` via an embedding table.
+
+    This model is designed to be drop-in for contrastive training where
+    each view may come from a different layer.
+
+    Forward accepts keyword arguments so evaluation utilities can pass
+    `layer_idx=...` without positional coupling.
+    """
+
+    def __init__(
+        self,
+        *,
+        num_layers: int,
+        input_dim: int = 4096,
+        final_dim: int = 512,
+        layer_embed_dim: int = 128,
+        dropout: float = 0.1,
+        input_dropout: float = 0.2,
+    ):
+        super().__init__()
+        if int(num_layers) <= 0:
+            raise ValueError("num_layers must be > 0")
+
+        self.encoder = ProgressiveCompressor(
+            input_dim=int(input_dim),
+            final_dim=int(final_dim),
+            dropout=float(dropout),
+            input_dropout=float(input_dropout),
+        )
+
+        self.layer_embedding = nn.Embedding(int(num_layers), int(layer_embed_dim))
+        self.layer_proj = nn.Linear(int(layer_embed_dim), int(final_dim))
+        self.fuse = nn.Linear(int(final_dim) * 2, int(final_dim))
+        self.norm = nn.LayerNorm(int(final_dim))
+
+    def forward(self, x, *, layer_idx=None, **kwargs):
+        _ = kwargs
+        z = self.encoder(x)
+
+        if layer_idx is None:
+            return z
+
+        if isinstance(layer_idx, int):
+            layer_idx = torch.full((z.shape[0],), layer_idx, dtype=torch.long, device=z.device)
+        elif isinstance(layer_idx, torch.Tensor):
+            layer_idx = layer_idx.to(device=z.device, dtype=torch.long, non_blocking=True)
+            if layer_idx.dim() == 0:
+                layer_idx = layer_idx.view(1).expand(z.shape[0])
+            elif layer_idx.dim() > 1:
+                layer_idx = layer_idx.view(-1)
+
+        if layer_idx.shape[0] != z.shape[0]:
+            raise ValueError(
+                f"layer_idx batch size {layer_idx.shape[0]} does not match x batch size {z.shape[0]}"
+            )
+
+        e = self.layer_embedding(layer_idx)
+        e = self.layer_proj(e)
+        fused = self.fuse(torch.cat([z, e], dim=-1))
+        return self.norm(fused)

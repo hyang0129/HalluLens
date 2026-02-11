@@ -1,8 +1,8 @@
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Callable
 from abc import ABC, abstractmethod
 from loguru import logger
 from .evaluation import inference_embeddings
-from .metrics import mahalanobis_ood_stats
+from .metrics import mahalanobis_ood_stats, cosine_similarity_ood_stats, knn_ood_stats
 
 
 def set_logging_level(level: str = "INFO"):
@@ -91,7 +91,9 @@ class HallucinationEvaluator(MetricEvaluator):
                  num_workers: int = 4,
                  persistent_workers: bool = False,
                  outlier_class: int = 1,
-                 max_rows: int = 10000000):
+                 max_rows: int = 10000000,
+                 metric: Union[str, Callable[..., Dict[str, Any]]] = "mahalanobis",
+                 metric_kwargs: Optional[Dict[str, Any]] = None):
         """
         Initialize the hallucination evaluator.
 
@@ -106,6 +108,9 @@ class HallucinationEvaluator(MetricEvaluator):
             persistent_workers: Whether to keep workers persistent
             outlier_class: Which class to treat as outlier (0 or 1)
             max_rows: Maximum number of rows to consider from activation parser df
+            metric: Which OOD metric/stats function to use. Either a string name
+                ('mahalanobis', 'cosine', 'knn') or a callable.
+            metric_kwargs: Optional kwargs passed to the metric callable.
         """
         self.activation_parser_df = activation_parser_df
         self.train_data_loader = train_data_loader
@@ -118,8 +123,51 @@ class HallucinationEvaluator(MetricEvaluator):
         self.outlier_class = outlier_class
         self.max_rows = max_rows
 
+        self.metric_name, self.metric_fn = self._resolve_metric(metric)
+        self.metric_kwargs = metric_kwargs or {}
+
         # Cache for computed embeddings
         self._baseline_embeddings = None
+
+    @staticmethod
+    def _resolve_metric(metric: Union[str, Callable[..., Dict[str, Any]]]):
+        if callable(metric):
+            return getattr(metric, "__name__", "custom_metric"), metric
+
+        metric_key = str(metric).strip().lower()
+        metric_map = {
+            "mahalanobis": mahalanobis_ood_stats,
+            "mds": mahalanobis_ood_stats,
+            "cosine": cosine_similarity_ood_stats,
+            "cosine_similarity": cosine_similarity_ood_stats,
+            "knn": knn_ood_stats,
+        }
+        if metric_key not in metric_map:
+            raise ValueError(
+                f"Unknown metric '{metric}'. Expected one of {sorted(metric_map.keys())} or a callable."
+            )
+
+        return metric_key, metric_map[metric_key]
+
+    def _compute_stats(
+        self,
+        baseline_embeddings: List[Dict[str, Any]],
+        labeled_test_embeddings: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Call the configured metric function with best-effort compatibility."""
+
+        # Most metrics in activation_research.metrics accept (train_records, test_records, outlier_class=...).
+        # For custom callables, we try a couple of common signatures.
+        try:
+            return self.metric_fn(
+                baseline_embeddings,
+                labeled_test_embeddings,
+                outlier_class=self.outlier_class,
+                **self.metric_kwargs,
+            )
+        except TypeError:
+            # Fallback: metric doesn't accept outlier_class (or kwargs).
+            return self.metric_fn(baseline_embeddings, labeled_test_embeddings, **self.metric_kwargs)
 
     def compute(self, data_loader, model) -> Dict[str, Any]:
         """
@@ -143,13 +191,8 @@ class HallucinationEvaluator(MetricEvaluator):
         # Assign hallucination labels
         labeled_test_embeddings = self._assign_hallucination_labels(test_embeddings)
 
-        # Compute Mahalanobis OOD statistics
-        logger.info("Computing Mahalanobis OOD statistics...")
-        stats = mahalanobis_ood_stats(
-            baseline_embeddings,
-            labeled_test_embeddings,
-            outlier_class=self.outlier_class
-        )
+        logger.info(f"Computing OOD stats via metric='{self.metric_name}'...")
+        stats = self._compute_stats(baseline_embeddings, labeled_test_embeddings)
 
         logger.info("Evaluation complete!")
         logger.info(f"Results: {stats}")
@@ -178,13 +221,8 @@ class HallucinationEvaluator(MetricEvaluator):
         # Assign hallucination labels to the embeddings
         labeled_embeddings = self._assign_hallucination_labels(embeddings)
 
-        # Compute Mahalanobis OOD statistics
-        logger.info("Computing Mahalanobis OOD statistics...")
-        stats = mahalanobis_ood_stats(
-            self._baseline_embeddings,
-            labeled_embeddings,
-            outlier_class=self.outlier_class
-        )
+        logger.info(f"Computing OOD stats via metric='{self.metric_name}'...")
+        stats = self._compute_stats(self._baseline_embeddings, labeled_embeddings)
 
         logger.info("Evaluation complete!")
         logger.info(f"Results: {stats}")
