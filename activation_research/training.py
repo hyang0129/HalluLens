@@ -11,6 +11,7 @@ from sklearn.metrics import roc_auc_score
 import os
 import json
 import math
+import re
 
 
 class InfiniteIndexStream(IterableDataset):
@@ -134,6 +135,60 @@ def _cleanup_legacy_checkpoints(checkpoint_dir: str, *, keep_filenames: set[str]
             except OSError:
                 pass
             continue
+
+
+def _save_and_prune_snapshots(
+    *,
+    checkpoint_dir: str,
+    snapshot_prefix: str,
+    epoch_one_indexed: int,
+    checkpoint: dict,
+    snapshot_every: int,
+    snapshot_keep_last: int,
+    is_last_epoch: bool,
+) -> None:
+    """Optionally save periodic snapshot checkpoints and prune old ones.
+
+    Snapshot checkpoints are useful for inspecting/rolling back training.
+    Retention is handled by keeping only the newest `snapshot_keep_last`
+    snapshots.
+    """
+    if snapshot_every is None:
+        return
+    snapshot_every = int(snapshot_every)
+    snapshot_keep_last = int(snapshot_keep_last)
+    if snapshot_every <= 0 or snapshot_keep_last <= 0:
+        return
+
+    should_snapshot = (epoch_one_indexed % snapshot_every == 0) or bool(is_last_epoch)
+    if should_snapshot:
+        snap_name = f"{snapshot_prefix}_snapshot_epoch_{epoch_one_indexed:05d}.pt"
+        snap_path = os.path.join(checkpoint_dir, snap_name)
+        _atomic_torch_save(checkpoint, snap_path)
+
+    # Prune older snapshots beyond the retention window.
+    pattern = re.compile(rf"^{re.escape(snapshot_prefix)}_snapshot_epoch_(\\d+)\\.pt$")
+    snapshots: list[tuple[int, str]] = []
+    try:
+        for name in os.listdir(checkpoint_dir):
+            m = pattern.match(name)
+            if not m:
+                continue
+            try:
+                epoch_num = int(m.group(1))
+            except ValueError:
+                continue
+            snapshots.append((epoch_num, name))
+    except FileNotFoundError:
+        return
+
+    snapshots.sort(key=lambda x: x[0])
+    to_delete = snapshots[:-snapshot_keep_last] if len(snapshots) > snapshot_keep_last else []
+    for _, name in to_delete:
+        try:
+            os.remove(os.path.join(checkpoint_dir, name))
+        except OSError:
+            pass
 
 class SupConLoss(nn.Module):
     """Supervised Contrastive Learning: https://arxiv.org/pdf/2004.11362.pdf.
@@ -303,6 +358,9 @@ def train_contrastive(model, train_dataset, test_dataset=None,
                       epochs=10, batch_size=512, lr=1e-6,
                       temperature=0.07, device='cuda', num_workers=16, sub_batch_size=64,
                       checkpoint_dir='checkpoints', save_every=1, resume_from=None, persistent_workers=True,
+                      cleanup_legacy_checkpoints: bool = True,
+                      snapshot_every: int = 0,
+                      snapshot_keep_last: int = 5,
                       use_labels=False, ignore_label=-1,
                       same_sample_weight=1.0, same_class_weight=1.0,
                       balanced_sampling=False,
@@ -573,7 +631,8 @@ def train_contrastive(model, train_dataset, test_dataset=None,
             print(f"Epoch {epoch + 1}/{epochs} - Test Loss: {test_loss:.4f} - Test Pairing Acc: {test_acc:.4f} - Test Cosine Sim: {test_cosine_sim:.4f}")
 
         # Save checkpoint (keep only what is needed to resume)
-        if (epoch + 1) % save_every == 0 or epoch == epochs - 1:
+        is_last_epoch = (epoch == epochs - 1)
+        if (epoch + 1) % save_every == 0 or is_last_epoch:
             checkpoint = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -590,11 +649,26 @@ def train_contrastive(model, train_dataset, test_dataset=None,
 
             last_path = os.path.join(checkpoint_dir, 'contrastive_last.pt')
             _atomic_torch_save(checkpoint, last_path)
-            _cleanup_legacy_checkpoints(checkpoint_dir, keep_filenames={'contrastive_last.pt'})
+
+            _save_and_prune_snapshots(
+                checkpoint_dir=checkpoint_dir,
+                snapshot_prefix='contrastive',
+                epoch_one_indexed=epoch + 1,
+                checkpoint=checkpoint,
+                snapshot_every=snapshot_every,
+                snapshot_keep_last=snapshot_keep_last,
+                is_last_epoch=is_last_epoch,
+            )
+
+            if cleanup_legacy_checkpoints:
+                _cleanup_legacy_checkpoints(checkpoint_dir, keep_filenames={'contrastive_last.pt'})
 
 
 def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, batch_size=512, lr=1e-4, device='cuda', num_workers=4, sub_batch_size=64,
                          checkpoint_dir='checkpoints', save_every=1, resume_from=None, persistent_workers=True,
+                         cleanup_legacy_checkpoints: bool = True,
+                         snapshot_every: int = 0,
+                         snapshot_keep_last: int = 5,
                          balanced_sampling=True):
     """
     Train a hallucination classifier using last layer activations.
@@ -785,7 +859,8 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
             print(f"Epoch {epoch+1} - Val Loss: {val_loss:.4f} - Val Acc: {val_acc:.4f} - Val AUROC: {val_auroc:.4f}")
 
         # Save checkpoint (keep only what is needed to resume)
-        if (epoch + 1) % save_every == 0 or epoch == epochs - 1:
+        is_last_epoch = (epoch == epochs - 1)
+        if (epoch + 1) % save_every == 0 or is_last_epoch:
             checkpoint = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -801,4 +876,16 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
 
             last_path = os.path.join(checkpoint_dir, 'halu_classifier_last.pt')
             _atomic_torch_save(checkpoint, last_path)
-            _cleanup_legacy_checkpoints(checkpoint_dir, keep_filenames={'halu_classifier_last.pt'})
+
+            _save_and_prune_snapshots(
+                checkpoint_dir=checkpoint_dir,
+                snapshot_prefix='halu_classifier',
+                epoch_one_indexed=epoch + 1,
+                checkpoint=checkpoint,
+                snapshot_every=snapshot_every,
+                snapshot_keep_last=snapshot_keep_last,
+                is_last_epoch=is_last_epoch,
+            )
+
+            if cleanup_legacy_checkpoints:
+                _cleanup_legacy_checkpoints(checkpoint_dir, keep_filenames={'halu_classifier_last.pt'})
