@@ -83,6 +83,15 @@ class Trainer:
         self.config = config
         self.device = _resolve_device(config.device)
 
+        self._cached_train_dataset_key: Optional[int] = None
+        self._cached_train_loader: Optional[DataLoader] = None
+        self._cached_train_steps_per_epoch: Optional[int] = None
+        self._cached_train_infinite_iter = None
+
+        self._cached_val_dataset_key: Optional[int] = None
+        self._cached_val_loader: Optional[DataLoader] = None
+        self._cached_val_max_batches: Optional[int] = None
+
         os.makedirs(self.config.checkpoint_dir, exist_ok=True)
 
         self.model = self.model.to(self.device)
@@ -177,6 +186,35 @@ class Trainer:
         _ = val_dataset
         return {}
 
+    def _build_val_loader(self, val_dataset) -> Tuple[DataLoader, Optional[int]]:
+        """Return (val_loader, max_batches_or_none) with caching."""
+        dataset_key = id(val_dataset)
+        needs_rebuild = (self._cached_val_loader is None) or (self._cached_val_dataset_key != dataset_key)
+
+        if needs_rebuild:
+            dataset = val_dataset
+            eval_max_batches = None
+
+            if bool(getattr(self.config, "use_infinite_index_stream_eval", False)):
+                if not hasattr(dataset, "__len__"):
+                    raise TypeError("use_infinite_index_stream_eval=True requires val_dataset to have __len__")
+                base_len = len(dataset)
+                if not isinstance(dataset, IterableDataset):
+                    dataset = InfiniteIndexStream(
+                        dataset,
+                        shuffle=bool(getattr(self.config, "infinite_eval_shuffle", True)),
+                        seed=int(getattr(self.config, "infinite_eval_seed", 0)),
+                    )
+                eval_max_batches = int(math.ceil(base_len / float(self.config.batch_size)))
+
+            val_loader = self.val_dataloader(dataset)
+
+            self._cached_val_loader = val_loader
+            self._cached_val_dataset_key = dataset_key
+            self._cached_val_max_batches = eval_max_batches
+
+        return self._cached_val_loader, self._cached_val_max_batches
+
     def maybe_save_checkpoint(
         self,
         *,
@@ -234,7 +272,29 @@ class Trainer:
 
     def _build_train_iterator(self, train_dataset):
         """Return (train_loader, steps_per_epoch, train_iter_or_none)."""
-        train_loader = self.train_dataloader(train_dataset)
+        dataset_key = id(train_dataset)
+        needs_rebuild = (self._cached_train_loader is None) or (self._cached_train_dataset_key != dataset_key)
+
+        if needs_rebuild:
+            train_loader = self.train_dataloader(train_dataset)
+            self._cached_train_loader = train_loader
+            self._cached_train_dataset_key = dataset_key
+            self._cached_train_infinite_iter = None
+
+            if bool(getattr(self.config, "use_infinite_index_stream", False)):
+                if not hasattr(train_dataset, "__len__"):
+                    raise TypeError("use_infinite_index_stream=True requires train_dataset to have __len__")
+                self._cached_train_steps_per_epoch = int(math.ceil(len(train_dataset) / float(self.config.batch_size)))
+            else:
+                self._cached_train_steps_per_epoch = None
+
+        train_loader = self._cached_train_loader
+
+        if bool(getattr(self.config, "use_infinite_index_stream", False)):
+            if self._cached_train_infinite_iter is None:
+                self._cached_train_infinite_iter = iter(train_loader)
+
+            return train_loader, self._cached_train_steps_per_epoch, self._cached_train_infinite_iter
 
         if isinstance(train_dataset, IterableDataset):
             # Iterable datasets may be infinite; default to iterating the loader directly.
@@ -247,6 +307,16 @@ class Trainer:
             train_dataset,
             batch_size=int(self.config.batch_size),
             shuffle=True,
+            num_workers=int(self.config.num_workers),
+            pin_memory=True,
+            persistent_workers=bool(self.config.persistent_workers and int(self.config.num_workers) > 0),
+        )
+
+    def val_dataloader(self, val_dataset) -> DataLoader:
+        return DataLoader(
+            val_dataset,
+            batch_size=int(self.config.batch_size),
+            shuffle=False,
             num_workers=int(self.config.num_workers),
             pin_memory=True,
             persistent_workers=bool(self.config.persistent_workers and int(self.config.num_workers) > 0),
@@ -300,15 +370,6 @@ class ContrastiveTrainer(Trainer):
     def __init__(self, model: torch.nn.Module, *, config: ContrastiveTrainerConfig):
         self.contrastive_config = config
         super().__init__(model, config=config)
-
-        self._cached_train_dataset_key: Optional[int] = None
-        self._cached_train_loader: Optional[DataLoader] = None
-        self._cached_train_steps_per_epoch: Optional[int] = None
-        self._cached_train_infinite_iter = None
-
-        self._cached_val_dataset_key: Optional[int] = None
-        self._cached_val_loader: Optional[DataLoader] = None
-        self._cached_val_max_batches: Optional[int] = None
 
         self.loss_fn = SupConLoss(
             temperature=float(config.temperature),
@@ -391,78 +452,22 @@ class ContrastiveTrainer(Trainer):
             collate_fn=_contrastive_collate_min,
         )
 
-    def _build_train_iterator(self, train_dataset):
-        dataset_key = id(train_dataset)
-        needs_rebuild = (self._cached_train_loader is None) or (self._cached_train_dataset_key != dataset_key)
-
-        if needs_rebuild:
-            train_loader = self.train_dataloader(train_dataset)
-            self._cached_train_loader = train_loader
-            self._cached_train_dataset_key = dataset_key
-            self._cached_train_infinite_iter = None
-
-            if bool(self.contrastive_config.use_infinite_index_stream):
-                if not hasattr(train_dataset, "__len__"):
-                    raise TypeError("use_infinite_index_stream=True requires train_dataset to have __len__")
-                self._cached_train_steps_per_epoch = int(
-                    math.ceil(len(train_dataset) / float(self.contrastive_config.batch_size))
-                )
-            else:
-                self._cached_train_steps_per_epoch = None
-
-        train_loader = self._cached_train_loader
-
-        if bool(self.contrastive_config.use_infinite_index_stream):
-            if self._cached_train_infinite_iter is None:
-                self._cached_train_infinite_iter = iter(train_loader)
-
-            return train_loader, self._cached_train_steps_per_epoch, self._cached_train_infinite_iter
-
-        if isinstance(train_dataset, IterableDataset):
-            return train_loader, None, None
-
-        return train_loader, None, None
+    def val_dataloader(self, val_dataset) -> DataLoader:
+        return DataLoader(
+            val_dataset,
+            batch_size=int(self.contrastive_config.batch_size),
+            shuffle=False,
+            num_workers=int(self.contrastive_config.num_workers),
+            pin_memory=True,
+            persistent_workers=bool(
+                self.contrastive_config.persistent_workers and int(self.contrastive_config.num_workers) > 0
+            ),
+            collate_fn=_contrastive_collate_min,
+        )
 
     def validate(self, *, epoch: int, val_dataset) -> Dict[str, float]:
         _ = epoch
-
-        dataset_key = id(val_dataset)
-        needs_rebuild = (self._cached_val_loader is None) or (self._cached_val_dataset_key != dataset_key)
-
-        if needs_rebuild:
-            dataset = val_dataset
-            eval_max_batches = None
-
-            if bool(self.contrastive_config.use_infinite_index_stream_eval):
-                if not hasattr(dataset, "__len__"):
-                    raise TypeError("use_infinite_index_stream_eval=True requires val_dataset to have __len__")
-                base_len = len(dataset)
-                if not isinstance(dataset, IterableDataset):
-                    dataset = InfiniteIndexStream(
-                        dataset,
-                        shuffle=bool(self.contrastive_config.infinite_eval_shuffle),
-                        seed=int(self.contrastive_config.infinite_eval_seed),
-                    )
-                eval_max_batches = int(math.ceil(base_len / float(self.contrastive_config.batch_size)))
-
-            val_loader = DataLoader(
-                dataset,
-                batch_size=int(self.contrastive_config.batch_size),
-                shuffle=False,
-                num_workers=int(self.contrastive_config.num_workers),
-                pin_memory=True,
-                persistent_workers=bool(
-                    self.contrastive_config.persistent_workers and int(self.contrastive_config.num_workers) > 0
-                ),
-                collate_fn=_contrastive_collate_min,
-            )
-
-            self._cached_val_loader = val_loader
-            self._cached_val_dataset_key = dataset_key
-            self._cached_val_max_batches = eval_max_batches
-
-        val_loader = self._cached_val_loader
-        eval_max_batches = self._cached_val_max_batches
+        val_loader, eval_max_batches = self._build_val_loader(val_dataset)
 
         # Call the existing evaluator with sub_batch_size=batch_size to avoid microbatch buffering.
         test_loss, test_acc, test_cos = evaluate(
@@ -564,15 +569,6 @@ class LayerAwareContrastiveTrainer(Trainer):
         self.contrastive_config = config
         super().__init__(model, config=config)
 
-        self._cached_train_dataset_key: Optional[int] = None
-        self._cached_train_loader: Optional[DataLoader] = None
-        self._cached_train_steps_per_epoch: Optional[int] = None
-        self._cached_train_infinite_iter = None
-
-        self._cached_val_dataset_key: Optional[int] = None
-        self._cached_val_loader: Optional[DataLoader] = None
-        self._cached_val_max_batches: Optional[int] = None
-
         self.loss_fn = SupConLoss(
             temperature=float(config.temperature),
             ignore_label=int(config.ignore_label),
@@ -659,78 +655,22 @@ class LayerAwareContrastiveTrainer(Trainer):
             collate_fn=_contrastive_collate_min,
         )
 
-    def _build_train_iterator(self, train_dataset):
-        dataset_key = id(train_dataset)
-        needs_rebuild = (self._cached_train_loader is None) or (self._cached_train_dataset_key != dataset_key)
-
-        if needs_rebuild:
-            train_loader = self.train_dataloader(train_dataset)
-            self._cached_train_loader = train_loader
-            self._cached_train_dataset_key = dataset_key
-            self._cached_train_infinite_iter = None
-
-            if bool(self.contrastive_config.use_infinite_index_stream):
-                if not hasattr(train_dataset, "__len__"):
-                    raise TypeError("use_infinite_index_stream=True requires train_dataset to have __len__")
-                self._cached_train_steps_per_epoch = int(
-                    math.ceil(len(train_dataset) / float(self.contrastive_config.batch_size))
-                )
-            else:
-                self._cached_train_steps_per_epoch = None
-
-        train_loader = self._cached_train_loader
-
-        if bool(self.contrastive_config.use_infinite_index_stream):
-            if self._cached_train_infinite_iter is None:
-                self._cached_train_infinite_iter = iter(train_loader)
-
-            return train_loader, self._cached_train_steps_per_epoch, self._cached_train_infinite_iter
-
-        if isinstance(train_dataset, IterableDataset):
-            return train_loader, None, None
-
-        return train_loader, None, None
+    def val_dataloader(self, val_dataset) -> DataLoader:
+        return DataLoader(
+            val_dataset,
+            batch_size=int(self.contrastive_config.batch_size),
+            shuffle=False,
+            num_workers=int(self.contrastive_config.num_workers),
+            pin_memory=True,
+            persistent_workers=bool(
+                self.contrastive_config.persistent_workers and int(self.contrastive_config.num_workers) > 0
+            ),
+            collate_fn=_contrastive_collate_min,
+        )
 
     def validate(self, *, epoch: int, val_dataset) -> Dict[str, float]:
         _ = epoch
-
-        dataset_key = id(val_dataset)
-        needs_rebuild = (self._cached_val_loader is None) or (self._cached_val_dataset_key != dataset_key)
-
-        if needs_rebuild:
-            dataset = val_dataset
-            eval_max_batches = None
-
-            if bool(self.contrastive_config.use_infinite_index_stream_eval):
-                if not hasattr(dataset, "__len__"):
-                    raise TypeError("use_infinite_index_stream_eval=True requires val_dataset to have __len__")
-                base_len = len(dataset)
-                if not isinstance(dataset, IterableDataset):
-                    dataset = InfiniteIndexStream(
-                        dataset,
-                        shuffle=bool(self.contrastive_config.infinite_eval_shuffle),
-                        seed=int(self.contrastive_config.infinite_eval_seed),
-                    )
-                eval_max_batches = int(math.ceil(base_len / float(self.contrastive_config.batch_size)))
-
-            val_loader = DataLoader(
-                dataset,
-                batch_size=int(self.contrastive_config.batch_size),
-                shuffle=False,
-                num_workers=int(self.contrastive_config.num_workers),
-                pin_memory=True,
-                persistent_workers=bool(
-                    self.contrastive_config.persistent_workers and int(self.contrastive_config.num_workers) > 0
-                ),
-                collate_fn=_contrastive_collate_min,
-            )
-
-            self._cached_val_loader = val_loader
-            self._cached_val_dataset_key = dataset_key
-            self._cached_val_max_batches = eval_max_batches
-
-        val_loader = self._cached_val_loader
-        eval_max_batches = self._cached_val_max_batches
+        val_loader, eval_max_batches = self._build_val_loader(val_dataset)
 
         test_loss, test_acc, test_cos = evaluate(
             self.model,
