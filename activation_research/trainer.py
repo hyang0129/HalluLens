@@ -50,6 +50,52 @@ def _resolve_device(device: str) -> torch.device:
     return torch.device(device)
 
 
+def _select_eval_sub_batch_size(
+    *,
+    full_batch_size: int,
+    expected_full_batches: int,
+    num_workers: int,
+    target_worker_multiplier: float,
+    min_sub_batch_size: int,
+) -> int:
+    """Select a sub-batch size that increases eval loader parallelism.
+
+    Chooses the largest divisor of ``full_batch_size`` that yields at least
+    ``ceil(num_workers * target_worker_multiplier)`` sub-batches across the
+    expected full-batch count.
+    """
+    full_batch_size = int(full_batch_size)
+    expected_full_batches = int(expected_full_batches)
+    num_workers = int(num_workers)
+    target_worker_multiplier = float(target_worker_multiplier)
+    min_sub_batch_size = max(32, int(min_sub_batch_size))
+
+    if full_batch_size <= 0:
+        raise ValueError("full_batch_size must be positive")
+    if expected_full_batches <= 0 or num_workers <= 0:
+        return full_batch_size
+
+    target_sub_batches = int(math.ceil(max(1.0, target_worker_multiplier) * float(num_workers)))
+    if expected_full_batches >= target_sub_batches:
+        return full_batch_size
+
+    divisors_desc = [
+        size
+        for size in range(full_batch_size, min_sub_batch_size - 1, -1)
+        if full_batch_size % size == 0
+    ]
+    if not divisors_desc:
+        return full_batch_size
+
+    for sub_batch_size in divisors_desc:
+        multiplier = full_batch_size // sub_batch_size
+        total_sub_batches = expected_full_batches * multiplier
+        if total_sub_batches >= target_sub_batches:
+            return int(sub_batch_size)
+
+    return int(divisors_desc[-1])
+
+
 @dataclass
 class TrainerConfig:
     """Common configuration for all trainers."""
@@ -70,6 +116,11 @@ class TrainerConfig:
 
     snapshot_every: int = 0
     snapshot_keep_last: int = 5
+
+    eval_sub_batch_size: Optional[int] = None
+    eval_auto_sub_batching: bool = True
+    eval_sub_batch_target_worker_multiplier: float = 2.0
+    eval_sub_batch_min_size: int = 1
 
 
 class Trainer:
@@ -96,6 +147,7 @@ class Trainer:
         self._cached_val_dataset_key: Optional[int] = None
         self._cached_val_loader: Optional[DataLoader] = None
         self._cached_val_max_batches: Optional[int] = None
+        self._cached_val_loader_batch_size: Optional[int] = None
 
         os.makedirs(self.config.checkpoint_dir, exist_ok=True)
 
@@ -191,10 +243,58 @@ class Trainer:
         _ = val_dataset
         return {}
 
-    def _build_val_loader(self, val_dataset) -> Tuple[DataLoader, Optional[int]]:
-        """Return (val_loader, max_batches_or_none) with caching."""
+    def _resolve_eval_loader_batch_size(self, val_dataset) -> int:
+        """Resolve eval loader batch size from config and dataset characteristics."""
+        full_batch_size = int(self.config.batch_size)
+
+        explicit_sub_batch_size = getattr(self.config, "eval_sub_batch_size", None)
+        if explicit_sub_batch_size is not None:
+            explicit_sub_batch_size = int(explicit_sub_batch_size)
+            if explicit_sub_batch_size <= 0:
+                raise ValueError("eval_sub_batch_size must be positive when provided")
+            if explicit_sub_batch_size > full_batch_size:
+                raise ValueError("eval_sub_batch_size cannot exceed batch_size")
+            if full_batch_size % explicit_sub_batch_size != 0:
+                raise ValueError("batch_size must be divisible by eval_sub_batch_size")
+            return explicit_sub_batch_size
+
+        if not bool(getattr(self.config, "eval_auto_sub_batching", True)):
+            return full_batch_size
+
+        if not hasattr(val_dataset, "__len__"):
+            return full_batch_size
+
+        num_workers = int(getattr(self.config, "num_workers", 0))
+        if num_workers <= 0:
+            return full_batch_size
+
+        expected_full_batches = int(math.ceil(len(val_dataset) / float(full_batch_size)))
+        sub_batch_size = _select_eval_sub_batch_size(
+            full_batch_size=full_batch_size,
+            expected_full_batches=expected_full_batches,
+            num_workers=num_workers,
+            target_worker_multiplier=float(
+                getattr(self.config, "eval_sub_batch_target_worker_multiplier", 2.0)
+            ),
+            min_sub_batch_size=int(getattr(self.config, "eval_sub_batch_min_size", 1)),
+        )
+        if sub_batch_size != full_batch_size:
+            logger.info(
+                "Auto eval sub-batching enabled: "
+                f"batch_size={full_batch_size} -> eval_sub_batch_size={sub_batch_size} "
+                f"(workers={num_workers}, expected_full_batches={expected_full_batches})"
+            )
+        return int(sub_batch_size)
+
+    def _build_val_loader(self, val_dataset) -> Tuple[DataLoader, Optional[int], int]:
+        """Return (val_loader, max_loader_batches_or_none, eval_loader_batch_size) with caching."""
         dataset_key = id(val_dataset)
-        needs_rebuild = (self._cached_val_loader is None) or (self._cached_val_dataset_key != dataset_key)
+        eval_loader_batch_size = self._resolve_eval_loader_batch_size(val_dataset)
+        needs_rebuild = (
+            (self._cached_val_loader is None)
+            or (self._cached_val_dataset_key != dataset_key)
+            or (self._cached_val_loader_batch_size != int(eval_loader_batch_size))
+        )
 
         if needs_rebuild:
             dataset = val_dataset
@@ -210,15 +310,16 @@ class Trainer:
                         shuffle=bool(getattr(self.config, "infinite_eval_shuffle", True)),
                         seed=int(getattr(self.config, "infinite_eval_seed", 0)),
                     )
-                eval_max_batches = int(math.ceil(base_len / float(self.config.batch_size)))
+                eval_max_batches = int(math.ceil(base_len / float(eval_loader_batch_size)))
 
-            val_loader = self.val_dataloader(dataset)
+            val_loader = self.val_dataloader(dataset, batch_size=int(eval_loader_batch_size))
 
             self._cached_val_loader = val_loader
             self._cached_val_dataset_key = dataset_key
             self._cached_val_max_batches = eval_max_batches
+            self._cached_val_loader_batch_size = int(eval_loader_batch_size)
 
-        return self._cached_val_loader, self._cached_val_max_batches
+        return self._cached_val_loader, self._cached_val_max_batches, int(eval_loader_batch_size)
 
     def maybe_save_checkpoint(
         self,
@@ -317,10 +418,11 @@ class Trainer:
             persistent_workers=bool(self.config.persistent_workers and int(self.config.num_workers) > 0),
         )
 
-    def val_dataloader(self, val_dataset) -> DataLoader:
+    def val_dataloader(self, val_dataset, *, batch_size: Optional[int] = None) -> DataLoader:
+        resolved_batch_size = int(self.config.batch_size if batch_size is None else batch_size)
         return DataLoader(
             val_dataset,
-            batch_size=int(self.config.batch_size),
+            batch_size=resolved_batch_size,
             shuffle=False,
             num_workers=int(self.config.num_workers),
             pin_memory=True,
@@ -457,10 +559,11 @@ class ContrastiveTrainer(Trainer):
             collate_fn=_contrastive_collate_min,
         )
 
-    def val_dataloader(self, val_dataset) -> DataLoader:
+    def val_dataloader(self, val_dataset, *, batch_size: Optional[int] = None) -> DataLoader:
+        resolved_batch_size = int(self.contrastive_config.batch_size if batch_size is None else batch_size)
         return DataLoader(
             val_dataset,
-            batch_size=int(self.contrastive_config.batch_size),
+            batch_size=resolved_batch_size,
             shuffle=False,
             num_workers=int(self.contrastive_config.num_workers),
             pin_memory=True,
@@ -472,11 +575,13 @@ class ContrastiveTrainer(Trainer):
 
     def validate(self, *, epoch: int, val_dataset) -> Dict[str, float]:
         _ = epoch
-        val_loader, eval_max_batches = self._build_val_loader(val_dataset)
+        val_loader, eval_max_batches, eval_sub_batch_size = self._build_val_loader(val_dataset)
 
         evaluator = ContrastiveEvaluator(
             loss_fn=self.loss_fn,
             device=self.device,
+            batch_size=int(self.contrastive_config.batch_size),
+            sub_batch_size=int(eval_sub_batch_size),
             use_labels=bool(self.contrastive_config.use_labels),
             ignore_label=int(self.contrastive_config.ignore_label),
         )
@@ -662,10 +767,11 @@ class LayerAwareContrastiveTrainer(Trainer):
             collate_fn=_contrastive_collate_min,
         )
 
-    def val_dataloader(self, val_dataset) -> DataLoader:
+    def val_dataloader(self, val_dataset, *, batch_size: Optional[int] = None) -> DataLoader:
+        resolved_batch_size = int(self.contrastive_config.batch_size if batch_size is None else batch_size)
         return DataLoader(
             val_dataset,
-            batch_size=int(self.contrastive_config.batch_size),
+            batch_size=resolved_batch_size,
             shuffle=False,
             num_workers=int(self.contrastive_config.num_workers),
             pin_memory=True,
@@ -677,13 +783,13 @@ class LayerAwareContrastiveTrainer(Trainer):
 
     def validate(self, *, epoch: int, val_dataset) -> Dict[str, float]:
         _ = epoch
-        val_loader, eval_max_batches = self._build_val_loader(val_dataset)
+        val_loader, eval_max_batches, eval_sub_batch_size = self._build_val_loader(val_dataset)
 
         test_loss, test_acc, test_cos = evaluate(
             self.model,
             val_loader,
             batch_size=int(self.contrastive_config.batch_size),
-            sub_batch_size=int(self.contrastive_config.batch_size),
+            sub_batch_size=int(eval_sub_batch_size),
             loss_fn=self.loss_fn,
             device=str(self.device),
             use_labels=bool(self.contrastive_config.use_labels),

@@ -4,6 +4,55 @@ import tempfile
 import torch
 
 
+def test_eval_auto_sub_batch_selection_matches_worker_target_example():
+    from activation_research.trainer import _select_eval_sub_batch_size
+
+    sub_batch_size = _select_eval_sub_batch_size(
+        full_batch_size=512,
+        expected_full_batches=17,
+        num_workers=30,
+        target_worker_multiplier=2.0,
+        min_sub_batch_size=1,
+    )
+    assert sub_batch_size == 128
+
+
+def test_eval_explicit_sub_batch_size_override_is_used():
+    from activation_research.trainer import ContrastiveTrainer, ContrastiveTrainerConfig
+
+    class DummyDataset(torch.utils.data.Dataset):
+        def __len__(self):
+            return 100
+
+        def __getitem__(self, idx):
+            _ = idx
+            return {
+                "layer1_activations": torch.randn(1, 4, 8),
+                "layer2_activations": torch.randn(1, 4, 8),
+                "halu": torch.tensor(0.0),
+                "hashkey": "hk",
+            }
+
+    class DummyEncoder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.net = torch.nn.Sequential(torch.nn.Flatten(), torch.nn.Linear(32, 8))
+
+        def forward(self, x):
+            return self.net(x)
+
+    cfg = ContrastiveTrainerConfig(
+        max_epochs=1,
+        batch_size=512,
+        num_workers=30,
+        eval_sub_batch_size=128,
+        device="cpu",
+    )
+    trainer = ContrastiveTrainer(DummyEncoder(), config=cfg)
+    resolved = trainer._resolve_eval_loader_batch_size(DummyDataset())
+    assert resolved == 128
+
+
 def test_contrastive_trainer_smoke_cpu_checkpoint_and_resume():
     from activation_research.trainer import ContrastiveTrainer, ContrastiveTrainerConfig
 

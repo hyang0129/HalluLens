@@ -37,6 +37,13 @@ def evaluate(
     evaluator_manager=None,
     max_batches=None,
 ):
+    batch_size = int(batch_size)
+    sub_batch_size = int(sub_batch_size)
+    if batch_size <= 0 or sub_batch_size <= 0:
+        raise ValueError("batch_size and sub_batch_size must be positive")
+    if batch_size % sub_batch_size != 0:
+        raise ValueError("batch_size must be divisible by sub_batch_size")
+
     model.eval()
     total_loss = 0.0
     total_acc = 0.0
@@ -49,6 +56,48 @@ def evaluate(
         buffer_l1, buffer_l2 = [], []
         buffer_labels = [] if use_labels else None
         buffer_hashkeys = [] if evaluator_manager is not None else None
+        buffered_samples = 0
+
+        def _flush_buffer():
+            nonlocal total_loss, total_acc, total_cosine_sim, n_batches
+            nonlocal buffer_x1, buffer_x2, buffer_l1, buffer_l2, buffer_labels, buffer_hashkeys, buffered_samples
+
+            if not buffer_x1:
+                return
+
+            x1_full = torch.cat(buffer_x1, dim=0)
+            x2_full = torch.cat(buffer_x2, dim=0)
+            l1_full = torch.cat(buffer_l1, dim=0) if buffer_l1 else None
+            l2_full = torch.cat(buffer_l2, dim=0) if buffer_l2 else None
+            labels_full = torch.cat(buffer_labels, dim=0) if (use_labels and buffer_labels) else None
+
+            z1 = _call_model(model, x1_full, layer_idx=l1_full)
+            z2 = _call_model(model, x2_full, layer_idx=l2_full)
+
+            if evaluator_manager is not None:
+                evaluator_manager.accumulate_batch(z1, z2, buffer_hashkeys, labels_full)
+                buffer_hashkeys = []
+
+            z_stacked = torch.stack([z1, z2], dim=1)
+            if use_labels:
+                loss = loss_fn(z_stacked, labels=labels_full)
+            else:
+                loss = loss_fn(z_stacked)
+
+            acc = pairing_accuracy(z1, z2)
+            cosine_sim = average_cosine_similarity(z1, z2)
+
+            total_loss += loss.item()
+            total_acc += acc
+            total_cosine_sim += cosine_sim
+            n_batches += 1
+
+            buffer_x1 = []
+            buffer_x2 = []
+            buffer_l1 = []
+            buffer_l2 = []
+            buffer_labels = [] if use_labels else None
+            buffered_samples = 0
 
         for i, batch in enumerate(test_dataloader):
             if max_batches is not None and i >= int(max_batches):
@@ -58,6 +107,7 @@ def evaluate(
 
             buffer_x1.append(x1)
             buffer_x2.append(x2)
+            buffered_samples += int(x1.size(0))
 
             if isinstance(batch, dict) and 'layer1_idx' in batch:
                 buffer_l1.append(batch['layer1_idx'].to(device, non_blocking=True))
@@ -88,74 +138,12 @@ def evaluate(
                     labels = labels.view(-1)
                 buffer_labels.append(labels)
 
-            # Process when buffer is full or at the end of the loop
-            if len(buffer_x1) * sub_batch_size == batch_size:
-                x1_full = torch.cat(buffer_x1, dim=0)
-                x2_full = torch.cat(buffer_x2, dim=0)
-                buffer_x1 = []
-                buffer_x2 = []
-
-                l1_full = torch.cat(buffer_l1, dim=0) if buffer_l1 else None
-                l2_full = torch.cat(buffer_l2, dim=0) if buffer_l2 else None
-                buffer_l1 = []
-                buffer_l2 = []
-
-                z1 = _call_model(model, x1_full, layer_idx=l1_full)
-                z2 = _call_model(model, x2_full, layer_idx=l2_full)
-
-                # Accumulate embeddings if evaluator manager is provided
-                if evaluator_manager is not None:
-                    labels = torch.cat(buffer_labels, dim=0) if (use_labels and buffer_labels) else None
-                    evaluator_manager.accumulate_batch(z1, z2, buffer_hashkeys, labels)
-                    buffer_hashkeys = []
-
-                z_stacked = torch.stack([z1, z2], dim=1)
-
-                if use_labels:
-                    labels_full = torch.cat(buffer_labels, dim=0)
-                    buffer_labels = []
-                    loss = loss_fn(z_stacked, labels=labels_full)
-                else:
-                    loss = loss_fn(z_stacked)
-
-                acc = pairing_accuracy(z1, z2)
-                cosine_sim = average_cosine_similarity(z1, z2)
-
-                total_loss += loss.item()
-                total_acc += acc
-                total_cosine_sim += cosine_sim
-                n_batches += 1
+            if buffered_samples >= batch_size:
+                _flush_buffer()
 
         # Process any remaining partial buffer
         if buffer_x1:
-            x1_full = torch.cat(buffer_x1, dim=0)
-            x2_full = torch.cat(buffer_x2, dim=0)
-
-            l1_full = torch.cat(buffer_l1, dim=0) if buffer_l1 else None
-            l2_full = torch.cat(buffer_l2, dim=0) if buffer_l2 else None
-
-            z1 = _call_model(model, x1_full, layer_idx=l1_full)
-            z2 = _call_model(model, x2_full, layer_idx=l2_full)
-
-            if evaluator_manager is not None:
-                labels = torch.cat(buffer_labels, dim=0) if (use_labels and buffer_labels) else None
-                evaluator_manager.accumulate_batch(z1, z2, buffer_hashkeys, labels)
-
-            z_stacked = torch.stack([z1, z2], dim=1)
-
-            if use_labels:
-                labels_full = torch.cat(buffer_labels, dim=0)
-                loss = loss_fn(z_stacked, labels=labels_full)
-            else:
-                loss = loss_fn(z_stacked)
-
-            acc = pairing_accuracy(z1, z2)
-            cosine_sim = average_cosine_similarity(z1, z2)
-
-            total_loss += loss.item()
-            total_acc += acc
-            total_cosine_sim += cosine_sim
-            n_batches += 1
+            _flush_buffer()
 
     avg_loss = total_loss / max(1, n_batches)
     avg_acc = total_acc / max(1, n_batches)
