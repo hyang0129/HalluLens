@@ -26,7 +26,12 @@ from loguru import logger
 from torch.utils.data import DataLoader, IterableDataset
 from tqdm.autonotebook import tqdm
 
-from .evaluation import average_cosine_similarity, evaluate, pairing_accuracy
+from .contrastive_evaluator import (
+    ContrastiveEvaluator,
+    average_cosine_similarity,
+    pairing_accuracy,
+)
+from .evaluation import evaluate
 from .training import (
     InfiniteIndexStream,
     SupConLoss,
@@ -342,7 +347,7 @@ class ContrastiveTrainerConfig(TrainerConfig):
     infinite_stream_seed: int = 0
 
     use_infinite_index_stream_eval: bool = True
-    infinite_eval_shuffle: bool = True
+    infinite_eval_shuffle: bool = False
     infinite_eval_seed: int = 0
 
 
@@ -469,18 +474,20 @@ class ContrastiveTrainer(Trainer):
         _ = epoch
         val_loader, eval_max_batches = self._build_val_loader(val_dataset)
 
-        # Call the existing evaluator with sub_batch_size=batch_size to avoid microbatch buffering.
-        test_loss, test_acc, test_cos = evaluate(
-            self.model,
-            val_loader,
-            batch_size=int(self.contrastive_config.batch_size),
-            sub_batch_size=int(self.contrastive_config.batch_size),
+        evaluator = ContrastiveEvaluator(
             loss_fn=self.loss_fn,
-            device=str(self.device),
+            device=self.device,
             use_labels=bool(self.contrastive_config.use_labels),
             ignore_label=int(self.contrastive_config.ignore_label),
+        )
+        val_stats = evaluator.run(
+            self.model,
+            val_loader,
             max_batches=eval_max_batches,
         )
+        test_loss = float(val_stats["loss"])
+        test_acc = float(val_stats["acc"])
+        test_cos = float(val_stats["cosine_sim"])
 
         self.best_loss = min(float(self.best_loss), float(test_loss))
 
