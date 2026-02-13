@@ -122,6 +122,10 @@ class TrainerConfig:
     eval_sub_batch_target_worker_multiplier: float = 2.0
     eval_sub_batch_min_size: int = 1
 
+    # Optional fixed number of optimization steps to run per epoch.
+    # If set, training uses this step count regardless of dataset length.
+    steps_per_epoch_override: Optional[int] = None
+
 
 class Trainer:
     """A minimal, Lightning-inspired trainer.
@@ -381,6 +385,12 @@ class Trainer:
         dataset_key = id(train_dataset)
         needs_rebuild = (self._cached_train_loader is None) or (self._cached_train_dataset_key != dataset_key)
 
+        steps_override = getattr(self.config, "steps_per_epoch_override", None)
+        if steps_override is not None:
+            steps_override = int(steps_override)
+            if steps_override <= 0:
+                raise ValueError("steps_per_epoch_override must be a positive integer when provided")
+
         if needs_rebuild:
             train_loader = self.train_dataloader(train_dataset)
             self._cached_train_loader = train_loader
@@ -390,7 +400,8 @@ class Trainer:
             if bool(getattr(self.config, "use_infinite_index_stream", False)):
                 if not hasattr(train_dataset, "__len__"):
                     raise TypeError("use_infinite_index_stream=True requires train_dataset to have __len__")
-                self._cached_train_steps_per_epoch = int(math.ceil(len(train_dataset) / float(self.config.batch_size)))
+                inferred_steps = int(math.ceil(len(train_dataset) / float(self.config.batch_size)))
+                self._cached_train_steps_per_epoch = int(steps_override if steps_override is not None else inferred_steps)
             else:
                 self._cached_train_steps_per_epoch = None
 
@@ -401,6 +412,11 @@ class Trainer:
                 self._cached_train_infinite_iter = iter(train_loader)
 
             return train_loader, self._cached_train_steps_per_epoch, self._cached_train_infinite_iter
+
+        if steps_override is not None:
+            if self._cached_train_infinite_iter is None:
+                self._cached_train_infinite_iter = iter(train_loader)
+            return train_loader, int(steps_override), self._cached_train_infinite_iter
 
         if isinstance(train_dataset, IterableDataset):
             # Iterable datasets may be infinite; default to iterating the loader directly.

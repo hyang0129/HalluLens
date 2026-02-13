@@ -1,0 +1,101 @@
+import os
+import sys
+
+import pandas as pd
+import torch
+
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+
+def _make_data():
+    train_records = [
+        {"z1": torch.tensor([0.0, 0.0]), "z2": torch.tensor([0.0, 0.0])},
+        {"z1": torch.tensor([0.1, 0.0]), "z2": torch.tensor([0.1, 0.0])},
+        {"z1": torch.tensor([0.0, 0.1]), "z2": torch.tensor([0.0, 0.1])},
+        {"z1": torch.tensor([0.1, 0.1]), "z2": torch.tensor([0.1, 0.1])},
+    ]
+
+    test_embeddings = [
+        {"hashkey": "id_0", "z1": torch.tensor([0.05, 0.05]), "z2": torch.tensor([0.06, 0.04])},
+        {"hashkey": "id_1", "z1": torch.tensor([0.02, 0.04]), "z2": torch.tensor([0.03, 0.05])},
+        {"hashkey": "ood_0", "z1": torch.tensor([10.0, 10.0]), "z2": torch.tensor([9.0, 11.0])},
+        {"hashkey": "ood_1", "z1": torch.tensor([9.5, 10.5]), "z2": torch.tensor([8.7, 10.8])},
+    ]
+
+    activation_parser_df = pd.DataFrame(
+        {
+            "prompt_hash": ["id_0", "id_1", "ood_0", "ood_1"],
+            "halu": [0, 0, 1, 1],
+        }
+    )
+    return train_records, test_embeddings, activation_parser_df
+
+
+def test_multi_metric_hallucination_evaluator_runs_cosine_mds_knn():
+    from activation_research.metric_evaluator import MultiMetricHallucinationEvaluator
+
+    class DummyLoader:
+        dataset = None
+
+    train_records, test_embeddings, activation_parser_df = _make_data()
+
+    evaluator = MultiMetricHallucinationEvaluator(
+        activation_parser_df=activation_parser_df,
+        train_data_loader=DummyLoader(),
+        device="cpu",
+        metrics=["cosine", "mds", {"metric": "knn", "kwargs": {"k": 2}}],
+    )
+    evaluator._baseline_embeddings = train_records
+
+    stats = evaluator.compute_from_embeddings(test_embeddings)
+
+    assert "cosine_auroc" in stats
+    assert "mahalanobis_auroc" in stats
+    assert "knn_auroc" in stats
+
+
+def test_multi_metric_hallucination_evaluator_reuses_embeddings_once():
+    from activation_research.metric_evaluator import MultiMetricHallucinationEvaluator
+
+    class DummyLoader:
+        dataset = None
+
+    train_records, test_embeddings, activation_parser_df = _make_data()
+
+    evaluator = MultiMetricHallucinationEvaluator(
+        activation_parser_df=activation_parser_df,
+        train_data_loader=DummyLoader(),
+        device="cpu",
+        metrics=["cosine", "mds", {"metric": "knn", "kwargs": {"k": 2}}],
+    )
+
+    calls = {"baseline": 0, "test": 0, "label": 0}
+
+    def fake_baseline(_model):
+        calls["baseline"] += 1
+        return train_records
+
+    def fake_test(_loader, _model):
+        calls["test"] += 1
+        return test_embeddings
+
+    def fake_labels(records):
+        calls["label"] += 1
+        return [
+            {**record, "halu": 0 if str(record["hashkey"]).startswith("id_") else 1}
+            for record in records
+        ]
+
+    evaluator._compute_baseline_embeddings = fake_baseline
+    evaluator._compute_test_embeddings = fake_test
+    evaluator._assign_hallucination_labels = fake_labels
+
+    stats = evaluator.compute(data_loader=DummyLoader(), model=object())
+
+    assert "cosine_auroc" in stats
+    assert "mahalanobis_auroc" in stats
+    assert "knn_auroc" in stats
+    assert calls == {"baseline": 1, "test": 1, "label": 1}
