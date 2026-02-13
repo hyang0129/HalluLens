@@ -2,18 +2,94 @@ import torch
 import numpy as np
 from sklearn.metrics import roc_auc_score
 from sklearn.neighbors import NearestNeighbors
-from scipy.spatial import distance
 import torch.nn.functional as F
 
 
-def mahalanobis_ood_stats(train_records, test_records, outlier_class = 1):
+def _safe_auroc(binary_labels: np.ndarray, scores: np.ndarray) -> float:
+    try:
+        return float(roc_auc_score(binary_labels, scores))
+    except ValueError:
+        return float("nan")
+
+
+def _binary_outlier_labels(labels: torch.Tensor, outlier_class: int) -> np.ndarray:
+    labels_np = labels.detach().cpu().numpy()
+    return (labels_np == int(outlier_class)).astype(np.int32)
+
+
+def _filter_train_records_by_label(train_records, outlier_class: int, train_label_filter: str):
+    mode = str(train_label_filter).strip().lower()
+    if mode not in {"all", "id_only", "ood_only"}:
+        raise ValueError("train_label_filter must be one of {'all', 'id_only', 'ood_only'}")
+    if mode == "all":
+        return list(train_records)
+
+    if not train_records:
+        return []
+
+    if not all("halu" in record for record in train_records):
+        # If labels are unavailable, fall back to full train set.
+        return list(train_records)
+
+    target_label = (1 - int(outlier_class)) if mode == "id_only" else int(outlier_class)
+    filtered = [record for record in train_records if int(record["halu"]) == target_label]
+    return filtered if filtered else list(train_records)
+
+
+def _calibrate_knn_k(
+    train_z: np.ndarray,
+    train_labels_binary: np.ndarray,
+    *,
+    base_k: int,
+    metric: str,
+    k_candidates=None,
+) -> int:
+    n_train = int(train_z.shape[0])
+    if n_train < 3:
+        return int(min(base_k, max(1, n_train)))
+
+    if len(np.unique(train_labels_binary)) < 2:
+        return int(min(base_k, n_train - 1))
+
+    if k_candidates is None:
+        candidates = [1, 3, 5, 7, 9, 15, 31]
+    else:
+        candidates = [int(value) for value in k_candidates]
+
+    candidates = sorted({k for k in candidates if 0 < k < n_train})
+    if not candidates:
+        return int(min(base_k, n_train - 1))
+
+    max_k = max(candidates)
+    nn = NearestNeighbors(n_neighbors=max_k + 1, metric=metric)
+    nn.fit(train_z)
+    distances, _ = nn.kneighbors(train_z)
+
+    best_k = int(min(base_k, n_train - 1))
+    best_score = float("-inf")
+
+    for candidate_k in candidates:
+        candidate_scores = distances[:, 1 : candidate_k + 1].mean(axis=1)
+        candidate_auroc = _safe_auroc(train_labels_binary, candidate_scores)
+        if np.isnan(candidate_auroc):
+            continue
+        if candidate_auroc > best_score:
+            best_score = float(candidate_auroc)
+            best_k = int(candidate_k)
+
+    return int(best_k)
+
+
+def mahalanobis_ood_stats(train_records, test_records, outlier_class=1, train_label_filter: str = "id_only"):
+    train_records = _filter_train_records_by_label(train_records, outlier_class=outlier_class, train_label_filter=train_label_filter)
+
     # Extract z1 tensors from train set and stack
     train_z = torch.stack([r['z1'] for r in train_records])
 
     # Compute mean and covariance from training set
     mean = train_z.mean(dim=0)
     centered = train_z - mean
-    cov = torch.matmul(centered.T, centered) / (len(train_z) - 1)
+    cov = torch.matmul(centered.T, centered) / max(1, (len(train_z) - 1))
 
     # Add small value to diagonal for numerical stability (regularization)
     cov += torch.eye(cov.shape[0]) * 1e-5
@@ -40,18 +116,20 @@ def mahalanobis_ood_stats(train_records, test_records, outlier_class = 1):
         id_dists = dists[test_labels == 1]
         ood_dists = dists[test_labels == 0]
 
+    binary_outlier_labels = _binary_outlier_labels(test_labels, outlier_class=outlier_class)
+
     stats = {
         'mahalanobis_mean_id': id_dists.mean().item(),
         'mahalanobis_std_id': id_dists.std().item(),
         'mahalanobis_mean_ood': ood_dists.mean().item(),
         'mahalanobis_std_ood': ood_dists.std().item(),
-        'mahalanobis_auroc': roc_auc_score(test_labels, dists.numpy())
+        'mahalanobis_auroc': _safe_auroc(binary_outlier_labels, dists.detach().cpu().numpy())
     }
 
     return stats
 
 
-def cosine_similarity_ood_stats(train_records, test_records, outlier_class = 1):
+def cosine_similarity_ood_stats(train_records, test_records, outlier_class=1):
     """
     Compute OOD statistics using cosine similarity between z1 and z2 pairs.
 
@@ -105,6 +183,8 @@ def cosine_similarity_ood_stats(train_records, test_records, outlier_class = 1):
     # We use negative similarities so that lower similarity gives higher "distance" score
     ood_scores = -test_similarities.numpy()
 
+    binary_outlier_labels = _binary_outlier_labels(test_labels, outlier_class=outlier_class)
+
     stats = {
         'cosine_mean_train': train_similarities.mean().item(),
         'cosine_std_train': train_similarities.std().item(),
@@ -112,7 +192,7 @@ def cosine_similarity_ood_stats(train_records, test_records, outlier_class = 1):
         'cosine_std_id': id_similarities.std().item(),
         'cosine_mean_ood': ood_similarities.mean().item(),
         'cosine_std_ood': ood_similarities.std().item(),
-        'cosine_auroc': roc_auc_score(test_labels, ood_scores)
+        'cosine_auroc': _safe_auroc(binary_outlier_labels, ood_scores)
     }
 
     return stats
@@ -145,6 +225,9 @@ def knn_ood_stats(
     outlier_class: int = 1,
     k: int = 5,
     metric: str = "euclidean",
+    train_label_filter: str = "all",
+    calibrate_k: bool = False,
+    k_candidates=None,
 ):
     """Compute OOD statistics using k-nearest-neighbor distance in embedding space.
 
@@ -165,10 +248,30 @@ def knn_ood_stats(
     if k <= 0:
         raise ValueError("k must be a positive integer")
 
+    train_records = _filter_train_records_by_label(
+        train_records,
+        outlier_class=outlier_class,
+        train_label_filter=train_label_filter,
+    )
+
     # Stack train/test embeddings (z1). Use CPU numpy for sklearn.
     train_z = torch.stack([r["z1"] for r in train_records]).detach().cpu().numpy()
     test_z = torch.stack([r["z1"] for r in test_records]).detach().cpu().numpy()
     test_labels = torch.tensor([r["halu"] for r in test_records], dtype=torch.int32).squeeze()
+
+    train_labels_binary = None
+    if train_records and all("halu" in record for record in train_records):
+        train_labels = torch.tensor([r["halu"] for r in train_records], dtype=torch.int32).squeeze()
+        train_labels_binary = _binary_outlier_labels(train_labels, outlier_class=outlier_class)
+
+    if bool(calibrate_k) and train_labels_binary is not None:
+        k = _calibrate_knn_k(
+            train_z,
+            train_labels_binary,
+            base_k=k,
+            metric=metric,
+            k_candidates=k_candidates,
+        )
 
     n_train = train_z.shape[0]
     n_neighbors = min(k, n_train)
@@ -190,16 +293,18 @@ def knn_ood_stats(
         id_scores = knn_scores[test_labels == 1]
         ood_scores = knn_scores[test_labels == 0]
 
+    binary_outlier_labels = _binary_outlier_labels(test_labels, outlier_class=outlier_class)
+
     stats = {
         "knn_k": int(k),
         "knn_metric": str(metric),
+        "knn_train_label_filter": str(train_label_filter),
+        "knn_calibrated_k": bool(calibrate_k and train_labels_binary is not None),
         "knn_mean_id": id_scores.mean().item() if id_scores.numel() else float("nan"),
         "knn_std_id": id_scores.std().item() if id_scores.numel() else float("nan"),
         "knn_mean_ood": ood_scores.mean().item() if ood_scores.numel() else float("nan"),
         "knn_std_ood": ood_scores.std().item() if ood_scores.numel() else float("nan"),
-        # AUROC is computed with the original labels (halu==1 as positive), consistent
-        # with mahalanobis_ood_stats() in this module.
-        "knn_auroc": roc_auc_score(test_labels.numpy(), knn_scores.numpy()),
+        "knn_auroc": _safe_auroc(binary_outlier_labels, knn_scores.numpy()),
     }
 
     return stats

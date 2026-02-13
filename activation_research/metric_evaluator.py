@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional, Union, Callable, Tuple
+from typing import List, Dict, Any, Optional, Union, Callable
 from abc import ABC, abstractmethod
 from loguru import logger
 from .evaluation import inference_embeddings
@@ -129,6 +129,7 @@ class HallucinationEvaluator(MetricEvaluator):
 
         # Cache for computed embeddings
         self._baseline_embeddings = None
+        self._labeled_baseline_embeddings = None
 
     @staticmethod
     def _resolve_metric(metric: Union[str, Callable[..., Dict[str, Any]]]):
@@ -192,10 +193,11 @@ class HallucinationEvaluator(MetricEvaluator):
         test_embeddings = self._compute_test_embeddings(data_loader, model)
 
         # Assign hallucination labels
+        labeled_baseline_embeddings = self._get_labeled_baseline_embeddings(baseline_embeddings)
         labeled_test_embeddings = self._assign_hallucination_labels(test_embeddings)
 
         logger.info(f"Computing OOD stats via metric='{self.metric_name}'...")
-        stats = self._compute_stats(baseline_embeddings, labeled_test_embeddings)
+        stats = self._compute_stats(labeled_baseline_embeddings, labeled_test_embeddings)
 
         logger.info("Evaluation complete!")
         logger.info(f"Results: {stats}")
@@ -222,10 +224,11 @@ class HallucinationEvaluator(MetricEvaluator):
             raise ValueError("Baseline embeddings not available. Call compute() with training data first.")
 
         # Assign hallucination labels to the embeddings
+        labeled_baseline_embeddings = self._get_labeled_baseline_embeddings(self._baseline_embeddings)
         labeled_embeddings = self._assign_hallucination_labels(embeddings)
 
         logger.info(f"Computing OOD stats via metric='{self.metric_name}'...")
-        stats = self._compute_stats(self._baseline_embeddings, labeled_embeddings)
+        stats = self._compute_stats(labeled_baseline_embeddings, labeled_embeddings)
 
         logger.info("Evaluation complete!")
         logger.info(f"Results: {stats}")
@@ -257,6 +260,7 @@ class HallucinationEvaluator(MetricEvaluator):
             layers=self.layers,
             persistent_workers=self.persistent_workers
         )
+        self._labeled_baseline_embeddings = None
 
         logger.info(f"Computed {len(self._baseline_embeddings)} baseline embeddings")
         return self._baseline_embeddings
@@ -288,7 +292,12 @@ class HallucinationEvaluator(MetricEvaluator):
         logger.info(f"Computed {len(test_embeddings)} test embeddings")
         return test_embeddings
     
-    def _assign_hallucination_labels(self, embeddings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _assign_hallucination_labels(
+        self,
+        embeddings: List[Dict[str, Any]],
+        *,
+        keep_unlabeled: bool = False,
+    ) -> List[Dict[str, Any]]:
         """
         Assign hallucination labels to embeddings using activation parser data.
 
@@ -305,11 +314,25 @@ class HallucinationEvaluator(MetricEvaluator):
 
         labeled_embeddings = []
         for i, record in enumerate(embeddings):
-            hashkey = record['hashkey']
+            if "halu" in record:
+                labeled_embeddings.append(record.copy())
+                continue
+
+            hashkey = record.get('hashkey')
+            if hashkey is None:
+                if keep_unlabeled:
+                    labeled_embeddings.append(record.copy())
+                else:
+                    logger.warning("Record missing hashkey and halu label. Skipping.")
+                continue
+
             ishalu = df[df['prompt_hash'] == hashkey]['halu']
 
             if len(ishalu) != 1:
-                logger.warning(f"Expected exactly 1 match for hashkey {hashkey}, found {len(ishalu)}. Skipping.")
+                if keep_unlabeled:
+                    labeled_embeddings.append(record.copy())
+                else:
+                    logger.warning(f"Expected exactly 1 match for hashkey {hashkey}, found {len(ishalu)}. Skipping.")
                 continue
 
             # Create a copy of the record and add the label
@@ -319,6 +342,14 @@ class HallucinationEvaluator(MetricEvaluator):
 
         logger.info(f"Successfully labeled {len(labeled_embeddings)} embeddings")
         return labeled_embeddings
+
+    def _get_labeled_baseline_embeddings(self, baseline_embeddings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if self._labeled_baseline_embeddings is None:
+            self._labeled_baseline_embeddings = self._assign_hallucination_labels(
+                baseline_embeddings,
+                keep_unlabeled=True,
+            )
+        return self._labeled_baseline_embeddings
 
     def get_cached_baseline_embeddings(self) -> Optional[List[Dict[str, Any]]]:
         """
@@ -332,6 +363,7 @@ class HallucinationEvaluator(MetricEvaluator):
     def clear_cache(self):
         """Clear cached embeddings to free memory."""
         self._baseline_embeddings = None
+        self._labeled_baseline_embeddings = None
         logger.info("Cleared embedding cache")
 
 
@@ -396,6 +428,7 @@ class MultiMetricHallucinationEvaluator(HallucinationEvaluator):
         - ``kwargs`` (optional): dict kwargs for this metric
         - ``name`` (optional): name/prefix for collision handling
         - ``prefix`` (optional): explicit prefix for output keys
+        - ``train_selection`` (optional): 'all' | 'id_only' | 'ood_only'
     """
 
     def __init__(
@@ -452,6 +485,7 @@ class MultiMetricHallucinationEvaluator(HallucinationEvaluator):
                 "metric_fn": metric_fn,
                 "metric_kwargs": per_metric_kwargs,
                 "prefix": spec.get("prefix"),
+                "train_selection": spec.get("train_selection"),
             }
 
         metric_name, metric_fn = self._resolve_metric(spec)
@@ -460,7 +494,43 @@ class MultiMetricHallucinationEvaluator(HallucinationEvaluator):
             "metric_fn": metric_fn,
             "metric_kwargs": dict(self.default_metric_kwargs),
             "prefix": None,
+            "train_selection": None,
         }
+
+    @staticmethod
+    def _default_train_selection(metric_name: str) -> str:
+        metric_key = str(metric_name).strip().lower()
+        if metric_key in {"mahalanobis", "mds"}:
+            return "id_only"
+        return "all"
+
+    def _select_train_records_for_metric(
+        self,
+        *,
+        metric_name: str,
+        train_selection: Optional[str],
+        labeled_baseline_embeddings: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        mode = self._default_train_selection(metric_name) if train_selection is None else str(train_selection).strip().lower()
+        if mode not in {"all", "id_only", "ood_only"}:
+            raise ValueError("train_selection must be one of {'all', 'id_only', 'ood_only'}")
+        if mode == "all":
+            return labeled_baseline_embeddings
+
+        if not labeled_baseline_embeddings or not all("halu" in record for record in labeled_baseline_embeddings):
+            logger.warning(
+                f"Metric '{metric_name}' requested train_selection='{mode}' but baseline labels are unavailable. Using all baseline records."
+            )
+            return labeled_baseline_embeddings
+
+        target_label = (1 - int(self.outlier_class)) if mode == "id_only" else int(self.outlier_class)
+        filtered = [record for record in labeled_baseline_embeddings if int(record["halu"]) == target_label]
+        if not filtered:
+            logger.warning(
+                f"Metric '{metric_name}' train_selection='{mode}' produced empty train set. Falling back to all baseline records."
+            )
+            return labeled_baseline_embeddings
+        return filtered
 
     def _compute_stats_for_metric(
         self,
@@ -506,7 +576,7 @@ class MultiMetricHallucinationEvaluator(HallucinationEvaluator):
 
     def _compute_all_metrics(
         self,
-        baseline_embeddings: List[Dict[str, Any]],
+        labeled_baseline_embeddings: List[Dict[str, Any]],
         labeled_test_embeddings: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         out: Dict[str, Any] = {}
@@ -516,12 +586,19 @@ class MultiMetricHallucinationEvaluator(HallucinationEvaluator):
             metric_fn = metric_spec["metric_fn"]
             metric_kwargs = metric_spec["metric_kwargs"]
             metric_prefix = metric_spec["prefix"]
+            metric_train_selection = metric_spec["train_selection"]
+
+            metric_train_embeddings = self._select_train_records_for_metric(
+                metric_name=str(metric_name),
+                train_selection=metric_train_selection,
+                labeled_baseline_embeddings=labeled_baseline_embeddings,
+            )
 
             logger.info(f"Computing OOD stats via metric='{metric_name}'...")
             metric_stats = self._compute_stats_for_metric(
                 metric_fn=metric_fn,
                 metric_kwargs=metric_kwargs,
-                baseline_embeddings=baseline_embeddings,
+                baseline_embeddings=metric_train_embeddings,
                 labeled_test_embeddings=labeled_test_embeddings,
             )
             self._merge_metric_stats(out, str(metric_name), metric_prefix, metric_stats)
@@ -532,10 +609,11 @@ class MultiMetricHallucinationEvaluator(HallucinationEvaluator):
         logger.info("Starting multi-metric hallucination detection evaluation...")
 
         baseline_embeddings = self._compute_baseline_embeddings(model)
+        labeled_baseline_embeddings = self._get_labeled_baseline_embeddings(baseline_embeddings)
         test_embeddings = self._compute_test_embeddings(data_loader, model)
         labeled_test_embeddings = self._assign_hallucination_labels(test_embeddings)
 
-        stats = self._compute_all_metrics(baseline_embeddings, labeled_test_embeddings)
+        stats = self._compute_all_metrics(labeled_baseline_embeddings, labeled_test_embeddings)
 
         logger.info("Evaluation complete!")
         logger.info(f"Results: {stats}")
@@ -547,8 +625,9 @@ class MultiMetricHallucinationEvaluator(HallucinationEvaluator):
         if self._baseline_embeddings is None:
             raise ValueError("Baseline embeddings not available. Call compute() first or set cache manually.")
 
+        labeled_baseline_embeddings = self._get_labeled_baseline_embeddings(self._baseline_embeddings)
         labeled_embeddings = self._assign_hallucination_labels(embeddings)
-        stats = self._compute_all_metrics(self._baseline_embeddings, labeled_embeddings)
+        stats = self._compute_all_metrics(labeled_baseline_embeddings, labeled_embeddings)
 
         logger.info("Evaluation complete!")
         logger.info(f"Results: {stats}")
