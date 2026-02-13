@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional, Tuple
 
@@ -48,6 +49,13 @@ def _resolve_device(device: str) -> torch.device:
     if device == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device)
+
+
+def _slugify_component(name: str) -> str:
+    """Convert a class/name into a stable filesystem-safe token."""
+    cleaned = re.sub(r"[^0-9a-zA-Z]+", "_", str(name).strip().lower())
+    cleaned = cleaned.strip("_")
+    return cleaned or "unknown"
 
 
 def _select_eval_sub_batch_size(
@@ -116,6 +124,7 @@ class TrainerConfig:
 
     snapshot_every: int = 0
     snapshot_keep_last: int = 5
+    snapshot_subdir: Optional[str] = None
 
     eval_sub_batch_size: Optional[int] = None
     eval_auto_sub_batching: bool = True
@@ -162,6 +171,30 @@ class Trainer:
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
         return torch.optim.Adam(self.model.parameters(), lr=float(self.config.lr))
+
+    def resolve_snapshot_dir(self) -> str:
+        """Resolve the snapshot directory path for this trainer instance.
+
+        Default behavior writes snapshots into a subfolder under
+        ``checkpoint_dir`` named ``{trainer_name}__{model_name}``.
+        Set ``snapshot_subdir`` to a custom folder name to override, or
+        to an empty string to store snapshots directly in ``checkpoint_dir``.
+        """
+        configured_subdir = self.config.snapshot_subdir
+        if configured_subdir is None:
+            trainer_name = _slugify_component(self.__class__.__name__)
+            model_name = _slugify_component(self.model.__class__.__name__)
+            subdir_name = f"{trainer_name}__{model_name}"
+        else:
+            subdir_name = str(configured_subdir).strip()
+
+        snapshot_dir = (
+            self.config.checkpoint_dir
+            if subdir_name == ""
+            else os.path.join(self.config.checkpoint_dir, subdir_name)
+        )
+        os.makedirs(snapshot_dir, exist_ok=True)
+        return snapshot_dir
 
     def training_step(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, Dict[str, float]]:
         raise NotImplementedError
@@ -354,7 +387,7 @@ class Trainer:
         _atomic_torch_save(checkpoint, last_path)
 
         _save_and_prune_snapshots(
-            checkpoint_dir=self.config.checkpoint_dir,
+            checkpoint_dir=self.resolve_snapshot_dir(),
             snapshot_prefix="trainer",
             epoch_one_indexed=epoch + 1,
             checkpoint=checkpoint,
@@ -654,7 +687,7 @@ class ContrastiveTrainer(Trainer):
         _atomic_torch_save(checkpoint, last_path)
 
         _save_and_prune_snapshots(
-            checkpoint_dir=self.contrastive_config.checkpoint_dir,
+            checkpoint_dir=self.resolve_snapshot_dir(),
             snapshot_prefix="contrastive",
             epoch_one_indexed=epoch + 1,
             checkpoint=checkpoint,
@@ -857,7 +890,7 @@ class LayerAwareContrastiveTrainer(Trainer):
         _atomic_torch_save(checkpoint, last_path)
 
         _save_and_prune_snapshots(
-            checkpoint_dir=self.contrastive_config.checkpoint_dir,
+            checkpoint_dir=self.resolve_snapshot_dir(),
             snapshot_prefix="layer_aware_contrastive",
             epoch_one_indexed=epoch + 1,
             checkpoint=checkpoint,
