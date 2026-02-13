@@ -223,11 +223,13 @@ def knn_ood_stats(
     train_records,
     test_records,
     outlier_class: int = 1,
-    k: int = 5,
+    k: int = 50,
     metric: str = "euclidean",
     train_label_filter: str = "all",
     calibrate_k: bool = False,
     k_candidates=None,
+    max_train_size: int = 200000,
+    sample_seed: int = 0,
 ):
     """Compute OOD statistics using k-nearest-neighbor distance in embedding space.
 
@@ -240,6 +242,13 @@ def knn_ood_stats(
         outlier_class: Which class to treat as outlier for ID/OOD summary stats.
         k: Number of neighbors to use.
         metric: Distance metric for NearestNeighbors (e.g. 'euclidean', 'cosine').
+        train_label_filter: Train-set selection policy: 'all', 'id_only', or 'ood_only'.
+        calibrate_k: If True and train labels are available, select k from candidates
+            by maximizing leave-one-out AUROC on train data.
+        k_candidates: Candidate k values used when calibrate_k=True.
+        max_train_size: If > 0 and train set exceeds this size, downsample train
+            records before KNN fitting.
+        sample_seed: RNG seed for train downsampling.
 
     Returns:
         dict: Contains KNN distance statistics for ID/OOD detection.
@@ -253,6 +262,47 @@ def knn_ood_stats(
         outlier_class=outlier_class,
         train_label_filter=train_label_filter,
     )
+
+    sampled_train = False
+    max_train_size = int(max_train_size)
+    if max_train_size > 0 and len(train_records) > max_train_size:
+        sampled_train = True
+        rng = np.random.default_rng(int(sample_seed))
+
+        if train_records and all("halu" in record for record in train_records):
+            # Stratified sampling by halu label when available.
+            idx_by_label = {}
+            for idx, record in enumerate(train_records):
+                label = int(record["halu"])
+                idx_by_label.setdefault(label, []).append(idx)
+
+            sampled_indices = []
+            for idxs in idx_by_label.values():
+                frac = len(idxs) / float(len(train_records))
+                n_pick = max(1, int(round(frac * max_train_size)))
+                n_pick = min(n_pick, len(idxs))
+                chosen = rng.choice(np.array(idxs), size=n_pick, replace=False)
+                sampled_indices.extend(chosen.tolist())
+
+            if len(sampled_indices) > max_train_size:
+                sampled_indices = rng.choice(
+                    np.array(sampled_indices), size=max_train_size, replace=False
+                ).tolist()
+            elif len(sampled_indices) < max_train_size:
+                remaining = sorted(set(range(len(train_records))) - set(sampled_indices))
+                if remaining:
+                    extra = rng.choice(
+                        np.array(remaining),
+                        size=min(max_train_size - len(sampled_indices), len(remaining)),
+                        replace=False,
+                    )
+                    sampled_indices.extend(extra.tolist())
+
+            sampled_indices = sorted(set(sampled_indices))
+            train_records = [train_records[idx] for idx in sampled_indices]
+        else:
+            sample_idx = rng.choice(np.arange(len(train_records)), size=max_train_size, replace=False)
+            train_records = [train_records[int(idx)] for idx in sample_idx]
 
     # Stack train/test embeddings (z1). Use CPU numpy for sklearn.
     train_z = torch.stack([r["z1"] for r in train_records]).detach().cpu().numpy()
@@ -270,7 +320,7 @@ def knn_ood_stats(
             train_labels_binary,
             base_k=k,
             metric=metric,
-            k_candidates=k_candidates,
+            k_candidates=([50, 100, 200, 500, 1000] if k_candidates is None else k_candidates),
         )
 
     n_train = train_z.shape[0]
@@ -300,6 +350,9 @@ def knn_ood_stats(
         "knn_metric": str(metric),
         "knn_train_label_filter": str(train_label_filter),
         "knn_calibrated_k": bool(calibrate_k and train_labels_binary is not None),
+        "knn_train_size_used": int(len(train_records)),
+        "knn_train_sampled": bool(sampled_train),
+        "knn_max_train_size": int(max_train_size),
         "knn_mean_id": id_scores.mean().item() if id_scores.numel() else float("nan"),
         "knn_std_id": id_scores.std().item() if id_scores.numel() else float("nan"),
         "knn_mean_ood": ood_scores.mean().item() if ood_scores.numel() else float("nan"),
