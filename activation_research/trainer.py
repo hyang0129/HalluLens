@@ -135,6 +135,9 @@ class TrainerConfig:
     # If set, training uses this step count regardless of dataset length.
     steps_per_epoch_override: Optional[int] = None
 
+    # Gradient clipping (max L2 norm).  Set to 0.0 or None to disable.
+    grad_clip_norm: Optional[float] = None
+
 
 class Trainer:
     """A minimal, Lightning-inspired trainer.
@@ -249,6 +252,12 @@ class Trainer:
 
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
+
+            if self.config.grad_clip_norm is not None and float(self.config.grad_clip_norm) > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), max_norm=float(self.config.grad_clip_norm)
+                )
+
             self.optimizer.step()
 
             total_loss += float(loss.detach().cpu().item())
