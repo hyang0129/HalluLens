@@ -29,17 +29,15 @@ from tqdm.autonotebook import tqdm
 
 from .contrastive_evaluator import (
     ContrastiveEvaluator,
-    average_cosine_similarity,
-    pairing_accuracy,
 )
-from .evaluation import evaluate
+from .evaluation import evaluate, intra_inter_margin, intra_sample_cosine_mean
 from .training import (
     InfiniteIndexStream,
     SupConLoss,
     _atomic_torch_save,
     _build_balanced_sampler,
     _cleanup_legacy_checkpoints,
-    _contrastive_collate_min,
+    _contrastive_collate_kview,
     _save_and_prune_snapshots,
 )
 
@@ -229,8 +227,8 @@ class Trainer:
         train_loader, steps_per_epoch, train_iter = self._build_train_iterator(train_dataset)
 
         total_loss = 0.0
-        total_acc = 0.0
-        total_cos = 0.0
+        total_intra_cos = 0.0
+        total_intra_inter_margin = 0.0
         n_steps = 0
 
         if steps_per_epoch is not None:
@@ -261,25 +259,27 @@ class Trainer:
             self.optimizer.step()
 
             total_loss += float(loss.detach().cpu().item())
-            total_acc += float(metrics.get("pairing_acc", 0.0))
-            total_cos += float(metrics.get("cosine_sim", 0.0))
+            total_intra_cos += float(metrics.get("intra_cos", 0.0))
+            total_intra_inter_margin += float(metrics.get("intra_inter_margin", 0.0))
             n_steps += 1
 
             loop.set_postfix(
                 loss=(total_loss / n_steps),
-                pairing_acc=(total_acc / n_steps),
-                cosine_sim=(total_cos / n_steps),
+                intra_cos=(total_intra_cos / n_steps),
+                intra_inter_margin=(total_intra_inter_margin / n_steps),
             )
 
         out = {
             "train_loss": (total_loss / max(1, n_steps)),
-            "train_acc": (total_acc / max(1, n_steps)),
-            "train_cosine_sim": (total_cos / max(1, n_steps)),
+            "train_intra_cos": (total_intra_cos / max(1, n_steps)),
+            "train_intra_inter_margin": (total_intra_inter_margin / max(1, n_steps)),
         }
 
         logger.info(
             "Train epoch metrics: "
-            f"loss={out['train_loss']:.4f}, acc={out['train_acc']:.4f}, cos={out['train_cosine_sim']:.4f}"
+            f"loss={out['train_loss']:.4f}, "
+            f"intra_cos={out['train_intra_cos']:.4f}, "
+            f"intra_inter_margin={out['train_intra_inter_margin']:.4f}"
         )
         return out
 
@@ -498,6 +498,9 @@ class ContrastiveTrainerConfig(TrainerConfig):
     ignore_label: int = -1
     same_sample_weight: float = 1.0
     same_class_weight: float = 1.0
+    num_views: int = 2
+    view_sampling_with_replacement: bool = False
+    train_forward_chunk_views: Optional[int] = None
 
     balanced_sampling: bool = False
 
@@ -538,6 +541,8 @@ class ContrastiveTrainer(Trainer):
 
     def __init__(self, model: torch.nn.Module, *, config: ContrastiveTrainerConfig):
         self.contrastive_config = config
+        if int(self.contrastive_config.num_views) < 2:
+            raise ValueError("ContrastiveTrainerConfig.num_views must be >= 2")
         super().__init__(model, config=config)
 
         self.loss_fn = SupConLoss(
@@ -550,12 +555,12 @@ class ContrastiveTrainer(Trainer):
         self.best_loss: float = float("inf")
 
     def training_step(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, Dict[str, float]]:
-        x1 = batch["layer1_activations"].squeeze(1).to(self.device, non_blocking=True)
-        x2 = batch["layer2_activations"].squeeze(1).to(self.device, non_blocking=True)
+        views = batch["views_activations"].to(self.device, non_blocking=True)
+        batch_size, num_views, seq_len, hidden_dim = views.shape
+        x_flat = views.reshape(batch_size * num_views, seq_len, hidden_dim)
 
-        z1 = self.model(x1)
-        z2 = self.model(x2)
-        z_stacked = torch.stack([z1, z2], dim=1)
+        z_flat = self.model(x_flat)
+        z_views = z_flat.reshape(batch_size, num_views, -1)
 
         if bool(self.contrastive_config.use_labels):
             labels = batch["halu"].to(self.device, non_blocking=True)
@@ -577,14 +582,14 @@ class ContrastiveTrainer(Trainer):
                     device=self.device,
                 )
 
-            loss = self.loss_fn(z_stacked, labels=labels, sample_ids=sample_ids)
+            loss = self.loss_fn(z_views, labels=labels, sample_ids=sample_ids)
         else:
-            loss = self.loss_fn(z_stacked)
+            loss = self.loss_fn(z_views)
 
-        acc = pairing_accuracy(z1, z2)
-        cos = average_cosine_similarity(z1, z2)
+        intra_cos = intra_sample_cosine_mean(z_views)
+        intra_inter = intra_inter_margin(z_views)
 
-        return loss, {"pairing_acc": float(acc), "cosine_sim": float(cos)}
+        return loss, {"intra_cos": float(intra_cos), "intra_inter_margin": float(intra_inter)}
 
     def train_dataloader(self, train_dataset) -> DataLoader:
         dataset = train_dataset
@@ -618,7 +623,7 @@ class ContrastiveTrainer(Trainer):
             persistent_workers=bool(
                 self.contrastive_config.persistent_workers and int(self.contrastive_config.num_workers) > 0
             ),
-            collate_fn=_contrastive_collate_min,
+            collate_fn=_contrastive_collate_kview,
         )
 
     def val_dataloader(self, val_dataset, *, batch_size: Optional[int] = None) -> DataLoader:
@@ -632,7 +637,7 @@ class ContrastiveTrainer(Trainer):
             persistent_workers=bool(
                 self.contrastive_config.persistent_workers and int(self.contrastive_config.num_workers) > 0
             ),
-            collate_fn=_contrastive_collate_min,
+            collate_fn=_contrastive_collate_kview,
         )
 
     def validate(self, *, epoch: int, val_dataset) -> Dict[str, float]:
@@ -653,21 +658,23 @@ class ContrastiveTrainer(Trainer):
             max_batches=eval_max_batches,
         )
         test_loss = float(val_stats["loss"])
-        test_acc = float(val_stats["acc"])
-        test_cos = float(val_stats["cosine_sim"])
+        test_intra_cos = float(val_stats["intra_cos"])
+        test_intra_inter_margin = float(val_stats["intra_inter_margin"])
 
         self.best_loss = min(float(self.best_loss), float(test_loss))
 
         out = {
             "test_loss": float(test_loss),
-            "test_acc": float(test_acc),
-            "test_cosine_sim": float(test_cos),
+            "test_intra_cos": float(test_intra_cos),
+            "test_intra_inter_margin": float(test_intra_inter_margin),
             "best_loss": float(self.best_loss),
         }
 
         logger.info(
             "Val metrics: "
-            f"loss={out['test_loss']:.4f}, acc={out['test_acc']:.4f}, cos={out['test_cosine_sim']:.4f}"
+            f"loss={out['test_loss']:.4f}, "
+            f"intra_cos={out['test_intra_cos']:.4f}, "
+            f"intra_inter_margin={out['test_intra_inter_margin']:.4f}"
         )
         return out
 
@@ -741,6 +748,8 @@ class LayerAwareContrastiveTrainer(Trainer):
 
     def __init__(self, model: torch.nn.Module, *, config: LayerAwareContrastiveTrainerConfig):
         self.contrastive_config = config
+        if int(self.contrastive_config.num_views) < 2:
+            raise ValueError("LayerAwareContrastiveTrainerConfig.num_views must be >= 2")
         super().__init__(model, config=config)
 
         self.loss_fn = SupConLoss(
@@ -789,19 +798,18 @@ class LayerAwareContrastiveTrainer(Trainer):
         super().fit(train_dataset, val_dataset=val_dataset)
 
     def training_step(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, Dict[str, float]]:
-        x1 = batch["layer1_activations"].squeeze(1).to(self.device, non_blocking=True)
-        x2 = batch["layer2_activations"].squeeze(1).to(self.device, non_blocking=True)
+        views = batch["views_activations"].to(self.device, non_blocking=True)
+        view_indices = batch.get("view_indices")
+        if not isinstance(view_indices, torch.Tensor):
+            raise ValueError("LayerAwareContrastiveTrainer requires `view_indices` in each batch")
 
-        layer1_idx = batch.get("layer1_idx")
-        layer2_idx = batch.get("layer2_idx")
-        if isinstance(layer1_idx, torch.Tensor):
-            layer1_idx = layer1_idx.to(self.device, non_blocking=True)
-        if isinstance(layer2_idx, torch.Tensor):
-            layer2_idx = layer2_idx.to(self.device, non_blocking=True)
+        view_indices = view_indices.to(self.device, non_blocking=True)
+        batch_size, num_views, seq_len, hidden_dim = views.shape
+        x_flat = views.reshape(batch_size * num_views, seq_len, hidden_dim)
+        layer_idx_flat = view_indices.reshape(batch_size * num_views)
 
-        z1 = self.model(x1, layer_idx=layer1_idx)
-        z2 = self.model(x2, layer_idx=layer2_idx)
-        z_stacked = torch.stack([z1, z2], dim=1)
+        z_flat = self.model(x_flat, layer_idx=layer_idx_flat)
+        z_views = z_flat.reshape(batch_size, num_views, -1)
 
         if bool(self.contrastive_config.use_labels):
             labels = batch["halu"].to(self.device, non_blocking=True)
@@ -822,13 +830,13 @@ class LayerAwareContrastiveTrainer(Trainer):
                     device=self.device,
                 )
 
-            loss = self.loss_fn(z_stacked, labels=labels, sample_ids=sample_ids)
+            loss = self.loss_fn(z_views, labels=labels, sample_ids=sample_ids)
         else:
-            loss = self.loss_fn(z_stacked)
+            loss = self.loss_fn(z_views)
 
-        acc = pairing_accuracy(z1, z2)
-        cos = average_cosine_similarity(z1, z2)
-        return loss, {"pairing_acc": float(acc), "cosine_sim": float(cos)}
+        intra_cos = intra_sample_cosine_mean(z_views)
+        intra_inter = intra_inter_margin(z_views)
+        return loss, {"intra_cos": float(intra_cos), "intra_inter_margin": float(intra_inter)}
 
     def train_dataloader(self, train_dataset) -> DataLoader:
         dataset = train_dataset
@@ -862,7 +870,7 @@ class LayerAwareContrastiveTrainer(Trainer):
             persistent_workers=bool(
                 self.contrastive_config.persistent_workers and int(self.contrastive_config.num_workers) > 0
             ),
-            collate_fn=_contrastive_collate_min,
+            collate_fn=_contrastive_collate_kview,
         )
 
     def val_dataloader(self, val_dataset, *, batch_size: Optional[int] = None) -> DataLoader:
@@ -876,14 +884,14 @@ class LayerAwareContrastiveTrainer(Trainer):
             persistent_workers=bool(
                 self.contrastive_config.persistent_workers and int(self.contrastive_config.num_workers) > 0
             ),
-            collate_fn=_contrastive_collate_min,
+            collate_fn=_contrastive_collate_kview,
         )
 
     def validate(self, *, epoch: int, val_dataset) -> Dict[str, float]:
         _ = epoch
         val_loader, eval_max_batches, eval_sub_batch_size = self._build_val_loader(val_dataset)
 
-        test_loss, test_acc, test_cos = evaluate(
+        test_loss, test_intra_cos, test_intra_inter_margin = evaluate(
             self.model,
             val_loader,
             batch_size=int(self.contrastive_config.batch_size),
@@ -899,14 +907,16 @@ class LayerAwareContrastiveTrainer(Trainer):
 
         out = {
             "test_loss": float(test_loss),
-            "test_acc": float(test_acc),
-            "test_cosine_sim": float(test_cos),
+            "test_intra_cos": float(test_intra_cos),
+            "test_intra_inter_margin": float(test_intra_inter_margin),
             "best_loss": float(self.best_loss),
         }
 
         logger.info(
             "Val metrics: "
-            f"loss={out['test_loss']:.4f}, acc={out['test_acc']:.4f}, cos={out['test_cosine_sim']:.4f}"
+            f"loss={out['test_loss']:.4f}, "
+            f"intra_cos={out['test_intra_cos']:.4f}, "
+            f"intra_inter_margin={out['test_intra_inter_margin']:.4f}"
         )
         return out
 

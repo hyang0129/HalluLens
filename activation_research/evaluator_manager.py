@@ -9,7 +9,7 @@ class EvaluatorManager:
     Manager class that accumulates model outputs during evaluation and computes metrics at the end of an epoch.
     
     This class can be used to:
-    1. Accumulate z1 and z2 embeddings during evaluation
+    1. Accumulate z_views embeddings during evaluation
     2. Store additional metadata (hashkeys, labels, etc.)
     3. Compute metrics using registered evaluators at the end of an epoch
     4. Clear accumulated data for the next epoch
@@ -17,8 +17,7 @@ class EvaluatorManager:
     
     def __init__(self):
         """Initialize the evaluator manager."""
-        self.accumulated_z1: List[torch.Tensor] = []
-        self.accumulated_z2: List[torch.Tensor] = []
+        self.accumulated_z_views: List[torch.Tensor] = []
         self.accumulated_hashkeys: List[str] = []
         self.accumulated_labels: List[torch.Tensor] = []
         self.evaluators: List[MetricEvaluator] = []
@@ -33,23 +32,20 @@ class EvaluatorManager:
         self.evaluators.append(evaluator)
         logger.info(f"Registered evaluator: {type(evaluator).__name__}")
     
-    def accumulate_batch(self, 
-                        z1: torch.Tensor, 
-                        z2: torch.Tensor, 
+    def accumulate_batch(self,
+                        z_views: torch.Tensor,
                         hashkeys: Optional[List[str]] = None,
                         labels: Optional[torch.Tensor] = None):
         """
         Accumulate embeddings and metadata from a batch.
         
         Args:
-            z1: First set of embeddings (B, D)
-            z2: Second set of embeddings (B, D)
+            z_views: Embeddings for all views (B, K, D)
             hashkeys: Optional list of hashkeys for the batch
             labels: Optional labels for the batch
         """
         # Move to CPU to save GPU memory
-        self.accumulated_z1.append(z1.cpu())
-        self.accumulated_z2.append(z2.cpu())
+        self.accumulated_z_views.append(z_views.cpu())
         
         if hashkeys is not None:
             self.accumulated_hashkeys.extend(hashkeys)
@@ -62,20 +58,19 @@ class EvaluatorManager:
         Get all accumulated embeddings as a list of dictionaries.
         
         Returns:
-            List of dictionaries containing z1, z2, and optional metadata
+            List of dictionaries containing z_views and optional metadata
         """
-        if not self.accumulated_z1:
+        if not self.accumulated_z_views:
             return []
-        
+
         # Concatenate all accumulated tensors
-        all_z1 = torch.cat(self.accumulated_z1, dim=0)
-        all_z2 = torch.cat(self.accumulated_z2, dim=0)
+        all_z_views = torch.cat(self.accumulated_z_views, dim=0)
+        all_labels = torch.cat(self.accumulated_labels, dim=0) if self.accumulated_labels else None
         
         records = []
-        for i in range(len(all_z1)):
+        for i in range(len(all_z_views)):
             record = {
-                'z1': all_z1[i],
-                'z2': all_z2[i]
+                'z_views': all_z_views[i]
             }
             
             # Add hashkey if available
@@ -83,10 +78,8 @@ class EvaluatorManager:
                 record['hashkey'] = self.accumulated_hashkeys[i]
             
             # Add label if available
-            if self.accumulated_labels:
-                all_labels = torch.cat(self.accumulated_labels, dim=0)
-                if i < len(all_labels):
-                    record['halu'] = all_labels[i].item()
+            if all_labels is not None and i < len(all_labels):
+                record['halu'] = all_labels[i].item()
             
             records.append(record)
         
@@ -102,7 +95,7 @@ class EvaluatorManager:
         Returns:
             Dictionary containing metrics from all evaluators
         """
-        if not self.accumulated_z1:
+        if not self.accumulated_z_views:
             logger.warning("No accumulated data to compute metrics on")
             return {}
         
@@ -135,8 +128,7 @@ class EvaluatorManager:
     
     def clear(self):
         """Clear all accumulated data."""
-        self.accumulated_z1.clear()
-        self.accumulated_z2.clear()
+        self.accumulated_z_views.clear()
         self.accumulated_hashkeys.clear()
         self.accumulated_labels.clear()
         logger.debug("Cleared accumulated evaluation data")
@@ -149,8 +141,8 @@ class EvaluatorManager:
             Dictionary with counts of accumulated data
         """
         return {
-            'num_samples': len(self.accumulated_z1) * (self.accumulated_z1[0].size(0) if self.accumulated_z1 else 0),
-            'num_batches': len(self.accumulated_z1),
+            'num_samples': len(self.accumulated_z_views) * (self.accumulated_z_views[0].size(0) if self.accumulated_z_views else 0),
+            'num_batches': len(self.accumulated_z_views),
             'num_hashkeys': len(self.accumulated_hashkeys),
             'num_labels': sum(len(labels) for labels in self.accumulated_labels),
             'num_evaluators': len(self.evaluators)
@@ -203,7 +195,7 @@ class CosineSimEvaluator:
         Compute cosine similarity statistics from accumulated embeddings.
 
         Args:
-            embeddings: List of embedding dictionaries with z1 and z2
+            embeddings: List of embedding dictionaries with z_views
 
         Returns:
             Dictionary containing cosine similarity statistics
@@ -213,14 +205,15 @@ class CosineSimEvaluator:
 
         import torch.nn.functional as F
 
-        z1_list = [record['z1'] for record in embeddings]
-        z2_list = [record['z2'] for record in embeddings]
-
-        z1_tensor = torch.stack(z1_list)
-        z2_tensor = torch.stack(z2_list)
-
-        # Compute cosine similarities
-        cosine_sims = F.cosine_similarity(z1_tensor, z2_tensor, dim=1)
+        z_views = torch.stack([record['z_views'] for record in embeddings])
+        z_views = F.normalize(z_views, dim=-1)
+        _, k, _ = z_views.shape
+        if k < 2:
+            cosine_sims = torch.zeros(len(embeddings), dtype=z_views.dtype)
+        else:
+            sim = torch.matmul(z_views, z_views.transpose(1, 2))
+            tri = torch.triu_indices(k, k, offset=1)
+            cosine_sims = sim[:, tri[0], tri[1]].mean(dim=1)
 
         stats = {
             'cosine_sim_mean': cosine_sims.mean().item(),
@@ -239,8 +232,8 @@ class CosineSimEvaluator:
             if non_halu_mask.any():
                 non_halu_sims = cosine_sims[non_halu_mask]
                 stats.update({
-                    'cosine_sim_non_halu_mean': non_halu_sims.mean().item(),
-                    'cosine_sim_non_halu_std': non_halu_sims.std().item(),
+                    'intra_cos_non_halu_mean': non_halu_sims.mean().item(),
+                    'intra_cos_non_halu_std': non_halu_sims.std().item(),
                     'cosine_sim_non_halu_count': non_halu_mask.sum().item()
                 })
 
@@ -249,8 +242,8 @@ class CosineSimEvaluator:
             if halu_mask.any():
                 halu_sims = cosine_sims[halu_mask]
                 stats.update({
-                    'cosine_sim_halu_mean': halu_sims.mean().item(),
-                    'cosine_sim_halu_std': halu_sims.std().item(),
+                    'intra_cos_halu_mean': halu_sims.mean().item(),
+                    'intra_cos_halu_std': halu_sims.std().item(),
                     'cosine_sim_halu_count': halu_mask.sum().item()
                 })
 

@@ -30,6 +30,8 @@ class ActivationDataset(Dataset):
         verbose: bool = False,
         pad_length: int = 63,
         min_target_layers: int = 2,
+        num_views: int = 2,
+        view_sampling_with_replacement: bool = False,
         return_all_activations: bool = False,
     ):
         """
@@ -44,7 +46,9 @@ class ActivationDataset(Dataset):
             fixed_layer: If specified, one activation will always be from this layer (index in relevant_layers)
             random_seed: Random seed for train/test split (default: 42)
             verbose: Whether to log initialization messages (default: False for datasets)
-            return_all_activations: If True, load all relevant layers for Zarr instead of only two
+            num_views: Number of contrastive views to sample per sample (K-view, K>=2)
+            view_sampling_with_replacement: Whether to sample view indices with replacement
+            return_all_activations: If True, include all relevant layers in all_activations
         """
         self.activations_path = activations_path
         normalized_logger_type = str(logger_type).strip().lower()
@@ -66,7 +70,11 @@ class ActivationDataset(Dataset):
         self.fixed_layer = fixed_layer
         self.pad_length = pad_length
         self.min_target_layers = min_target_layers
+        self.num_views = int(num_views)
+        self.view_sampling_with_replacement = bool(view_sampling_with_replacement)
         self.return_all_activations = return_all_activations
+        if self.num_views < 2:
+            raise ValueError("num_views must be >= 2")
         self._use_zarr_fast_path = self._is_zarr_path(activations_path)
         if not self._use_zarr_fast_path:
             raise ValueError(
@@ -100,11 +108,9 @@ class ActivationDataset(Dataset):
             Dictionary containing:
             - hashkey: The prompt hash
             - halu: Whether this is a hallucination
-            - all_activations: All padded activations (None for non-targeted layers)
-            - layer1_activations: Activations from first layer (fixed layer if specified, otherwise random)
-            - layer2_activations: Activations from second layer (random, different from layer1)
-            - layer1_idx: Index of first selected layer
-            - layer2_idx: Index of second selected layer
+            - all_activations: All padded activations (missing layers zero-filled)
+            - views_activations: Activations from selected K views, shape (K, T, H)
+            - view_indices: Indices of selected views in relevant_layers, shape (K,)
             - input_length: Length of the input prompt
         """
         if self._use_zarr_fast_path:
@@ -135,7 +141,7 @@ class ActivationDataset(Dataset):
             # If act is None, keep it as None
             padded_activations.append(act)
 
-        # Select two different layers, with optional fixed layer
+        # Select K layers, with optional fixed layer
         available_layers = [i for i, act in enumerate(padded_activations) if act is not None]
         if len(available_layers) < self.min_target_layers:
             raise ValueError(
@@ -143,40 +149,57 @@ class ActivationDataset(Dataset):
                 f"need at least {self.min_target_layers})."
             )
 
-        if self.fixed_layer is not None:
-            # Ensure fixed_layer is valid and available
-            if self.fixed_layer not in available_layers:
-                raise ValueError(f"Fixed layer {self.fixed_layer} is not available in the relevant layers")
-
-            # Set one layer to the fixed layer
-            layer1_idx = self.fixed_layer
-            # Select a random different layer for the second activation
-            other_layers = [i for i in available_layers if i != self.fixed_layer]
-            if len(other_layers) == 0:
-                raise ValueError(f"No other layers available besides fixed layer {self.fixed_layer}")
-            layer2_idx = random.choice(other_layers)
-        else:
-            # Original behavior: randomly select two different layers.
-            # For classifier-style usage, allow min_target_layers == 1 and return the same layer twice.
-            if len(available_layers) == 1:
-                layer1_idx = available_layers[0]
-                layer2_idx = available_layers[0]
-            else:
-                layer1_idx, layer2_idx = random.sample(available_layers, 2)
-
-        layer1_activations = padded_activations[layer1_idx]
-        layer2_activations = padded_activations[layer2_idx]
+        selected_view_indices = self._select_view_indices(available_layers)
+        filled_activations = self._fill_missing_layers(padded_activations)
+        selected_views = [filled_activations[i] for i in selected_view_indices]
+        selected_views = [act.squeeze(0) if act.ndim == 3 and act.shape[0] == 1 else act for act in selected_views]
+        views_activations = torch.stack(selected_views, dim=0)
 
         return {
             'hashkey': row['prompt_hash'],
             'halu': torch.tensor(row['halu'], dtype=torch.float32),
-            'all_activations': padded_activations,
-            'layer1_activations': layer1_activations,
-            'layer2_activations': layer2_activations,
-            'layer1_idx': layer1_idx,
-            'layer2_idx': layer2_idx,
+            'all_activations': filled_activations,
+            'views_activations': views_activations,
+            'view_indices': torch.tensor(selected_view_indices, dtype=torch.long),
             'input_length': input_length
         }
+
+    def _fill_missing_layers(self, layers: List[Optional[torch.Tensor]]) -> List[torch.Tensor]:
+        reference = next((act for act in layers if act is not None), None)
+        if reference is None:
+            raise ValueError("No available layers found for this sample")
+        return [torch.zeros_like(reference) if act is None else act for act in layers]
+
+    def _select_view_indices(self, available_layers: List[int]) -> List[int]:
+        if self.fixed_layer is not None and self.fixed_layer not in available_layers:
+            raise ValueError(f"Fixed layer {self.fixed_layer} is not available in the relevant layers")
+
+        if self.fixed_layer is not None:
+            other_layers = [i for i in available_layers if i != self.fixed_layer]
+            if self.view_sampling_with_replacement:
+                if not other_layers and self.num_views > 1:
+                    raise ValueError(f"No other layers available besides fixed layer {self.fixed_layer}")
+                sampled = random.choices(other_layers, k=self.num_views - 1) if self.num_views > 1 else []
+            else:
+                if len(other_layers) < self.num_views - 1:
+                    raise ValueError(
+                        f"Not enough layers for strict K-view sampling with fixed layer: "
+                        f"need {self.num_views - 1} additional layers, found {len(other_layers)}"
+                    )
+                sampled = random.sample(other_layers, self.num_views - 1)
+            return [self.fixed_layer, *sampled]
+
+        if self.view_sampling_with_replacement:
+            if not available_layers:
+                raise ValueError("No available layers found for this sample")
+            return random.choices(available_layers, k=self.num_views)
+
+        if len(available_layers) < self.num_views:
+            raise ValueError(
+                f"Not enough layers for strict K-view sampling: "
+                f"need {self.num_views}, found {len(available_layers)}"
+            )
+        return random.sample(available_layers, self.num_views)
 
     def _getitem_zarr(self, idx: int) -> Dict[str, Any]:
         row = self.df.iloc[idx]
@@ -202,116 +225,28 @@ class ActivationDataset(Dataset):
                 act = act[:, :self.pad_length, :]
             return act
 
-        def _fill_missing_layers(layers: List[Optional[torch.Tensor]]) -> List[torch.Tensor]:
-            reference = next((act for act in layers if act is not None), None)
-            if reference is None:
-                raise ValueError("No available layers found for this sample")
-            filled: List[torch.Tensor] = []
-            for act in layers:
-                if act is None:
-                    filled.append(torch.zeros_like(reference))
-                else:
-                    filled.append(act)
-            return filled
+        for layer_pos in range(len(self.relevant_layers)):
+            padded_activations[layer_pos] = load_layer(layer_pos)
 
-        if self.return_all_activations:
-            for layer_pos in range(len(self.relevant_layers)):
-                padded_activations[layer_pos] = load_layer(layer_pos)
-            available_layers = [i for i, act in enumerate(padded_activations) if act is not None]
-            if len(available_layers) < self.min_target_layers:
-                raise ValueError(
-                    f"Not enough targeted layers available (found {len(available_layers)} layers; "
-                    f"need at least {self.min_target_layers})."
-                )
-            if self.fixed_layer is not None:
-                if self.fixed_layer not in available_layers:
-                    raise ValueError(f"Fixed layer {self.fixed_layer} is not available in the relevant layers")
-                layer1_idx = self.fixed_layer
-                other_layers = [i for i in available_layers if i != layer1_idx]
-                if not other_layers:
-                    raise ValueError(f"No other layers available besides fixed layer {self.fixed_layer}")
-                layer2_idx = random.choice(other_layers)
-            else:
-                if len(available_layers) == 1:
-                    layer1_idx = available_layers[0]
-                    layer2_idx = available_layers[0]
-                else:
-                    layer1_idx, layer2_idx = random.sample(available_layers, 2)
+        available_layers = [i for i, act in enumerate(padded_activations) if act is not None]
+        if len(available_layers) < self.min_target_layers:
+            raise ValueError(
+                f"Not enough targeted layers available (found {len(available_layers)} layers; "
+                f"need at least {self.min_target_layers})."
+            )
 
-            padded_activations = _fill_missing_layers(padded_activations)
-            layer1_activations = padded_activations[layer1_idx]
-            layer2_activations = padded_activations[layer2_idx]
-
-            return {
-                'hashkey': row['prompt_hash'],
-                'halu': torch.tensor(row['halu'], dtype=torch.float32),
-                'all_activations': padded_activations,
-                'layer1_activations': layer1_activations,
-                'layer2_activations': layer2_activations,
-                'layer1_idx': layer1_idx,
-                'layer2_idx': layer2_idx,
-                'input_length': input_length
-            }
-
-        all_positions = list(range(len(self.relevant_layers)))
-
-        if self.fixed_layer is not None:
-            layer1_idx = self.fixed_layer
-            layer1_activations = load_layer(layer1_idx)
-            if layer1_activations is None:
-                raise ValueError(f"Fixed layer {self.fixed_layer} is not available in the relevant layers")
-
-            other_layers = [i for i in all_positions if i != layer1_idx]
-            random.shuffle(other_layers)
-            layer2_idx = None
-            layer2_activations = None
-            for candidate in other_layers:
-                layer2_activations = load_layer(candidate)
-                if layer2_activations is not None:
-                    layer2_idx = candidate
-                    break
-            if layer2_idx is None:
-                raise ValueError(f"No other layers available besides fixed layer {self.fixed_layer}")
-        else:
-            random.shuffle(all_positions)
-            layer1_idx = None
-            layer2_idx = None
-            layer1_activations = None
-            layer2_activations = None
-            for candidate in all_positions:
-                layer1_activations = load_layer(candidate)
-                if layer1_activations is not None:
-                    layer1_idx = candidate
-                    break
-            if layer1_idx is None:
-                raise ValueError("No available layers found for this sample")
-
-            for candidate in all_positions:
-                if candidate == layer1_idx:
-                    continue
-                layer2_activations = load_layer(candidate)
-                if layer2_activations is not None:
-                    layer2_idx = candidate
-                    break
-            if layer2_idx is None:
-                if self.min_target_layers == 1:
-                    layer2_idx = layer1_idx
-                    layer2_activations = layer1_activations
-                else:
-                    raise ValueError("Not enough targeted layers available for this sample")
-
-        padded_activations[layer1_idx] = layer1_activations
-        padded_activations[layer2_idx] = layer2_activations
-        padded_activations = _fill_missing_layers(padded_activations)
+        selected_view_indices = self._select_view_indices(available_layers)
+        filled_activations = self._fill_missing_layers(padded_activations)
+        selected_views = [filled_activations[i] for i in selected_view_indices]
+        selected_views = [act.squeeze(0) if act.ndim == 3 and act.shape[0] == 1 else act for act in selected_views]
+        views_activations = torch.stack(selected_views, dim=0)
 
         return {
             'hashkey': row['prompt_hash'],
             'halu': torch.tensor(row['halu'], dtype=torch.float32),
-            'all_activations': padded_activations,
-            'layer1_activations': layer1_activations,
-            'layer2_activations': layer2_activations,
-            'layer1_idx': layer1_idx,
-            'layer2_idx': layer2_idx,
+            'all_activations': filled_activations,
+            'views_activations': views_activations,
+            'view_indices': torch.tensor(selected_view_indices, dtype=torch.long),
             'input_length': input_length
         }
     
@@ -577,6 +512,8 @@ class ActivationParser:
         fixed_layer: Optional[int] = None,
         pad_length: int = 63,
         min_target_layers: int = 2,
+        num_views: int = 2,
+        view_sampling_with_replacement: bool = False,
         return_all_activations: bool = False,
         backend: Literal["auto", "zarr"] = "auto",
     ) -> ActivationDataset:
@@ -587,6 +524,8 @@ class ActivationParser:
             split: Which split to use ('train' or 'test')
             relevant_layers: List of layer indices to use (default: layers 16-29)
             fixed_layer: If specified, one activation will always be from this layer (index in relevant_layers)
+            num_views: Number of views to sample per example
+            view_sampling_with_replacement: Whether to sample with replacement when selecting views
 
         Returns:
             ActivationDataset instance for the specified split
@@ -608,6 +547,8 @@ class ActivationParser:
             verbose=False,
             pad_length=pad_length,
             min_target_layers=min_target_layers,
+            num_views=num_views,
+            view_sampling_with_replacement=view_sampling_with_replacement,
             return_all_activations=return_all_activations,
         )
 

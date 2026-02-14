@@ -3,7 +3,6 @@ import torch.nn.functional as F
 from tqdm.autonotebook import tqdm
 from torch.utils.data import DataLoader
 
-import torch
 import numpy as np
 from sklearn.metrics import roc_auc_score
 from scipy.spatial import distance
@@ -23,6 +22,47 @@ def _call_model(model, x, **kwargs):
         if "unexpected keyword argument" in msg or "got an unexpected keyword" in msg:
             return model(x)
         raise
+
+
+def _normalize_labels(labels: torch.Tensor) -> torch.Tensor:
+    if labels.dim() == 0:
+        return labels.unsqueeze(0)
+    if labels.dim() > 1:
+        return labels.view(-1)
+    return labels
+
+
+def intra_sample_cosine_mean(z_views: torch.Tensor) -> float:
+    """Average cosine similarity across all within-sample view pairs."""
+    z_norm = F.normalize(z_views, dim=-1)
+    batch_size, num_views, _ = z_norm.shape
+    if num_views < 2:
+        return 0.0
+    sim = torch.matmul(z_norm, z_norm.transpose(1, 2))
+    tri = torch.triu_indices(num_views, num_views, offset=1, device=z_norm.device)
+    vals = sim[:, tri[0], tri[1]]
+    return float(vals.mean().item())
+
+
+def intra_inter_margin(z_views: torch.Tensor) -> float:
+    """Margin between mean intra-sample similarity and inter-sample similarity."""
+    z_norm = F.normalize(z_views, dim=-1)
+    batch_size, num_views, dim = z_norm.shape
+    if batch_size < 2 or num_views < 2:
+        return 0.0
+
+    sim_views = torch.matmul(z_norm, z_norm.transpose(1, 2))
+    tri = torch.triu_indices(num_views, num_views, offset=1, device=z_norm.device)
+    intra = sim_views[:, tri[0], tri[1]].mean()
+
+    flat = z_norm.reshape(batch_size * num_views, dim)
+    sample_ids = torch.arange(batch_size, device=z_norm.device).repeat_interleave(num_views)
+    sim_all = torch.matmul(flat, flat.T)
+    inter_mask = sample_ids.unsqueeze(0) != sample_ids.unsqueeze(1)
+    inter_vals = sim_all[inter_mask]
+    if inter_vals.numel() == 0:
+        return 0.0
+    return float((intra - inter_vals.mean()).item())
 
 
 def evaluate(
@@ -46,73 +86,70 @@ def evaluate(
 
     model.eval()
     total_loss = 0.0
-    total_acc = 0.0
-    total_cosine_sim = 0.0
+    total_intra_cos = 0.0
+    total_margin = 0.0
     n_batches = 0
 
     with torch.no_grad():
         # Buffers to accumulate mini-batches
-        buffer_x1, buffer_x2 = [], []
-        buffer_l1, buffer_l2 = [], []
+        buffer_views = []
+        buffer_view_indices = []
         buffer_labels = [] if use_labels else None
         buffer_hashkeys = [] if evaluator_manager is not None else None
         buffered_samples = 0
 
         def _flush_buffer():
-            nonlocal total_loss, total_acc, total_cosine_sim, n_batches
-            nonlocal buffer_x1, buffer_x2, buffer_l1, buffer_l2, buffer_labels, buffer_hashkeys, buffered_samples
+            nonlocal total_loss, total_intra_cos, total_margin, n_batches
+            nonlocal buffer_views, buffer_view_indices, buffer_labels, buffer_hashkeys, buffered_samples
 
-            if not buffer_x1:
+            if not buffer_views:
                 return
 
-            x1_full = torch.cat(buffer_x1, dim=0)
-            x2_full = torch.cat(buffer_x2, dim=0)
-            l1_full = torch.cat(buffer_l1, dim=0) if buffer_l1 else None
-            l2_full = torch.cat(buffer_l2, dim=0) if buffer_l2 else None
+            views_full = torch.cat(buffer_views, dim=0)
+            view_indices_full = torch.cat(buffer_view_indices, dim=0) if buffer_view_indices else None
             labels_full = torch.cat(buffer_labels, dim=0) if (use_labels and buffer_labels) else None
 
-            z1 = _call_model(model, x1_full, layer_idx=l1_full)
-            z2 = _call_model(model, x2_full, layer_idx=l2_full)
+            bsz, num_views, seq_len, hidden_dim = views_full.shape
+            x_flat = views_full.reshape(bsz * num_views, seq_len, hidden_dim)
+            layer_idx_flat = None
+            if view_indices_full is not None:
+                layer_idx_flat = view_indices_full.reshape(bsz * num_views)
+
+            z_flat = _call_model(model, x_flat, layer_idx=layer_idx_flat)
+            z_views = z_flat.reshape(bsz, num_views, -1)
 
             if evaluator_manager is not None:
-                evaluator_manager.accumulate_batch(z1, z2, buffer_hashkeys, labels_full)
+                evaluator_manager.accumulate_batch(z_views, buffer_hashkeys, labels_full)
                 buffer_hashkeys = []
 
-            z_stacked = torch.stack([z1, z2], dim=1)
             if use_labels:
-                loss = loss_fn(z_stacked, labels=labels_full)
+                loss = loss_fn(z_views, labels=labels_full)
             else:
-                loss = loss_fn(z_stacked)
+                loss = loss_fn(z_views)
 
-            acc = pairing_accuracy(z1, z2)
-            cosine_sim = average_cosine_similarity(z1, z2)
+            intra_cos = intra_sample_cosine_mean(z_views)
+            margin = intra_inter_margin(z_views)
 
             total_loss += loss.item()
-            total_acc += acc
-            total_cosine_sim += cosine_sim
+            total_intra_cos += intra_cos
+            total_margin += margin
             n_batches += 1
 
-            buffer_x1 = []
-            buffer_x2 = []
-            buffer_l1 = []
-            buffer_l2 = []
+            buffer_views = []
+            buffer_view_indices = []
             buffer_labels = [] if use_labels else None
             buffered_samples = 0
 
         for i, batch in enumerate(test_dataloader):
             if max_batches is not None and i >= int(max_batches):
                 break
-            x1 = batch['layer1_activations'].squeeze(1).to(device, non_blocking=True)
-            x2 = batch['layer2_activations'].squeeze(1).to(device, non_blocking=True)
+            views = batch['views_activations'].to(device, non_blocking=True)
 
-            buffer_x1.append(x1)
-            buffer_x2.append(x2)
-            buffered_samples += int(x1.size(0))
+            buffer_views.append(views)
+            buffered_samples += int(views.size(0))
 
-            if isinstance(batch, dict) and 'layer1_idx' in batch:
-                buffer_l1.append(batch['layer1_idx'].to(device, non_blocking=True))
-            if isinstance(batch, dict) and 'layer2_idx' in batch:
-                buffer_l2.append(batch['layer2_idx'].to(device, non_blocking=True))
+            if isinstance(batch, dict) and 'view_indices' in batch:
+                buffer_view_indices.append(batch['view_indices'].to(device, non_blocking=True))
 
             if buffer_hashkeys is not None:
                 hk = None
@@ -126,69 +163,20 @@ def evaluate(
                     buffer_hashkeys.extend(list(hk))
 
             if use_labels:
-                labels = batch['halu'].to(device, non_blocking=True)
-                # Ensure labels have at least one dimension for concatenation
-                if labels.dim() == 0:
-                    labels = labels.unsqueeze(0)
-                elif labels.dim() == 1 and labels.size(0) == 1:
-                    # Already has batch dimension
-                    pass
-                else:
-                    # Handle batch of labels
-                    labels = labels.view(-1)
+                labels = _normalize_labels(batch['halu'].to(device, non_blocking=True))
                 buffer_labels.append(labels)
 
             if buffered_samples >= batch_size:
                 _flush_buffer()
 
         # Process any remaining partial buffer
-        if buffer_x1:
+        if buffer_views:
             _flush_buffer()
 
     avg_loss = total_loss / max(1, n_batches)
-    avg_acc = total_acc / max(1, n_batches)
-    avg_cosine_sim = total_cosine_sim / max(1, n_batches)
-    return avg_loss, avg_acc, avg_cosine_sim
-
-def pairing_accuracy(z1, z2):
-    """
-    z1, z2: (B, D) normalized embeddings
-    Returns percentage of pairs correctly matched by highest cosine similarity.
-    """
-    z1 = F.normalize(z1, dim=1)
-    z2 = F.normalize(z2, dim=1)
-
-    # Compute cosine similarity matrix (B x B)
-    sim_matrix = torch.matmul(z1, z2.T)  # (B, B)
-
-    # For each in z1, find index of max similarity in z2
-    preds_z1 = sim_matrix.argmax(dim=1)
-    # For each in z2, find index of max similarity in z1
-    preds_z2 = sim_matrix.argmax(dim=0)
-
-    batch_size = z1.size(0)
-    # Correct matches: indices where preds match i
-    correct_z1 = (preds_z1 == torch.arange(batch_size, device=z1.device)).sum().item()
-    correct_z2 = (preds_z2 == torch.arange(batch_size, device=z2.device)).sum().item()
-
-    # Average accuracy
-    accuracy = (correct_z1 + correct_z2) / (2 * batch_size)
-    return accuracy
-
-
-def average_cosine_similarity(z1, z2):
-    """
-    z1, z2: (B, D) embeddings
-    Returns average cosine similarity between corresponding pairs (z1[i], z2[i]).
-    """
-    z1 = F.normalize(z1, dim=1)
-    z2 = F.normalize(z2, dim=1)
-
-    # Compute cosine similarity for corresponding pairs
-    cosine_sim = (z1 * z2).sum(dim=1)  # (B,)
-
-    # Return average cosine similarity
-    return cosine_sim.mean().item()
+    avg_intra_cos = total_intra_cos / max(1, n_batches)
+    avg_margin = total_margin / max(1, n_batches)
+    return avg_loss, avg_intra_cos, avg_margin
 
 
 
@@ -290,8 +278,8 @@ def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, devi
         persistent_workers=persistent_workers
     )
 
-    buffer_x1, buffer_x2, buffer_hash = [], [], []
-    buffer_l1, buffer_l2 = [], []
+    buffer_views, buffer_hash = [], []
+    buffer_view_indices = []
     if layers is not None:
         buffer_layers = {layer_idx: [] for layer_idx in layers}
     results = []
@@ -301,15 +289,11 @@ def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, devi
     with torch.no_grad():
         for i, batch in enumerate(tqdm(dataloader, desc="Inference")):
             if layers is None:
-                x1 = batch['layer1_activations'].squeeze(1).to(device, non_blocking=True)
-                x2 = batch['layer2_activations'].squeeze(1).to(device, non_blocking=True)
-                buffer_x1.append(x1)
-                buffer_x2.append(x2)
+                views = batch['views_activations'].to(device, non_blocking=True)
+                buffer_views.append(views)
 
-                if isinstance(batch, dict) and 'layer1_idx' in batch:
-                    buffer_l1.append(batch['layer1_idx'].to(device, non_blocking=True))
-                if isinstance(batch, dict) and 'layer2_idx' in batch:
-                    buffer_l2.append(batch['layer2_idx'].to(device, non_blocking=True))
+                if isinstance(batch, dict) and 'view_indices' in batch:
+                    buffer_view_indices.append(batch['view_indices'].to(device, non_blocking=True))
             else:
                 all_activations = batch['all_activations']
                 for layer_idx, layer_acts in zip(layers, all_activations):
@@ -319,27 +303,27 @@ def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, devi
             buffer_hash.extend(hashkeys)
 
             # Process when buffer is full or at the end of the loop
-            if (layers is None and len(buffer_x1) == subs_in_batch) or \
+            if (layers is None and len(buffer_views) == subs_in_batch) or \
                (layers is not None and len(next(iter(buffer_layers.values()))) == subs_in_batch) or \
                i == len(dataloader) - 1:
                 
                 if layers is None:
-                    x1_full = torch.cat(buffer_x1, dim=0)
-                    x2_full = torch.cat(buffer_x2, dim=0)
-                    buffer_x1, buffer_x2 = [], []
+                    views_full = torch.cat(buffer_views, dim=0)
+                    view_indices_full = torch.cat(buffer_view_indices, dim=0) if buffer_view_indices else None
+                    buffer_views = []
+                    buffer_view_indices = []
 
-                    l1_full = torch.cat(buffer_l1, dim=0) if buffer_l1 else None
-                    l2_full = torch.cat(buffer_l2, dim=0) if buffer_l2 else None
-                    buffer_l1, buffer_l2 = [], []
+                    bsz, num_views, seq_len, hidden_dim = views_full.shape
+                    x_flat = views_full.reshape(bsz * num_views, seq_len, hidden_dim)
+                    layer_idx_flat = view_indices_full.reshape(bsz * num_views) if view_indices_full is not None else None
 
-                    z1 = _call_model(model, x1_full, layer_idx=l1_full)
-                    z2 = _call_model(model, x2_full, layer_idx=l2_full)
+                    z_flat = _call_model(model, x_flat, layer_idx=layer_idx_flat)
+                    z_views = z_flat.reshape(bsz, num_views, -1)
 
-                    for h, z1_i, z2_i in zip(buffer_hash, z1, z2):
+                    for h, z_views_i in zip(buffer_hash, z_views):
                         results.append({
                             "hashkey": h,
-                            "z1": z1_i.cpu(),
-                            "z2": z2_i.cpu()
+                            "z_views": z_views_i.cpu(),
                         })
                 else:
                     layer_embeddings = {}
