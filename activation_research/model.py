@@ -37,8 +37,34 @@ class TransformerBlock(nn.Module):
         return self.norm(x)
 
 class ProgressiveCompressor(nn.Module):
-    def __init__(self, input_dim=4096, final_dim=512, dropout=0.1, input_dropout=0.2):
+    """Progressive dimensionality-reducing transformer encoder.
+
+    Parameters
+    ----------
+    input_dim : int
+        Activation dimension (e.g. 4096).
+    final_dim : int
+        Output embedding dimension (e.g. 512).
+    dropout, input_dropout : float
+        Dropout rates.
+    normalize_input : bool
+        If ``True``, apply ``LayerNorm(input_dim)`` to raw activations
+        **before** dropout and positional encoding.  This is important
+        when the encoder receives activations from different LLM layers
+        whose magnitudes can vary significantly (e.g. layer 14 ≈ 50,
+        layer 29 ≈ 200).  Without this, the positional encoding
+        (amplitude ≈ 1) is negligible and the model must waste capacity
+        learning implicit scale normalisation.  Default ``False`` to
+        preserve backward compatibility.
+    """
+
+    def __init__(self, input_dim=4096, final_dim=512, dropout=0.1, input_dropout=0.2,
+                 normalize_input: bool = False):
         super().__init__()
+
+        self.normalize_input = bool(normalize_input)
+        if self.normalize_input:
+            self.input_norm = nn.LayerNorm(int(input_dim))
 
         dims = []
         d = input_dim
@@ -61,6 +87,8 @@ class ProgressiveCompressor(nn.Module):
         x: (B, L, 4096)
         returns: (B, 512)
         """
+        if self.normalize_input:
+            x = self.input_norm(x)
 
         x = self.dropout(x)
     
@@ -219,14 +247,23 @@ class LayerAwareProgressiveCompressor(nn.Module):
       FiLM modules).  Input-side handles distribution normalisation,
       output-side handles representation-space calibration.
     * ``"positional"`` – additive conditioning.  A learned layer
-      embedding is added to the encoder output: ``z' = z + e(n)``.
-      Lightweight but assumes activations are already roughly
-      homogeneous across layers.
+      embedding is added to the encoder output: ``z' = z + α·e(n)``
+      where α is a **learnable scalar** initialised to a small value
+      (default 0.1) so the layer signal starts near-zero and grows
+      during training.  This prevents the embedding from dominating
+      or being negligible relative to the encoder output.
     * ``"concatenate"`` – the original strategy.  Layer embedding is
       projected, concatenated with ``z``, and fused through a linear
       layer.
     * ``"none"`` – no layer conditioning at all.  ``layer_idx`` is
       accepted but ignored; useful as a baseline.
+    * ``None`` (Python ``None``) – **pure encoder mode**.  Equivalent to
+      using a plain ``ProgressiveCompressor`` directly: no layer-specific
+      modules are created, ``layer_idx`` is accepted but ignored, and
+      the output ``LayerNorm`` is skipped so the architecture is
+      identical to the standard contrastive encoder.  Use this to
+      confirm that the layer-aware training loop reproduces standard
+      contrastive results.
 
     Forward accepts keyword arguments so evaluation utilities can pass
     `layer_idx=...` without positional coupling.
@@ -242,14 +279,22 @@ class LayerAwareProgressiveCompressor(nn.Module):
     layer_embed_dim : int
         Intermediate layer embedding size (used by ``"concatenate"`` and
         ``"positional"`` modes).
-    conditioning : str
+    conditioning : str or None
         One of ``"film_in"``, ``"film_out"``, ``"film_both"``,
-        ``"positional"``, ``"concatenate"``, ``"none"``.
-        Defaults to ``"positional"`` (FiLM off).
+        ``"positional"``, ``"concatenate"``, ``"none"``, or Python
+        ``None``.  Defaults to ``"positional"``.
+    positional_init_alpha : float
+        Initial value for the learnable scale on the positional layer
+        embedding.  Only used when ``conditioning="positional"``.
+        Default ``0.1``.
     normalize_output : bool
         If True, L2-normalize the output embeddings.  Essential when
         using a contrastive loss that computes dot-product similarity
         (e.g. ``SupConLoss``).  Default ``False``.
+    normalize_input : bool
+        If True, apply ``LayerNorm`` to raw activations before encoding.
+        Recommended when the encoder receives activations from different
+        LLM layers with varying magnitudes.  Default ``False``.
     dropout, input_dropout : float
         Dropout rates forwarded to the inner encoder.
     """
@@ -263,17 +308,22 @@ class LayerAwareProgressiveCompressor(nn.Module):
         input_dim: int = 4096,
         final_dim: int = 512,
         layer_embed_dim: int = 128,
-        conditioning: str = "positional",
+        conditioning: "str | None" = "positional",
         normalize_output: bool = False,
+        normalize_input: bool = False,
+        positional_init_alpha: float = 0.1,
         dropout: float = 0.1,
         input_dropout: float = 0.2,
     ):
         super().__init__()
-        conditioning = conditioning.lower()
-        if conditioning not in self.VALID_CONDITIONING:
-            raise ValueError(
-                f"conditioning must be one of {self.VALID_CONDITIONING}, got '{conditioning}'"
-            )
+        if conditioning is None:
+            conditioning = None  # keep as Python None – pure encoder mode
+        else:
+            conditioning = conditioning.lower()
+            if conditioning not in self.VALID_CONDITIONING:
+                raise ValueError(
+                    f"conditioning must be one of {self.VALID_CONDITIONING} or None, got '{conditioning}'"
+                )
         if int(num_layers) <= 0:
             raise ValueError("num_layers must be > 0")
 
@@ -285,26 +335,36 @@ class LayerAwareProgressiveCompressor(nn.Module):
             final_dim=int(final_dim),
             dropout=float(dropout),
             input_dropout=float(input_dropout),
+            normalize_input=bool(normalize_input),
         )
 
         # --- conditioning-specific modules ---
-        if conditioning in ("film_in", "film_both"):
+        if conditioning is not None and conditioning in ("film_in", "film_both"):
             # Input-side FiLM: operates on (B, L, input_dim)
             self.film_in = FiLMConditioner(int(num_layers), int(input_dim))
 
-        if conditioning in ("film_out", "film_both"):
+        if conditioning is not None and conditioning in ("film_out", "film_both"):
             # Output-side FiLM: operates on (B, final_dim)
             self.film_out = FiLMConditioner(int(num_layers), int(final_dim))
 
         if conditioning == "positional":
             self.layer_embedding = nn.Embedding(int(num_layers), int(final_dim))
+            # Learnable scale so the layer signal starts small relative to
+            # the encoder output and grows as the model needs it.
+            self.positional_alpha = nn.Parameter(
+                torch.tensor(float(positional_init_alpha))
+            )
 
         elif conditioning == "concatenate":
             self.layer_embedding = nn.Embedding(int(num_layers), int(layer_embed_dim))
             self.layer_proj = nn.Linear(int(layer_embed_dim), int(final_dim))
             self.fuse = nn.Linear(int(final_dim) * 2, int(final_dim))
 
-        self.norm = nn.LayerNorm(int(final_dim))
+        # LayerNorm is only used when conditioning is active; skipping it
+        # in pure-encoder mode (None) keeps the architecture identical to
+        # a standalone ProgressiveCompressor.
+        if conditioning is not None:
+            self.norm = nn.LayerNorm(int(final_dim))
 
     # ------------------------------------------------------------------ #
     #  Helpers
@@ -334,6 +394,14 @@ class LayerAwareProgressiveCompressor(nn.Module):
     def forward(self, x: torch.Tensor, *, layer_idx=None, **kwargs) -> torch.Tensor:
         _ = kwargs
 
+        # Pure-encoder mode (conditioning=None): behave exactly like
+        # ProgressiveCompressor – ignore layer_idx entirely.
+        if self.conditioning is None:
+            z = self.encoder(x)
+            if self.normalize_output:
+                z = F.normalize(z, dim=-1)
+            return z
+
         if layer_idx is None:
             z = self.encoder(x)
             if self.normalize_output:
@@ -354,7 +422,7 @@ class LayerAwareProgressiveCompressor(nn.Module):
 
         elif self.conditioning == "positional":
             e = self.layer_embedding(idx)  # (B, final_dim)
-            z = z + e
+            z = z + self.positional_alpha * e
 
         elif self.conditioning == "concatenate":
             e = self.layer_embedding(idx)
