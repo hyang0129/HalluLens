@@ -3,7 +3,7 @@
 Script to run the nonsense_mixed_entities.py benchmark with activation logging.
 This script ensures that:
 1. The server is running with activation logging enabled
-2. The benchmark is configured to use the right model and LMDB path
+2. The benchmark is configured to use the right model and Zarr path
 3. The results are properly stored and accessible for analysis
 """
 import os
@@ -48,8 +48,8 @@ def main():
                       help="Number of samples (default: 100)")
     parser.add_argument("--output_base_dir", type=str, default="output",
                       help="Base directory for output (default: output)")
-    parser.add_argument("--lmdb_path", type=str, default="lmdb_data/benchmark_activations.lmdb",
-                      help="Path to LMDB file for storing activations (default: lmdb_data/benchmark_activations.lmdb)")
+    parser.add_argument("--activations_path", type=str, default="zarr_data/benchmark_activations.zarr",
+                      help="Path to .zarr store for activations (default: zarr_data/benchmark_activations.zarr)")
     
     args = parser.parse_args()
     
@@ -59,15 +59,18 @@ def main():
         print(f"python -m activation_logging.vllm_serve --model {args.model} --host {args.host} --port {args.port}")
         sys.exit(1)
     
-    # Create LMDB directory if needed
-    lmdb_dir = os.path.dirname(args.lmdb_path)
-    if lmdb_dir and not os.path.exists(lmdb_dir):
-        os.makedirs(lmdb_dir, exist_ok=True)
-        print(f"Created LMDB directory: {lmdb_dir}")
+    # Create output directory if needed
+    activations_dir = os.path.dirname(args.activations_path)
+    if activations_dir and not os.path.exists(activations_dir):
+        os.makedirs(activations_dir, exist_ok=True)
+        print(f"Created activations directory: {activations_dir}")
     
     # Run the benchmark
     exp_hash = hashlib.md5(f"{args.exp}_{args.model}_{args.seed}_{args.N}".encode()).hexdigest()[:8]
-    lmdb_path = f"{args.lmdb_path.rstrip('.lmdb')}_{exp_hash}.lmdb"
+    base_path = args.activations_path
+    if base_path.endswith('.zarr'):
+        base_path = base_path[:-5]
+    activations_path = f"{base_path}_{exp_hash}.zarr"
     
     print(f"Running benchmark with the following configuration:")
     print(f"Model: {args.model}")
@@ -75,12 +78,13 @@ def main():
     print(f"Seed: {args.seed}")
     print(f"Samples: {args.N}")
     print(f"Output directory: {args.output_base_dir}")
-    print(f"LMDB path: {lmdb_path}")
+    print(f"Activations path: {activations_path}")
     
     # Set environment variables for the benchmark to use our server
     env = os.environ.copy()
     env["OPENAI_KEY"] = "dummy_key_not_used"  # Required by utils/lm.py
-    env["ACTIVATION_LMDB_PATH"] = lmdb_path
+    env["ACTIVATION_STORAGE_PATH"] = activations_path
+    env["ACTIVATION_LOGGER_TYPE"] = "zarr"
     
     # Run the benchmark
     benchmark_cmd = [
@@ -101,7 +105,7 @@ def main():
         print("\nStarting benchmark...")
         subprocess.run(benchmark_cmd, env=env)
         print(f"\nBenchmark completed. Results saved to {args.output_base_dir}")
-        print(f"Activations logged to {lmdb_path}")
+        print(f"Activations logged to {activations_path}")
     except Exception as e:
         print(f"Error running benchmark: {e}")
         sys.exit(1)

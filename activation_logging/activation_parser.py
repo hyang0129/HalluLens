@@ -1,22 +1,19 @@
 """
 activation_parser.py
-Handles parsing of metadata from JSON files and looking up corresponding activations from LMDB.
+Handles parsing of metadata from JSON files and looking up corresponding activations from Zarr.
 """
 import json
 import hashlib
 from typing import Dict, Any, List, Optional, Literal
 from pathlib import Path
 from loguru import logger
-import pandas as pd 
-import json 
-from loguru import logger
+import pandas as pd
 from sklearn.model_selection import train_test_split
 import torch
 from torch.utils.data import Dataset
 import random
 
-from .activations_logger import ActivationsLogger, JsonActivationsLogger
-from .webdataset_option_a import WDSOptionAConfig, WDSOptionAIterableDataset
+from .activations_logger import ActivationsLogger
 
 class ActivationDataset(Dataset):
     """PyTorch Dataset for loading activation data."""
@@ -27,7 +24,7 @@ class ActivationDataset(Dataset):
         activations_path: str,
         split: Literal['train', 'test'],
         relevant_layers: Optional[List[int]] = None,
-        logger_type: str = "lmdb",
+        logger_type: str = "zarr",
         fixed_layer: Optional[int] = None,
         random_seed: int = 42,
         verbose: bool = False,
@@ -40,17 +37,24 @@ class ActivationDataset(Dataset):
 
         Args:
             df: DataFrame containing the metadata
-            activations_path: Path to the activations storage (LMDB file, JSON directory, or .zarr store)
+            activations_path: Path to the activations storage (.zarr store)
             split: Which split to use ('train' or 'test')
             relevant_layers: List of layer indices to use (default: layers 16-29)
-            logger_type: Type of logger to use ('lmdb' or 'json')
+            logger_type: Activation storage type. Only 'zarr' is supported.
             fixed_layer: If specified, one activation will always be from this layer (index in relevant_layers)
             random_seed: Random seed for train/test split (default: 42)
             verbose: Whether to log initialization messages (default: False for datasets)
             return_all_activations: If True, load all relevant layers for Zarr instead of only two
         """
         self.activations_path = activations_path
-        self.logger_type = logger_type
+        normalized_logger_type = str(logger_type).strip().lower()
+        if normalized_logger_type != "zarr":
+            raise ValueError(
+                f"Unsupported logger_type='{logger_type}'. "
+                "Only Zarr activation storage is supported. "
+                "LMDB/JSON/WDS backends are deprecated and no longer supported."
+            )
+        self.logger_type = normalized_logger_type
         self.random_seed = random_seed
         self.verbose = verbose
         # For backward compatibility
@@ -63,7 +67,12 @@ class ActivationDataset(Dataset):
         self.pad_length = pad_length
         self.min_target_layers = min_target_layers
         self.return_all_activations = return_all_activations
-        self._use_zarr_fast_path = self._is_zarr_path(activations_path) and logger_type != "json"
+        self._use_zarr_fast_path = self._is_zarr_path(activations_path)
+        if not self._use_zarr_fast_path:
+            raise ValueError(
+                f"Unsupported activations_path='{activations_path}'. "
+                "Only .zarr activation stores are supported."
+            )
 
     @staticmethod
     def _is_zarr_path(path: str) -> bool:
@@ -311,7 +320,7 @@ class ActivationDataset(Dataset):
 
 class ActivationParser:
     def __init__(self, inference_json: str, eval_json: str, activations_path: str,
-                 df: Optional[pd.DataFrame] = None, logger_type: str = "lmdb",
+                 df: Optional[pd.DataFrame] = None, logger_type: str = "zarr",
                  random_seed: int = 42, verbose: bool = True):
         """
         Initialize the ActivationParser.
@@ -319,9 +328,9 @@ class ActivationParser:
         Args:
             inference_json: Path to the inference JSON file
             eval_json: Path to the evaluation JSON file
-            activations_path: Path to the activations storage (LMDB file or JSON directory)
+            activations_path: Path to the activations storage (.zarr store)
             df: Optional DataFrame to use instead of loading from JSON files
-            logger_type: Type of logger to use ('lmdb' or 'json')
+            logger_type: Activation storage type. Only 'zarr' is supported.
             random_seed: Random seed for train/test split (default: 42)
             verbose: Whether to log initialization and metadata loading messages (default: True)
         """
@@ -333,13 +342,26 @@ class ActivationParser:
         if not self.eval_json.exists():
             raise FileNotFoundError(f"JSON file not found: {eval_json}")
 
+        if not str(activations_path).endswith(".zarr"):
+            raise ValueError(
+                f"Unsupported activations_path='{activations_path}'. "
+                "Only .zarr activation stores are supported."
+            )
+
         self.activations_path = activations_path
-        self.logger_type = logger_type
+        normalized_logger_type = str(logger_type).strip().lower()
+        if normalized_logger_type != "zarr":
+            raise ValueError(
+                f"Unsupported logger_type='{logger_type}'. "
+                "Only Zarr activation storage is supported. "
+                "LMDB/JSON/WDS backends are deprecated and no longer supported."
+            )
+        self.logger_type = normalized_logger_type
         self.random_seed = random_seed
         self.verbose = verbose
         self._activation_logger = None
         self._group_index = None
-        self._wds_shards = self._detect_wds_shards(activations_path)
+        self._wds_shards = None
 
         # For backward compatibility, also store as lmdb_path
         self.lmdb_path = activations_path
@@ -367,28 +389,19 @@ class ActivationParser:
                 # Stagger by 50ms per worker for large worker counts
                 time.sleep(worker_info.id * 0.05)
 
-            # IMPORTANT: Do not disable the activation logger just because a
-            # `webdataset/` folder exists next to the Zarr store.
-            # We still need random-access reads (Zarr/LMDB) for the non-WDS
-            # dataset backend.
-            if self.logger_type == "wds":
-                self._activation_logger = None
-            elif self.logger_type == "json":
-                self._activation_logger = JsonActivationsLogger(output_dir=self.activations_path, read_only=True, verbose=self.verbose)
-            else:  # default to lmdb
-                self._activation_logger = ActivationsLogger(lmdb_path=self.activations_path, read_only=True, verbose=self.verbose)
+            self._activation_logger = ActivationsLogger(lmdb_path=self.activations_path, read_only=True, verbose=self.verbose)
         return self._activation_logger
 
     def get_entry_metadata(self, entry_key: str) -> Dict[str, Any]:
         """Retrieve metadata only for a given entry key."""
-        if self.logger_type == "wds" or self.activation_logger is None:
+        if self.activation_logger is None:
             return {}
         metadata = self.activation_logger.get_entry_by_key(entry_key, metadata_only=True)
         return metadata or {}
 
     def get_layer_activation(self, entry_key: str, layer_idx: int, sequence_mode: str = "response") -> Optional[torch.Tensor]:
         """Retrieve a single layer activation for the given entry key and sequence mode."""
-        if self.logger_type == "wds" or self.activation_logger is None:
+        if self.activation_logger is None:
             return None
         if hasattr(self.activation_logger, "get_layer_activation"):
             return self.activation_logger.get_layer_activation(entry_key, layer_idx, sequence_mode=sequence_mode)
@@ -409,10 +422,9 @@ class ActivationParser:
 
         gendf = gendf[~gendf['prompt_hash'].duplicated(keep=False)]
 
-        if self.logger_type != "wds" and self._wds_shards is None:
-            keys = self.activation_logger.list_entries()
-            base_keys = {key.split("_")[0] for key in keys}
-            gendf = gendf[gendf['prompt_hash'].isin(base_keys)]
+        keys = self.activation_logger.list_entries()
+        base_keys = {key.split("_")[0] for key in keys}
+        gendf = gendf[gendf['prompt_hash'].isin(base_keys)]
 
         gendf = gendf[~gendf['abstain']]
 
@@ -566,7 +578,7 @@ class ActivationParser:
         pad_length: int = 63,
         min_target_layers: int = 2,
         return_all_activations: bool = False,
-        backend: Literal["auto", "zarr", "wds"] = "auto",
+        backend: Literal["auto", "zarr"] = "auto",
     ) -> ActivationDataset:
         """
         Get a PyTorch Dataset for the specified split.
@@ -579,35 +591,18 @@ class ActivationParser:
         Returns:
             ActivationDataset instance for the specified split
         """
-        if backend not in {"auto", "zarr", "wds"}:
-            raise ValueError("backend must be one of: 'auto', 'zarr', 'wds'")
-
-        use_wds = False
-        if backend == "wds":
-            use_wds = True
-        elif backend == "zarr":
-            use_wds = False
-        else:  # auto
-            use_wds = self.logger_type == "wds" or self._wds_shards is not None
-
-        if use_wds:
-            config = WDSOptionAConfig(
-                shards=self._wds_shards or self.activations_path,
-                split=split,
-                shuffle_buffer=10_000,
-                pad_length=pad_length,
-                min_target_layers=min_target_layers,
-                relevant_layers=relevant_layers,
-                fixed_layer=fixed_layer,
+        if backend not in {"auto", "zarr"}:
+            raise ValueError(
+                "backend must be one of: 'auto', 'zarr'. "
+                "WDS backend is deprecated and no longer supported."
             )
-            return WDSOptionAIterableDataset(self.df, config)
 
         return ActivationDataset(
             self.df,
             self.activations_path,
             split,
             relevant_layers,
-            self.logger_type,
+            "zarr",
             fixed_layer,
             self.random_seed,
             verbose=False,
@@ -617,7 +612,7 @@ class ActivationParser:
         )
 
     def close(self):
-        """Close the LMDB connection."""
+        """Close the underlying activation logger connection."""
         self.logger.close() 
 
 

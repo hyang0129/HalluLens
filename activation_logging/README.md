@@ -1,6 +1,13 @@
 # Activation Logging for LLM Hallucination Analysis
 
-This project provides a vLLM-based inference server with activation logging capabilities, capturing last-layer per-token activations, prompts, responses, and evaluation results to LMDB. Designed specifically for evaluating the nature of activations when an LLM is hallucinating vs not hallucinating.
+This project provides a vLLM-based inference server with activation logging capabilities, capturing last-layer per-token activations, prompts, responses, and evaluation results to Zarr. Designed specifically for evaluating the nature of activations when an LLM is hallucinating vs not hallucinating.
+
+## Backend Support Policy
+
+- ✅ Supported: Zarr activation storage (`.zarr`)
+- ❌ Deprecated and no longer supported: LMDB, JSON directory logging, WebDataset runtime backend
+
+The runtime now expects `activations_path` to end with `.zarr` and `logger_type` to be `zarr`.
 
 ## Setup
 
@@ -31,12 +38,12 @@ This project provides a vLLM-based inference server with activation logging capa
 ### Starting the Server
 
 - Start the FastAPI OpenAI-compatible server with activation logging:
-  1. (Optional) Set the LMDB path for experiment separation:
+    1. (Optional) Set the Zarr path for experiment separation:
      ```bash
      # On Linux/macOS
-     export ACTIVATION_LMDB_PATH=lmdb_data/exp1_activations.lmdb
+         export ACTIVATION_STORAGE_PATH=zarr_data/exp1_activations.zarr
      # On Windows
-     set ACTIVATION_LMDB_PATH=lmdb_data/exp1_activations.lmdb
+         set ACTIVATION_STORAGE_PATH=zarr_data/exp1_activations.zarr
      ```
   2. Launch the server using vLLM serve:
      ```bash
@@ -88,9 +95,9 @@ python -m tasks.triviaqa.triviaqa \
     --N 100
 ```
 
-## LMDB Output
+## Zarr Output
 
-- Activations, prompts, and responses are stored in LMDB under `lmdb_data/`.
+- Activations, prompts, and responses are stored in Zarr under `zarr_data/`.
 - Each entry key is a SHA256 hash of the prompt.
 - The data structure stored includes:
   - `prompt`: The original input prompt
@@ -102,21 +109,7 @@ python -m tasks.triviaqa.triviaqa \
 
 ### Command Line Testing
 
-To verify that activation logging is working correctly from the command line:
-
-```bash
-# Basic logging test
-python activation_logging/test_lmdb_logging.py basic --model meta-llama/Llama-3.1-8B-Instruct
-
-# With authentication token (needed for meta-llama models)
-python activation_logging/test_lmdb_logging.py basic --model meta-llama/Llama-3.1-8B-Instruct --auth_token your_huggingface_token
-
-# With custom max tokens
-python activation_logging/test_lmdb_logging.py basic --model meta-llama/Llama-3.1-8B-Instruct --max_tokens 20
-
-# Test temperature and top_p overwrite functionality
-python activation_logging/test_lmdb_logging.py params
-```
+Use Zarr-based benchmark/testing flows. Legacy `test_lmdb_logging.py` is deprecated and not supported.
 
 ### Programmatic Testing
 
@@ -161,23 +154,25 @@ When using the API directly, you can include the HuggingFace authentication toke
 ```python
 import requests
 
-# 1. Standard completion request with custom LMDB path
+# 1. Standard completion request with custom Zarr path
 url = "http://localhost:8000/v1/completions"
 payload = {
     "model": "meta-llama/Llama-3.1-8B-Instruct",
     "prompt": "Hello, world!",
     "max_tokens": 100,
     "auth_token": "your_huggingface_token",  # Include this for gated models
-    "lmdb_path": "lmdb_data/custom_path.lmdb"  # Optional: specify custom LMDB path
+    "activations_path": "zarr_data/custom_path.zarr",  # Optional: specify custom Zarr path
+    "logger_type": "zarr"
 }
 
 response = requests.post(url, json=payload)
 print(response.json())
 
-# 2. Set overwrite LMDB path for all requests
+# 2. Set overwrite activations path for all requests
+# (legacy endpoint name retained: set_overwrite_lmdb_path; value must be .zarr)
 url = "http://localhost:8000/set_overwrite_lmdb_path"
 payload = {
-    "lmdb_path": "lmdb_data/overwrite_path.lmdb"
+    "lmdb_path": "zarr_data/overwrite_path.zarr"
 }
 
 response = requests.post(url, json=payload)
@@ -189,7 +184,7 @@ payload = {
     "model": "meta-llama/Llama-3.1-8B-Instruct",
     "prompt": "Using the overwrite path",
     "max_tokens": 100,
-    "lmdb_path": "lmdb_data/this_will_be_ignored.lmdb"  # This will be ignored
+    "activations_path": "zarr_data/this_will_be_ignored.zarr"  # This will be ignored
 }
 
 response = requests.post(url, json=payload)
@@ -260,7 +255,7 @@ print(response.json())
 ## Notes
 - Python 3.10+ recommended
 - Always run the server before attempting to use the inference utils
-- Do not commit large LMDB files or model weights to version control
+- Do not commit large activation stores or model weights to version control
 - Never commit your HuggingFace authentication token to version control
 - When temperature is set to None, a default value of 0.0 (deterministic) is used
 - When top_p is set to None, a default value of 1.0 (no filtering) is used 

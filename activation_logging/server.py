@@ -21,7 +21,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from loguru import logger
 import uvicorn
-from activation_logging.activations_logger import ActivationsLogger, JsonActivationsLogger
+from activation_logging.activations_logger import ActivationsLogger
 from llama_cpp import Llama  # Import for llama.cpp Python bindings
 
 try:
@@ -159,16 +159,15 @@ logger.info(f"Server initialization - DEFAULT_MODEL set to: {DEFAULT_MODEL}")
 logger.info(f"Server initialization - Environment DEFAULT_MODEL: {os.environ.get('DEFAULT_MODEL', 'not set')}")
 app = FastAPI()
 
-# Default activation storage path (can be LMDB or JSON directory)
-DEFAULT_ACTIVATIONS_PATH = os.environ.get("ACTIVATION_STORAGE_PATH",
-                                        os.environ.get("ACTIVATION_LMDB_PATH", "lmdb_data/activations.lmdb"))
+# Default activation storage path (Zarr only)
+DEFAULT_ACTIVATIONS_PATH = os.environ.get("ACTIVATION_STORAGE_PATH", "zarr_data/activations.zarr")
 logger.info(f"Server initialization - DEFAULT_ACTIVATIONS_PATH: {DEFAULT_ACTIVATIONS_PATH}")
 
-# Default logger type ('lmdb' or 'json')
-DEFAULT_LOGGER_TYPE = os.environ.get("ACTIVATION_LOGGER_TYPE", "lmdb")
+# Default logger type (Zarr only)
+DEFAULT_LOGGER_TYPE = "zarr"
 logger.info(f"Server initialization - DEFAULT_LOGGER_TYPE: {DEFAULT_LOGGER_TYPE}")
 
-# Default LMDB path (for backward compatibility)
+# Deprecated LMDB field alias (backward compatibility only)
 DEFAULT_LMDB_PATH = DEFAULT_ACTIVATIONS_PATH
 
 # Default LMDB map size (16GB if not specified)
@@ -1058,7 +1057,9 @@ class CompletionRequest(BaseModel):
     temperature: float = 0.7
     top_p: float = 0.95
     stop: Optional[List[str]] = None
-    lmdb_path: Optional[str] = None  # Optional field for custom LMDB path
+    activations_path: Optional[str] = None  # Optional field for custom .zarr activation path
+    logger_type: Optional[str] = None  # Optional logger type; must be 'zarr'
+    lmdb_path: Optional[str] = None  # Deprecated alias for activations_path (must still be .zarr)
     auth_token: Optional[str] = None  # Optional field for HuggingFace auth token
     multi_sample: Optional[bool] = False  # Optional flag to enable multi-sample logging
     sample_group_id: Optional[str] = None  # Optional group ID to link samples
@@ -1094,7 +1095,9 @@ class ChatCompletionRequest(BaseModel):
     temperature: float = 0.7
     top_p: float = 0.95
     stop: Optional[List[str]] = None
-    lmdb_path: Optional[str] = None  # Optional field for custom LMDB path
+    activations_path: Optional[str] = None  # Optional field for custom .zarr activation path
+    logger_type: Optional[str] = None  # Optional logger type; must be 'zarr'
+    lmdb_path: Optional[str] = None  # Deprecated alias for activations_path (must still be .zarr)
     auth_token: Optional[str] = None  # Optional field for HuggingFace auth token
     multi_sample: Optional[bool] = False  # Optional flag to enable multi-sample logging
     sample_group_id: Optional[str] = None  # Optional group ID to link samples
@@ -1117,7 +1120,7 @@ class ChatCompletionResponse(BaseModel):
 
 
 class SetOverwriteLMDBPathRequest(BaseModel):
-    """Request model for setting the overwrite LMDB path."""
+    """Deprecated request model for setting overwrite activation path via lmdb_path."""
     lmdb_path: Optional[str] = None
 
 
@@ -1228,6 +1231,12 @@ def apply_overwrites(request_params):
     if overwrite_activations_path is not None:
         params['activations_path'] = overwrite_activations_path
         logger.info(f"Using overwrite activations path: {overwrite_activations_path}")
+    elif (not params.get('activations_path')) and params.get('lmdb_path'):
+        params['activations_path'] = params.get('lmdb_path')
+        logger.warning(
+            "Request field 'lmdb_path' is deprecated. "
+            "Using it as activations_path for backward compatibility."
+        )
     elif 'activations_path' not in params or not params.get('activations_path'):
         # If no path specified and no overwrite, use the environment variable
         params['activations_path'] = DEFAULT_ACTIVATIONS_PATH
@@ -1242,15 +1251,40 @@ def apply_overwrites(request_params):
         params['logger_type'] = DEFAULT_LOGGER_TYPE
         logger.info(f"Using default logger type from environment: {params['logger_type']}")
 
-    # Apply LMDB path overwrite if set (backward compatibility)
+    logger_type = str(params.get('logger_type', '')).strip().lower()
+    if logger_type != "zarr":
+        raise ValueError(
+            f"Unsupported logger_type='{params.get('logger_type')}'. "
+            "Only Zarr activation logging is supported. "
+            "LMDB/JSON/WDS methods are deprecated and no longer supported."
+        )
+    params['logger_type'] = "zarr"
+
+    # Apply LMDB path overwrite if set (deprecated, accepted only for .zarr paths)
     if overwrite_lmdb_path is not None:
-        params['lmdb_path'] = overwrite_lmdb_path
-        params['activations_path'] = overwrite_lmdb_path  # Also set activations_path for consistency
-        logger.info(f"Using overwrite LMDB path: {overwrite_lmdb_path}")
+        lmdb_overwrite_path = str(overwrite_lmdb_path).strip()
+        if not lmdb_overwrite_path.endswith('.zarr'):
+            raise ValueError(
+                f"Unsupported overwrite_lmdb_path='{overwrite_lmdb_path}'. "
+                "Only .zarr activation stores are supported."
+            )
+        params['lmdb_path'] = lmdb_overwrite_path
+        params['activations_path'] = lmdb_overwrite_path
+        logger.warning(
+            "overwrite_lmdb_path is deprecated. "
+            "Using value as activations_path for backward compatibility."
+        )
     elif 'lmdb_path' not in params or not params.get('lmdb_path'):
-        # If no path specified and no overwrite, use the activations_path or environment variable
+        # Keep legacy field populated for downstream compatibility
         params['lmdb_path'] = params.get('activations_path', DEFAULT_ACTIVATIONS_PATH)
-        logger.info(f"Using activations path as LMDB path for backward compatibility: {params['lmdb_path']}")
+        logger.info(f"Using activations path as legacy lmdb_path field: {params['lmdb_path']}")
+
+    activations_path = str(params.get('activations_path', '')).strip()
+    if not activations_path.endswith('.zarr'):
+        raise ValueError(
+            f"Unsupported activations_path='{activations_path}'. "
+            "Only .zarr activation stores are supported."
+        )
 
     return params
 
@@ -1270,6 +1304,16 @@ def get_logger_for_request(request_params):
     """
     activations_path = request_params.get('activations_path', request_params.get('lmdb_path'))
     logger_type = request_params.get('logger_type', DEFAULT_LOGGER_TYPE)
+    if str(logger_type).strip().lower() != "zarr":
+        raise ValueError(
+            f"Unsupported logger_type='{logger_type}'. "
+            "Only Zarr activation logging is supported."
+        )
+    if not str(activations_path or "").strip().endswith(".zarr"):
+        raise ValueError(
+            f"Unsupported activations_path='{activations_path}'. "
+            "Only .zarr activation stores are supported."
+        )
 
     # Get target layers and sequence mode from environment variables
     target_layers = os.environ.get("ACTIVATION_TARGET_LAYERS", "all")
@@ -1283,58 +1327,26 @@ def get_logger_for_request(request_params):
         if activations_path and activations_path.strip():
             # Create and use a custom logger with the specified path and type
             logger.info(f"Using custom activations path: {activations_path}")
-
-            if logger_type == "json":
-                # Check if directory exists and log directory info
-                if os.path.exists(activations_path):
-                    file_count = len([f for f in os.listdir(activations_path) if f.endswith('.npy')])
-                    dir_size = sum(os.path.getsize(os.path.join(activations_path, f))
-                                 for f in os.listdir(activations_path)) / 1024**2  # MB
-                    logger.info(f"Existing JSON activation directory: {file_count} files, {dir_size:.2f}MB")
-
-                custom_logger = JsonActivationsLogger(
-                    output_dir=activations_path,
-                    target_layers=target_layers,
-                    sequence_mode=sequence_mode,
-                    read_only=False
-                )
-                logger.info(f"Created JsonActivationsLogger for {activations_path}")
-            else:  # default to lmdb
-                # Check if LMDB exists and log info
-                if os.path.exists(activations_path):
-                    file_size = os.path.getsize(activations_path) / 1024**2  # MB
-                    logger.info(f"Existing LMDB file: {file_size:.2f}MB")
-
-                custom_logger = ActivationsLogger(
-                    lmdb_path=activations_path,
-                    map_size=DEFAULT_MAP_SIZE,
-                    target_layers=target_layers,
-                    sequence_mode=sequence_mode
-                )
-                logger.info(f"Created ActivationsLogger for {activations_path}")
+            custom_logger = ActivationsLogger(
+                lmdb_path=activations_path,
+                map_size=DEFAULT_MAP_SIZE,
+                target_layers=target_layers,
+                sequence_mode=sequence_mode
+            )
+            logger.info(f"Created Zarr ActivationsLogger for {activations_path}")
 
             return custom_logger, custom_logger, True
         else:
             # Create a new logger with the default path from environment
             default_path = DEFAULT_ACTIVATIONS_PATH
             logger.info(f"Using default activations path: {default_path}")
-
-            if logger_type == "json":
-                new_logger = JsonActivationsLogger(
-                    output_dir=default_path,
-                    target_layers=target_layers,
-                    sequence_mode=sequence_mode,
-                    read_only=False
-                )
-                logger.info(f"Created default JsonActivationsLogger")
-            else:  # default to lmdb
-                new_logger = ActivationsLogger(
-                    lmdb_path=default_path,
-                    map_size=DEFAULT_MAP_SIZE,
-                    target_layers=target_layers,
-                    sequence_mode=sequence_mode
-                )
-                logger.info(f"Created default ActivationsLogger")
+            new_logger = ActivationsLogger(
+                lmdb_path=default_path,
+                map_size=DEFAULT_MAP_SIZE,
+                target_layers=target_layers,
+                sequence_mode=sequence_mode
+            )
+            logger.info("Created default Zarr ActivationsLogger")
 
             return new_logger, new_logger, False
 
@@ -1481,12 +1493,12 @@ async def restart_server():
 @app.post("/set_overwrite_lmdb_path", response_model=SetOverwriteLMDBPathResponse)
 async def set_overwrite_lmdb_path(request: SetOverwriteLMDBPathRequest):
     """
-    Set the overwrite LMDB path for all completion requests.
-    When set, this path will override any path in completion requests.
-    Set to None to use the path specified in each request or the default path.
+    Deprecated endpoint kept for backward compatibility.
+    Accepts only .zarr paths and maps them to activation storage overwrite.
+    Set to None to disable the overwrite.
     
     Args:
-        request: SetOverwriteLMDBPathRequest with the new LMDB path
+        request: SetOverwriteLMDBPathRequest with the new .zarr path
         
     Returns:
         SetOverwriteLMDBPathResponse with status and path information
@@ -1496,20 +1508,35 @@ async def set_overwrite_lmdb_path(request: SetOverwriteLMDBPathRequest):
     # Store the previous value
     previous_value = overwrite_lmdb_path
     
-    # Update the global variable
+    # Validate and update the global variable
+    if request.lmdb_path is not None and not str(request.lmdb_path).strip().endswith('.zarr'):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported overwrite path '{request.lmdb_path}'. "
+                "Only .zarr activation stores are supported."
+            ),
+        )
+
     overwrite_lmdb_path = request.lmdb_path
     
     # If overwrite is None, we'll use the environment variable
     if overwrite_lmdb_path is None:
-        logger.info(f"Overwrite LMDB path removed. Will use ACTIVATION_LMDB_PATH={os.environ.get('ACTIVATION_LMDB_PATH', DEFAULT_LMDB_PATH)}")
+        logger.info(
+            "Deprecated overwrite_lmdb_path removed. "
+            f"Will use ACTIVATION_STORAGE_PATH={os.environ.get('ACTIVATION_STORAGE_PATH', DEFAULT_ACTIVATIONS_PATH)}"
+        )
     else:
-        logger.info(f"Overwrite LMDB path set to: {overwrite_lmdb_path}")
+        logger.warning(
+            "set_overwrite_lmdb_path is deprecated; use .zarr path only. "
+            f"Current overwrite path: {overwrite_lmdb_path}"
+        )
     
     return SetOverwriteLMDBPathResponse(
         success=True,
         previous_value=previous_value,
         current_value=overwrite_lmdb_path,
-        message="Overwrite LMDB path successfully updated"
+        message="Deprecated overwrite_lmdb_path updated (Zarr-only compatibility mode)"
     )
 
 
