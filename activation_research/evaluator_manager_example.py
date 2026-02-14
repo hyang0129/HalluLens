@@ -27,7 +27,7 @@ def example_training_loop_with_evaluator_manager():
     hallucination_evaluator = HallucinationEvaluator(
         activation_parser_df=activation_parser_df,
         train_data_loader=train_loader,
-        layers=None,  # Use default z1/z2
+        layers=None,
         batch_size=64,
         sub_batch_size=32,
         device='cuda',
@@ -59,7 +59,7 @@ def example_training_loop_with_evaluator_manager():
         evaluator_manager.clear()
         
         # Run evaluation with accumulation
-        avg_loss, avg_acc, avg_cosine_sim = evaluate(
+        avg_loss, avg_intra_cos, avg_intra_inter_margin = evaluate(
             model=model,
             test_dataloader=eval_loader,
             batch_size=64,
@@ -70,7 +70,11 @@ def example_training_loop_with_evaluator_manager():
             evaluator_manager=evaluator_manager  # This enables accumulation
         )
         
-        print(f"Evaluation metrics - Loss: {avg_loss:.4f}, Acc: {avg_acc:.4f}, Cosine Sim: {avg_cosine_sim:.4f}")
+        print(
+            f"Evaluation metrics - Loss: {avg_loss:.4f}, "
+            f"Intra Cos: {avg_intra_cos:.4f}, "
+            f"Intra/Inter Margin: {avg_intra_inter_margin:.4f}"
+        )
         
         # Get stats about accumulated data
         stats = evaluator_manager.get_stats()
@@ -98,18 +102,18 @@ def example_manual_accumulation():
     # Simulate some embeddings
     batch_size = 4
     embedding_dim = 128
+    num_views = 4
     
     for batch_idx in range(3):  # Simulate 3 batches
         # Generate mock embeddings
-        z1 = torch.randn(batch_size, embedding_dim)
-        z2 = torch.randn(batch_size, embedding_dim)
+        z_views = torch.randn(batch_size, num_views, embedding_dim)
         
         # Generate mock hashkeys and labels
         hashkeys = [f"hash_{batch_idx}_{i}" for i in range(batch_size)]
         labels = torch.randint(0, 2, (batch_size,))
         
         # Accumulate
-        evaluator_manager.accumulate_batch(z1, z2, hashkeys, labels)
+        evaluator_manager.accumulate_batch(z_views, hashkeys, labels)
         print(f"Accumulated batch {batch_idx + 1}")
     
     # Get accumulated embeddings
@@ -120,8 +124,7 @@ def example_manual_accumulation():
     if records:
         first_record = records[0]
         print(f"First record keys: {list(first_record.keys())}")
-        print(f"z1 shape: {first_record['z1'].shape}")
-        print(f"z2 shape: {first_record['z2'].shape}")
+        print(f"z_views shape: {first_record['z_views'].shape}")
         if 'hashkey' in first_record:
             print(f"hashkey: {first_record['hashkey']}")
         if 'halu' in first_record:
@@ -154,14 +157,12 @@ def example_custom_evaluator():
             if not embeddings:
                 return {}
             
-            z1_list = [record['z1'] for record in embeddings]
-            z2_list = [record['z2'] for record in embeddings]
-            
-            z1_tensor = torch.stack(z1_list)
-            z2_tensor = torch.stack(z2_list)
-            
-            # Compute cosine similarities
-            cosine_sims = F.cosine_similarity(z1_tensor, z2_tensor, dim=1)
+            z_views = torch.stack([record['z_views'] for record in embeddings])
+            z_views = F.normalize(z_views, dim=-1)
+            _, k, _ = z_views.shape
+            tri = torch.triu_indices(k, k, offset=1)
+            sim = torch.matmul(z_views, z_views.transpose(1, 2))
+            cosine_sims = sim[:, tri[0], tri[1]].mean(dim=1)
             
             stats = {
                 'cosine_sim_mean': cosine_sims.mean().item(),
@@ -196,11 +197,10 @@ def example_custom_evaluator():
     evaluator_manager.register_evaluator(cosine_evaluator)
     
     # Simulate some data
-    z1 = torch.randn(10, 64)
-    z2 = torch.randn(10, 64)
+    z_views = torch.randn(10, 4, 64)
     labels = torch.randint(0, 2, (10,))
-    
-    evaluator_manager.accumulate_batch(z1, z2, labels=labels)
+
+    evaluator_manager.accumulate_batch(z_views, labels=labels)
     
     # Compute metrics
     metrics = evaluator_manager.compute_metrics()

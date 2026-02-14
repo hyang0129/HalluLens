@@ -36,6 +36,37 @@ def _filter_train_records_by_label(train_records, outlier_class: int, train_labe
     return filtered if filtered else list(train_records)
 
 
+def _record_embedding(record: dict) -> torch.Tensor:
+    """Return one representative embedding per record.
+
+    Preferred schema is `z_views: (K, D)`, reduced by view-mean.
+    Legacy schemas (`z1`) are still supported for compatibility.
+    """
+    if "z_views" in record:
+        z_views = record["z_views"]
+        if z_views.dim() != 2:
+            raise ValueError("Expected record['z_views'] to have shape (K, D)")
+        return z_views.mean(dim=0)
+    if "z1" in record:
+        return record["z1"]
+    raise KeyError("Record must contain either 'z_views' or 'z1'")
+
+
+def _record_intra_cos(record: dict) -> float:
+    """Return mean intra-sample cosine similarity for one record."""
+    if "z_views" in record:
+        z_views = F.normalize(record["z_views"], dim=-1)
+        k = z_views.shape[0]
+        if k < 2:
+            return 0.0
+        sim = torch.matmul(z_views, z_views.T)
+        tri = torch.triu_indices(k, k, offset=1)
+        return float(sim[tri[0], tri[1]].mean().item())
+    if "z1" in record and "z2" in record:
+        return float(F.cosine_similarity(record["z1"].unsqueeze(0), record["z2"].unsqueeze(0)).item())
+    raise KeyError("Record must contain 'z_views' or both 'z1' and 'z2'")
+
+
 def _calibrate_knn_k(
     train_z: np.ndarray,
     train_labels_binary: np.ndarray,
@@ -83,8 +114,7 @@ def _calibrate_knn_k(
 def mahalanobis_ood_stats(train_records, test_records, outlier_class=1, train_label_filter: str = "id_only"):
     train_records = _filter_train_records_by_label(train_records, outlier_class=outlier_class, train_label_filter=train_label_filter)
 
-    # Extract z1 tensors from train set and stack
-    train_z = torch.stack([r['z1'] for r in train_records])
+    train_z = torch.stack([_record_embedding(r) for r in train_records])
 
     # Compute mean and covariance from training set
     mean = train_z.mean(dim=0)
@@ -100,7 +130,7 @@ def mahalanobis_ood_stats(train_records, test_records, outlier_class=1, train_la
         return torch.sqrt((delta @ inv_cov @ delta.T).diag())
 
     # Prepare test set
-    test_z = torch.stack([r['z1'] for r in test_records])
+    test_z = torch.stack([_record_embedding(r) for r in test_records])
     test_labels = torch.tensor([r['halu'] for r in test_records], dtype=torch.int32)
     test_labels = test_labels.squeeze()
 
@@ -131,14 +161,14 @@ def mahalanobis_ood_stats(train_records, test_records, outlier_class=1, train_la
 
 def cosine_similarity_ood_stats(train_records, test_records, outlier_class=1):
     """
-    Compute OOD statistics using cosine similarity between z1 and z2 pairs.
+    Compute OOD statistics using within-sample view similarity.
 
     More similar pairs (higher cosine similarity) indicate in-distribution samples.
     Less similar pairs (lower cosine similarity) indicate out-of-distribution samples.
 
     Args:
-        train_records: List of training records containing z1 and z2 tensors
-        test_records: List of test records containing z1, z2 tensors and halu labels
+        train_records: List of training records containing z_views tensors
+        test_records: List of test records containing z_views tensors and halu labels
         outlier_class: Which class to treat as outlier (0 or 1), default 1
 
     Returns:
@@ -147,10 +177,7 @@ def cosine_similarity_ood_stats(train_records, test_records, outlier_class=1):
     # Compute cosine similarities for training set (to establish baseline)
     train_similarities = []
     for record in train_records:
-        z1 = record['z1']
-        z2 = record['z2']
-        # Compute cosine similarity between z1 and z2
-        similarity = F.cosine_similarity(z1.unsqueeze(0), z2.unsqueeze(0)).item()
+        similarity = _record_intra_cos(record)
         train_similarities.append(similarity)
 
     train_similarities = torch.tensor(train_similarities)
@@ -159,12 +186,9 @@ def cosine_similarity_ood_stats(train_records, test_records, outlier_class=1):
     test_similarities = []
     test_labels = []
     for record in test_records:
-        z1 = record['z1']
-        z2 = record['z2']
         halu = record['halu']
 
-        # Compute cosine similarity between z1 and z2
-        similarity = F.cosine_similarity(z1.unsqueeze(0), z2.unsqueeze(0)).item()
+        similarity = _record_intra_cos(record)
         test_similarities.append(similarity)
         test_labels.append(halu)
 

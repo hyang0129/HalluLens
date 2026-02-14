@@ -475,10 +475,12 @@ class LayerAwareProgressiveCompressor(nn.Module):
                 break
             # Accept both raw tensors and dict batches
             if isinstance(batch, dict):
-                x = batch.get("layer1_activations", batch.get("activations"))
+                x = batch.get("views_activations", batch.get("activations"))
                 if x is None:
                     continue
-                x = x.squeeze(1)
+                if x.dim() == 4:
+                    batch_size, num_views, seq_len, hidden_dim = x.shape
+                    x = x.reshape(batch_size * num_views, seq_len, hidden_dim)
             else:
                 x = batch
             x = x.to(device).float()

@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader, WeightedRandomSampler, IterableDataset,
 from tqdm import tqdm
 import torch.nn as nn
 from torch.utils.data import DataLoader, WeightedRandomSampler
-from .evaluation import evaluate, pairing_accuracy, average_cosine_similarity
+from .evaluation import evaluate, intra_inter_margin, intra_sample_cosine_mean
 from loguru import logger
 from sklearn.metrics import roc_auc_score
 import os
@@ -60,7 +60,7 @@ class InfiniteIndexStream(IterableDataset):
             epoch += 1
 
 
-def _contrastive_collate_min(batch):
+def _contrastive_collate_kview(batch):
     """Collate only the fields used by contrastive training.
 
     This avoids default-collate trying to batch large/irregular fields like
@@ -69,26 +69,26 @@ def _contrastive_collate_min(batch):
     if batch is None:
         return batch
 
-    layer1 = torch.stack([b["layer1_activations"] for b in batch], dim=0)
-    layer2 = torch.stack([b["layer2_activations"] for b in batch], dim=0)
+    views = torch.stack([b["views_activations"] for b in batch], dim=0)
     halu = torch.stack([b["halu"] for b in batch], dim=0)
     hashkeys = [b["hashkey"] for b in batch]
 
     out = {
-        "layer1_activations": layer1,
-        "layer2_activations": layer2,
+        "views_activations": views,
         "halu": halu,
         "hashkey": hashkeys,
     }
 
-    if "layer1_idx" in batch[0]:
-        out["layer1_idx"] = torch.tensor([b["layer1_idx"] for b in batch], dtype=torch.long)
-    if "layer2_idx" in batch[0]:
-        out["layer2_idx"] = torch.tensor([b["layer2_idx"] for b in batch], dtype=torch.long)
+    if "view_indices" in batch[0]:
+        out["view_indices"] = torch.stack([b["view_indices"] for b in batch], dim=0).to(dtype=torch.long)
     if "input_length" in batch[0]:
         out["input_length"] = torch.tensor([b["input_length"] for b in batch], dtype=torch.long)
 
     return out
+
+
+# Backward compatibility alias for older imports.
+_contrastive_collate_min = _contrastive_collate_kview
 
 
 def _atomic_torch_save(obj, path: str) -> None:
@@ -371,6 +371,17 @@ def train_contrastive(model, train_dataset, test_dataset=None,
                       infinite_eval_shuffle: bool = False,
                       infinite_eval_seed: int = 0):
 
+    def _call_model_with_optional_layer_idx(m, x, layer_idx=None):
+        if layer_idx is None:
+            return m(x)
+        try:
+            return m(x, layer_idx=layer_idx)
+        except TypeError as e:
+            msg = str(e)
+            if "unexpected keyword argument" in msg or "got an unexpected keyword" in msg:
+                return m(x)
+            raise
+
     base_dataset_len = None
     if use_infinite_index_stream:
         if not hasattr(train_dataset, "__len__"):
@@ -386,18 +397,20 @@ def train_contrastive(model, train_dataset, test_dataset=None,
 
     assert batch_size % sub_batch_size == 0, "batch_size must be divisible by sub_batch_size"
 
-    # Create checkpoint directory
     os.makedirs(checkpoint_dir, exist_ok=True)
-    
+
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    loss_fn = SupConLoss(temperature=temperature, ignore_label=ignore_label,
-                         same_sample_weight=same_sample_weight, same_class_weight=same_class_weight)
-    
+    loss_fn = SupConLoss(
+        temperature=temperature,
+        ignore_label=ignore_label,
+        same_sample_weight=same_sample_weight,
+        same_class_weight=same_class_weight,
+    )
+
     start_epoch = 0
     best_loss = float('inf')
-    
-    # Resume from checkpoint if specified. Support absolute paths; raise if missing.
+
     if resume_from is not None:
         checkpoint_path = resume_from if os.path.isabs(resume_from) else os.path.join(checkpoint_dir, resume_from)
         if not os.path.exists(checkpoint_path):
@@ -430,14 +443,13 @@ def train_contrastive(model, train_dataset, test_dataset=None,
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=use_persistent_workers,
-        collate_fn=_contrastive_collate_min,
+        collate_fn=_contrastive_collate_kview,
     )
 
     test_loader = None
     eval_max_batches = None
     if test_dataset is not None:
         test_is_iterable = isinstance(test_dataset, IterableDataset)
-        base_test_len = None
         if use_infinite_index_stream_eval:
             if not hasattr(test_dataset, "__len__"):
                 raise TypeError("use_infinite_index_stream_eval=True requires test_dataset to have __len__")
@@ -458,11 +470,9 @@ def train_contrastive(model, train_dataset, test_dataset=None,
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=use_persistent_workers,
-            collate_fn=_contrastive_collate_min,
+            collate_fn=_contrastive_collate_kview,
         )
 
-    # For infinite streaming we keep one iterator across epochs, but we still
-    # run a fixed number of steps per epoch to preserve epoch semantics.
     steps_per_epoch = None
     train_iter = None
     if use_infinite_index_stream:
@@ -473,9 +483,10 @@ def train_contrastive(model, train_dataset, test_dataset=None,
         logger.info(f"Starting epoch {epoch + 1}/{epochs}")
         model.train()
         total_loss = 0.0
-        total_acc = 0.0
-        total_cosine_sim = 0.0
-        n_batches = 0  # Track number of full batches processed
+        total_intra_cos = 0.0
+        total_intra_inter_margin = 0.0
+        n_batches = 0
+
         if use_infinite_index_stream:
             total_steps = steps_per_epoch
             loop = tqdm(range(total_steps), desc=f"Epoch {epoch+1}/{epochs}", leave=False)
@@ -486,8 +497,8 @@ def train_contrastive(model, train_dataset, test_dataset=None,
             except TypeError:
                 total_steps = None
 
-        # Buffers to accumulate mini-batches
-        buffer_x1, buffer_x2 = [], []
+        buffer_views = []
+        buffer_view_indices = []
         buffer_labels = [] if use_labels else None
         buffer_sample_ids = [] if use_labels else None
 
@@ -501,123 +512,104 @@ def train_contrastive(model, train_dataset, test_dataset=None,
                     batch = next(train_iter)
 
             i += 1
-            if total_steps is not None:
-                logger.info(f"Epoch {epoch + 1}/{epochs} - Step {i}/{total_steps}")
-            else:
-                logger.info(f"Epoch {epoch + 1}/{epochs} - Step {i}")
-            logger.debug(f"Adding batch {i} to buffer. Current buffer size: {len(buffer_x1)}")
-            x1 = batch['layer1_activations'].squeeze(1).to(device, non_blocking=True)
-            x2 = batch['layer2_activations'].squeeze(1).to(device, non_blocking=True)
+            logger.debug(f"Adding batch {i} to buffer. Current buffer size: {len(buffer_views)}")
+            views = batch['views_activations'].to(device, non_blocking=True)
 
-            buffer_x1.append(x1)
-            buffer_x2.append(x2)
+            buffer_views.append(views)
+            if 'view_indices' in batch:
+                buffer_view_indices.append(batch['view_indices'].to(device, non_blocking=True))
 
             if use_labels:
                 labels = batch['halu'].to(device, non_blocking=True)
-                # Ensure labels have at least one dimension for concatenation
                 if labels.dim() == 0:
                     labels = labels.unsqueeze(0)
-                elif labels.dim() == 1 and labels.size(0) == 1:
-                    # Already has batch dimension
-                    pass
-                else:
-                    # Handle batch of labels
+                elif labels.dim() > 1:
                     labels = labels.view(-1)
                 buffer_labels.append(labels)
 
-                # Extract sample IDs (use hashkey as unique identifier)
-                # Convert hashkey to numeric ID for tensor operations
                 hashkeys = batch['hashkey']
                 if isinstance(hashkeys, str):
                     hashkeys = [hashkeys]
-
-                # Create numeric sample IDs from hashkeys
-                sample_ids = torch.tensor([hash(hk) % 1000000 for hk in hashkeys],
-                                        dtype=torch.long, device=device)
+                sample_ids = torch.tensor([hash(hk) % 1000000 for hk in hashkeys], dtype=torch.long, device=device)
                 buffer_sample_ids.append(sample_ids)
 
-            # Process when buffer is full or at the end of the loop
-            buffer_full = len(buffer_x1) * sub_batch_size == batch_size
+            buffer_full = len(buffer_views) * sub_batch_size == batch_size
             last_batch = total_steps is not None and i == total_steps
             if buffer_full or last_batch:
-                logger.debug(f"Processing buffer at batch {i}. Buffer size: {len(buffer_x1)}")
-                x1_full = torch.cat(buffer_x1, dim=0)
-                x2_full = torch.cat(buffer_x2, dim=0)
-                buffer_x1 = []
-                buffer_x2 = []
+                views_full = torch.cat(buffer_views, dim=0)
+                view_idx_full = torch.cat(buffer_view_indices, dim=0) if buffer_view_indices else None
+                buffer_views = []
+                buffer_view_indices = []
 
-                z1 = model(x1_full)
-                z2 = model(x2_full)
-
-                z_stacked = torch.stack([z1, z2], dim=1)
+                bsz, num_views, seq_len, hidden_dim = views_full.shape
+                x_flat = views_full.reshape(bsz * num_views, seq_len, hidden_dim)
+                view_idx_flat = view_idx_full.reshape(bsz * num_views) if view_idx_full is not None else None
+                z_flat = _call_model_with_optional_layer_idx(model, x_flat, layer_idx=view_idx_flat)
+                z_views = z_flat.reshape(bsz, num_views, -1)
 
                 if use_labels:
                     labels_full = torch.cat(buffer_labels, dim=0)
                     sample_ids_full = torch.cat(buffer_sample_ids, dim=0)
                     buffer_labels = []
                     buffer_sample_ids = []
-                    loss = loss_fn(z_stacked, labels=labels_full, sample_ids=sample_ids_full)
+                    loss = loss_fn(z_views, labels=labels_full, sample_ids=sample_ids_full)
                 else:
-                    loss = loss_fn(z_stacked)
+                    loss = loss_fn(z_views)
 
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
-                acc = pairing_accuracy(z1, z2)
-                cosine_sim = average_cosine_similarity(z1, z2)
                 total_loss += loss.item()
-                total_acc += acc
-                total_cosine_sim += cosine_sim
-                n_batches += 1  # Increment for each full batch processed
+                total_intra_cos += intra_sample_cosine_mean(z_views)
+                total_intra_inter_margin += intra_inter_margin(z_views)
+                n_batches += 1
 
                 avg_loss = total_loss / n_batches
-                avg_acc = total_acc / n_batches
-                avg_cosine_sim = total_cosine_sim / n_batches
+                avg_intra_cos = total_intra_cos / n_batches
+                avg_intra_inter = total_intra_inter_margin / n_batches
+                loop.set_postfix(loss=avg_loss, intra_cos=avg_intra_cos, intra_inter_margin=avg_intra_inter)
 
-                loop.set_postfix(loss=avg_loss, pairing_acc=avg_acc, cosine_sim=avg_cosine_sim)
+        if buffer_views:
+            views_full = torch.cat(buffer_views, dim=0)
+            view_idx_full = torch.cat(buffer_view_indices, dim=0) if buffer_view_indices else None
 
-        if buffer_x1:
-            logger.debug("Processing remaining buffer after epoch loop")
-            x1_full = torch.cat(buffer_x1, dim=0)
-            x2_full = torch.cat(buffer_x2, dim=0)
-            buffer_x1 = []
-            buffer_x2 = []
-
-            z1 = model(x1_full)
-            z2 = model(x2_full)
-            z_stacked = torch.stack([z1, z2], dim=1)
+            bsz, num_views, seq_len, hidden_dim = views_full.shape
+            x_flat = views_full.reshape(bsz * num_views, seq_len, hidden_dim)
+            view_idx_flat = view_idx_full.reshape(bsz * num_views) if view_idx_full is not None else None
+            z_flat = _call_model_with_optional_layer_idx(model, x_flat, layer_idx=view_idx_flat)
+            z_views = z_flat.reshape(bsz, num_views, -1)
 
             if use_labels and buffer_labels:
                 labels_full = torch.cat(buffer_labels, dim=0)
                 sample_ids_full = torch.cat(buffer_sample_ids, dim=0)
-                buffer_labels = []
-                buffer_sample_ids = []
-                loss = loss_fn(z_stacked, labels=labels_full, sample_ids=sample_ids_full)
+                loss = loss_fn(z_views, labels=labels_full, sample_ids=sample_ids_full)
             else:
-                loss = loss_fn(z_stacked)
+                loss = loss_fn(z_views)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-            acc = pairing_accuracy(z1, z2)
-            cosine_sim = average_cosine_similarity(z1, z2)
             total_loss += loss.item()
-            total_acc += acc
-            total_cosine_sim += cosine_sim
+            total_intra_cos += intra_sample_cosine_mean(z_views)
+            total_intra_inter_margin += intra_inter_margin(z_views)
             n_batches += 1
 
-            avg_loss = total_loss / n_batches
-            avg_acc = total_acc / n_batches
-            avg_cosine_sim = total_cosine_sim / n_batches
-
-        print(f"Epoch {epoch + 1}/{epochs} - Train Loss: {avg_loss:.4f} - Train Pairing Acc: {avg_acc:.4f} - Train Cosine Sim: {avg_cosine_sim:.4f}")
+        avg_loss = total_loss / max(1, n_batches)
+        avg_intra_cos = total_intra_cos / max(1, n_batches)
+        avg_intra_inter = total_intra_inter_margin / max(1, n_batches)
+        print(
+            f"Epoch {epoch + 1}/{epochs} - Train Loss: {avg_loss:.4f} "
+            f"- Train Intra Cos: {avg_intra_cos:.4f} "
+            f"- Train Intra/Inter Margin: {avg_intra_inter:.4f}"
+        )
 
         test_loss = float('inf')
-        test_cosine_sim = 0.0
+        test_intra_cos = 0.0
+        test_intra_inter_margin = 0.0
         if test_loader is not None:
-            test_loss, test_acc, test_cosine_sim = evaluate(
+            test_loss, test_intra_cos, test_intra_inter_margin = evaluate(
                 model,
                 test_loader,
                 batch_size=batch_size,
@@ -628,9 +620,12 @@ def train_contrastive(model, train_dataset, test_dataset=None,
                 ignore_label=ignore_label,
                 max_batches=eval_max_batches,
             )
-            print(f"Epoch {epoch + 1}/{epochs} - Test Loss: {test_loss:.4f} - Test Pairing Acc: {test_acc:.4f} - Test Cosine Sim: {test_cosine_sim:.4f}")
+            print(
+                f"Epoch {epoch + 1}/{epochs} - Test Loss: {test_loss:.4f} "
+                f"- Test Intra Cos: {test_intra_cos:.4f} "
+                f"- Test Intra/Inter Margin: {test_intra_inter_margin:.4f}"
+            )
 
-        # Save checkpoint (keep only what is needed to resume)
         is_last_epoch = (epoch == epochs - 1)
         if (epoch + 1) % save_every == 0 or is_last_epoch:
             checkpoint = {
@@ -638,10 +633,11 @@ def train_contrastive(model, train_dataset, test_dataset=None,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'train_loss': avg_loss,
-                'train_acc': avg_acc,
-                'train_cosine_sim': avg_cosine_sim,
+                'train_intra_cos': avg_intra_cos,
+                'train_intra_inter_margin': avg_intra_inter,
                 'test_loss': test_loss,
-                'test_cosine_sim': test_cosine_sim,
+                'test_intra_cos': test_intra_cos,
+                'test_intra_inter_margin': test_intra_inter_margin,
                 'best_loss': min(best_loss, test_loss),
                 'temperature': temperature,
                 'lr': lr,
