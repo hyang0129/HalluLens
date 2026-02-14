@@ -518,7 +518,11 @@ class LayerAwareContrastiveTrainerConfig(ContrastiveTrainerConfig):
     Kept as a distinct type to make experiments explicit in scripts.
     """
 
-    pass
+    # Embedding calibration -- deprecated in favour of model-level
+    # ``requires_calibration`` attribute.  Kept for backward compat.
+    calibrate: bool = False
+    calibrate_max_batches: int = 50
+    calibrate_target_ratio: float = 0.1
 
 
 class ContrastiveTrainer(Trainer):
@@ -747,6 +751,42 @@ class LayerAwareContrastiveTrainer(Trainer):
         )
 
         self.best_loss: float = float("inf")
+        self._calibrated: bool = False
+
+    def fit(self, train_dataset, val_dataset=None) -> None:
+        """Run the training loop, with optional pre-training calibration."""
+        # Check model attribute first, fall back to config for backward compat.
+        needs_calibration = getattr(self.model, "requires_calibration", False)
+        if not needs_calibration:
+            needs_calibration = bool(self.contrastive_config.calibrate)
+
+        if (
+            needs_calibration
+            and not self._calibrated
+            and hasattr(self.model, "calibrate")
+        ):
+            logger.info("Running embedding calibration...")
+            # Build the train loader (this caches it for later reuse)
+            train_loader, _, train_iter = self._build_train_iterator(train_dataset)
+            # Use the iterator if available (infinite stream), otherwise the loader directly
+            calib_iter = train_iter if train_iter is not None else iter(train_loader)
+
+            max_batches = getattr(self.model, "calibrate_max_batches", 50)
+            target_ratio = getattr(self.model, "calibrate_target_ratio", 0.01)
+            # Config overrides if explicitly set
+            if bool(self.contrastive_config.calibrate):
+                max_batches = int(self.contrastive_config.calibrate_max_batches)
+                target_ratio = float(self.contrastive_config.calibrate_target_ratio)
+
+            stats = self.model.calibrate(
+                calib_iter,
+                max_batches=int(max_batches),
+                target_ratio=float(target_ratio),
+            )
+            self._calibrated = True
+            logger.info(f"Calibration complete: {stats}")
+
+        super().fit(train_dataset, val_dataset=val_dataset)
 
     def training_step(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, Dict[str, float]]:
         x1 = batch["layer1_activations"].squeeze(1).to(self.device, non_blocking=True)

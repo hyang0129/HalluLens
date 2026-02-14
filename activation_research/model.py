@@ -289,6 +289,12 @@ class LayerAwareProgressiveCompressor(nn.Module):
         Initial value for the learnable scale on the positional layer
         embedding.  Only used when ``conditioning="positional"``.
         Default ``0.1``.
+    requires_calibration : bool
+        If True, the model declares that it needs input-based calibration
+        before training.  The trainer will call ``calibrate()`` before the
+        first epoch when this flag is set.  Default ``True`` — set to
+        ``False`` to skip calibration (e.g. when resuming from a
+        checkpoint or using ``conditioning=None``).
     normalize_output : bool
         If True, L2-normalize the output embeddings.  Essential when
         using a contrastive loss that computes dot-product similarity
@@ -314,6 +320,9 @@ class LayerAwareProgressiveCompressor(nn.Module):
         normalize_output: bool = False,
         normalize_input: bool = False,
         positional_init_alpha: float = 0.1,
+        requires_calibration: bool = True,
+        calibrate_max_batches: int = 50,
+        calibrate_target_ratio: float = 0.01,
         dropout: float = 0.1,
         input_dropout: float = 0.2,
     ):
@@ -331,6 +340,12 @@ class LayerAwareProgressiveCompressor(nn.Module):
 
         self.conditioning = conditioning
         self.normalize_output = bool(normalize_output)
+
+        # Calibration attributes — checked by the trainer.
+        # conditioning=None means pure encoder mode, no calibration needed.
+        self.requires_calibration = bool(requires_calibration) and conditioning is not None
+        self.calibrate_max_batches = int(calibrate_max_batches)
+        self.calibrate_target_ratio = float(calibrate_target_ratio)
 
         self.encoder = ProgressiveCompressor(
             input_dim=int(input_dim),
@@ -365,7 +380,11 @@ class LayerAwareProgressiveCompressor(nn.Module):
         # LayerNorm is only used when conditioning is active; skipping it
         # in pure-encoder mode (None) keeps the architecture identical to
         # a standalone ProgressiveCompressor.
-        if conditioning is not None:
+        # When normalize_output is True the LayerNorm stabilises the
+        # representation before L2-normalisation.  When normalize_output
+        # is False, LayerNorm inflates the vector norm to ~sqrt(final_dim)
+        # which causes SupConLoss logits to explode, so we skip it.
+        if conditioning is not None and normalize_output:
             self.norm = nn.LayerNorm(int(final_dim))
 
     # ------------------------------------------------------------------ #
@@ -389,6 +408,122 @@ class LayerAwareProgressiveCompressor(nn.Module):
             return layer_idx
 
         raise TypeError(f"layer_idx must be int or Tensor, got {type(layer_idx)}")
+
+    # ------------------------------------------------------------------ #
+    #  Calibration
+    # ------------------------------------------------------------------ #
+    @torch.no_grad()
+    def calibrate(
+        self,
+        dataloader,
+        *,
+        max_batches: int = 50,
+        target_ratio: float = 0.01,
+    ) -> dict:
+        """Calibrate layer embeddings to match input activation statistics.
+
+        Runs a quick pass over training batches, measures the per-element
+        mean and std of the raw input activations, and re-initialises the
+        conditioning parameters so their magnitude is proportional to the
+        actual data scale.
+
+        The input statistics are the only meaningful reference before
+        training — the encoder output is random noise at init.
+
+        For ``"positional"`` conditioning this rescales the embedding
+        weights so each row's norm is ``target_ratio * mean_input_norm``
+        and resets ``positional_alpha`` to 1.0 (scale is baked in).
+
+        For ``"film_in"`` / ``"film_both"`` this rescales
+        the beta (shift) embeddings proportionally while keeping gamma
+        (scale) near identity.
+
+        For ``"concatenate"`` this rescales the layer embedding weights
+        proportionally.
+
+        Parameters
+        ----------
+        dataloader : DataLoader or iterator
+            Training dataloader or an iterator over batches (e.g. an
+            infinite-stream iterator).  Only the activation tensors are
+            used.  When an iterator is passed, consumed batches advance
+            the iterator state — this is fine for infinite streams.
+        max_batches : int
+            Number of batches to sample for statistics (default 50).
+        target_ratio : float
+            Desired ratio of embedding contribution to input activation
+            norm.  Default ``0.01`` means the embedding starts at ~1% of
+            the mean input activation magnitude — conservative since the
+            encoder will compress/transform the inputs during training.
+
+        Returns
+        -------
+        dict
+            Calibration statistics: ``input_mean_norm``,
+            ``input_elem_mean``, ``input_elem_std``,
+            ``embedding_target_norm``.
+        """
+        if self.conditioning is None:
+            return {}
+
+        device = next(self.parameters()).device
+
+        norms = []
+        elem_vals = []
+        for i, batch in enumerate(dataloader):
+            if i >= max_batches:
+                break
+            # Accept both raw tensors and dict batches
+            if isinstance(batch, dict):
+                x = batch.get("layer1_activations", batch.get("activations"))
+                if x is None:
+                    continue
+                x = x.squeeze(1)
+            else:
+                x = batch
+            x = x.to(device).float()
+            # x: (B, L, D) — compute per-sample norms over the feature dim
+            # Flatten to (B*L, D) to get per-token norms
+            flat = x.reshape(-1, x.shape[-1])
+            norms.append(flat.norm(dim=-1).cpu())
+            elem_vals.append(flat.cpu())
+
+        if not norms:
+            return {}
+
+        all_norms = torch.cat(norms, dim=0)
+        all_vals = torch.cat(elem_vals, dim=0)
+        input_mean_norm = float(all_norms.mean())
+        input_elem_mean = float(all_vals.mean())
+        input_elem_std = float(all_vals.std())
+
+        target_norm = input_mean_norm * target_ratio
+
+        # --- Rescale embeddings ---
+        if self.conditioning == "positional":
+            emb = self.layer_embedding.weight  # (num_layers, final_dim)
+            row_norms = emb.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+            self.layer_embedding.weight.copy_(emb * (target_norm / row_norms))
+            # Bake scale into weights; reset alpha to 1.0
+            self.positional_alpha.fill_(1.0)
+
+        elif self.conditioning in ("film_in", "film_both"):
+            beta = self.film_in.beta.weight
+            beta_norms = beta.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+            self.film_in.beta.weight.copy_(beta * (target_norm / beta_norms))
+
+        if self.conditioning == "concatenate":
+            emb = self.layer_embedding.weight
+            row_norms = emb.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+            self.layer_embedding.weight.copy_(emb * (target_norm / row_norms))
+
+        stats = {
+            "input_mean_norm": input_mean_norm,
+            "input_elem_mean": input_elem_mean,
+            "input_elem_std": input_elem_std,
+            "embedding_target_norm": target_norm,
+        }
+        return stats
 
     # ------------------------------------------------------------------ #
     #  Forward
@@ -433,7 +568,8 @@ class LayerAwareProgressiveCompressor(nn.Module):
 
         # conditioning == "none": no-op, z passes through unchanged
 
-        z = self.norm(z)
+        if hasattr(self, 'norm'):
+            z = self.norm(z)
 
         if self.normalize_output:
             z = F.normalize(z, dim=-1)
