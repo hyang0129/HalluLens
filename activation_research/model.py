@@ -225,6 +225,8 @@ class LayerAwareProgressiveCompressor(nn.Module):
     * ``"concatenate"`` – the original strategy.  Layer embedding is
       projected, concatenated with ``z``, and fused through a linear
       layer.
+    * ``"none"`` – no layer conditioning at all.  ``layer_idx`` is
+      accepted but ignored; useful as a baseline.
 
     Forward accepts keyword arguments so evaluation utilities can pass
     `layer_idx=...` without positional coupling.
@@ -242,12 +244,17 @@ class LayerAwareProgressiveCompressor(nn.Module):
         ``"positional"`` modes).
     conditioning : str
         One of ``"film_in"``, ``"film_out"``, ``"film_both"``,
-        ``"positional"``, ``"concatenate"``.
+        ``"positional"``, ``"concatenate"``, ``"none"``.
+        Defaults to ``"positional"`` (FiLM off).
+    normalize_output : bool
+        If True, L2-normalize the output embeddings.  Essential when
+        using a contrastive loss that computes dot-product similarity
+        (e.g. ``SupConLoss``).  Default ``False``.
     dropout, input_dropout : float
         Dropout rates forwarded to the inner encoder.
     """
 
-    VALID_CONDITIONING = {"film_in", "film_out", "film_both", "positional", "concatenate"}
+    VALID_CONDITIONING = {"film_in", "film_out", "film_both", "positional", "concatenate", "none"}
 
     def __init__(
         self,
@@ -256,7 +263,8 @@ class LayerAwareProgressiveCompressor(nn.Module):
         input_dim: int = 4096,
         final_dim: int = 512,
         layer_embed_dim: int = 128,
-        conditioning: str = "film_both",
+        conditioning: str = "positional",
+        normalize_output: bool = False,
         dropout: float = 0.1,
         input_dropout: float = 0.2,
     ):
@@ -270,6 +278,7 @@ class LayerAwareProgressiveCompressor(nn.Module):
             raise ValueError("num_layers must be > 0")
 
         self.conditioning = conditioning
+        self.normalize_output = bool(normalize_output)
 
         self.encoder = ProgressiveCompressor(
             input_dim=int(input_dim),
@@ -327,6 +336,8 @@ class LayerAwareProgressiveCompressor(nn.Module):
 
         if layer_idx is None:
             z = self.encoder(x)
+            if self.normalize_output:
+                z = F.normalize(z, dim=-1)
             return z
 
         idx = self._coerce_layer_idx(layer_idx, x.shape[0], x.device)
@@ -337,7 +348,7 @@ class LayerAwareProgressiveCompressor(nn.Module):
 
         z = self.encoder(x)  # (B, final_dim)
 
-        # --- output-side FiLM ---
+        # --- output-side conditioning ---
         if self.conditioning in ("film_out", "film_both"):
             z = self.film_out(z, idx)  # (B, final_dim) → (B, final_dim)
 
@@ -350,4 +361,11 @@ class LayerAwareProgressiveCompressor(nn.Module):
             e = self.layer_proj(e)
             z = self.fuse(torch.cat([z, e], dim=-1))
 
-        return self.norm(z)
+        # conditioning == "none": no-op, z passes through unchanged
+
+        z = self.norm(z)
+
+        if self.normalize_output:
+            z = F.normalize(z, dim=-1)
+
+        return z
