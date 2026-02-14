@@ -87,6 +87,8 @@ class ProgressiveCompressor(nn.Module):
         x: (B, L, 4096)
         returns: (B, 512)
         """
+        x = x.float()
+
         if self.normalize_input:
             x = self.input_norm(x)
 
