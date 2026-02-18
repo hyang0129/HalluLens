@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional, Tuple
 
@@ -136,6 +137,9 @@ class TrainerConfig:
     # Gradient clipping (max L2 norm).  Set to 0.0 or None to disable.
     grad_clip_norm: Optional[float] = None
 
+    # Log wall-clock timing for epoch phases and checkpoint writes.
+    log_timing: bool = True
+
 
 class Trainer:
     """A minimal, Lightning-inspired trainer.
@@ -207,18 +211,38 @@ class Trainer:
 
         for epoch in tqdm(range(self.start_epoch, int(self.config.max_epochs)), desc="Epochs"):
             logger.info(f"Starting epoch {epoch + 1}/{self.config.max_epochs}")
+            epoch_start = time.perf_counter()
+
+            train_start = time.perf_counter()
             train_metrics = self.train_epoch(epoch=epoch, train_dataset=train_dataset)
+            train_seconds = float(time.perf_counter() - train_start)
 
             val_metrics: Dict[str, float] = {}
+            val_seconds = 0.0
             if val_dataset is not None:
+                val_start = time.perf_counter()
                 val_metrics = self.validate(epoch=epoch, val_dataset=val_dataset)
+                val_seconds = float(time.perf_counter() - val_start)
 
-            self.maybe_save_checkpoint(
+            checkpoint_seconds = float(
+                self.maybe_save_checkpoint(
                 epoch=epoch,
                 train_metrics=train_metrics,
                 val_metrics=val_metrics,
                 is_last_epoch=(epoch == int(self.config.max_epochs) - 1),
+                )
             )
+
+            if bool(getattr(self.config, "log_timing", True)):
+                epoch_seconds = float(time.perf_counter() - epoch_start)
+                logger.info(
+                    "Epoch timing: "
+                    f"epoch={epoch + 1}/{self.config.max_epochs}, "
+                    f"total={epoch_seconds:.2f}s, "
+                    f"train={train_seconds:.2f}s, "
+                    f"val={val_seconds:.2f}s, "
+                    f"checkpoint={checkpoint_seconds:.2f}s"
+                )
 
     def train_epoch(self, *, epoch: int, train_dataset) -> Dict[str, float]:
         """Train for a single epoch and return aggregate metrics."""
@@ -374,14 +398,16 @@ class Trainer:
         train_metrics: Dict[str, float],
         val_metrics: Dict[str, float],
         is_last_epoch: bool,
-    ) -> None:
+    ) -> float:
         """Default checkpointing behavior: save last checkpoint periodically."""
+        checkpoint_start = time.perf_counter()
+
         if int(self.config.save_every) <= 0:
-            return
+            return 0.0
 
         should_save = ((epoch + 1) % int(self.config.save_every) == 0) or bool(is_last_epoch)
         if not should_save:
-            return
+            return 0.0
 
         checkpoint = {
             "epoch": int(epoch),
@@ -407,6 +433,14 @@ class Trainer:
 
         if bool(self.config.cleanup_legacy_checkpoints):
             _cleanup_legacy_checkpoints(self.config.checkpoint_dir, keep_filenames={"trainer_last.pt"})
+
+        elapsed = float(time.perf_counter() - checkpoint_start)
+        if bool(getattr(self.config, "log_timing", True)):
+            logger.info(
+                "Checkpoint timing: "
+                f"epoch={epoch + 1}, path={last_path}, elapsed={elapsed:.2f}s"
+            )
+        return elapsed
 
     def load_checkpoint(self, resume_from: str) -> None:
         checkpoint_path = resume_from
@@ -685,13 +719,15 @@ class ContrastiveTrainer(Trainer):
         train_metrics: Dict[str, float],
         val_metrics: Dict[str, float],
         is_last_epoch: bool,
-    ) -> None:
+    ) -> float:
+        checkpoint_start = time.perf_counter()
+
         if int(self.contrastive_config.save_every) <= 0:
-            return
+            return 0.0
 
         should_save = ((epoch + 1) % int(self.contrastive_config.save_every) == 0) or bool(is_last_epoch)
         if not should_save:
-            return
+            return 0.0
 
         checkpoint = {
             "epoch": int(epoch),
@@ -721,6 +757,14 @@ class ContrastiveTrainer(Trainer):
                 self.contrastive_config.checkpoint_dir,
                 keep_filenames={"contrastive_last.pt"},
             )
+
+        elapsed = float(time.perf_counter() - checkpoint_start)
+        if bool(getattr(self.contrastive_config, "log_timing", True)):
+            logger.info(
+                "Checkpoint timing: "
+                f"epoch={epoch + 1}, path={last_path}, elapsed={elapsed:.2f}s"
+            )
+        return elapsed
 
     def load_checkpoint(self, resume_from: str) -> None:
         checkpoint_path = resume_from
@@ -927,13 +971,15 @@ class LayerAwareContrastiveTrainer(Trainer):
         train_metrics: Dict[str, float],
         val_metrics: Dict[str, float],
         is_last_epoch: bool,
-    ) -> None:
+    ) -> float:
+        checkpoint_start = time.perf_counter()
+
         if int(self.contrastive_config.save_every) <= 0:
-            return
+            return 0.0
 
         should_save = ((epoch + 1) % int(self.contrastive_config.save_every) == 0) or bool(is_last_epoch)
         if not should_save:
-            return
+            return 0.0
 
         checkpoint = {
             "epoch": int(epoch),
@@ -963,6 +1009,14 @@ class LayerAwareContrastiveTrainer(Trainer):
                 self.contrastive_config.checkpoint_dir,
                 keep_filenames={"layer_aware_contrastive_last.pt"},
             )
+
+        elapsed = float(time.perf_counter() - checkpoint_start)
+        if bool(getattr(self.contrastive_config, "log_timing", True)):
+            logger.info(
+                "Checkpoint timing: "
+                f"epoch={epoch + 1}, path={last_path}, elapsed={elapsed:.2f}s"
+            )
+        return elapsed
 
     def load_checkpoint(self, resume_from: str) -> None:
         checkpoint_path = resume_from
