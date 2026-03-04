@@ -225,17 +225,67 @@ class ActivationDataset(Dataset):
                 act = act[:, :self.pad_length, :]
             return act
 
-        for layer_pos in range(len(self.relevant_layers)):
-            padded_activations[layer_pos] = load_layer(layer_pos)
+        if self.return_all_activations:
+            for layer_pos in range(len(self.relevant_layers)):
+                padded_activations[layer_pos] = load_layer(layer_pos)
 
-        available_layers = [i for i, act in enumerate(padded_activations) if act is not None]
-        if len(available_layers) < self.min_target_layers:
-            raise ValueError(
-                f"Not enough targeted layers available (found {len(available_layers)} layers; "
-                f"need at least {self.min_target_layers})."
-            )
+            available_layers = [i for i, act in enumerate(padded_activations) if act is not None]
+            if len(available_layers) < self.min_target_layers:
+                raise ValueError(
+                    f"Not enough targeted layers available (found {len(available_layers)} layers; "
+                    f"need at least {self.min_target_layers})."
+                )
 
-        selected_view_indices = self._select_view_indices(available_layers)
+            selected_view_indices = self._select_view_indices(available_layers)
+        else:
+            # Lazy path: load as few layers as needed to select K views.
+            # We avoid eagerly loading every relevant layer for each sample.
+            candidate_positions = list(range(len(self.relevant_layers)))
+
+            if self.fixed_layer is not None and self.fixed_layer not in candidate_positions:
+                raise ValueError(f"Fixed layer {self.fixed_layer} is not available in the relevant layers")
+
+            # Load fixed layer first (if configured), then progressively load others.
+            if self.fixed_layer is not None:
+                padded_activations[self.fixed_layer] = load_layer(self.fixed_layer)
+                if padded_activations[self.fixed_layer] is None:
+                    raise ValueError(f"Fixed layer {self.fixed_layer} is not available in the relevant layers")
+
+            remaining = [pos for pos in candidate_positions if pos != self.fixed_layer]
+            random.shuffle(remaining)
+
+            def current_available() -> List[int]:
+                return [i for i, act in enumerate(padded_activations) if act is not None]
+
+            selected_view_indices: Optional[List[int]] = None
+            last_error: Optional[Exception] = None
+
+            # Attempt selection with progressively more loaded candidates.
+            for candidate in [None, *remaining]:
+                if candidate is not None:
+                    padded_activations[candidate] = load_layer(candidate)
+
+                available_layers = current_available()
+                if len(available_layers) < self.min_target_layers:
+                    continue
+
+                try:
+                    selected_view_indices = self._select_view_indices(available_layers)
+                    break
+                except ValueError as exc:
+                    last_error = exc
+
+            if selected_view_indices is None:
+                available_layers = current_available()
+                if len(available_layers) < self.min_target_layers:
+                    raise ValueError(
+                        f"Not enough targeted layers available (found {len(available_layers)} layers; "
+                        f"need at least {self.min_target_layers})."
+                    )
+                if last_error is not None:
+                    raise last_error
+                raise ValueError("Could not select K views from available layers")
+
         filled_activations = self._fill_missing_layers(padded_activations)
         selected_views = [filled_activations[i] for i in selected_view_indices]
         selected_views = [act.squeeze(0) if act.ndim == 3 and act.shape[0] == 1 else act for act in selected_views]
