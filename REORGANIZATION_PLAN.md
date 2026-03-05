@@ -93,7 +93,7 @@ rm "HalluLens README.MD"   # duplicate of README.md
 rm CHANGELOG.md            # empty file
 ```
 
-### Phase 4: Create `notebooks/` and move notebooks
+### Phase 4: Create `notebooks/` and move notebooks (SKIP) 
 ```bash
 mkdir notebooks
 git mv b_contrastive_training_with_new_trainer.ipynb notebooks/
