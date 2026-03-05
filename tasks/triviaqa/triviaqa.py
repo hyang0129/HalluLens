@@ -392,6 +392,66 @@ def load_triviaqa_data(dataset_variant="unfiltered", split="dev", n_samples=1000
     }
 
 
+def run_step(step, model, dataset_variant="unfiltered", split="dev", N=1000,
+             data_dir="", auto_download=True, generations_file_path="", eval_results_path="",
+             quick_debug_mode=False, inference_method="vllm", max_inference_tokens=256,
+             logger_type="lmdb", activations_path=None, log_file=None,
+             resume=True, resume_eval=True):
+    """Run a single step of the TriviaQA task. Callable from Python directly."""
+    base_path = os.getcwd()
+    TASKNAME = f'triviaqa_{dataset_variant}_{split}'
+    model_name = model.split("/")[-1]
+    print(f"Running {TASKNAME} with model {model_name}")
+
+    if step == "inference":
+        effective_data_dir = data_dir if data_dir else f"{base_path}/data"
+        triviaqa_data = load_triviaqa_data(
+            dataset_variant=dataset_variant,
+            split=split,
+            n_samples=N,
+            data_dir=effective_data_dir,
+            auto_download=auto_download)
+        prompts_df = pd.DataFrame({
+            'prompt': [f"Q: {q}\nA:" for q in triviaqa_data['questions']],
+            'question': triviaqa_data['questions'],
+            'correct_answers': triviaqa_data['correct_answers'],
+            'question_id': triviaqa_data['question_ids']
+        })
+        print(f"Starting Inference for [{model}], Testset_N: {prompts_df.shape}")
+        print(f"📋 Task: {TASKNAME}")
+        print(f"🔧 Inference method: {inference_method}")
+        print(f"🎯 Max tokens per request: {max_inference_tokens}")
+        if logger_type:
+            print(f"📊 Activation logging: {logger_type}")
+        print("-" * 60)
+        exp.run_exp(
+            task=TASKNAME,
+            model_path=model,
+            all_prompts=prompts_df,
+            generations_file_path=generations_file_path if generations_file_path else None,
+            inference_method=inference_method,
+            max_tokens=max_inference_tokens,
+            max_workers=1,
+            logger_type=logger_type,
+            activations_path=activations_path,
+            log_file_path=log_file,
+            resume=resume)
+        print('✅ Inference completed successfully!')
+
+    elif step == "eval":
+        print(f"Starting Evaluation for {model}")
+        TriviaQAEval(
+            model_path=model,
+            TASKNAME=TASKNAME,
+            generations_file_path=generations_file_path,
+            quick_debug_mode=quick_debug_mode
+        ).run_eval(eval_results_path=eval_results_path, log_file=log_file, resume=resume_eval)
+        print(f'{TASKNAME} Evaluation completed')
+
+    else:
+        raise ValueError(f"Unknown step: {step}")
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--do_inference', default=False, action='store_true')
@@ -422,62 +482,16 @@ if __name__ == '__main__':
     parser.add_argument('--no-resume-eval', action='store_true', help='Disable automatic resume for evaluation step')
 
     args = parser.parse_args()
-    
-    # Set up task name and paths
-    base_path = os.path.dirname(os.path.abspath(__name__))
-    TASKNAME = f'triviaqa_{args.dataset_variant}_{args.split}'
-    model_name = args.model.split("/")[-1]
-    
-    print(f"Running {TASKNAME} with model {model_name}")
-    
+
     if args.do_inference:
-        # Load TriviaQA data
-        data_dir = args.data_dir if args.data_dir else f"{base_path}/data"
-        triviaqa_data = load_triviaqa_data(
-            dataset_variant=args.dataset_variant,
-            split=args.split,
-            n_samples=args.N,
-            data_dir=data_dir,
-            auto_download=args.auto_download
-        )
-
-        # Prepare prompts for inference (following TriviaQA format from LLMsKnow)
-        prompts_df = pd.DataFrame({
-            'prompt': [f"Q: {q}\nA:" for q in triviaqa_data['questions']],  # Simple Q&A format
-            'question': triviaqa_data['questions'],
-            'correct_answers': triviaqa_data['correct_answers'],
-            'question_id': triviaqa_data['question_ids']
-        })
-        
-        print(f"Starting Inference for [{args.model}], Testset_N: {prompts_df.shape}")
-        print(f"📋 Task: {TASKNAME}")
-        print(f"🔧 Inference method: {args.inference_method}")
-        print(f"🎯 Max tokens per request: {args.max_inference_tokens}")
-        if args.logger_type:
-            print(f"📊 Activation logging: {args.logger_type}")
-        print("-" * 60)
-
-        exp.run_exp(
-            task=TASKNAME,
-            model_path=args.model,
-            all_prompts=prompts_df,
-            generations_file_path=args.generations_file_path if args.generations_file_path else None,
-            inference_method=args.inference_method,
-            max_tokens=args.max_inference_tokens,
-            max_workers=1,
-            logger_type=args.logger_type,
-            activations_path=args.activations_path,
-            log_file_path=args.log_file,
-            resume=not args.no_resume
-        )
-        print('✅ Inference completed successfully!')
-    
+        run_step("inference", args.model, dataset_variant=args.dataset_variant, split=args.split,
+                 N=args.N, data_dir=args.data_dir, auto_download=args.auto_download,
+                 generations_file_path=args.generations_file_path,
+                 inference_method=args.inference_method, max_inference_tokens=args.max_inference_tokens,
+                 logger_type=args.logger_type, activations_path=args.activations_path,
+                 log_file=args.log_file, resume=not args.no_resume)
     if args.do_eval:
-        print(f"Starting Evaluation for {args.model}")
-        TriviaQAEval(
-            model_path=args.model,
-            TASKNAME=TASKNAME,
-            generations_file_path=args.generations_file_path,
-            quick_debug_mode=args.quick_debug_mode
-        ).run_eval(eval_results_path=args.eval_results_path, log_file=args.log_file, resume=not args.no_resume_eval)
-        print(f'{TASKNAME} Evaluation completed')
+        run_step("eval", args.model, dataset_variant=args.dataset_variant, split=args.split,
+                 generations_file_path=args.generations_file_path,
+                 eval_results_path=args.eval_results_path, quick_debug_mode=args.quick_debug_mode,
+                 log_file=args.log_file, resume_eval=not args.no_resume_eval)

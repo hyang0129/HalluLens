@@ -50,7 +50,10 @@ python scripts/run_with_server.py \
     --step all \
     --task precisewikiqa \
     --model meta-llama/Llama-3.1-8B-Instruct \
-    --N 100
+  --N 100 \
+  --logger-type lmdb \
+  --activations-path shared/goodwiki.zarr/activations.zarr \
+  --log-file shared/goodwiki.zarr/server.log
 ```
 
 ### Train hallucination classifier

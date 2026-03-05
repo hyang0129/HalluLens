@@ -40,6 +40,7 @@ python scripts/run_with_server.py \
   --inference_method vllm \
   --logger-type json \
   --activations-path goodwiki_json_2/activations.json \
+   --log-file goodwiki_json_2/server.log \
   --max_inference_tokens 64 \
   --N 60000 \
   --qa_output_path data/precise_qa/save/qa_goodwiki_Llama-3.1-8B-Instruct_gguf_big.jsonl \
@@ -58,6 +59,9 @@ python scripts/run_with_server.py \
   --step inference \
   --task precisewikiqa \
   --model meta-llama/Llama-3.1-8B-Instruct \
+   --logger-type lmdb \
+   --activations-path goodwiki_json_2/activations.lmdb \
+   --log-file goodwiki_json_2/server.log \
   --N 60000 \
   --no-resume \
   ...

@@ -16,7 +16,7 @@ echo ""
 
 # Example 2: Run only inference
 echo "Example 2: Run inference only (requires prompts to exist)"
-echo "python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct"
+echo "python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --logger-type lmdb --activations-path shared/goodwiki.zarr/activations.zarr --log-file shared/goodwiki.zarr/server.log"
 echo ""
 
 # Example 3: Run only evaluation
@@ -36,12 +36,12 @@ echo ""
 
 # Example 6: Custom activation storage
 echo "Example 6: Custom activation storage path"
-echo "python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --activations-path custom_data/my_experiment.lmdb"
+echo "python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --logger-type lmdb --activations-path custom_data/my_experiment.lmdb --log-file custom_data/server.log"
 echo ""
 
 # Example 7: JSON activation logging
 echo "Example 7: Use JSON activation logging instead of LMDB"
-echo "python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --logger-type json --activations-path json_data/activations"
+echo "python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --logger-type json --activations-path json_data/activations --log-file json_data/server.log"
 echo ""
 
 echo "=== Key Benefits ==="

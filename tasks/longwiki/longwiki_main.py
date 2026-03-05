@@ -53,6 +53,74 @@ def run_eval(args):
 
     facthalu.run()
 
+def run_step(step, model, exp_mode="longwiki", N=5,
+             db_path="data/wiki_data/.cache/enwiki-20230401.db",
+             q_generator="meta-llama/Meta-Llama-3.1-70B-Instruct",
+             claim_extractor="meta-llama/Llama-3.1-405B-Instruct-FP8",
+             abstain_evaluator="meta-llama/Llama-3.1-70B-Instruct",
+             verifier="meta-llama/Llama-3.1-405B-Instruct-FP8",
+             k=32, max_tokens=1024, max_workers=64, max_workers_qgen=1,
+             inference_method="vllm", eval_cache_path=None,
+             logger_type="lmdb", activations_path=None, log_file=None,
+             resume=True, resume_eval=True):
+    """Run a single step of the LongWiki task. Callable from Python directly."""
+    import types
+    base_path = os.getcwd()
+    model_name = model.split("/")[-1]
+    QA_OUTPUT_PATH = f"data/longwiki/save/longwiki_{model_name}.jsonl"
+
+    if step == "generate":
+        if os.path.exists(QA_OUTPUT_PATH):
+            print("using existing qa file")
+            all_prompts = pd.read_json(QA_OUTPUT_PATH, lines=True)
+            assert len(all_prompts) == N
+        else:
+            if "longwiki" == exp_mode:
+                wiki_input_path = f"{base_path}/data/wiki_data/doc_goodwiki_h_score.jsonl"
+                print(wiki_input_path)
+                QAs = qa.longform_QA_generation_run_batch(
+                    wiki_input_path=wiki_input_path,
+                    N=N,
+                    q_generator=q_generator,
+                    output_path=QA_OUTPUT_PATH,
+                    from_scratch=False,
+                    max_workers=max_workers_qgen)
+                all_prompts = pd.DataFrame(QAs)
+            else:
+                raise NotImplementedError(f"Mode {exp_mode} not implemented")
+
+    elif step == "inference":
+        all_prompts = pd.read_json(QA_OUTPUT_PATH, lines=True)
+        assert len(all_prompts) == N
+        print(f"Start Inference for {model} ", exp_mode, N)
+        exp.run_exp(
+            task=f"{TASKNAME}-{exp_mode}",
+            model_path=model,
+            all_prompts=all_prompts,
+            inference_method=inference_method,
+            max_tokens=max_tokens,
+            logger_type=logger_type,
+            activations_path=activations_path,
+            log_file_path=log_file)
+        print('\n***Inference completed')
+
+    elif step == "eval":
+        args_ns = types.SimpleNamespace(
+            model=model, exp_mode=exp_mode, db_path=db_path,
+            abstain_evaluator=abstain_evaluator, claim_extractor=claim_extractor,
+            verifier=verifier, k=k, eval_cache_path=eval_cache_path,
+            no_resume=not resume, no_resume_eval=not resume_eval,
+            logger_type=logger_type, activations_path=activations_path, log_file=log_file,
+        )
+        print("============= [[ {} ]] =================".format(exp_mode))
+        print(f"Running evaluation for {model_name};")
+        run_eval(args_ns)
+        print('\n***Evaluation completed')
+
+    else:
+        raise ValueError(f"Unknown step: {step}")
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--exp_mode', type=str, default='', help='longwiki')
@@ -90,61 +158,21 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    # save all args details in  
-    base_path = os.path.dirname(os.path.abspath(__name__))
-    model_name = args.model.split("/")[-1]
-    QA_OUTPUT_PATH = f"data/longwiki/save/longwiki_{model_name}.jsonl"
-
     if args.do_generate_prompt:
-        if os.path.exists(QA_OUTPUT_PATH):
-            print("using existing qa file")
-            all_prompts = pd.read_json(QA_OUTPUT_PATH, lines=True)
-            assert len(all_prompts) == args.N
-        else:
-            if "longwiki" == args.exp_mode:
-                wiki_input_path = f"{base_path}/data/wiki_data/doc_goodwiki_h_score.jsonl"
-                print(wiki_input_path)
-                QAs = qa.longform_QA_generation_run_batch(
-                        wiki_input_path=f"{base_path}/data/wiki_data/doc_goodwiki_h_score.jsonl",
-                        N=args.N,
-                        q_generator=args.q_generator, # "meta-llama/Meta-Llama-3.1-405B-Instruct", 
-                        output_path=QA_OUTPUT_PATH,
-                        from_scratch=False,
-                        max_workers=args.max_workers_qgen
-                    )
-                all_prompts = pd.DataFrame(QAs)
-            else:
-                raise NotImplementedError(f"Mode {args.exp_mode} not implemented")
-
-    # RUN INFERENCE
+        run_step("generate", args.model, exp_mode=args.exp_mode, N=args.N,
+                 q_generator=args.q_generator, max_workers_qgen=args.max_workers_qgen)
     if args.do_inference:
-        all_prompts = pd.read_json(QA_OUTPUT_PATH, lines=True)
-        assert len(all_prompts) == args.N
-
-        print(f"Start Inference for {args.model} ", args.exp_mode, args.N)
-
-        exp.run_exp(task=f"{TASKNAME}-{args.exp_mode}",
-                    model_path=args.model,
-                    all_prompts=all_prompts,
-                    inference_method=args.inference_method,
-                    max_tokens=args.max_tokens,
-                    logger_type=args.logger_type,
-                    activations_path=args.activations_path,
-                    log_file_path=args.log_file)
-
-        print('\n***Inference completed')
-
-    # RUN EVALUATION:
+        run_step("inference", args.model, exp_mode=args.exp_mode, N=args.N,
+                 inference_method=args.inference_method, max_tokens=args.max_tokens,
+                 logger_type=args.logger_type, activations_path=args.activations_path,
+                 log_file=args.log_file)
     if args.do_eval:
-        print("============= [[ {} ]] =================".format(args.exp_mode))
-        print(f"Running evaluation for {model_name};")
-        print(f"** Refusal Evaluator: {args.abstain_evaluator}")
-        print(f"** Claim Extractor: {args.claim_extractor}")
-        print(f"** Verifier: {args.verifier}") 
-        print("=========================================")
-        run_eval(args)
-        
-        print('\n***Evaluation completed')
+        run_step("eval", args.model, exp_mode=args.exp_mode, db_path=args.db_path,
+                 abstain_evaluator=args.abstain_evaluator, claim_extractor=args.claim_extractor,
+                 verifier=args.verifier, k=args.k, eval_cache_path=args.eval_cache_path,
+                 resume=not args.no_resume, resume_eval=not args.no_resume_eval,
+                 logger_type=args.logger_type, activations_path=args.activations_path,
+                 log_file=args.log_file)
             
 
 

@@ -514,6 +514,113 @@ class PreciseQAEval:
         print("=" * 80)
 
 
+def run_step(step, model, wiki_src="goodwiki", mode="dynamic", N=1,
+             qa_output_path="", q_generator="Llama-3.3-70B-Instruct-IQ3_M.gguf",
+             max_workers_qgen=1, generations_file_path="", eval_results_path="",
+             quick_debug_mode=False, inference_method="vllm", max_inference_tokens=256,
+             logger_type="lmdb", activations_path=None, log_file=None,
+             resume=True, resume_eval=True, max_retries=3, base_delay=1.0):
+    """Run a single step of the PreciseWikiQA task. Callable from Python directly."""
+    base_path = os.getcwd()
+    TASKNAME = f'precise_wikiqa_{wiki_src}_{mode}'
+    model_name = model.split("/")[-1]
+    print(f"Running {TASKNAME} with model {model_name}")
+
+    QA_OUTPUT_PATH = qa_output_path if qa_output_path else \
+        f'data/precise_qa/save/qa_{wiki_src}_{model_name}_{mode}.jsonl'
+    print(QA_OUTPUT_PATH)
+
+    if step == "generate":
+        if os.path.exists(QA_OUTPUT_PATH):
+            QAs = [line for line in jsonlines.open(QA_OUTPUT_PATH, 'r')]
+            print(f"📂 Found existing QA file: {QA_OUTPUT_PATH}")
+            print(f"✅ Loaded {len(QAs)} existing QA pairs")
+            if len(QAs) >= N:
+                print(f"✅ Target already reached! {len(QAs)} >= {N}")
+                print(f"   Using first {N} QA pairs")
+            else:
+                remaining = N - len(QAs)
+                print(f"📊 Resume statistics:")
+                print(f"   - Target: {N}")
+                print(f"   - Already completed: {len(QAs)}")
+                print(f"   - Remaining to generate: {remaining}")
+                print(f"   - Progress: {len(QAs)/N*100:.1f}%")
+                if 'goodwiki' in wiki_src:
+                    print(f"🚀 Generating {remaining} additional QA pairs...")
+                    new_QAs = precise_qa.precise_QA_generation_run_batch(
+                        wiki_input_path=f"{base_path}/data/wiki_data/doc_goodwiki_h_score.jsonl",
+                        N=remaining,
+                        q_generator=q_generator,
+                        output_path=QA_OUTPUT_PATH,
+                        max_workers=max_workers_qgen)
+                    print(f"✅ Generated {len(new_QAs)} new QA pairs")
+                    print(f"📊 Total QA pairs now: {len(QAs) + len(new_QAs)}")
+                else:
+                    raise NotImplementedError(f"mode {wiki_src} not implemented")
+        else:
+            if 'goodwiki' in wiki_src:
+                print(f"🚀 Generating {N} QA pairs from scratch...")
+                QAs = precise_qa.precise_QA_generation_run_batch(
+                    wiki_input_path=f"{base_path}/data/wiki_data/doc_goodwiki_h_score.jsonl",
+                    N=N,
+                    q_generator=q_generator,
+                    output_path=QA_OUTPUT_PATH,
+                    max_workers=max_workers_qgen)
+                print(f"✅ Generated {len(QAs)} QA pairs")
+            else:
+                raise NotImplementedError(f"mode {wiki_src} not implemented")
+
+    elif step == "inference":
+        QAs = [line for line in jsonlines.open(QA_OUTPUT_PATH, 'r')]
+        QAs_df = pd.DataFrame(QAs)
+        QAs_df = QAs_df[~(QAs_df.answer.str.contains('reference document', case=False))]
+        QAs_df = QAs_df[~(QAs_df.answer.str.contains('Please answer according', case=False))]
+        QAs_df = QAs_df[~(QAs_df.answer.str.contains('answer based on your response', case=False))]
+        QAs_df = QAs_df[~(QAs_df.answer == '')]
+        QAs_df = QAs_df[~(QAs_df.answer.str.replace(r'[^\w\s]', '', regex=True).str.strip().str.lower() == 'answer')]
+        QAs_df = QAs_df[(QAs_df.h_score_cat > 6)]
+        QAs_df = QAs_df.reset_index(drop=True)
+        if len(QAs_df) > N:
+            print(f"📊 Selecting first {N} questions from {len(QAs_df)} filtered questions (deterministic ordering for resume support)")
+            QAs_df = QAs_df.iloc[:N]
+        else:
+            print(f"⚠️  Warning: Only {len(QAs_df)} questions available after filtering, requested {N}")
+        QAs_df['prompt'] = QAs_df.prompt.apply(lambda x: f'Answer in one sentence. Q:{x}\n A:')
+        print(f"Starting Inference for [{model}], Testset_N: {QAs_df.shape}")
+        exp.run_exp(
+            task=TASKNAME,
+            model_path=model,
+            all_prompts=QAs_df,
+            generations_file_path=generations_file_path if generations_file_path else None,
+            inference_method=inference_method,
+            max_tokens=max_inference_tokens,
+            max_workers=1,
+            max_retries=max_retries,
+            base_delay=base_delay,
+            logger_type=logger_type,
+            activations_path=activations_path,
+            log_file_path=log_file,
+            resume=resume)
+        print('Inference completed')
+
+    elif step == "eval":
+        print(f"Starting Evaluation for {model}")
+        PreciseQAEval(
+            model_path=model,
+            TASKNAME=TASKNAME,
+            generations_file_path=generations_file_path,
+            quick_debug_mode=quick_debug_mode
+        ).run_eval(
+            eval_results_path=eval_results_path,
+            log_file=log_file,
+            resume=resume_eval
+        )
+        print(f'{TASKNAME} Evaluation completed')
+
+    else:
+        raise ValueError(f"Unknown step: {step}")
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--do_generate_prompt', default=False, action='store_true')
@@ -551,117 +658,20 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    # get base path
-    base_path = os.path.dirname(os.path.abspath(__name__))
-    TASKNAME=f'precise_wikiqa_{args.wiki_src}_{args.mode}'
-
-    model_name = args.model.split("/")[-1]
-    print(f"Running {TASKNAME} with model {model_name}")
-
-    QAs_df = None
-    QA_OUTPUT_PATH = f'data/precise_qa/save/qa_{args.wiki_src}_{model_name}_{args.mode}.jsonl'\
-                            if args.qa_output_path == "" \
-                                else args.qa_output_path
-    print(QA_OUTPUT_PATH)
-
     if args.do_generate_prompt:
-        # 1. Generate QA pairs with resume capability
-
-        if os.path.exists(QA_OUTPUT_PATH):
-            QAs = [line for line in jsonlines.open(QA_OUTPUT_PATH, 'r')]
-            print(f"📂 Found existing QA file: {QA_OUTPUT_PATH}")
-            print(f"✅ Loaded {len(QAs)} existing QA pairs")
-            
-            if len(QAs) >= args.N:
-                print(f"✅ Target already reached! {len(QAs)} >= {args.N}")
-                print(f"   Using first {args.N} QA pairs")
-            else:
-                # Need to generate more to reach target
-                remaining = args.N - len(QAs)
-                print(f"📊 Resume statistics:")
-                print(f"   - Target: {args.N}")
-                print(f"   - Already completed: {len(QAs)}")
-                print(f"   - Remaining to generate: {remaining}")
-                print(f"   - Progress: {len(QAs)/args.N*100:.1f}%")
-                
-                if 'goodwiki' in args.wiki_src:
-                    print(f"🚀 Generating {remaining} additional QA pairs...")
-                    new_QAs = precise_qa.precise_QA_generation_run_batch(
-                        wiki_input_path=f"{base_path}/data/wiki_data/doc_goodwiki_h_score.jsonl",
-                        N=remaining,
-                        q_generator=args.q_generator,
-                        output_path=QA_OUTPUT_PATH,
-                        max_workers=args.max_workers_qgen)
-                    print(f"✅ Generated {len(new_QAs)} new QA pairs")
-                    print(f"📊 Total QA pairs now: {len(QAs) + len(new_QAs)}")
-                else:
-                    raise NotImplementedError(f"mode {args.wiki_src} not implemented")
-        else:
-            # No existing file, generate from scratch
-            if 'goodwiki' in args.wiki_src:
-                print(f"🚀 Generating {args.N} QA pairs from scratch...")
-                QAs = precise_qa.precise_QA_generation_run_batch(
-                    wiki_input_path=f"{base_path}/data/wiki_data/doc_goodwiki_h_score.jsonl",
-                    N=args.N,
-                    q_generator=args.q_generator,
-                    output_path=QA_OUTPUT_PATH,
-                    max_workers=args.max_workers_qgen)
-                print(f"✅ Generated {len(QAs)} QA pairs")
-
-            else:
-                raise NotImplementedError(f"mode {args.wiki_src} not implemented")
-            
+        run_step("generate", args.model, wiki_src=args.wiki_src, mode=args.mode, N=args.N,
+                 qa_output_path=args.qa_output_path, q_generator=args.q_generator,
+                 max_workers_qgen=args.max_workers_qgen, logger_type=args.logger_type,
+                 activations_path=args.activations_path, log_file=args.log_file)
     if args.do_inference:
-        QAs = [line for line in jsonlines.open(QA_OUTPUT_PATH, 'r')]
-        QAs_df = pd.DataFrame(QAs)
-
-        # remove answers that are empty or contain something like "answer is in reference document"
-        QAs_df =  QAs_df[~(QAs_df.answer.str.contains('reference document', case = False))]
-        QAs_df =  QAs_df[~(QAs_df.answer.str.contains('Please answer according', case = False))]
-        QAs_df =  QAs_df[~(QAs_df.answer.str.contains('answer based on your response', case = False))]
-        QAs_df = QAs_df[~(QAs_df.answer == '')]
-        # Remove rows where answer only contains the word 'answer' and punctuation
-        QAs_df = QAs_df[~(QAs_df.answer.str.replace(r'[^\w\s]', '', regex=True).str.strip().str.lower() == 'answer')]
-        QAs_df = QAs_df[(QAs_df.h_score_cat > 6)]
-
-        # Use deterministic sampling for resumable inference
-        # Reset index to ensure consistent ordering, then take first N rows
-        QAs_df = QAs_df.reset_index(drop=True)
-        if len(QAs_df) > args.N:
-            print(f"📊 Selecting first {args.N} questions from {len(QAs_df)} filtered questions (deterministic ordering for resume support)")
-            QAs_df = QAs_df.iloc[:args.N]
-        else:
-            print(f"⚠️  Warning: Only {len(QAs_df)} questions available after filtering, requested {args.N}")
-
-        QAs_df['prompt'] = QAs_df.prompt.apply(lambda x : f'Answer in one sentence. Q:{x}\n A:')
-
-        print(f"Starting Inference for [{args.model}], Testset_N: {QAs_df.shape}")
-        exp.run_exp(
-                    task=f"{TASKNAME}",
-                    model_path=args.model,
-                    all_prompts=QAs_df,
-                    generations_file_path=args.generations_file_path if args.generations_file_path else None,
-                    inference_method=args.inference_method, \
-                    max_tokens=args.max_inference_tokens,
-                    max_workers=1,
-                    max_retries=args.max_retries,
-                    base_delay=args.base_delay,
-                    logger_type=args.logger_type,
-                    activations_path=args.activations_path,
-                    log_file_path=args.log_file,
-                    resume=not args.no_resume)
-        print('Inference completed')
-
+        run_step("inference", args.model, wiki_src=args.wiki_src, mode=args.mode, N=args.N,
+                 qa_output_path=args.qa_output_path, generations_file_path=args.generations_file_path,
+                 inference_method=args.inference_method, max_inference_tokens=args.max_inference_tokens,
+                 logger_type=args.logger_type, activations_path=args.activations_path,
+                 log_file=args.log_file, resume=not args.no_resume,
+                 max_retries=args.max_retries, base_delay=args.base_delay)
     if args.do_eval:
-        print(f"Starting Evaluation for {args.model}")
-        PreciseQAEval(
-            model_path=args.model,
-            TASKNAME=TASKNAME,
-            generations_file_path=args.generations_file_path,
-            quick_debug_mode=args.quick_debug_mode
-        ).run_eval(
-            eval_results_path=args.eval_results_path,
-            log_file=args.log_file,
-            resume=not args.no_resume_eval
-        )
-        print(f'{TASKNAME} Evaluation completed')
+        run_step("eval", args.model, wiki_src=args.wiki_src, mode=args.mode,
+                 qa_output_path=args.qa_output_path, generations_file_path=args.generations_file_path,
+                 eval_results_path=args.eval_results_path, quick_debug_mode=args.quick_debug_mode,
+                 log_file=args.log_file, resume_eval=not args.no_resume_eval)

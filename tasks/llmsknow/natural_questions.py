@@ -382,6 +382,36 @@ class NaturalQuestionsInference:
         print(f"\n✅ Inference complete! Results saved to: {self.generations_file_path}")
 
 
+def run_step(step, model, data_dir="external/LLMsKnow/data", output_dir="output",
+             inference_method="vllm", max_tokens=64, temperature=0.0, N=None,
+             generations_file_path=None, eval_results_path=None, log_file=None,
+             quick_debug_mode=False):
+    """Run a single step of the Natural Questions task. Callable from Python directly."""
+    TASKNAME = "natural_questions"
+
+    if step == "inference":
+        inferencer = NaturalQuestionsInference(
+            model_path=model,
+            TASKNAME=TASKNAME,
+            output_base_dir=output_dir,
+            data_dir=data_dir,
+            inference_method=inference_method,
+            n_samples=N,
+            generations_file_path=generations_file_path)
+        inferencer.run_inference(max_tokens=max_tokens, temperature=temperature)
+
+    elif step == "eval":
+        evaluator = NaturalQuestionsEval(
+            model_path=model,
+            TASKNAME=TASKNAME,
+            generations_file_path=generations_file_path,
+            quick_debug_mode=quick_debug_mode)
+        evaluator.run_eval(eval_results_path=eval_results_path, log_file=log_file)
+
+    else:
+        raise ValueError(f"Unknown step: {step}")
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Natural Questions (NQ) inference and evaluation')
 
@@ -410,46 +440,16 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    # Generate task name
-    TASKNAME = "natural_questions"
-
     if args.do_inference:
-        print("="*60)
-        print("NATURAL QUESTIONS - INFERENCE")
-        print("="*60)
-
-        inferencer = NaturalQuestionsInference(
-            model_path=args.model,
-            TASKNAME=TASKNAME,
-            output_base_dir=args.output_dir,
-            data_dir=args.data_dir,
-            inference_method=args.inference_method,
-            n_samples=args.N,
-            generations_file_path=args.generations_file_path
-        )
-
-        inferencer.run_inference(
-            max_tokens=args.max_tokens,
-            temperature=args.temperature
-        )
-
+        run_step("inference", args.model, data_dir=args.data_dir, output_dir=args.output_dir,
+                 inference_method=args.inference_method, max_tokens=args.max_tokens,
+                 temperature=args.temperature, N=args.N,
+                 generations_file_path=args.generations_file_path,
+                 log_file=args.log_file, quick_debug_mode=args.quick_debug_mode)
     if args.do_eval:
-        print("="*60)
-        print("NATURAL QUESTIONS - EVALUATION")
-        print("="*60)
-
-        evaluator = NaturalQuestionsEval(
-            model_path=args.model,
-            TASKNAME=TASKNAME,
-            generations_file_path=args.generations_file_path,
-            quick_debug_mode=args.quick_debug_mode
-        )
-
-        evaluator.run_eval(
-            eval_results_path=args.eval_results_path,
-            log_file=args.log_file
-        )
-
+        run_step("eval", args.model, generations_file_path=args.generations_file_path,
+                 eval_results_path=args.eval_results_path, log_file=args.log_file,
+                 quick_debug_mode=args.quick_debug_mode)
     if not args.do_inference and not args.do_eval:
         print("No action specified. Use --do_inference and/or --do_eval")
         parser.print_help()

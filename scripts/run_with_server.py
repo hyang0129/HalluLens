@@ -5,8 +5,16 @@ Unified script to run HalluLens tasks with automatic server management.
 This script automatically starts the activation logging server and runs one of the three
 generation steps, eliminating the need for manual server startup.
 
-Usage:
+Can be used as a CLI script or imported as a Python module (e.g., from a Jupyter notebook).
+When used as a Python module, the client (inference/task) always runs in the calling thread,
+which avoids tqdm RAM issues in Jupyter.
+
+Usage (CLI):
     python scripts/run_with_server.py --step [generate|inference|eval] [task_options...]
+
+Usage (Python):
+    from scripts.run_with_server import run_experiment
+    run_experiment(step="all", task="precisewikiqa", model="meta-llama/Llama-3.1-8B-Instruct", N=100)
 
 Examples:
     # Generate prompts (PreciseWikiQA) - uses --model for question generation
@@ -16,28 +24,28 @@ Examples:
     python scripts/run_with_server.py --step generate --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --q_generator meta-llama/Llama-3.1-70B-Instruct --N 100
 
     # Run inference (PreciseWikiQA)
-    python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct
+    python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --logger-type lmdb --activations-path shared/goodwiki.zarr/activations.zarr --log-file shared/goodwiki.zarr/server.log
 
     # Run evaluation (PreciseWikiQA)
     python scripts/run_with_server.py --step eval --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct
 
     # Run all steps in sequence (PreciseWikiQA)
-    python scripts/run_with_server.py --step all --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --N 100
+    python scripts/run_with_server.py --step all --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --N 100 --logger-type lmdb --activations-path shared/goodwiki.zarr/activations.zarr --log-file shared/goodwiki.zarr/server.log
 
     # TriviaQA inference and evaluation
-    python scripts/run_with_server.py --step all --task triviaqa --model meta-llama/Llama-3.1-8B-Instruct --N 1000
+    python scripts/run_with_server.py --step all --task triviaqa --model meta-llama/Llama-3.1-8B-Instruct --N 1000 --logger-type lmdb --activations-path shared/triviaqa_unfiltered_dev/activations.lmdb --log-file shared/triviaqa_unfiltered_dev/server.log
 
     # TriviaQA with custom dataset variant
-    python scripts/run_with_server.py --step inference --task triviaqa --model meta-llama/Llama-3.1-8B-Instruct --dataset_variant unfiltered --split dev
+    python scripts/run_with_server.py --step inference --task triviaqa --model meta-llama/Llama-3.1-8B-Instruct --dataset_variant unfiltered --split dev --logger-type lmdb --activations-path shared/triviaqa_unfiltered_dev/activations.lmdb --log-file shared/triviaqa_unfiltered_dev/server.log
 
     # Natural Questions inference and evaluation
-    python scripts/run_with_server.py --step all --task naturalquestions --model meta-llama/Llama-3.1-8B-Instruct --N 1000
+    python scripts/run_with_server.py --step all --task naturalquestions --model meta-llama/Llama-3.1-8B-Instruct --N 1000 --logger-type lmdb --activations-path shared/natural_questions_dev/activations.lmdb --log-file shared/natural_questions_dev/server.log
 
     # Natural Questions with custom settings
-    python scripts/run_with_server.py --step inference --task naturalquestions --model meta-llama/Llama-3.1-8B-Instruct --max_tokens 64 --temperature 0.0
+    python scripts/run_with_server.py --step inference --task naturalquestions --model meta-llama/Llama-3.1-8B-Instruct --max_tokens 64 --temperature 0.0 --logger-type lmdb --activations-path shared/natural_questions_dev/activations.lmdb --log-file shared/natural_questions_dev/server.log
 
     # Custom server log file
-    python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --log-file custom/server.log
+    python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --logger-type lmdb --activations-path custom/activations.lmdb --log-file custom/server.log
 
     # Question generation with increased concurrency (8 parallel requests)
     python scripts/run_with_server.py --step generate --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --N 100 --max-workers-qgen 8
@@ -45,8 +53,8 @@ Examples:
     # LongWiki with concurrent question generation
     python scripts/run_with_server.py --step generate --task longwiki --model meta-llama/Llama-3.1-70B-Instruct --N 50 --max-workers-qgen 4
 
-    # name for the q generator 
-     Llama-3.3-70B-Instruct-Q6_K_L 
+    # name for the q generator
+     Llama-3.3-70B-Instruct-Q6_K_L
     """
 
 import argparse
@@ -63,6 +71,12 @@ sys.path.insert(0, str(project_root))
 
 # Import ServerManager from utils.lm
 from utils import lm
+
+# Use ServerManager from utils.lm
+ServerManager = lm.ServerManager
+get_server_manager = lm.get_server_manager
+set_server_manager = lm.set_server_manager
+
 
 def check_dependencies(task, step):
     """Check if required data files and directories exist for the task and step."""
@@ -140,6 +154,7 @@ def check_dependencies(task, step):
 
     return True
 
+
 def get_task_name(task, **kwargs):
     """Generate the task name based on task type and parameters."""
     if task == "precisewikiqa":
@@ -160,6 +175,7 @@ def get_task_name(task, **kwargs):
     else:
         return task
 
+
 def determine_generations_file_path(task_name, model, generations_file_path=None):
     """Determine the generations file path based on task and model."""
     if generations_file_path:
@@ -169,13 +185,12 @@ def determine_generations_file_path(task_name, model, generations_file_path=None
     model_name = model.split("/")[-1]
     return f"output/{task_name}/{model_name}/generation.jsonl"
 
-# Use ServerManager from utils.lm
-ServerManager = lm.ServerManager
-get_server_manager = lm.get_server_manager
-set_server_manager = lm.set_server_manager
 
 def run_task_step(step, task, model, **kwargs):
-    """Run the specified task step.
+    """Run a single task step by calling the task module directly (no subprocess).
+
+    The task code runs in the calling thread, which is required for Jupyter notebook
+    compatibility (avoids tqdm RAM explosion).
 
     Args:
         step: The step to run (generate, inference, eval)
@@ -185,304 +200,380 @@ def run_task_step(step, task, model, **kwargs):
     """
     logger.info(f"Running {step} step for {task} task with model {model}")
 
-    # Use default environment
-    env = os.environ.copy()
-
-    # Optional: control QA generation chunk size via env var.
-    # This affects question generation code paths that batch work in chunks (default is 5).
+    # Temporarily set QA chunk size env var if specified
     qa_chunk_size = kwargs.get("qa_generation_chunk_size")
+    _old_qa_chunk = os.environ.get("QA_GENERATION_CHUNK_SIZE")
     if qa_chunk_size is not None:
-        env["QA_GENERATION_CHUNK_SIZE"] = str(int(qa_chunk_size))
+        os.environ["QA_GENERATION_CHUNK_SIZE"] = str(int(qa_chunk_size))
 
-    # Build command based on task and step
-    if task == "precisewikiqa":
-        cmd = [sys.executable, "-m", "tasks.shortform.precise_wikiqa"]
-
-        # Add step-specific flags
-        if step == "generate":
-            cmd.append("--do_generate_prompt")
-        elif step == "inference":
-            cmd.append("--do_inference")
-        elif step == "eval":
-            cmd.append("--do_eval")
-
-        # Add common parameters
-        cmd.extend([
-            "--model", model,
-            "--wiki_src", kwargs.get("wiki_src", "goodwiki"),
-            "--mode", kwargs.get("mode", "dynamic"),
-            "--inference_method", kwargs.get("inference_method", "vllm"),
-            "--max_inference_tokens", str(kwargs.get("max_inference_tokens", 256)),
-            "--N", str(kwargs.get("N", 1))
-        ])
-
-        # Add optional parameters
-        if kwargs.get("generations_file_path"):
-            cmd.extend(["--generations_file_path", kwargs["generations_file_path"]])
-        if kwargs.get("eval_results_path"):
-            cmd.extend(["--eval_results_path", kwargs["eval_results_path"]])
-        # Use --model for question generation if q_generator not explicitly specified
-        if step == "generate":
-            q_gen = kwargs.get("q_generator") or model
-            cmd.extend(["--q_generator", q_gen])
-        elif kwargs.get("q_generator"):
-            cmd.extend(["--q_generator", kwargs["q_generator"]])
-        if kwargs.get("qa_output_path"):
-            cmd.extend(["--qa_output_path", kwargs["qa_output_path"]])
-        if kwargs.get("quick_debug_mode"):
-            cmd.append("--quick_debug_mode")
-        if kwargs.get("max_workers_qgen"):
-            cmd.extend(["--max_workers_qgen", str(kwargs["max_workers_qgen"])])
-
-        # Add activation logging parameters
-        if kwargs.get("logger_type"):
-            cmd.extend(["--logger_type", kwargs["logger_type"]])
-        if kwargs.get("activations_path"):
-            cmd.extend(["--activations_path", kwargs["activations_path"]])
-        if kwargs.get("log_file"):
-            cmd.extend(["--log_file", kwargs["log_file"]])
-
-        # Add resume control
-        if not kwargs.get("resume", True):
-            cmd.append("--no-resume")
-        if not kwargs.get("resume_eval", True):
-            cmd.append("--no-resume-eval")
-
-    elif task == "longwiki":
-        cmd = [sys.executable, "-m", "tasks.longwiki.longwiki_main"]
-
-        # Add step-specific flags
-        if step == "generate":
-            cmd.append("--do_generate_prompt")
-        elif step == "inference":
-            cmd.append("--do_inference")
-        elif step == "eval":
-            cmd.append("--do_eval")
-
-        # Add common parameters
-        cmd.extend([
-            "--model", model,
-            "--exp_mode", "longwiki",
-            "--inference_method", kwargs.get("inference_method", "vllm"),
-            "--N", str(kwargs.get("N", 5))
-        ])
-
-        # Add required parameters for longwiki
-        db_path = kwargs.get("db_path", "data/wiki_data/.cache/enwiki-20230401.db")
-        cmd.extend(["--db_path", db_path])
-
-        if kwargs.get("q_generator"):
-            cmd.extend(["--q_generator", kwargs["q_generator"]])
-        if kwargs.get("claim_extractor"):
-            cmd.extend(["--claim_extractor", kwargs["claim_extractor"]])
-        if kwargs.get("abstain_evaluator"):
-            cmd.extend(["--abstain_evaluator", kwargs["abstain_evaluator"]])
-        if kwargs.get("verifier"):
-            cmd.extend(["--verifier", kwargs["verifier"]])
-        if kwargs.get("k"):
-            cmd.extend(["--k", str(kwargs["k"])])
-        if kwargs.get("max_tokens"):
-            cmd.extend(["--max_tokens", str(kwargs["max_tokens"])])
-        if kwargs.get("max_workers"):
-            cmd.extend(["--max_workers", str(kwargs["max_workers"])])
-        if kwargs.get("max_workers_qgen"):
-            cmd.extend(["--max_workers_qgen", str(kwargs["max_workers_qgen"])])
-
-        # Add activation logging parameters
-        if kwargs.get("logger_type"):
-            cmd.extend(["--logger_type", kwargs["logger_type"]])
-        if kwargs.get("activations_path"):
-            cmd.extend(["--activations_path", kwargs["activations_path"]])
-        if kwargs.get("log_file"):
-            cmd.extend(["--log_file", kwargs["log_file"]])
-
-    elif task == "mixedentities":
-        cmd = [sys.executable, "-m", "tasks.refusal_test.nonsense_mixed_entities"]
-
-        # Add step-specific flags
-        if step == "generate":
-            cmd.append("--do_generate_prompt")
-        elif step == "inference":
-            cmd.append("--do_inference")
-        elif step == "eval":
-            cmd.append("--do_eval")
-
-        # Add parameters
-        cmd.extend([
-            "--tested_model", model,
-            "--exp", kwargs.get("exp", "nonsense_all"),
-            "--N", str(kwargs.get("N", 2000)),
-            "--seed", str(kwargs.get("seed", 1)),
-            "--inference_method", kwargs.get("inference_method", "vllm")
-        ])
-
-        # Add activation logging parameters
-        if kwargs.get("logger_type"):
-            cmd.extend(["--logger_type", kwargs["logger_type"]])
-        if kwargs.get("activations_path"):
-            cmd.extend(["--activations_path", kwargs["activations_path"]])
-        if kwargs.get("log_file"):
-            cmd.extend(["--log_file", kwargs["log_file"]])
-
-        # Add resume control
-        if not kwargs.get("resume", True):
-            cmd.append("--no-resume")
-        if not kwargs.get("resume_eval", True):
-            cmd.append("--no-resume-eval")
-
-    elif task == "triviaqa":
-        cmd = [sys.executable, "-m", "tasks.triviaqa.triviaqa"]
-
-        # Add step-specific flags (TriviaQA only has inference and eval, no generate)
-        if step == "generate":
-            # TriviaQA doesn't have a generate step, skip
-            logger.info("TriviaQA doesn't have a generate step - skipping")
-            return None
-        elif step == "inference":
-            cmd.append("--do_inference")
-        elif step == "eval":
-            cmd.append("--do_eval")
-
-        # Add common parameters
-        cmd.extend([
-            "--model", model,
-            "--dataset_variant", kwargs.get("dataset_variant", "unfiltered"),
-            "--split", kwargs.get("split", "dev"),
-            "--inference_method", kwargs.get("inference_method", "vllm"),
-            "--max_inference_tokens", str(kwargs.get("max_inference_tokens", 256)),
-            "--N", str(kwargs.get("N", 1000))
-        ])
-
-        # Add optional parameters
-        if kwargs.get("generations_file_path"):
-            cmd.extend(["--generations_file_path", kwargs["generations_file_path"]])
-        if kwargs.get("eval_results_path"):
-            cmd.extend(["--eval_results_path", kwargs["eval_results_path"]])
-        if kwargs.get("data_dir"):
-            cmd.extend(["--data_dir", kwargs["data_dir"]])
-        if kwargs.get("quick_debug_mode"):
-            cmd.append("--quick_debug_mode")
-        if not kwargs.get("auto_download", True):
-            cmd.append("--no_auto_download")
-
-        # Add activation logging parameters
-        if kwargs.get("logger_type"):
-            cmd.extend(["--logger_type", kwargs["logger_type"]])
-        if kwargs.get("activations_path"):
-            cmd.extend(["--activations_path", kwargs["activations_path"]])
-        if kwargs.get("log_file"):
-            cmd.extend(["--log_file", kwargs["log_file"]])
-
-        # Add resume control
-        if not kwargs.get("resume", True):
-            cmd.append("--no-resume")
-        if not kwargs.get("resume_eval", True):
-            cmd.append("--no-resume-eval")
-
-    elif task == "naturalquestions":
-        cmd = [sys.executable, "-m", "tasks.llmsknow.natural_questions"]
-
-        # Add step-specific flags (NQ only has inference and eval, no generate)
-        if step == "generate":
-            # Natural Questions doesn't have a generate step, skip
-            logger.info("Natural Questions doesn't have a generate step - skipping")
-            return None
-        elif step == "inference":
-            cmd.append("--do_inference")
-        elif step == "eval":
-            cmd.append("--do_eval")
-
-        # Add common parameters
-        cmd.extend([
-            "--model", model,
-            "--inference_method", kwargs.get("inference_method", "vllm"),
-            "--max_tokens", str(kwargs.get("max_tokens", 64)),
-            "--temperature", str(kwargs.get("temperature", 0.0)),
-            "--N", str(kwargs.get("N")) if kwargs.get("N") is not None else "--N"
-        ])
-
-        # Remove --N flag if N is None (process all samples)
-        if kwargs.get("N") is None:
-            # Remove the last two items (--N and its value)
-            cmd = cmd[:-2]
-
-        # Add optional parameters
-        if kwargs.get("data_dir"):
-            cmd.extend(["--data_dir", kwargs["data_dir"]])
-        if kwargs.get("output_dir"):
-            cmd.extend(["--output_dir", kwargs["output_dir"]])
-        if kwargs.get("generations_file_path"):
-            cmd.extend(["--generations_file_path", kwargs["generations_file_path"]])
-        if kwargs.get("eval_results_path"):
-            cmd.extend(["--eval_results_path", kwargs["eval_results_path"]])
-        if kwargs.get("log_file"):
-            cmd.extend(["--log_file", kwargs["log_file"]])
-        if kwargs.get("quick_debug_mode"):
-            cmd.append("--quick_debug_mode")
-
-    else:
-        raise ValueError(f"Unknown task: {task}")
-
-    logger.info(f"Task command: {' '.join(cmd)}")
-
-    # Handle case where command is None (e.g., TriviaQA generate step)
-    if cmd is None:
-        logger.info(f"Step {step} skipped for task {task}")
-        return None
-
-    # Run the task with environment variables, streaming output in real-time
     logger.info("=" * 80)
-    logger.info(f"Starting {step} step - output will be shown below:")
+    logger.info(f"Starting {step} step:")
     logger.info("=" * 80)
-    
-    # Use Popen to stream output in real-time
-    # Important: run tasks from the repository root so any relative paths
-    # (e.g., data/precise_qa/save/...) resolve consistently.
-    process = subprocess.Popen(
-        cmd,
-        cwd=str(project_root),
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,  # Combine stderr with stdout
-        text=True,
-        bufsize=1,  # Line buffered
-        universal_newlines=True
-    )
-    
-    # Stream output line by line
-    for line in process.stdout:
-        print(line, end='', flush=True)
-    
-    # Wait for process to complete
-    return_code = process.wait()
-    
-    logger.info("=" * 80)
-    
-    if return_code != 0:
-        logger.error(f"Task failed with return code {return_code}")
-        raise RuntimeError(f"Task execution failed with return code {return_code}")
 
+    try:
+        if task == "precisewikiqa":
+            from tasks.shortform.precise_wikiqa import run_step as _run
+            _run(
+                step=step,
+                model=model,
+                wiki_src=kwargs.get("wiki_src", "goodwiki"),
+                mode=kwargs.get("mode", "dynamic"),
+                N=kwargs.get("N", 1),
+                qa_output_path=kwargs.get("qa_output_path", ""),
+                q_generator=kwargs.get("q_generator") or model,
+                max_workers_qgen=kwargs.get("max_workers_qgen", 1),
+                generations_file_path=kwargs.get("generations_file_path", ""),
+                eval_results_path=kwargs.get("eval_results_path", ""),
+                quick_debug_mode=kwargs.get("quick_debug_mode", False),
+                inference_method=kwargs.get("inference_method", "vllm"),
+                max_inference_tokens=kwargs.get("max_inference_tokens", 256),
+                logger_type=kwargs.get("logger_type", "lmdb"),
+                activations_path=kwargs.get("activations_path"),
+                log_file=kwargs.get("log_file"),
+                resume=kwargs.get("resume", True),
+                resume_eval=kwargs.get("resume_eval", True),
+            )
+
+        elif task == "longwiki":
+            from tasks.longwiki.longwiki_main import run_step as _run
+            _run(
+                step=step,
+                model=model,
+                exp_mode=kwargs.get("exp_mode", "longwiki"),
+                N=kwargs.get("N", 5),
+                db_path=kwargs.get("db_path", "data/wiki_data/.cache/enwiki-20230401.db"),
+                q_generator=kwargs.get("q_generator", "meta-llama/Meta-Llama-3.1-70B-Instruct"),
+                claim_extractor=kwargs.get("claim_extractor", "meta-llama/Llama-3.1-405B-Instruct-FP8"),
+                abstain_evaluator=kwargs.get("abstain_evaluator", "meta-llama/Llama-3.1-70B-Instruct"),
+                verifier=kwargs.get("verifier", "meta-llama/Llama-3.1-405B-Instruct-FP8"),
+                k=kwargs.get("k", 32),
+                max_tokens=kwargs.get("max_tokens", 1024),
+                max_workers=kwargs.get("max_workers", 64),
+                max_workers_qgen=kwargs.get("max_workers_qgen", 1),
+                inference_method=kwargs.get("inference_method", "vllm"),
+                logger_type=kwargs.get("logger_type", "lmdb"),
+                activations_path=kwargs.get("activations_path"),
+                log_file=kwargs.get("log_file"),
+                resume=kwargs.get("resume", True),
+                resume_eval=kwargs.get("resume_eval", True),
+            )
+
+        elif task == "mixedentities":
+            from tasks.refusal_test.nonsense_mixed_entities import run_step as _run
+            _run(
+                step=step,
+                model=model,
+                exp=kwargs.get("exp", "nonsense_all"),
+                N=kwargs.get("N", 2000),
+                seed=kwargs.get("seed", 1),
+                inference_method=kwargs.get("inference_method", "vllm"),
+                logger_type=kwargs.get("logger_type", "lmdb"),
+                activations_path=kwargs.get("activations_path"),
+                log_file=kwargs.get("log_file"),
+                resume=kwargs.get("resume", True),
+                resume_eval=kwargs.get("resume_eval", True),
+            )
+
+        elif task == "triviaqa":
+            if step == "generate":
+                logger.info("TriviaQA doesn't have a generate step - skipping")
+                return None
+            from tasks.triviaqa.triviaqa import run_step as _run
+            _run(
+                step=step,
+                model=model,
+                dataset_variant=kwargs.get("dataset_variant", "unfiltered"),
+                split=kwargs.get("split", "dev"),
+                N=kwargs.get("N", 1000),
+                data_dir=kwargs.get("data_dir", ""),
+                auto_download=kwargs.get("auto_download", True),
+                generations_file_path=kwargs.get("generations_file_path", ""),
+                eval_results_path=kwargs.get("eval_results_path", ""),
+                quick_debug_mode=kwargs.get("quick_debug_mode", False),
+                inference_method=kwargs.get("inference_method", "vllm"),
+                max_inference_tokens=kwargs.get("max_inference_tokens", 256),
+                logger_type=kwargs.get("logger_type", "lmdb"),
+                activations_path=kwargs.get("activations_path"),
+                log_file=kwargs.get("log_file"),
+                resume=kwargs.get("resume", True),
+                resume_eval=kwargs.get("resume_eval", True),
+            )
+
+        elif task == "naturalquestions":
+            if step == "generate":
+                logger.info("Natural Questions doesn't have a generate step - skipping")
+                return None
+            from tasks.llmsknow.natural_questions import run_step as _run
+            _run(
+                step=step,
+                model=model,
+                data_dir=kwargs.get("data_dir", "external/LLMsKnow/data"),
+                output_dir=kwargs.get("output_dir", "output"),
+                inference_method=kwargs.get("inference_method", "vllm"),
+                max_tokens=kwargs.get("max_tokens", 64),
+                temperature=kwargs.get("temperature", 0.0),
+                N=kwargs.get("N"),
+                generations_file_path=kwargs.get("generations_file_path"),
+                eval_results_path=kwargs.get("eval_results_path"),
+                log_file=kwargs.get("log_file"),
+                quick_debug_mode=kwargs.get("quick_debug_mode", False),
+            )
+
+        else:
+            raise ValueError(f"Unknown task: {task}")
+
+    finally:
+        # Restore QA chunk size env var
+        if qa_chunk_size is not None:
+            if _old_qa_chunk is None:
+                os.environ.pop("QA_GENERATION_CHUNK_SIZE", None)
+            else:
+                os.environ["QA_GENERATION_CHUNK_SIZE"] = _old_qa_chunk
+
+    logger.info("=" * 80)
     logger.success(f"Task {step} completed successfully")
-    
-    # Return a simple result object for compatibility
-    class Result:
-        def __init__(self, returncode):
-            self.returncode = returncode
-            self.stdout = ""
-            self.stderr = ""
-    
-    return Result(return_code)
+
+
+def run_experiment(
+    step, task, model,
+    *,
+    host="0.0.0.0",
+    port=8000,
+    server_startup_timeout=None,
+    logger_type="lmdb",
+    activations_path=None,
+    log_file=None,
+    N=1,
+    wiki_src="goodwiki",
+    mode="dynamic",
+    inference_method="vllm",
+    max_inference_tokens=256,
+    generations_file_path=None,
+    eval_results_path=None,
+    q_generator=None,
+    qa_output_path=None,
+    quick_debug_mode=False,
+    max_workers_qgen=1,
+    qa_generation_chunk_size=None,
+    db_path=None,
+    claim_extractor=None,
+    abstain_evaluator=None,
+    verifier=None,
+    k=32,
+    max_tokens=1024,
+    max_workers=64,
+    exp="nonsense_all",
+    seed=1,
+    dataset_variant="unfiltered",
+    split="dev",
+    data_dir=None,
+    auto_download=True,
+    output_dir=None,
+    temperature=0.0,
+    resume=True,
+    resume_eval=True,
+):
+    """Run a HalluLens experiment with automatic server management.
+
+    This is the main Python-callable entry point. The task code (inference/eval/generate)
+    always runs in the calling thread — safe for Jupyter notebooks.
+    Only the vLLM/llama.cpp server is started as a subprocess.
+
+    Args:
+        step: "generate", "inference", "eval", or "all"
+        task: "precisewikiqa", "longwiki", "mixedentities", "triviaqa", or "naturalquestions"
+        model: Model name or path (e.g. "meta-llama/Llama-3.1-8B-Instruct")
+        All other arguments mirror the CLI flags.
+    """
+    # Change to project root so task modules resolve relative paths correctly
+    os.chdir(str(project_root))
+
+    if not check_dependencies(task, step):
+        raise RuntimeError(f"Missing dependencies for task={task}, step={step}")
+
+    log_file_path = log_file or "server.log"
+    logger.info(f"Server log file: {log_file_path}")
+
+    logger.info("=" * 80)
+    logger.info("HalluLens Task Runner with Automatic Server Management")
+    logger.info("Server will be started automatically when needed")
+    logger.info("=" * 80)
+
+    # Determine which model needs the server
+    server_model = None
+    if step in ["generate", "all"]:
+        server_model = q_generator or model
+    elif step == "inference":
+        server_model = model
+
+    server_manager = None
+    server_was_running = False
+
+    if server_model and inference_method == "vllm":
+        server_was_running = lm.check_server_health(f"http://{host}:{port}")
+
+        if not server_was_running:
+            model_lower = server_model.lower()
+            is_gguf = (
+                model_lower.endswith('.gguf') or
+                '/gguf' in model_lower or
+                'gguf/' in model_lower or
+                '-gguf' in model_lower or
+                'q6_k' in model_lower or
+                'q4_k' in model_lower or
+                'iq3_m' in model_lower or
+                'iq4' in model_lower
+            )
+
+            if is_gguf:
+                logger.info(f"🔧 GGUF model detected - using llama.cpp server instead of vLLM")
+                logger.info(f"🚀 Starting llama.cpp server for model: {server_model}")
+
+                env = os.environ.copy()
+                if activations_path:
+                    env["ACTIVATION_STORAGE_PATH"] = activations_path
+                if logger_type:
+                    env["ACTIVATION_LOGGER_TYPE"] = logger_type
+                if log_file_path:
+                    env["SERVER_LOG_FILE"] = log_file_path
+                env["DEFAULT_MODEL"] = server_model
+
+                if '/' in server_model:
+                    gguf_dir = os.path.dirname(server_model)
+                    env["GGUF_MODELS_DIR"] = gguf_dir
+                    logger.info(f"GGUF models directory: {gguf_dir}")
+
+                cmd = [sys.executable, "-m", "uvicorn", "activation_logging.server:app",
+                       "--host", host, "--port", str(port)]
+
+                logger.info(f"Server command: {' '.join(cmd)}")
+                logger.info(f"Environment: DEFAULT_MODEL={server_model}")
+
+                server_process = subprocess.Popen(
+                    cmd, env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+                logger.info("Waiting for llama.cpp server to be ready...")
+                max_wait = server_startup_timeout or 120
+                start_time = time.time()
+
+                while time.time() - start_time < max_wait:
+                    if lm.check_server_health(f"http://{host}:{port}"):
+                        logger.success(f"✅ Llama.cpp server started at http://{host}:{port}")
+
+                        class _SimpleServerManager:
+                            def __init__(self, process):
+                                self.server_process = process
+                            def stop_server(self):
+                                if self.server_process:
+                                    logger.info("Terminating llama.cpp server...")
+                                    self.server_process.terminate()
+                                    try:
+                                        self.server_process.wait(timeout=10)
+                                    except subprocess.TimeoutExpired:
+                                        logger.warning("Server didn't terminate gracefully, killing...")
+                                        self.server_process.kill()
+
+                        server_manager = _SimpleServerManager(server_process)
+                        break
+                    time.sleep(3)
+                else:
+                    logger.error("Failed to start llama.cpp server within timeout")
+                    server_process.terminate()
+                    raise RuntimeError("Failed to start llama.cpp server within timeout")
+            else:
+                logger.info(f"🚀 Starting vLLM server for model: {server_model}")
+                server_manager = lm.ServerManager(
+                    model=server_model,
+                    host=host,
+                    port=port,
+                    logger_type=logger_type,
+                    activations_path=activations_path,
+                    log_file_path=log_file_path,
+                    startup_timeout=server_startup_timeout,
+                )
+                server_manager.start_server()
+                lm.set_server_manager(server_manager)
+                logger.success(f"✅ Server started at http://{host}:{port}")
+        else:
+            logger.info(f"✅ Server already running at http://{host}:{port}")
+            logger.warning("⚠️  Note: Using existing server (not managed by this script)")
+
+    try:
+        task_kwargs = dict(
+            N=N,
+            wiki_src=wiki_src,
+            mode=mode,
+            inference_method=inference_method,
+            max_inference_tokens=max_inference_tokens,
+            generations_file_path=generations_file_path,
+            eval_results_path=eval_results_path,
+            q_generator=q_generator,
+            qa_output_path=qa_output_path,
+            quick_debug_mode=quick_debug_mode,
+            max_workers_qgen=max_workers_qgen,
+            qa_generation_chunk_size=qa_generation_chunk_size,
+            logger_type=logger_type,
+            activations_path=activations_path,
+            log_file=log_file_path,
+            resume=resume,
+            resume_eval=resume_eval,
+            # LongWiki specific
+            db_path=db_path,
+            claim_extractor=claim_extractor,
+            abstain_evaluator=abstain_evaluator,
+            verifier=verifier,
+            k=k,
+            max_tokens=max_tokens,
+            max_workers=max_workers,
+            # Mixed entities specific
+            exp=exp,
+            seed=seed,
+            # TriviaQA specific
+            dataset_variant=dataset_variant,
+            split=split,
+            data_dir=data_dir,
+            auto_download=auto_download,
+            # Natural Questions specific
+            output_dir=output_dir,
+            temperature=temperature,
+        )
+
+        if step == "all":
+            steps = ["inference", "eval"] if task == "triviaqa" else ["generate", "inference", "eval"]
+            for s in steps:
+                logger.info(f"Running step {s}...")
+                result = run_task_step(s, task, model, **task_kwargs)
+                if result is None:
+                    logger.info(f"Step {s} was skipped")
+        else:
+            result = run_task_step(step, task, model, **task_kwargs)
+            if result is None:
+                logger.info(f"Step {step} was skipped")
+
+        logger.success("All steps completed successfully!")
+
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+        raise
+    finally:
+        if server_manager:
+            logger.info("🛑 Stopping server...")
+            server_manager.stop_server()
+            lm.set_server_manager(None)
+            logger.success("✅ Server stopped")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run HalluLens tasks with automatic server management")
-    
+
     # Required arguments
     parser.add_argument("--step", required=True, choices=["generate", "inference", "eval", "all"],
                        help="Which step to run (or 'all' for all steps)")
     parser.add_argument("--task", required=True, choices=["precisewikiqa", "longwiki", "mixedentities", "triviaqa", "naturalquestions"],
                        help="Which task to run")
     parser.add_argument("--model", required=True, help="Model to use")
-    
+
     # Server configuration
     parser.add_argument("--host", default="0.0.0.0", help="Server host")
     parser.add_argument("--port", type=int, default=8000, help="Server port")
@@ -551,218 +642,54 @@ def main():
     parser.add_argument("--no-resume-eval", action="store_true", help="Disable automatic resume specifically for evaluation step")
 
     args = parser.parse_args()
-    
-    # Check dependencies first
-    if not check_dependencies(args.task, args.step):
-        sys.exit(1)
-
-    # Determine log file path for server behavior logs
-    log_file_path = args.log_file
-    if not log_file_path:
-        # Default to server.log in current working directory
-        log_file_path = "server.log"
-    
-    logger.info(f"Server log file: {log_file_path}")
-
-    logger.info("=" * 80)
-    logger.info("HalluLens Task Runner with Automatic Server Management")
-    logger.info("Server will be started automatically when needed")
-    logger.info("=" * 80)
-
-    # Determine which model needs the server
-    server_model = None
-    if args.step in ["generate", "all"]:
-        # For generate step, use q_generator model if specified, otherwise use main model
-        server_model = args.q_generator or args.model
-    elif args.step in ["inference"]:
-        # For inference step, use main model
-        server_model = args.model
-
-    # Start server if needed and not already running
-    server_manager = None
-    server_was_running = False
-
-    if server_model and args.inference_method == "vllm":
-        server_was_running = lm.check_server_health(f"http://{args.host}:{args.port}")
-
-        if not server_was_running:
-            # Check if it's a GGUF model (file or directory)
-            model_lower = server_model.lower()
-            is_gguf = (
-                model_lower.endswith('.gguf') or 
-                '/gguf' in model_lower or 
-                'gguf/' in model_lower or
-                '-gguf' in model_lower or
-                'q6_k' in model_lower or
-                'q4_k' in model_lower or
-                'iq3_m' in model_lower or
-                'iq4' in model_lower
-            )
-            
-            if is_gguf:
-                logger.info(f"🔧 GGUF model detected - using llama.cpp server instead of vLLM")
-                logger.info(f"🚀 Starting llama.cpp server for model: {server_model}")
-                
-                # Set environment variables for server configuration
-                env = os.environ.copy()
-                if args.activations_path:
-                    env["ACTIVATION_STORAGE_PATH"] = args.activations_path
-                if args.logger_type:
-                    env["ACTIVATION_LOGGER_TYPE"] = args.logger_type
-                if log_file_path:
-                    env["SERVER_LOG_FILE"] = log_file_path
-                
-                # Set the default model to the GGUF model path
-                env["DEFAULT_MODEL"] = server_model
-                
-                # Set GGUF models directory if model contains a directory path
-                if '/' in server_model:
-                    gguf_dir = os.path.dirname(server_model)
-                    env["GGUF_MODELS_DIR"] = gguf_dir
-                    logger.info(f"GGUF models directory: {gguf_dir}")
-                
-                # Build server command for llama.cpp
-                cmd = [sys.executable, "-m", "uvicorn", "activation_logging.server:app",
-                       "--host", args.host,
-                       "--port", str(args.port)]
-                    
-                logger.info(f"Server command: {' '.join(cmd)}")
-                logger.info(f"Environment: DEFAULT_MODEL={server_model}")
-                
-                # Start server process
-                server_process = subprocess.Popen(
-                    cmd,
-                    env=env,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                
-                # Wait for server to be ready
-                logger.info("Waiting for llama.cpp server to be ready...")
-                max_wait = args.server_startup_timeout or 120  # seconds (GGUF models can take longer to load)
-                start_time = time.time()
-                
-                while time.time() - start_time < max_wait:
-                    if lm.check_server_health(f"http://{args.host}:{args.port}"):
-                        logger.success(f"✅ Llama.cpp server started at http://{args.host}:{args.port}")
-                        # Create a simple server manager-like object to track the process
-                        class SimpleServerManager:
-                            def __init__(self, process):
-                                self.server_process = process
-                            def stop_server(self):
-                                if self.server_process:
-                                    logger.info("Terminating llama.cpp server...")
-                                    self.server_process.terminate()
-                                    try:
-                                        self.server_process.wait(timeout=10)
-                                    except subprocess.TimeoutExpired:
-                                        logger.warning("Server didn't terminate gracefully, killing...")
-                                        self.server_process.kill()
-                        
-                        server_manager = SimpleServerManager(server_process)
-                        break
-                    time.sleep(3)
-                else:
-                    logger.error("Failed to start llama.cpp server within timeout")
-                    logger.error("Check server logs for details")
-                    server_process.terminate()
-                    sys.exit(1)
-            else:
-                logger.info(f"🚀 Starting vLLM server for model: {server_model}")
-                server_manager = lm.ServerManager(
-                    model=server_model,
-                    host=args.host,
-                    port=args.port,
-                    logger_type=args.logger_type,
-                    activations_path=args.activations_path,
-                    log_file_path=log_file_path,
-                    startup_timeout=args.server_startup_timeout,
-                )
-                server_manager.start_server()
-                lm.set_server_manager(server_manager)
-                logger.success(f"✅ Server started at http://{args.host}:{args.port}")
-        else:
-            logger.info(f"✅ Server already running at http://{args.host}:{args.port}")
-            logger.warning("⚠️  Note: Using existing server (not managed by this script)")
 
     try:
-
-        # Prepare task kwargs
-        task_kwargs = {
-            "N": args.N,
-            "wiki_src": args.wiki_src,
-            "mode": args.mode,
-            "inference_method": args.inference_method,
-            "max_inference_tokens": args.max_inference_tokens,
-            "generations_file_path": args.generations_file_path,
-            "eval_results_path": args.eval_results_path,
-            "q_generator": args.q_generator,
-            "qa_output_path": args.qa_output_path,
-            "quick_debug_mode": args.quick_debug_mode,
-            "max_workers_qgen": args.max_workers_qgen,
-            "qa_generation_chunk_size": args.qa_generation_chunk_size,
-            # Activation logging parameters
-            "logger_type": args.logger_type,
-            "activations_path": args.activations_path,
-            "log_file": log_file_path,
-            # Resume control
-            "resume": not args.no_resume,
-            "resume_eval": not args.no_resume_eval,
-            # LongWiki specific
-            "db_path": args.db_path,
-            "claim_extractor": args.claim_extractor,
-            "abstain_evaluator": args.abstain_evaluator,
-            "verifier": args.verifier,
-            "k": args.k,
-            "max_tokens": args.max_tokens,
-            "max_workers": args.max_workers,
-            # Mixed entities specific
-            "exp": args.exp,
-            "seed": args.seed,
-            # TriviaQA specific
-            "dataset_variant": args.dataset_variant,
-            "split": args.split,
-            "data_dir": args.data_dir,
-            "auto_download": args.auto_download
-        }
-
-        # Run task step(s)
-        if args.step == "all":
-            # Run all steps in sequence
-            if args.task == "triviaqa":
-                # TriviaQA only has inference and eval steps
-                steps = ["inference", "eval"]
-            else:
-                steps = ["generate", "inference", "eval"]
-
-            for step in steps:
-                logger.info(f"Running step {step}...")
-                result = run_task_step(step, args.task, args.model, **task_kwargs)
-                if result is None:
-                    logger.info(f"Step {step} was skipped")
-        else:
-            # Run single step
-            result = run_task_step(args.step, args.task, args.model, **task_kwargs)
-            if result is None:
-                logger.info(f"Step {args.step} was skipped")
-
-        logger.success("All steps completed successfully!")
-
-    except KeyboardInterrupt:
-        logger.info("Interrupted by user")
+        run_experiment(
+            step=args.step,
+            task=args.task,
+            model=args.model,
+            host=args.host,
+            port=args.port,
+            server_startup_timeout=args.server_startup_timeout,
+            logger_type=args.logger_type,
+            activations_path=args.activations_path,
+            log_file=args.log_file,
+            N=args.N,
+            wiki_src=args.wiki_src,
+            mode=args.mode,
+            inference_method=args.inference_method,
+            max_inference_tokens=args.max_inference_tokens,
+            generations_file_path=args.generations_file_path,
+            eval_results_path=args.eval_results_path,
+            q_generator=args.q_generator,
+            qa_output_path=args.qa_output_path,
+            quick_debug_mode=args.quick_debug_mode,
+            max_workers_qgen=args.max_workers_qgen,
+            qa_generation_chunk_size=args.qa_generation_chunk_size,
+            db_path=args.db_path,
+            claim_extractor=args.claim_extractor,
+            abstain_evaluator=args.abstain_evaluator,
+            verifier=args.verifier,
+            k=args.k,
+            max_tokens=args.max_tokens,
+            max_workers=args.max_workers,
+            exp=args.exp,
+            seed=args.seed,
+            dataset_variant=args.dataset_variant,
+            split=args.split,
+            data_dir=args.data_dir,
+            auto_download=args.auto_download,
+            output_dir=args.output_dir,
+            temperature=args.temperature,
+            resume=not args.no_resume,
+            resume_eval=not args.no_resume_eval,
+        )
     except Exception as e:
         logger.error(f"Error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
-    finally:
-        # Stop server if we started it
-        if server_manager:
-            logger.info("🛑 Stopping vLLM server...")
-            server_manager.stop_server()
-            lm.set_server_manager(None)
-            logger.success("✅ Server stopped")
+
 
 if __name__ == "__main__":
     main()

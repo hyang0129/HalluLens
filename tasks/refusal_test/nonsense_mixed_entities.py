@@ -142,6 +142,48 @@ class NonsenseMixedEval(NonsenseNameEval):
         return abstains_eval_res
 
 
+def run_step(step, model, exp="nonsense_all", N=2000, seed=1,
+             inference_method="vllm", prompt_output_path="", output_base_dir="output",
+             logger_type="lmdb", activations_path=None, log_file=None,
+             resume=True, resume_eval=True,
+             infer_overwrite=False, eval_overwrite=False):
+    """Run a single step of the MixedEntities task. Callable from Python directly."""
+    tested_model_name = model.split("/")[-1]
+    EXP = exp
+
+    if not prompt_output_path:
+        import os as _os
+        current_path = _os.getcwd()
+        prompt_output_path = '/'.join(current_path.split('/')[:5]) + f"/data/{EXP}/"
+    PROMPT_OUTPUT_DIR = prompt_output_path
+    prompt_path = f"{PROMPT_OUTPUT_DIR}/save/{tested_model_name}/{EXP}_{seed}_{N}.csv"
+    TASKNAME = f"{EXP}_{seed}_{N}"
+
+    if step == "generate":
+        generator = NonsenseMixedGeneration(seed, N, EXP)
+        prompt_objs = generator.generate_prompts()
+        generator.save_prompt_csv(prompt_objs, prompt_path)
+
+    elif step == "inference":
+        inference = NonsenseMixedInference(
+            TASKNAME, output_base_dir, model, prompt_path, seed,
+            inference_method, logger_type, activations_path, log_file)
+        if infer_overwrite:
+            inference.remove_existing_files()
+        inference.run_inference()
+
+    elif step == "eval":
+        if 'gemma' in model:
+            med_safety_filtered_model = True
+            eval_obj = NonsenseMixedEval(TASKNAME, output_base_dir, model, prompt_path, med_safety_filtered_model)
+        else:
+            eval_obj = NonsenseMixedEval(TASKNAME, output_base_dir, model, prompt_path)
+        eval_obj.run_eval(eval_overwrite, resume=resume_eval)
+
+    else:
+        raise ValueError(f"Unknown step: {step}")
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--exp', type=str, default='nonsense_all')
@@ -173,40 +215,16 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    # set variables
-    N = args.N
-    EXP = args.exp #nonsense_medicine
-    seed = args.seed
-    tested_model = args.tested_model
-    tested_model_name = tested_model.split("/")[-1]
-    output_base_dir = args.output_base_dir
-    inference_method = args.inference_method
-
-    if not args.prompt_output_path:
-        current_path = os.getcwd()
-        args.prompt_output_path = '/'.join(current_path.split('/')[:5]) + f"/data/{EXP}/"
-    PROMPT_OUTPUT_DIR = args.prompt_output_path
-    prompt_path = f"{PROMPT_OUTPUT_DIR}/save/{tested_model_name}/{EXP}_{seed}_{N}.csv"
-    TASKNAME = f"{EXP}_{seed}_{N}"
-
-    # generate prompts
     if args.do_generate_prompt:
-        generator = NonsenseMixedGeneration(seed, N, EXP)
-        prompt_objs = generator.generate_prompts()
-        generator.save_prompt_csv(prompt_objs, prompt_path)
-
-    # run inference
+        run_step("generate", args.tested_model, exp=args.exp, N=args.N, seed=args.seed,
+                 prompt_output_path=args.prompt_output_path, output_base_dir=args.output_base_dir)
     if args.do_inference:
-        inference = NonsenseMixedInference(TASKNAME, output_base_dir, tested_model, prompt_path, seed, inference_method, args.logger_type, args.activations_path, args.log_file)
-        if args.infer_overwrite:
-            inference.remove_existing_files()
-        inference.run_inference()
-            
-    # run evaluation
+        run_step("inference", args.tested_model, exp=args.exp, N=args.N, seed=args.seed,
+                 inference_method=args.inference_method, prompt_output_path=args.prompt_output_path,
+                 output_base_dir=args.output_base_dir, logger_type=args.logger_type,
+                 activations_path=args.activations_path, log_file=args.log_file,
+                 infer_overwrite=args.infer_overwrite)
     if args.do_eval:
-        if 'gemma' in tested_model:
-            med_safety_filtered_model = True
-            eval = NonsenseMixedEval(TASKNAME, output_base_dir, tested_model, prompt_path, med_safety_filtered_model)
-        else:
-            eval = NonsenseMixedEval(TASKNAME, output_base_dir, tested_model, prompt_path)
-        res = eval.run_eval(args.eval_overwrite, resume=not args.no_resume_eval)
+        run_step("eval", args.tested_model, exp=args.exp, N=args.N, seed=args.seed,
+                 prompt_output_path=args.prompt_output_path, output_base_dir=args.output_base_dir,
+                 resume_eval=not args.no_resume_eval, eval_overwrite=args.eval_overwrite)

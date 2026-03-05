@@ -31,6 +31,7 @@ python scripts/run_with_server.py \
   --inference_method vllm \
   --logger-type json \
   --activations-path "$OUTPUT_DIR/activations.json" \
+  --log-file "$OUTPUT_DIR/server.log" \
   --max_inference_tokens 64 \
   --N $N \
   --qa_output_path "data/precise_qa/save/qa_${WIKI_SRC}_Llama-3.1-8B-Instruct_${MODE}.jsonl" \

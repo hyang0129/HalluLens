@@ -133,7 +133,10 @@ python scripts/run_with_server.py \
     --step all \
     --task precisewikiqa \
     --model meta-llama/Llama-3.1-8B-Instruct \
-    --N 100
+  --N 100 \
+  --logger-type lmdb \
+  --activations-path shared/goodwiki.zarr/activations.zarr \
+  --log-file shared/goodwiki.zarr/server.log
 
 # Or use enhanced bash script
 bash scripts/task1_precisewikiqa_with_server.sh --N 100
@@ -180,6 +183,7 @@ python scripts/run_with_server.py \
   --inference_method vllm \
   --logger-type json \
   --activations-path test_output/activations.json \
+  --log-file test_output/server.log \
   --max_inference_tokens 256 \
   --N 100 \
   --qa_output_path data/precise_qa/save/qa_goodwiki_Llama-3.1-8B-Instruct_gguf_big.jsonl \
@@ -213,6 +217,7 @@ python scripts/run_with_server.py \
   --inference_method vllm \
   --logger-type lmdb \
   --activations-path test_output/activations.lmdb \
+  --log-file test_output/server.log \
   --max_inference_tokens 256 \
   --N 100 \
   --qa_output_path data/precise_qa/save/qa_goodwiki_Llama-3.1-8B-Instruct_gguf_big.jsonl \

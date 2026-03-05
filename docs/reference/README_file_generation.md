@@ -139,11 +139,14 @@ python scripts/run_with_server.py \
     --step all \
     --task precisewikiqa \
     --model meta-llama/Llama-3.1-8B-Instruct \
-    --N 100
+  --N 100 \
+  --logger-type lmdb \
+  --activations-path shared/goodwiki.zarr/activations.zarr \
+  --log-file shared/goodwiki.zarr/server.log
 
 # Or run individual steps
 python scripts/run_with_server.py --step generate --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --N 100
-python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct
+python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --logger-type lmdb --activations-path shared/goodwiki.zarr/activations.zarr --log-file shared/goodwiki.zarr/server.log
 python scripts/run_with_server.py --step eval --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct
 ```
 
@@ -191,13 +194,13 @@ python scripts/run_with_server.py --step eval --task precisewikiqa --model meta-
 
 ```bash
 # Quick single experiment
-python scripts/run_with_server.py --step all --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --N 10
+python scripts/run_with_server.py --step all --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --N 10 --logger-type lmdb --activations-path shared/goodwiki.zarr/activations.zarr --log-file shared/goodwiki.zarr/server.log
 
 # Custom activation storage
-python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --activations-path experiments/exp1.lmdb
+python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --logger-type lmdb --activations-path experiments/exp1.lmdb --log-file experiments/server.log
 
 # JSON logging instead of LMDB
-python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --logger-type json --activations-path json_data/activations
+python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --logger-type json --activations-path json_data/activations --log-file json_data/server.log
 
 # Enhanced bash script (drop-in replacement)
 bash scripts/task1_precisewikiqa_with_server.sh --N 100 --step all
