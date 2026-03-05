@@ -21,6 +21,12 @@ import subprocess
 import sys
 from loguru import logger
 
+# Respect the centralized log-level env var for stderr output.
+# The file sink always logs at INFO so nothing is lost.
+from utils.log_config import configure_logging  # noqa: E402
+
+configure_logging()  # picks up HALLULENS_LOG_LEVEL from parent process
+
 def main():
     parser = argparse.ArgumentParser(description="Run vLLM server with activation logging")
     parser.add_argument("--model", type=str, default="mistralai/Mistral-7B-Instruct-v0.2",
@@ -53,8 +59,8 @@ def main():
     
     args = parser.parse_args()
 
-    # Configure loguru logger
-    logger.remove()  # Remove default handler
+    # Add file sink for server logs (always at INFO level).
+    # The stderr sink is already configured by configure_logging() above.
     logger.add(
         args.log_file,
         rotation="10 MB",

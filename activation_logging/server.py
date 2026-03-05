@@ -21,6 +21,14 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from loguru import logger
 import uvicorn
+
+# Respect centralized log level for stderr output
+try:
+    from utils.log_config import configure_logging
+    configure_logging()  # picks up HALLULENS_LOG_LEVEL from parent
+except ImportError:
+    pass  # running standalone without project root on path
+
 from activation_logging.activations_logger import ActivationsLogger
 from llama_cpp import Llama  # Import for llama.cpp Python bindings
 
@@ -142,9 +150,9 @@ def _shrink_shortform_response(response_text: str, intent: Optional[str], max_ch
         chosen = chosen[:max_chars].rstrip()
     return chosen
 
-# Configure logger to use the same log file as parent process if specified
+# Add file sink for server logs when SERVER_LOG_FILE is set.
+# The stderr sink is already configured by configure_logging() above.
 if "SERVER_LOG_FILE" in os.environ:
-    logger.remove()  # Remove default handler
     logger.add(
         os.environ["SERVER_LOG_FILE"],
         rotation="10 MB",
