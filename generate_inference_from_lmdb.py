@@ -175,17 +175,17 @@ def main():
     if args.check_files:
         print(f"Checking if LMDB file exists: {args.lmdb_path}")
         if Path(args.lmdb_path).exists():
-            print("✅ LMDB file found")
+            print(" LMDB file found")
         else:
-            print("❌ LMDB file not found")
+            print(" LMDB file not found")
             return 1
     
     try:
         count = generate_inference_jsonl(args.lmdb_path, args.output_path)
-        print(f"✅ Successfully generated {count} inference entries")
+        print(f" Successfully generated {count} inference entries")
         return 0
     except Exception as e:
-        print(f"❌ Error generating inference JSONL: {e}")
+        print(f" Error generating inference JSONL: {e}")
         import traceback
         traceback.print_exc()
         return 1

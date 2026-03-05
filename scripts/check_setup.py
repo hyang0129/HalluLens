@@ -18,24 +18,24 @@ sys.path.insert(0, str(project_root))
 def check_file_exists(file_path, description):
     """Check if a file exists and log the result."""
     if file_path.exists():
-        logger.success(f"✅ {description}: {file_path}")
+        logger.success(f" {description}: {file_path}")
         return True
     else:
-        logger.error(f"❌ {description}: {file_path}")
+        logger.error(f" {description}: {file_path}")
         return False
 
 def check_directory_exists(dir_path, description):
     """Check if a directory exists and log the result."""
     if dir_path.exists() and dir_path.is_dir():
-        logger.success(f"✅ {description}: {dir_path}")
+        logger.success(f" {description}: {dir_path}")
         return True
     else:
-        logger.error(f"❌ {description}: {dir_path}")
+        logger.error(f" {description}: {dir_path}")
         return False
 
 def check_precisewikiqa_setup():
     """Check setup for PreciseWikiQA task."""
-    logger.info("🔍 Checking PreciseWikiQA setup...")
+    logger.info(" Checking PreciseWikiQA setup...")
     
     all_good = True
     
@@ -56,7 +56,7 @@ def check_precisewikiqa_setup():
 
 def check_longwiki_setup():
     """Check setup for LongWiki task."""
-    logger.info("🔍 Checking LongWiki setup...")
+    logger.info(" Checking LongWiki setup...")
     
     all_good = True
     
@@ -77,7 +77,7 @@ def check_longwiki_setup():
 
 def check_mixedentities_setup():
     """Check setup for Mixed Entities task."""
-    logger.info("🔍 Checking Mixed Entities setup...")
+    logger.info(" Checking Mixed Entities setup...")
     
     all_good = True
     
@@ -90,7 +90,7 @@ def check_mixedentities_setup():
         medicine_file = refusal_dir / "medicine_data.csv"  # Example file
         # Note: Actual file names may vary, this is just an example
         if not medicine_file.exists():
-            logger.warning(f"⚠️  Medicine data may be missing in {refusal_dir}")
+            logger.warning(f"  Medicine data may be missing in {refusal_dir}")
     
     output_dir = project_root / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -100,7 +100,7 @@ def check_mixedentities_setup():
 
 def check_activation_logging_setup():
     """Check activation logging setup."""
-    logger.info("🔍 Checking activation logging setup...")
+    logger.info(" Checking activation logging setup...")
     
     all_good = True
     
@@ -125,7 +125,7 @@ def check_activation_logging_setup():
 
 def print_download_instructions():
     """Print instructions for downloading missing data."""
-    logger.info("\n📥 To download missing data, run:")
+    logger.info("\n To download missing data, run:")
     logger.info("  python data/download_data.py --all")
     logger.info("\nOr for specific tasks:")
     logger.info("  python data/download_data.py --precisewikiqa")
@@ -134,7 +134,7 @@ def print_download_instructions():
 
 def main():
     """Main setup checker."""
-    logger.info("🚀 HalluLens Setup Checker")
+    logger.info(" HalluLens Setup Checker")
     logger.info("=" * 50)
     
     all_tasks_ready = True
@@ -148,28 +148,28 @@ def main():
     all_tasks_ready = precisewikiqa_ready and longwiki_ready and mixedentities_ready and activation_ready
     
     logger.info("\n" + "=" * 50)
-    logger.info("📊 Setup Summary:")
+    logger.info(" Setup Summary:")
     
-    status_icon = "✅" if precisewikiqa_ready else "❌"
+    status_icon = "[OK]" if precisewikiqa_ready else "[MISSING]"
     logger.info(f"  {status_icon} PreciseWikiQA: {'Ready' if precisewikiqa_ready else 'Missing data'}")
     
-    status_icon = "✅" if longwiki_ready else "❌"
+    status_icon = "[OK]" if longwiki_ready else "[MISSING]"
     logger.info(f"  {status_icon} LongWiki: {'Ready' if longwiki_ready else 'Missing data'}")
     
-    status_icon = "✅" if mixedentities_ready else "❌"
+    status_icon = "[OK]" if mixedentities_ready else "[MISSING]"
     logger.info(f"  {status_icon} Mixed Entities: {'Ready' if mixedentities_ready else 'Missing data'}")
     
-    status_icon = "✅" if activation_ready else "❌"
+    status_icon = "[OK]" if activation_ready else "[MISSING]"
     logger.info(f"  {status_icon} Activation Logging: {'Ready' if activation_ready else 'Missing components'}")
     
     if all_tasks_ready:
-        logger.success("\n🎉 All tasks are ready! You can now run:")
+        logger.success("\n All tasks are ready! You can now run:")
         logger.success("  python scripts/run_with_server.py --step all --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --N 10")
     else:
-        logger.warning("\n⚠️  Some tasks are missing required data.")
+        logger.warning("\n  Some tasks are missing required data.")
         print_download_instructions()
     
-    logger.info("\n📖 For more information, see:")
+    logger.info("\n For more information, see:")
     logger.info("  - README.md")
     logger.info("  - README_file_generation.md")
     logger.info("  - scripts/example_usage.sh")

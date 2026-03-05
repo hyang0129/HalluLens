@@ -31,10 +31,10 @@ def test_server_manager_import():
         assert hasattr(lm, 'get_server_manager'), "get_server_manager not found in utils.lm"
         assert hasattr(lm, 'set_server_manager'), "set_server_manager not found in utils.lm"
         
-        logger.success("✅ ServerManager successfully imported from utils.lm")
+        logger.success(" ServerManager successfully imported from utils.lm")
         return True
     except Exception as e:
-        logger.error(f"❌ Import test failed: {e}")
+        logger.error(f" Import test failed: {e}")
         return False
 
 def test_server_manager_creation():
@@ -57,10 +57,10 @@ def test_server_manager_creation():
         assert server_manager.port == 8000
         assert server_manager.logger_type == "lmdb"
         
-        logger.success("✅ ServerManager created successfully")
+        logger.success(" ServerManager created successfully")
         return True
     except Exception as e:
-        logger.error(f"❌ Creation test failed: {e}")
+        logger.error(f" Creation test failed: {e}")
         return False
 
 def test_global_server_manager():
@@ -90,10 +90,10 @@ def test_global_server_manager():
         lm.set_server_manager(None)
         assert lm.get_server_manager() is None, "Server manager should be None after clearing"
         
-        logger.success("✅ Global server manager registry works correctly")
+        logger.success(" Global server manager registry works correctly")
         return True
     except Exception as e:
-        logger.error(f"❌ Global registry test failed: {e}")
+        logger.error(f" Global registry test failed: {e}")
         return False
 
 def test_run_exp_parameters():
@@ -120,10 +120,10 @@ def test_run_exp_parameters():
         assert params['server_host'].default == "0.0.0.0", "server_host should default to 0.0.0.0"
         assert params['server_port'].default == 8000, "server_port should default to 8000"
         
-        logger.success("✅ run_exp() has correct server management parameters")
+        logger.success(" run_exp() has correct server management parameters")
         return True
     except Exception as e:
-        logger.error(f"❌ Parameter test failed: {e}")
+        logger.error(f" Parameter test failed: {e}")
         return False
 
 def test_restart_server_function():
@@ -148,10 +148,10 @@ def test_restart_server_function():
         # Clean up
         lm.set_server_manager(None)
         
-        logger.success("✅ restart_server() can access global server manager")
+        logger.success(" restart_server() can access global server manager")
         return True
     except Exception as e:
-        logger.error(f"❌ restart_server test failed: {e}")
+        logger.error(f" restart_server test failed: {e}")
         return False
 
 def main():
@@ -189,7 +189,7 @@ def main():
     total = len(results)
     
     for test_name, result in results:
-        status = "✅ PASS" if result else "❌ FAIL"
+        status = "PASS" if result else "FAIL"
         logger.info(f"{status}: {test_name}")
     
     logger.info("")

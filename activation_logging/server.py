@@ -856,7 +856,7 @@ def run_inference_llamacpp(prompt, max_tokens, temperature, top_p, model_path):
     # Get model from cache or load it
     logger.info(f"Getting llama.cpp model from cache or loading...")
     llm = get_llamacpp_model(model_path)
-    logger.info(f"✓ Model loaded/retrieved successfully")
+    logger.info(f" Model loaded/retrieved successfully")
     
     # Run inference
     logger.info(f"Running llama.cpp inference with prompt of length {len(prompt)} characters")
@@ -871,7 +871,7 @@ def run_inference_llamacpp(prompt, max_tokens, temperature, top_p, model_path):
     )
     
     inference_time = time.time() - inference_start
-    logger.info(f"✓ llama.cpp inference completed in {inference_time:.2f} seconds")
+    logger.info(f" llama.cpp inference completed in {inference_time:.2f} seconds")
     logger.info(f"  Output type: {type(output)}")
     logger.info(f"  Output keys: {output.keys() if isinstance(output, dict) else 'N/A'}")
     
@@ -999,7 +999,7 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
     logger.info(f"GGUF detection result: {is_gguf}")
     
     if is_gguf:
-        logger.info(f"✓ Detected GGUF model, using llama.cpp for inference")
+        logger.info(f" Detected GGUF model, using llama.cpp for inference")
         logger.info(f"Calling run_inference_llamacpp() with model_path={model_name}")
         try:
             logger.info(f"Entering run_inference_llamacpp()...")
@@ -1010,11 +1010,11 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
                 top_p=top_p,
                 model_path=model_name
             )
-            logger.info(f"✓ GGUF inference completed successfully")
+            logger.info(f" GGUF inference completed successfully")
             logger.info(f"  Response length: {len(result[0]) if result and result[0] else 0} chars")
             return result
         except Exception as e:
-            logger.error(f"✗ GGUF inference failed with exception: {type(e).__name__}")
+            logger.error(f" GGUF inference failed with exception: {type(e).__name__}")
             logger.error(f"  Error message: {e}")
             import traceback
             logger.error(f"  Traceback:\n{traceback.format_exc()}")
@@ -1022,7 +1022,7 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
 
     # vLLM fast path for certain quantized HF checkpoints.
     if _should_use_vllm_backend(model_name):
-        logger.info("✓ Detected vLLM-target model, using vLLM backend for inference")
+        logger.info(" Detected vLLM-target model, using vLLM backend for inference")
         try:
             return run_inference_vllm(
                 prompt=prompt,
@@ -1032,7 +1032,7 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
                 model_name=model_name,
             )
         except Exception as e:
-            logger.error("✗ vLLM inference failed (%s): %s", type(e).__name__, e)
+            logger.error(" vLLM inference failed (%s): %s", type(e).__name__, e)
             raise
 
     # Otherwise use the standard Hugging Face model loading

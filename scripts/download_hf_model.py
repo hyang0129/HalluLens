@@ -30,10 +30,10 @@ def check_authentication():
     try:
         from huggingface_hub import whoami
         user_info = whoami()
-        print(f"✅ Authenticated as: {user_info['name']}")
+        print(f" Authenticated as: {user_info['name']}")
         return True
     except Exception as e:
-        print(f"❌ Not authenticated with Hugging Face!")
+        print(f" Not authenticated with Hugging Face!")
         print(f"   Error: {e}")
         print(f"\nPlease authenticate with: huggingface-cli login")
         return False
@@ -52,7 +52,7 @@ def download_model(model_id, cache_dir=None, allow_patterns=None, ignore_pattern
     Returns:
         Path to downloaded model directory
     """
-    print(f"📦 Downloading model: {model_id}")
+    print(f" Downloading model: {model_id}")
     print(f"   This may take a while depending on model size and network speed...")
     
     if cache_dir:
@@ -73,21 +73,21 @@ def download_model(model_id, cache_dir=None, allow_patterns=None, ignore_pattern
             local_files_only=False
         )
         
-        print(f"✅ Model downloaded successfully!")
+        print(f" Model downloaded successfully!")
         print(f"   Location: {model_path}")
         return model_path
         
     except HfHubHTTPError as e:
         if "401" in str(e) or "403" in str(e):
-            print(f"❌ Authentication error!")
+            print(f" Authentication error!")
             print(f"   Make sure you:")
             print(f"   1. Accepted the license at https://huggingface.co/{model_id}")
             print(f"   2. Authenticated with: huggingface-cli login")
         else:
-            print(f"❌ Error downloading model: {e}")
+            print(f" Error downloading model: {e}")
         sys.exit(1)
     except Exception as e:
-        print(f"❌ Unexpected error: {e}")
+        print(f" Unexpected error: {e}")
         sys.exit(1)
 
 
@@ -135,7 +135,7 @@ def main():
     ignore_patterns = None
     
     if args.weights_only:
-        print("📋 Weights-only mode: downloading model weights and essential configs")
+        print(" Weights-only mode: downloading model weights and essential configs")
         allow_patterns = [
             "*.safetensors",
             "*.bin",
@@ -159,7 +159,7 @@ def main():
     
     print()
     print("=" * 80)
-    print("✅ Download Complete!")
+    print(" Download Complete!")
     print("=" * 80)
     print()
     print(f"Model path: {model_path}")

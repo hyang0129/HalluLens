@@ -135,9 +135,9 @@ class PreciseQAEval:
             self.test_df = self.test_df.head(5)
 
     def eval_abstention(self, evaluator, resume=True):
-        print(f"🔍 Starting abstention evaluation with {evaluator}")
+        print(f" Starting abstention evaluation with {evaluator}")
         abs_path = f'{self.output_path}/abstain_eval_raw.jsonl'
-        print(f"📁 Abstention logs will be saved to: {abs_path}")
+        print(f" Abstention logs will be saved to: {abs_path}")
 
         abstain_prompts = [
                 ABSTAIN_PROMPT_UPDATED.format(
@@ -146,32 +146,32 @@ class PreciseQAEval:
                 for _, g in self.test_df.iterrows()
             ]
 
-        print(f"📊 Generated {len(abstain_prompts)} abstention evaluation prompts")
+        print(f" Generated {len(abstain_prompts)} abstention evaluation prompts")
 
         # Check for existing results and resume if requested
         existing_results = []
         prompts_to_process = abstain_prompts
 
         if resume and os.path.exists(abs_path):
-            print(f"📂 Found existing abstention evaluation file: {abs_path}")
+            print(f" Found existing abstention evaluation file: {abs_path}")
             try:
                 with open(abs_path, 'r') as f:
                     for line in f:
                         existing_results.append(json.loads(line)['eval_res'])
 
                 if len(existing_results) > 0:
-                    print(f"✅ Loaded {len(existing_results)} existing abstention evaluations")
+                    print(f" Loaded {len(existing_results)} existing abstention evaluations")
                     if len(existing_results) >= len(abstain_prompts):
-                        print(f"✅ All {len(abstain_prompts)} abstention evaluations already complete!")
+                        print(f" All {len(abstain_prompts)} abstention evaluations already complete!")
                         return existing_results
 
                     prompts_to_process = abstain_prompts[len(existing_results):]
-                    print(f"📊 Resume statistics:")
+                    print(f" Resume statistics:")
                     print(f"   - Total prompts: {len(abstain_prompts)}")
                     print(f"   - Already completed: {len(existing_results)}")
                     print(f"   - Remaining to process: {len(prompts_to_process)}")
             except Exception as e:
-                print(f"⚠️  Warning: Could not load existing results: {e}")
+                print(f"  Warning: Could not load existing results: {e}")
                 print(f"   Starting from scratch...")
                 existing_results = []
                 prompts_to_process = abstain_prompts
@@ -181,7 +181,7 @@ class PreciseQAEval:
         server_manager = None
 
         if not server_was_running:
-            print(f"🚀 Starting evaluation server for {evaluator}...")
+            print(f" Starting evaluation server for {evaluator}...")
             server_manager = lm.ServerManager(
                 model=evaluator,
                 host="0.0.0.0",
@@ -191,9 +191,9 @@ class PreciseQAEval:
             )
             server_manager.start_server()
             lm.set_server_manager(server_manager)
-            print(f"✅ Evaluation server started successfully")
+            print(f" Evaluation server started successfully")
         else:
-            print(f"🔄 Using existing server for evaluation")
+            print(f" Using existing server for evaluation")
 
         # Initialize progress tracking for client logging
         lm.initialize_progress_tracking(len(abstain_prompts), already_completed=len(existing_results))
@@ -203,7 +203,7 @@ class PreciseQAEval:
             file_mode = 'a' if existing_results else 'w'
 
             with open(abs_path, file_mode, encoding='utf-8') as f:
-                print(f"🔄 Processing {len(prompts_to_process)} abstention evaluation requests...")
+                print(f" Processing {len(prompts_to_process)} abstention evaluation requests...")
                 from tqdm import tqdm
 
                 new_results = []
@@ -217,11 +217,11 @@ class PreciseQAEval:
 
             # Combine existing and new results
             abstains_eval_raw = existing_results + new_results
-            print(f"✅ Abstention evaluation completed successfully ({len(abstains_eval_raw)} total)")
+            print(f" Abstention evaluation completed successfully ({len(abstains_eval_raw)} total)")
         finally:
             # Stop server if we started it
             if server_manager and not server_was_running:
-                print("🛑 Stopping evaluation server...")
+                print(" Stopping evaluation server...")
                 server_manager.stop_server()
                 lm.set_server_manager(None)
         
@@ -281,10 +281,10 @@ class PreciseQAEval:
         return refusal_res, abstains_eval_raw
 
     def judge_hallucination(self, evaluator, resume=True):
-        print(f"🔍 Starting hallucination evaluation with {evaluator}")
+        print(f" Starting hallucination evaluation with {evaluator}")
 
         halu_path = f'{self.output_path}/halu_eval_raw.jsonl'
-        print(f"📁 Hallucination logs will be saved to: {halu_path}")
+        print(f" Hallucination logs will be saved to: {halu_path}")
 
         halu_prompts = [
             IS_HALLUCINATION_RESPONSE.format(
@@ -292,32 +292,32 @@ class PreciseQAEval:
             ) for _, g in self.test_df.iterrows()
         ]
 
-        print(f"📊 Generated {len(halu_prompts)} hallucination evaluation prompts")
+        print(f" Generated {len(halu_prompts)} hallucination evaluation prompts")
 
         # Check for existing results and resume if requested
         existing_results = []
         prompts_to_process = halu_prompts
 
         if resume and os.path.exists(halu_path):
-            print(f"📂 Found existing hallucination evaluation file: {halu_path}")
+            print(f" Found existing hallucination evaluation file: {halu_path}")
             try:
                 with open(halu_path, 'r') as f:
                     for line in f:
                         existing_results.append(json.loads(line)['eval_res'])
 
                 if len(existing_results) > 0:
-                    print(f"✅ Loaded {len(existing_results)} existing hallucination evaluations")
+                    print(f" Loaded {len(existing_results)} existing hallucination evaluations")
                     if len(existing_results) >= len(halu_prompts):
-                        print(f"✅ All {len(halu_prompts)} hallucination evaluations already complete!")
+                        print(f" All {len(halu_prompts)} hallucination evaluations already complete!")
                         return existing_results
 
                     prompts_to_process = halu_prompts[len(existing_results):]
-                    print(f"📊 Resume statistics:")
+                    print(f" Resume statistics:")
                     print(f"   - Total prompts: {len(halu_prompts)}")
                     print(f"   - Already completed: {len(existing_results)}")
                     print(f"   - Remaining to process: {len(prompts_to_process)}")
             except Exception as e:
-                print(f"⚠️  Warning: Could not load existing results: {e}")
+                print(f"  Warning: Could not load existing results: {e}")
                 print(f"   Starting from scratch...")
                 existing_results = []
                 prompts_to_process = halu_prompts
@@ -328,7 +328,7 @@ class PreciseQAEval:
             server_manager = None
 
             if not server_was_running:
-                print(f"🚀 Starting evaluation server for {evaluator}...")
+                print(f" Starting evaluation server for {evaluator}...")
                 server_manager = lm.ServerManager(
                     model=evaluator,
                     host="0.0.0.0",
@@ -338,9 +338,9 @@ class PreciseQAEval:
                 )
                 server_manager.start_server()
                 lm.set_server_manager(server_manager)
-                print(f"✅ Evaluation server started successfully")
+                print(f" Evaluation server started successfully")
             else:
-                print(f"🔄 Using existing server for evaluation")
+                print(f" Using existing server for evaluation")
 
             # Initialize progress tracking for client logging
             lm.initialize_progress_tracking(len(halu_prompts), already_completed=len(existing_results))
@@ -350,7 +350,7 @@ class PreciseQAEval:
                 file_mode = 'a' if existing_results else 'w'
                 
                 with open(halu_path, file_mode, encoding='utf-8') as f:
-                    print(f"🔄 Processing {len(prompts_to_process)} hallucination evaluation requests...")
+                    print(f" Processing {len(prompts_to_process)} hallucination evaluation requests...")
                     from tqdm import tqdm
 
                     new_results = []
@@ -364,11 +364,11 @@ class PreciseQAEval:
 
                 # Combine existing and new results
                 halu_eval_raw = existing_results + new_results
-                print(f"✅ Hallucination evaluation completed successfully ({len(halu_eval_raw)} total)")
+                print(f" Hallucination evaluation completed successfully ({len(halu_eval_raw)} total)")
             finally:
                 # Stop server if we started it
                 if server_manager and not server_was_running:
-                    print("🛑 Stopping evaluation server...")
+                    print(" Stopping evaluation server...")
                     server_manager.stop_server()
                     lm.set_server_manager(None)
 
@@ -417,31 +417,31 @@ class PreciseQAEval:
         logger.info(f"PreciseWikiQA evaluation client logging configured to: {client_log_file}")
 
         print("=" * 80)
-        print(f"🎯 Starting PreciseWikiQA Evaluation")
-        print(f"📊 Model: {self.model_name}")
-        print(f"📂 Generations file: {self.generations_file_path}")
-        print(f"📈 Total samples: {len(self.test_df)}")
-        print(f"🔧 Abstention evaluator: {self.abtention_evaluator}")
-        print(f"🔧 Hallucination evaluator: {self.halu_evaluator}")
-        print(f"📝 Client logs: {client_log_file}")
-        print(f"🔄 Resume mode: {'enabled' if resume else 'disabled'}")
+        print(f" Starting PreciseWikiQA Evaluation")
+        print(f" Model: {self.model_name}")
+        print(f" Generations file: {self.generations_file_path}")
+        print(f" Total samples: {len(self.test_df)}")
+        print(f" Abstention evaluator: {self.abtention_evaluator}")
+        print(f" Hallucination evaluator: {self.halu_evaluator}")
+        print(f" Client logs: {client_log_file}")
+        print(f" Resume mode: {'enabled' if resume else 'disabled'}")
         print("=" * 80)
 
         # Step 1: Abstention Evaluation
-        print(f"\n📋 Step 1/3: Abstention Evaluation")
+        print(f"\n Step 1/3: Abstention Evaluation")
         abstantion_res, abstantion_raw_gen = self.eval_abstention(self.abtention_evaluator, resume=resume)
 
         # Step 2: Hallucination Evaluation
-        print(f"\n📋 Step 2/3: Hallucination Evaluation")
+        print(f"\n Step 2/3: Hallucination Evaluation")
         halu_test_raw_gen = self.judge_hallucination(self.halu_evaluator, resume=resume)
 
 
         # Step 3: Processing Results
-        print(f"\n📋 Step 3/3: Processing Results")
-        print(f"🔄 Processing abstention and hallucination evaluation results...")
+        print(f"\n Step 3/3: Processing Results")
+        print(f" Processing abstention and hallucination evaluation results...")
         abstantion_res, halu_test_res = self.process_res(abstantion_raw_gen, halu_test_raw_gen)
 
-        print(f"📊 Computing final metrics...")
+        print(f" Computing final metrics...")
         not_abstained = sum([1 for x in abstantion_res if x == False])
         if not_abstained == 0:
             hallu_rate_not_abstain = 0
@@ -451,7 +451,7 @@ class PreciseQAEval:
         refusal_rate = sum([1 for is_abstaining in abstantion_res if is_abstaining == True])/ (len(abstantion_res) + 1e-8)
         correct_rate = sum([1 for is_hallucinated in halu_test_res if is_hallucinated == False])/ (len(halu_test_res) + 1e-8)
 
-        print(f"📈 Evaluation Results Summary:")
+        print(f" Evaluation Results Summary:")
         print(f"   - Total samples evaluated: {len(abstantion_res)}")
         print(f"   - Samples not abstained: {not_abstained}")
         print(f"   - Hallucination rate (non-abstained): {hallu_rate_not_abstain:.3f}")
@@ -484,17 +484,17 @@ class PreciseQAEval:
             # If using custom generations path, show co-location message
             default_generations_path = f'output/{TASKNAME}/{self.model_name}/generation.jsonl'
             if self.generations_file_path != default_generations_path:
-                print(f"📁 Co-locating eval results with generations file in: {self.output_path}")
+                print(f" Co-locating eval results with generations file in: {self.output_path}")
 
         # Ensure directory exists
         res_dir = os.path.dirname(res_path)
         if res_dir:  # Only create directory if path has a directory component
             os.makedirs(res_dir, exist_ok=True)
 
-        print(f"💾 Saving final evaluation results to: {res_path}")
+        print(f" Saving final evaluation results to: {res_path}")
         with open(res_path, 'w') as f:
             json.dump(res, f, indent=4)
-        print(f"✅ Evaluation results saved successfully")
+        print(f" Evaluation results saved successfully")
 
         # Print the results 
         print("=" * 80)
@@ -510,7 +510,7 @@ class PreciseQAEval:
         print(f"  False Refusal Rate: {refusal_rate:.3f} %")
         print(f"  Correct Rate: {correct_rate:.3f} %")
         print("-" * 80)
-        print(f"🎉 PreciseWikiQA evaluation completed successfully!")
+        print(f" PreciseWikiQA evaluation completed successfully!")
         print("=" * 80)
 
 
@@ -533,40 +533,40 @@ def run_step(step, model, wiki_src="goodwiki", mode="dynamic", N=1,
     if step == "generate":
         if os.path.exists(QA_OUTPUT_PATH):
             QAs = [line for line in jsonlines.open(QA_OUTPUT_PATH, 'r')]
-            print(f"📂 Found existing QA file: {QA_OUTPUT_PATH}")
-            print(f"✅ Loaded {len(QAs)} existing QA pairs")
+            print(f" Found existing QA file: {QA_OUTPUT_PATH}")
+            print(f" Loaded {len(QAs)} existing QA pairs")
             if len(QAs) >= N:
-                print(f"✅ Target already reached! {len(QAs)} >= {N}")
+                print(f" Target already reached! {len(QAs)} >= {N}")
                 print(f"   Using first {N} QA pairs")
             else:
                 remaining = N - len(QAs)
-                print(f"📊 Resume statistics:")
+                print(f" Resume statistics:")
                 print(f"   - Target: {N}")
                 print(f"   - Already completed: {len(QAs)}")
                 print(f"   - Remaining to generate: {remaining}")
                 print(f"   - Progress: {len(QAs)/N*100:.1f}%")
                 if 'goodwiki' in wiki_src:
-                    print(f"🚀 Generating {remaining} additional QA pairs...")
+                    print(f" Generating {remaining} additional QA pairs...")
                     new_QAs = precise_qa.precise_QA_generation_run_batch(
                         wiki_input_path=f"{base_path}/data/wiki_data/doc_goodwiki_h_score.jsonl",
                         N=remaining,
                         q_generator=q_generator,
                         output_path=QA_OUTPUT_PATH,
                         max_workers=max_workers_qgen)
-                    print(f"✅ Generated {len(new_QAs)} new QA pairs")
-                    print(f"📊 Total QA pairs now: {len(QAs) + len(new_QAs)}")
+                    print(f" Generated {len(new_QAs)} new QA pairs")
+                    print(f" Total QA pairs now: {len(QAs) + len(new_QAs)}")
                 else:
                     raise NotImplementedError(f"mode {wiki_src} not implemented")
         else:
             if 'goodwiki' in wiki_src:
-                print(f"🚀 Generating {N} QA pairs from scratch...")
+                print(f" Generating {N} QA pairs from scratch...")
                 QAs = precise_qa.precise_QA_generation_run_batch(
                     wiki_input_path=f"{base_path}/data/wiki_data/doc_goodwiki_h_score.jsonl",
                     N=N,
                     q_generator=q_generator,
                     output_path=QA_OUTPUT_PATH,
                     max_workers=max_workers_qgen)
-                print(f"✅ Generated {len(QAs)} QA pairs")
+                print(f" Generated {len(QAs)} QA pairs")
             else:
                 raise NotImplementedError(f"mode {wiki_src} not implemented")
 
@@ -581,10 +581,10 @@ def run_step(step, model, wiki_src="goodwiki", mode="dynamic", N=1,
         QAs_df = QAs_df[(QAs_df.h_score_cat > 6)]
         QAs_df = QAs_df.reset_index(drop=True)
         if len(QAs_df) > N:
-            print(f"📊 Selecting first {N} questions from {len(QAs_df)} filtered questions (deterministic ordering for resume support)")
+            print(f" Selecting first {N} questions from {len(QAs_df)} filtered questions (deterministic ordering for resume support)")
             QAs_df = QAs_df.iloc[:N]
         else:
-            print(f"⚠️  Warning: Only {len(QAs_df)} questions available after filtering, requested {N}")
+            print(f"  Warning: Only {len(QAs_df)} questions available after filtering, requested {N}")
         QAs_df['prompt'] = QAs_df.prompt.apply(lambda x: f'Answer in one sentence. Q:{x}\n A:')
         print(f"Starting Inference for [{model}], Testset_N: {QAs_df.shape}")
         exp.run_exp(

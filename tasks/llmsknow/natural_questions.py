@@ -191,8 +191,8 @@ class NaturalQuestionsEval:
             client_log_file = f"{generations_dir}/eval_client.log"
 
         print(f"Starting Natural Questions evaluation for model: {self.model_name}")
-        print(f"📝 Evaluation logs: {client_log_file}")
-        print(f"🔄 Resume mode: {'enabled' if resume else 'disabled'}")
+        print(f" Evaluation logs: {client_log_file}")
+        print(f" Resume mode: {'enabled' if resume else 'disabled'}")
 
         # Evaluate correctness using NQ string matching
         binary_correctness = self.evaluate_correctness()
@@ -240,14 +240,14 @@ class NaturalQuestionsEval:
         if eval_results_path is None:
             eval_results_path = f'{self.output_path}/eval_results.json'
 
-        print(f"💾 Saving evaluation results to: {eval_results_path}")
+        print(f" Saving evaluation results to: {eval_results_path}")
 
         with open(eval_results_path, 'w') as f:
             json.dump(res, f, indent=4)
 
         # Save detailed results to JSONL
         eval_raw_path = f'{self.output_path}/raw_eval_res.jsonl'
-        print(f"💾 Saving detailed results to: {eval_raw_path}")
+        print(f" Saving detailed results to: {eval_raw_path}")
 
         with jsonlines.open(eval_raw_path, mode='w') as writer:
             for idx in range(total_samples):
@@ -263,7 +263,7 @@ class NaturalQuestionsEval:
 
         # Print summary
         print("\n" + "="*60)
-        print("📊 EVALUATION SUMMARY - Natural Questions")
+        print(" EVALUATION SUMMARY - Natural Questions")
         print("="*60)
         print(f"Model: {self.model_name}")
         print(f"Total Samples: {total_samples}")
@@ -379,7 +379,7 @@ class NaturalQuestionsInference:
                     }
                     writer.write(result)
 
-        print(f"\n✅ Inference complete! Results saved to: {self.generations_file_path}")
+        print(f"\n Inference complete! Results saved to: {self.generations_file_path}")
 
 
 def run_step(step, model, data_dir="external/LLMsKnow/data", output_dir="output",

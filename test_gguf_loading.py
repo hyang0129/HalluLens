@@ -55,21 +55,21 @@ def test_gguf_loading(model_path, run_inference=False):
                 elif split_files:
                     # Split model detected - use the first part
                     model_path = split_files[0]
-                    print(f"\n   ✓ Split model detected, using first part: {os.path.basename(model_path)}")
+                    print(f"\n    Split model detected, using first part: {os.path.basename(model_path)}")
                     print(f"     (llama.cpp will automatically load all parts)")
                 else:
-                    print(f"\n   ⚠️  Multiple .gguf files found. Please specify which one to use.")
+                    print(f"\n     Multiple .gguf files found. Please specify which one to use.")
                     print(f"     Example: python test_gguf_loading.py --model \"{gguf_files[0]}\"")
                     return False
             else:
-                print(f"   ❌ No .gguf files found in directory!")
+                print(f"    No .gguf files found in directory!")
                 return False
         else:
             size_gb = os.path.getsize(model_path) / (1024**3)
             print(f"   Type: File")
             print(f"   Size: {size_gb:.2f} GB")
     else:
-        print(f"   ❌ Path does not exist!")
+        print(f"    Path does not exist!")
         
         # Try to find similar paths
         parent_dir = os.path.dirname(model_path)
@@ -93,9 +93,9 @@ def test_gguf_loading(model_path, run_inference=False):
     print(f"\n2. Importing llama-cpp-python...")
     try:
         from llama_cpp import Llama
-        print(f"   ✓ Successfully imported llama_cpp.Llama")
+        print(f"    Successfully imported llama_cpp.Llama")
     except ImportError as e:
-        print(f"   ❌ Failed to import llama-cpp-python: {e}")
+        print(f"    Failed to import llama-cpp-python: {e}")
         print(f"   Install with: pip install llama-cpp-python")
         return False
     
@@ -109,9 +109,9 @@ def test_gguf_loading(model_path, run_inference=False):
             verbose=True,
             n_ctx=4096,
         )
-        print(f"   ✓ Successfully loaded model!")
+        print(f"    Successfully loaded model!")
     except Exception as e:
-        print(f"   ❌ Failed to load model: {e}")
+        print(f"    Failed to load model: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -131,15 +131,15 @@ def test_gguf_loading(model_path, run_inference=False):
             )
             response = output['choices'][0]['text']
             print(f"   Response: {response}")
-            print(f"   ✓ Inference successful!")
+            print(f"    Inference successful!")
         except Exception as e:
-            print(f"   ❌ Inference failed: {e}")
+            print(f"    Inference failed: {e}")
             import traceback
             traceback.print_exc()
             return False
     
     print(f"\n{'=' * 80}")
-    print(f"✅ All tests passed!")
+    print(f" All tests passed!")
     print(f"{'=' * 80}")
     return True
 

@@ -46,11 +46,11 @@ class JupyterAPIExecutor:
             csrf_match = re.search(r'name="_xsrf" value="([^"]+)"', login_response.text)
 
             if not csrf_match:
-                print("❌ Could not find CSRF token in login page")
+                print(" Could not find CSRF token in login page")
                 return False
 
             csrf_token = csrf_match.group(1)
-            print(f"🔑 Found CSRF token: {csrf_token[:20]}...")
+            print(f" Found CSRF token: {csrf_token[:20]}...")
 
             # Attempt login with password and CSRF token
             login_data = {
@@ -60,17 +60,17 @@ class JupyterAPIExecutor:
             response = self.session.post(urljoin(self.base_url, '/login'), data=login_data)
 
             if response.status_code == 302:
-                print("✅ Successfully logged in with password (redirected)")
+                print(" Successfully logged in with password (redirected)")
                 return True
             elif response.status_code == 200 and 'login' not in response.url:
-                print("✅ Successfully logged in with password")
+                print(" Successfully logged in with password")
                 return True
             else:
-                print(f"❌ Login failed with status {response.status_code}")
+                print(f" Login failed with status {response.status_code}")
                 print(f"   Response URL: {response.url}")
                 return False
         except Exception as e:
-            print(f"❌ Error during login: {e}")
+            print(f" Error during login: {e}")
             return False
 
     def check_server_status(self):
@@ -78,39 +78,39 @@ class JupyterAPIExecutor:
         try:
             response = self.session.get(urljoin(self.base_url, '/api/status'))
             if response.status_code == 200:
-                print("✅ Jupyter server is accessible")
+                print(" Jupyter server is accessible")
                 return True
             elif response.status_code == 403:
-                print("🔐 Jupyter server requires authentication (403 Forbidden)")
+                print(" Jupyter server requires authentication (403 Forbidden)")
 
                 # Try to login with password if provided
                 if self.password:
-                    print("🔑 Attempting login with password...")
+                    print(" Attempting login with password...")
                     if self.login_with_password():
                         # Retry status check after login
                         response = self.session.get(urljoin(self.base_url, '/api/status'))
                         if response.status_code == 200:
-                            print("✅ Jupyter server is accessible after login")
+                            print(" Jupyter server is accessible after login")
                             return True
                         else:
-                            print(f"❌ Still getting status {response.status_code} after login")
+                            print(f" Still getting status {response.status_code} after login")
                             return False
                     else:
-                        print("❌ Password login failed")
+                        print(" Password login failed")
                         return False
                 else:
                     print("   Try: python jupyter_api_executor.py --password 123")
                     print("   Or: python jupyter_api_executor.py --token YOUR_TOKEN")
                     return False
             else:
-                print(f"❌ Jupyter server returned status {response.status_code}")
+                print(f" Jupyter server returned status {response.status_code}")
                 return False
         except requests.exceptions.ConnectionError:
-            print("❌ Cannot connect to Jupyter server")
+            print(" Cannot connect to Jupyter server")
             print(f"   Make sure the tunnel is active: ssh ... -L 8887:gpu-node:8887")
             return False
         except Exception as e:
-            print(f"❌ Error checking server status: {e}")
+            print(f" Error checking server status: {e}")
             return False
     
     def list_terminals(self):
@@ -119,15 +119,15 @@ class JupyterAPIExecutor:
             response = self.session.get(urljoin(self.base_url, '/api/terminals'))
             if response.status_code == 200:
                 terminals = response.json()
-                print(f"📋 Found {len(terminals)} active terminals:")
+                print(f" Found {len(terminals)} active terminals:")
                 for term in terminals:
                     print(f"   Terminal {term['name']}")
                 return terminals
             else:
-                print(f"❌ Failed to list terminals: {response.status_code}")
+                print(f" Failed to list terminals: {response.status_code}")
                 return []
         except Exception as e:
-            print(f"❌ Error listing terminals: {e}")
+            print(f" Error listing terminals: {e}")
             return []
     
     def create_terminal(self):
@@ -136,13 +136,13 @@ class JupyterAPIExecutor:
             response = self.session.post(urljoin(self.base_url, '/api/terminals'))
             if response.status_code == 200:
                 terminal = response.json()
-                print(f"✅ Created terminal: {terminal['name']}")
+                print(f" Created terminal: {terminal['name']}")
                 return terminal
             else:
-                print(f"❌ Failed to create terminal: {response.status_code}")
+                print(f" Failed to create terminal: {response.status_code}")
                 return None
         except Exception as e:
-            print(f"❌ Error creating terminal: {e}")
+            print(f" Error creating terminal: {e}")
             return None
     
     def execute_command(self, command, terminal_name=None, timeout=10):
@@ -159,7 +159,7 @@ class JupyterAPIExecutor:
                 else:
                     return False, "Failed to create terminal"
 
-        print(f"🚀 Executing command in terminal {terminal_name}: {command}")
+        print(f" Executing command in terminal {terminal_name}: {command}")
 
         try:
             # Build WebSocket URL for JupyterLab - try multiple formats
@@ -179,13 +179,13 @@ class JupyterAPIExecutor:
 
             success = False
             for ws_url in ws_patterns:
-                print(f"🔗 Trying WebSocket: {ws_url}")
+                print(f" Trying WebSocket: {ws_url}")
                 try:
                     success = self._try_websocket_connection(ws_url, headers, command)
                     if success:
                         break
                 except Exception as e:
-                    print(f"   ❌ Failed: {str(e)[:100]}...")
+                    print(f"    Failed: {str(e)[:100]}...")
                     continue
 
             if not success:
@@ -194,7 +194,7 @@ class JupyterAPIExecutor:
             return True, "Command executed successfully"
 
         except Exception as e:
-            print(f"❌ Error executing command: {e}")
+            print(f" Error executing command: {e}")
             return False, f"Execution failed: {e}"
 
     def _try_websocket_connection(self, ws_url, headers, command):
@@ -221,7 +221,7 @@ class JupyterAPIExecutor:
             message = json.dumps(['stdin', command + '\r\n'])
             ws.send(message)
             command_sent = True
-            print(f"   📤 Sent command: {command}")
+            print(f"    Sent command: {command}")
 
         def on_error(ws, error):
             raise Exception(f"WebSocket error: {error}")
@@ -252,7 +252,7 @@ class JupyterAPIExecutor:
 
         if command_sent and output:
             output_text = ''.join(output)
-            print(f"\n   ✅ Success! Output length: {len(output_text)} chars")
+            print(f"\n    Success! Output length: {len(output_text)} chars")
             return True
         else:
             raise Exception("No output received or command not sent")
@@ -268,7 +268,7 @@ def main():
 
     args = parser.parse_args()
 
-    print("🧪 Minimal Jupyter API Executor - Testing Mode")
+    print(" Minimal Jupyter API Executor - Testing Mode")
     print("=" * 50)
 
     # Initialize client
@@ -276,32 +276,32 @@ def main():
     
     # Check server status first
     if not client.check_server_status():
-        print("\n💡 Troubleshooting:")
+        print("\n Troubleshooting:")
         print("   1. Ensure SSH tunnel is active: ssh ... -L 8887:gpu-node:8887")
         print("   2. Verify Jupyter server is running on remote node")
         return
     
     # Execute requested action
     if args.check_status:
-        print("✅ Server status check completed")
+        print(" Server status check completed")
     elif args.list_terminals:
         client.list_terminals()
     elif args.command:
         success, output = client.execute_command(args.command)
         if success:
-            print(f"\n✅ Command executed successfully")
-            print(f"📄 Output:\n{output}")
+            print(f"\n Command executed successfully")
+            print(f" Output:\n{output}")
         else:
-            print(f"\n❌ Command failed: {output}")
+            print(f"\n Command failed: {output}")
     else:
         # Default: test with "echo hello world"
-        print("🔬 Running default test command...")
+        print(" Running default test command...")
         success, output = client.execute_command("echo hello world")
         if success:
-            print(f"\n✅ Test successful!")
-            print(f"📄 Output:\n{output}")
+            print(f"\n Test successful!")
+            print(f" Output:\n{output}")
         else:
-            print(f"\n❌ Test failed: {output}")
+            print(f"\n Test failed: {output}")
 
 if __name__ == '__main__':
     main()

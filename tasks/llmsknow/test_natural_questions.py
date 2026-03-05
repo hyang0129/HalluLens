@@ -24,7 +24,7 @@ def test_data_loading():
         # Load first 10 samples
         data = load_nq_data(split="test", n_samples=10)
         
-        print(f"\n✅ Successfully loaded {len(data)} samples")
+        print(f"\n Successfully loaded {len(data)} samples")
         
         # Display first sample
         print("\nFirst sample:")
@@ -36,7 +36,7 @@ def test_data_loading():
         return True
         
     except Exception as e:
-        print(f"\n❌ Error loading data: {e}")
+        print(f"\n Error loading data: {e}")
         return False
 
 
@@ -83,7 +83,7 @@ def test_correctness_evaluation():
         result = compute_correctness_nq(model_answers, correct_answers)
         
         passed = result[0] == test["expected"]
-        status = "✅" if passed else "❌"
+        status = "PASS" if passed else "FAIL"
         
         print(f"\nTest {i}: {test['description']} {status}")
         print(f"  Model: '{test['model_answer']}'")
@@ -106,7 +106,7 @@ def test_file_structure():
     data_file = project_root / "external" / "LLMsKnow" / "data" / "nq_wc_dataset.csv"
     
     if data_file.exists():
-        print(f"✅ Data file exists: {data_file}")
+        print(f" Data file exists: {data_file}")
         
         # Check file size
         size_mb = data_file.stat().st_size / (1024 * 1024)
@@ -114,7 +114,7 @@ def test_file_structure():
         
         return True
     else:
-        print(f"❌ Data file not found: {data_file}")
+        print(f" Data file not found: {data_file}")
         print("   Make sure external/LLMsKnow/ submodule is properly initialized")
         return False
 
@@ -136,14 +136,14 @@ def main():
     print("=" * 60)
     
     for test_name, passed in results.items():
-        status = "✅ PASSED" if passed else "❌ FAILED"
+        status = "PASSED" if passed else "FAILED"
         print(f"{test_name}: {status}")
     
     all_passed = all(results.values())
     
     print("\n" + "=" * 60)
     if all_passed:
-        print("🎉 ALL TESTS PASSED!")
+        print(" ALL TESTS PASSED!")
         print("\nNatural Questions is ready to use. Try:")
         print("\npython scripts/run_with_server.py \\")
         print("    --step all \\")
@@ -151,7 +151,7 @@ def main():
         print("    --model mistralai/Mistral-7B-Instruct-v0.2 \\")
         print("    --N 100")
     else:
-        print("⚠️ SOME TESTS FAILED")
+        print(" SOME TESTS FAILED")
         print("\nPlease fix the issues before using Natural Questions.")
     print("=" * 60)
     

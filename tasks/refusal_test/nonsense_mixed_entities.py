@@ -63,27 +63,27 @@ class NonsenseMixedEval(NonsenseNameEval):
         prompts_to_process = abstain_prompts
 
         if resume and os.path.exists(self.eval_raw_path):
-            print(f"📂 Found existing evaluation file: {self.eval_raw_path}")
+            print(f" Found existing evaluation file: {self.eval_raw_path}")
             try:
                 with open(self.eval_raw_path, 'r') as f:
                     for line in f:
                         existing_results.append(json.loads(line)['eval_res'])
 
                 if len(existing_results) > 0:
-                    print(f"✅ Loaded {len(existing_results)} existing evaluations")
+                    print(f" Loaded {len(existing_results)} existing evaluations")
                     if len(existing_results) >= len(abstain_prompts):
                         print(f"All {len(abstain_prompts)} evaluations already complete!")
                         abstains_eval_raw = existing_results
                     else:
                         prompts_to_process = abstain_prompts[len(existing_results):]
-                        print(f"📊 Resuming from {len(existing_results)}...")
+                        print(f" Resuming from {len(existing_results)}...")
             except Exception as e:
-                print(f"⚠️ Warning: Could not resume: {e}")
+                print(f" Warning: Could not resume: {e}")
                 existing_results = []
                 prompts_to_process = abstain_prompts
 
         if not 'abstains_eval_raw' in locals() and len(prompts_to_process) > 0:
-            print(f"🔄 Processing {len(prompts_to_process)} evaluation requests...")
+            print(f" Processing {len(prompts_to_process)} evaluation requests...")
             from tqdm import tqdm
             
             # Start server for evaluator model if needed
@@ -91,7 +91,7 @@ class NonsenseMixedEval(NonsenseNameEval):
             server_manager = None
 
             if not server_was_running:
-                print(f"🚀 Starting evaluation server for {self.evaluator}...")
+                print(f" Starting evaluation server for {self.evaluator}...")
                 server_manager = lm.ServerManager(
                     model=self.evaluator,
                     host="0.0.0.0",

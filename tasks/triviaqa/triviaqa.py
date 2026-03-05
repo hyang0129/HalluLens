@@ -212,8 +212,8 @@ class TriviaQAEval:
             client_log_file = f"{generations_dir}/eval_client.log"
 
         print(f"Starting TriviaQA evaluation for model: {self.model_name}")
-        print(f"📝 Evaluation logs: {client_log_file}")
-        print(f"🔄 Resume mode: {'enabled' if resume else 'disabled'}")
+        print(f" Evaluation logs: {client_log_file}")
+        print(f" Resume mode: {'enabled' if resume else 'disabled'}")
 
         # Evaluate correctness using TriviaQA string matching
         binary_correctness = self.evaluate_correctness()
@@ -273,7 +273,7 @@ class TriviaQAEval:
                 # Co-locate eval results with custom generations file
                 generations_dir = os.path.dirname(self.generations_file_path)
                 res_path = os.path.join(generations_dir, 'eval_results.json')
-                print(f"📁 Co-locating eval results with generations file in: {generations_dir}")
+                print(f" Co-locating eval results with generations file in: {generations_dir}")
             else:
                 # Use default output path
                 res_path = f'{self.output_path}/eval_results.json'
@@ -299,7 +299,7 @@ class TriviaQAEval:
         print(f"  Refusal Rate: {refusal_rate:.3f}")
         print(f"  Correct Rate: {correct_rate:.3f}")
         print("-" * 80)
-        print(f"🎉 TriviaQA evaluation completed successfully!")
+        print(f" TriviaQA evaluation completed successfully!")
         print("=" * 80)
 
 
@@ -418,11 +418,11 @@ def run_step(step, model, dataset_variant="unfiltered", split="dev", N=1000,
             'question_id': triviaqa_data['question_ids']
         })
         print(f"Starting Inference for [{model}], Testset_N: {prompts_df.shape}")
-        print(f"📋 Task: {TASKNAME}")
-        print(f"🔧 Inference method: {inference_method}")
-        print(f"🎯 Max tokens per request: {max_inference_tokens}")
+        print(f" Task: {TASKNAME}")
+        print(f" Inference method: {inference_method}")
+        print(f" Max tokens per request: {max_inference_tokens}")
         if logger_type:
-            print(f"📊 Activation logging: {logger_type}")
+            print(f" Activation logging: {logger_type}")
         print("-" * 60)
         exp.run_exp(
             task=TASKNAME,
@@ -436,7 +436,7 @@ def run_step(step, model, dataset_variant="unfiltered", split="dev", N=1000,
             activations_path=activations_path,
             log_file_path=log_file,
             resume=resume)
-        print('✅ Inference completed successfully!')
+        print(' Inference completed successfully!')
 
     elif step == "eval":
         print(f"Starting Evaluation for {model}")

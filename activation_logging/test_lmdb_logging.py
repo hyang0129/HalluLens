@@ -239,10 +239,10 @@ def test_overwrite_generation_params(
     
     # Check if both deterministic responses are the same (they should be)
     if deterministic_responses[0] == deterministic_responses[1]:
-        print("✓ Deterministic test passed: Both responses are identical")
+        print(" Deterministic test passed: Both responses are identical")
         deterministic_identical = True
     else:
-        print("✗ Deterministic test failed: Responses differ despite deterministic settings")
+        print(" Deterministic test failed: Responses differ despite deterministic settings")
         deterministic_identical = False
     
     results["deterministic_results"] = deterministic_responses
@@ -275,10 +275,10 @@ def test_overwrite_generation_params(
         # Check if the response with None parameters matches the deterministic response
         # (they should match since default values should be used)
         if none_param_text == deterministic_responses[0]:
-            print("✓ None parameters test passed: Response matches deterministic output")
+            print(" None parameters test passed: Response matches deterministic output")
             none_params_match = True
         else:
-            print("✗ None parameters test failed: Response differs from deterministic output")
+            print(" None parameters test failed: Response differs from deterministic output")
             none_params_match = False
         
         results["details"]["none_params_match"] = none_params_match
@@ -349,10 +349,10 @@ def test_overwrite_generation_params(
     
     # Check if creative response differs from deterministic responses
     if creative_text != deterministic_responses[0]:
-        print("✓ Creative test passed: Response differs from deterministic output")
+        print(" Creative test passed: Response differs from deterministic output")
         creative_different = True
     else:
-        print("✗ Creative test failed: Response is identical to deterministic output")
+        print(" Creative test failed: Response is identical to deterministic output")
         creative_different = False
     
     results["details"]["creative_different"] = creative_different

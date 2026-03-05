@@ -65,13 +65,13 @@ def test_fixed_layer_dataset():
             assert sample['layer1_idx'] == fixed_layer_idx, f"Expected layer1_idx to be {fixed_layer_idx}, got {sample['layer1_idx']}"
             assert sample['layer2_idx'] != fixed_layer_idx, f"Layer 2 should be different from fixed layer {fixed_layer_idx}"
         
-        print("\n✅ All tests passed!")
+        print("\n All tests passed!")
         
     except FileNotFoundError as e:
-        print(f"❌ File not found: {e}")
+        print(f" File not found: {e}")
         print("Please update the file paths in this script to point to your actual data files.")
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f" Error: {e}")
 
 
 def demonstrate_usage():
