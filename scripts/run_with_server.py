@@ -436,8 +436,8 @@ def run_experiment(
             )
 
             if is_gguf:
-                logger.info(f"🔧 GGUF model detected - using llama.cpp server instead of vLLM")
-                logger.info(f"🚀 Starting llama.cpp server for model: {server_model}")
+                logger.info(f"GGUF model detected - using llama.cpp server instead of vLLM")
+                logger.info(f"Starting llama.cpp server for model: {server_model}")
 
                 env = os.environ.copy()
                 if activations_path:
@@ -469,7 +469,7 @@ def run_experiment(
 
                 while time.time() - start_time < max_wait:
                     if lm.check_server_health(f"http://{host}:{port}"):
-                        logger.success(f"✅ Llama.cpp server started at http://{host}:{port}")
+                        logger.success(f"Llama.cpp server started at http://{host}:{port}")
 
                         class _SimpleServerManager:
                             def __init__(self, process):
@@ -492,7 +492,7 @@ def run_experiment(
                     server_process.terminate()
                     raise RuntimeError("Failed to start llama.cpp server within timeout")
             else:
-                logger.info(f"🚀 Starting vLLM server for model: {server_model}")
+                logger.info(f"Starting vLLM server for model: {server_model}")
                 server_manager = lm.ServerManager(
                     model=server_model,
                     host=host,
@@ -504,10 +504,10 @@ def run_experiment(
                 )
                 server_manager.start_server()
                 lm.set_server_manager(server_manager)
-                logger.success(f"✅ Server started at http://{host}:{port}")
+                logger.success(f"Server started at http://{host}:{port}")
         else:
-            logger.info(f"✅ Server already running at http://{host}:{port}")
-            logger.warning("⚠️  Note: Using existing server (not managed by this script)")
+            logger.info(f"Server already running at http://{host}:{port}")
+            logger.warning("Note: Using existing server (not managed by this script)")
 
     try:
         task_kwargs = dict(
@@ -568,10 +568,10 @@ def run_experiment(
         raise
     finally:
         if server_manager:
-            logger.info("🛑 Stopping server...")
+            logger.info("Stopping server...")
             server_manager.stop_server()
             lm.set_server_manager(None)
-            logger.success("✅ Server stopped")
+            logger.success("Server stopped")
 
 
 def main():
@@ -596,7 +596,7 @@ def main():
             "If omitted, defaults to 600s (or env SERVER_STARTUP_TIMEOUT/VLLM_SERVER_STARTUP_TIMEOUT if set)."
         ),
     )
-    parser.add_argument("--logger-type", default="lmdb", choices=["lmdb", "json"],
+    parser.add_argument("--logger-type", default="lmdb", choices=["lmdb", "json", "zarr"],
                        help="Activation logger type")
     parser.add_argument("--activations-path", help="Path for storing activations")
     parser.add_argument("--log-file", help="Path for server behavior logs (if not specified and step is inference, will be placed in same directory as generations file)")

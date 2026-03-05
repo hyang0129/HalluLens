@@ -2,11 +2,11 @@
 """
 Command-line script to run the vLLM server with activation logging.
 This script serves as a wrapper around vllm serve to ensure the activations
-are properly logged using either LMDB or JSON storage.
+are properly logged using LMDB, JSON, or Zarr storage.
 
 Usage:
   python -m activation_logging.vllm_serve [--model MODEL] [--host HOST] [--port PORT]
-    [--logger-type {lmdb,json}] [--activations-path PATH] [--target-layers {all,first_half,second_half}]
+    [--logger-type {lmdb,json,zarr}] [--activations-path PATH] [--target-layers {all,first_half,second_half}]
     [--sequence-mode {all,prompt,response}] [--auth_token AUTH_TOKEN] [--trim-output-at TRIM_SEQUENCE]
     [--map-size-gb MAP_SIZE_GB]
 
@@ -14,8 +14,11 @@ Examples:
   # Use JSON logging
   python -m activation_logging.vllm_serve --logger-type json --activations-path json_data/activations
 
-  # Use LMDB logging (default)
+    # Use LMDB logging
   python -m activation_logging.vllm_serve --logger-type lmdb --activations-path lmdb_data/activations.lmdb
+
+    # Use Zarr logging
+    python -m activation_logging.vllm_serve --logger-type zarr --activations-path zarr_data/activations.zarr
 """
 
 import argparse
@@ -35,7 +38,7 @@ def main():
     parser.add_argument("--activations-path", type=str, default=None,
                         help="Path for storing activations (LMDB file or JSON directory)")
     parser.add_argument("--logger-type", type=str, default="lmdb",
-                        choices=["lmdb", "json"],
+                        choices=["lmdb", "json", "zarr"],
                         help="Type of activation logger to use (default: lmdb)")
     parser.add_argument("--lmdb_path", type=str, default="lmdb_data/activations.lmdb",
                         help="Path to LMDB for storing activations (default: lmdb_data/activations.lmdb) - deprecated, use --activations-path")
@@ -73,6 +76,8 @@ def main():
     if not args.activations_path:
         if args.logger_type == "json":
             activations_path = "json_data/activations"
+        elif args.logger_type == "zarr":
+            activations_path = "zarr_data/activations.zarr"
         else:
             activations_path = args.lmdb_path
 
@@ -111,6 +116,12 @@ def main():
         if not os.path.exists(activations_path):
             os.makedirs(activations_path, exist_ok=True)
             logger.info(f"Created JSON activations directory: {activations_path}")
+    elif args.logger_type == "zarr":
+        # For Zarr logger, create the parent directory of the store path
+        activations_dir = os.path.dirname(activations_path)
+        if activations_dir and not os.path.exists(activations_dir):
+            os.makedirs(activations_dir, exist_ok=True)
+            logger.info(f"Created Zarr directory: {activations_dir}")
     else:
         # For LMDB logger, create the parent directory
         activations_dir = os.path.dirname(activations_path)
