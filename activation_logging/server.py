@@ -238,7 +238,7 @@ DEFAULT_LOGPROBS_ENABLED = _env_bool("ACTIVATION_LOGPROBS_ENABLED", True)
 DEFAULT_LOGPROBS_TOP_K = _env_int("ACTIVATION_LOGPROBS_TOPK", 20)
 if DEFAULT_LOGPROBS_TOP_K <= 0:
     logger.warning(
-        "Invalid ACTIVATION_LOGPROBS_TOPK=%s; falling back to 20",
+        "Invalid ACTIVATION_LOGPROBS_TOPK={}; falling back to 20",
         DEFAULT_LOGPROBS_TOP_K,
     )
     DEFAULT_LOGPROBS_TOP_K = 20
@@ -1110,7 +1110,7 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
                 for field_name, field_value in logprob_payload.items():
                     setattr(outputs, field_name, field_value)
                 logger.info(
-                    "Captured response logprobs for %s tokens (top_k=%s)",
+                    "Captured response logprobs for {} tokens (top_k={})",
                     len(logprob_payload["response_token_ids"]),
                     logprob_payload["response_logprobs_top_k"],
                 )
