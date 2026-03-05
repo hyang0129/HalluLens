@@ -29,28 +29,28 @@ Examples:
     python scripts/run_with_server.py --step generate --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --q_generator meta-llama/Llama-3.1-70B-Instruct --N 100
 
     # Run inference (PreciseWikiQA)
-    python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --logger-type lmdb --activations-path shared/goodwiki.zarr/activations.zarr --log-file shared/goodwiki.zarr/server.log
+    python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --logger-type zarr --activations-path shared/goodwiki.zarr/activations.zarr --log-file shared/goodwiki.zarr/server.log
 
     # Run evaluation (PreciseWikiQA)
     python scripts/run_with_server.py --step eval --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct
 
     # Run all steps in sequence (PreciseWikiQA)
-    python scripts/run_with_server.py --step all --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --N 100 --logger-type lmdb --activations-path shared/goodwiki.zarr/activations.zarr --log-file shared/goodwiki.zarr/server.log
+    python scripts/run_with_server.py --step all --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --N 100 --logger-type zarr --activations-path shared/goodwiki.zarr/activations.zarr --log-file shared/goodwiki.zarr/server.log
 
     # TriviaQA inference and evaluation
-    python scripts/run_with_server.py --step all --task triviaqa --model meta-llama/Llama-3.1-8B-Instruct --N 1000 --logger-type lmdb --activations-path shared/triviaqa_unfiltered_dev/activations.lmdb --log-file shared/triviaqa_unfiltered_dev/server.log
+    python scripts/run_with_server.py --step all --task triviaqa --model meta-llama/Llama-3.1-8B-Instruct --N 1000 --logger-type zarr --activations-path shared/triviaqa_unfiltered_dev/activations.zarr --log-file shared/triviaqa_unfiltered_dev/server.log
 
     # TriviaQA with custom dataset variant
-    python scripts/run_with_server.py --step inference --task triviaqa --model meta-llama/Llama-3.1-8B-Instruct --dataset_variant unfiltered --split dev --logger-type lmdb --activations-path shared/triviaqa_unfiltered_dev/activations.lmdb --log-file shared/triviaqa_unfiltered_dev/server.log
+    python scripts/run_with_server.py --step inference --task triviaqa --model meta-llama/Llama-3.1-8B-Instruct --dataset_variant unfiltered --split dev --logger-type zarr --activations-path shared/triviaqa_unfiltered_dev/activations.zarr --log-file shared/triviaqa_unfiltered_dev/server.log
 
     # Natural Questions inference and evaluation
-    python scripts/run_with_server.py --step all --task naturalquestions --model meta-llama/Llama-3.1-8B-Instruct --N 1000 --logger-type lmdb --activations-path shared/natural_questions_dev/activations.lmdb --log-file shared/natural_questions_dev/server.log
+    python scripts/run_with_server.py --step all --task naturalquestions --model meta-llama/Llama-3.1-8B-Instruct --N 1000 --logger-type zarr --activations-path shared/natural_questions_dev/activations.zarr --log-file shared/natural_questions_dev/server.log
 
     # Natural Questions with custom settings
-    python scripts/run_with_server.py --step inference --task naturalquestions --model meta-llama/Llama-3.1-8B-Instruct --max_tokens 64 --temperature 0.0 --logger-type lmdb --activations-path shared/natural_questions_dev/activations.lmdb --log-file shared/natural_questions_dev/server.log
+    python scripts/run_with_server.py --step inference --task naturalquestions --model meta-llama/Llama-3.1-8B-Instruct --max_tokens 64 --temperature 0.0 --logger-type zarr --activations-path shared/natural_questions_dev/activations.zarr --log-file shared/natural_questions_dev/server.log
 
     # Custom server log file
-    python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --logger-type lmdb --activations-path custom/activations.lmdb --log-file custom/server.log
+    python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --logger-type zarr --activations-path custom/activations.zarr --log-file custom/server.log
 
     # Question generation with increased concurrency (8 parallel requests)
     python scripts/run_with_server.py --step generate --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --N 100 --max-workers-qgen 8
@@ -237,7 +237,7 @@ def run_task_step(step, task, model, **kwargs):
                 quick_debug_mode=kwargs.get("quick_debug_mode", False),
                 inference_method=kwargs.get("inference_method", "vllm"),
                 max_inference_tokens=kwargs.get("max_inference_tokens", 256),
-                logger_type=kwargs.get("logger_type", "lmdb"),
+                logger_type=kwargs.get("logger_type", "zarr"),
                 activations_path=kwargs.get("activations_path"),
                 log_file=kwargs.get("log_file"),
                 resume=kwargs.get("resume", True),
@@ -261,7 +261,7 @@ def run_task_step(step, task, model, **kwargs):
                 max_workers=kwargs.get("max_workers", 64),
                 max_workers_qgen=kwargs.get("max_workers_qgen", 1),
                 inference_method=kwargs.get("inference_method", "vllm"),
-                logger_type=kwargs.get("logger_type", "lmdb"),
+                logger_type=kwargs.get("logger_type", "zarr"),
                 activations_path=kwargs.get("activations_path"),
                 log_file=kwargs.get("log_file"),
                 resume=kwargs.get("resume", True),
@@ -277,7 +277,7 @@ def run_task_step(step, task, model, **kwargs):
                 N=kwargs.get("N", 2000),
                 seed=kwargs.get("seed", 1),
                 inference_method=kwargs.get("inference_method", "vllm"),
-                logger_type=kwargs.get("logger_type", "lmdb"),
+                logger_type=kwargs.get("logger_type", "zarr"),
                 activations_path=kwargs.get("activations_path"),
                 log_file=kwargs.get("log_file"),
                 resume=kwargs.get("resume", True),
@@ -302,7 +302,7 @@ def run_task_step(step, task, model, **kwargs):
                 quick_debug_mode=kwargs.get("quick_debug_mode", False),
                 inference_method=kwargs.get("inference_method", "vllm"),
                 max_inference_tokens=kwargs.get("max_inference_tokens", 256),
-                logger_type=kwargs.get("logger_type", "lmdb"),
+                logger_type=kwargs.get("logger_type", "zarr"),
                 activations_path=kwargs.get("activations_path"),
                 log_file=kwargs.get("log_file"),
                 resume=kwargs.get("resume", True),
@@ -350,7 +350,7 @@ def run_experiment(
     host="0.0.0.0",
     port=8000,
     server_startup_timeout=None,
-    logger_type="lmdb",
+    logger_type="zarr",
     activations_path=None,
     log_file=None,
     N=1,
@@ -596,8 +596,8 @@ def main():
             "If omitted, defaults to 600s (or env SERVER_STARTUP_TIMEOUT/VLLM_SERVER_STARTUP_TIMEOUT if set)."
         ),
     )
-    parser.add_argument("--logger-type", default="lmdb", choices=["lmdb", "json", "zarr"],
-                       help="Activation logger type")
+    parser.add_argument("--logger-type", default="zarr", choices=["zarr"],
+                       help="Activation logger type (zarr only)")
     parser.add_argument("--activations-path", help="Path for storing activations")
     parser.add_argument("--log-file", help="Path for server behavior logs (if not specified and step is inference, will be placed in same directory as generations file)")
 
