@@ -81,6 +81,10 @@ class RunConfig:
     final_dim: int
     input_dropout: float
 
+    # optional token-logprob features
+    include_response_logprobs: bool
+    response_logprobs_top_k: int
+
 
 def _parse_layers(s: str) -> List[int]:
     """Parse layer spec like '14-29' or '22,26' or '16-29,31'."""
@@ -316,6 +320,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Optional fixed layer (layer number or index within --*-layers)",
     )
     parser.add_argument("--pad-length", type=int, default=63)
+    parser.add_argument(
+        "--include-response-logprobs",
+        action="store_true",
+        help="Load response token-level top-k logprob tensors alongside activation views.",
+    )
+    parser.add_argument(
+        "--response-logprobs-top-k",
+        type=int,
+        default=20,
+        help="Top-k width for response logprob tensors when --include-response-logprobs is enabled.",
+    )
 
     parser.add_argument("--epochs", type=int, default=150)
     parser.add_argument("--batch-size", type=int, default=512)
@@ -417,6 +432,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         fixed_layer=fixed_layer_train,
         pad_length=args.pad_length,
         min_target_layers=min_target_layers,
+        include_response_logprobs=args.include_response_logprobs,
+        response_logprobs_top_k=args.response_logprobs_top_k,
     )
     test_dataset = ap.get_dataset(
         "test",
@@ -424,6 +441,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         fixed_layer=fixed_layer_train,
         pad_length=args.pad_length,
         min_target_layers=min_target_layers,
+        include_response_logprobs=args.include_response_logprobs,
+        response_logprobs_top_k=args.response_logprobs_top_k,
     )
 
     # Model
@@ -459,6 +478,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         id_label=int(args.id_label),
         final_dim=args.final_dim,
         input_dropout=args.input_dropout,
+        include_response_logprobs=bool(args.include_response_logprobs),
+        response_logprobs_top_k=int(args.response_logprobs_top_k),
     )
 
     (out_base / "config.json").write_text(json.dumps(asdict(cfg), indent=2))
@@ -516,6 +537,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         fixed_layer=fixed_layer_eval,
         pad_length=args.pad_length,
         min_target_layers=2,
+        include_response_logprobs=args.include_response_logprobs,
+        response_logprobs_top_k=args.response_logprobs_top_k,
     )
 
     full_ap = ActivationParser(
@@ -532,6 +555,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         fixed_layer=fixed_layer_eval,
         pad_length=args.pad_length,
         min_target_layers=2,
+        include_response_logprobs=args.include_response_logprobs,
+        response_logprobs_top_k=args.response_logprobs_top_k,
     )
 
     logger.info("Computing baseline embeddings")

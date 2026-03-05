@@ -99,11 +99,27 @@ python -m tasks.triviaqa.triviaqa \
 
 - Activations, prompts, and responses are stored in Zarr under `zarr_data/`.
 - Each entry key is a SHA256 hash of the prompt.
+- Response-token logprobs are logged by default (`top_k=20`) when using the
+    Transformers backend that produces hidden states.
 - The data structure stored includes:
   - `prompt`: The original input prompt
   - `response`: The model's response text
   - `activations`: NumPy array of activation values
   - `model`: The model name/ID used for generation
+    - `response_token_ids`: Generated token IDs for the response sequence
+    - `response_token_logprobs`: Log-probability of the selected generated token at each step
+    - `response_topk_token_ids`: Top-k candidate token IDs per response step
+    - `response_topk_logprobs`: Top-k log-probabilities per response step
+
+### Logprob Configuration
+
+- `ACTIVATION_LOGPROBS_ENABLED=1|0` (default `1`)
+- `ACTIVATION_LOGPROBS_TOPK=20` (default `20`)
+
+With `activation_logging.vllm_serve`, these map to:
+
+- `--disable-logprobs` to turn off logprob capture
+- `--logprobs-top-k 20` to set top-k width
 
 ## Testing the Setup
 

@@ -3,6 +3,7 @@ activation_parser.py
 Handles parsing of metadata from JSON files and looking up corresponding activations from Zarr.
 """
 import json
+import os
 import hashlib
 from typing import Dict, Any, List, Optional, Literal
 from pathlib import Path
@@ -12,6 +13,7 @@ from sklearn.model_selection import train_test_split
 import torch
 from torch.utils.data import Dataset
 import random
+import numpy as np
 
 from .activations_logger import ActivationsLogger
 
@@ -33,6 +35,8 @@ class ActivationDataset(Dataset):
         num_views: int = 2,
         view_sampling_with_replacement: bool = False,
         return_all_activations: bool = False,
+        include_response_logprobs: bool = False,
+        response_logprobs_top_k: int = 20,
     ):
         """
         Initialize the dataset.
@@ -49,6 +53,8 @@ class ActivationDataset(Dataset):
             num_views: Number of contrastive views to sample per sample (K-view, K>=2)
             view_sampling_with_replacement: Whether to sample view indices with replacement
             return_all_activations: If True, include all relevant layers in all_activations
+            include_response_logprobs: If True, include per-token top-k response logprobs in each sample
+            response_logprobs_top_k: Number of top logprobs to expose per response token
         """
         self.activations_path = activations_path
         normalized_logger_type = str(logger_type).strip().lower()
@@ -73,6 +79,15 @@ class ActivationDataset(Dataset):
         self.num_views = int(num_views)
         self.view_sampling_with_replacement = bool(view_sampling_with_replacement)
         self.return_all_activations = return_all_activations
+        self.include_response_logprobs = bool(include_response_logprobs)
+        if int(response_logprobs_top_k) <= 0:
+            raise ValueError("response_logprobs_top_k must be >= 1")
+        self.response_logprobs_top_k = int(response_logprobs_top_k)
+        self.response_logprobs_top_k = int(
+            os.environ.get("ACTIVATION_LOGPROBS_TOPK", self.response_logprobs_top_k)
+        )
+        if self.response_logprobs_top_k <= 0:
+            self.response_logprobs_top_k = 1
         if self.num_views < 2:
             raise ValueError("num_views must be >= 2")
         self._use_zarr_fast_path = self._is_zarr_path(activations_path)
@@ -119,6 +134,7 @@ class ActivationDataset(Dataset):
 
     def _getitem_standard(self, idx: int) -> Dict[str, Any]:
         row, result, activations, input_length = self.activation_parser.get_activations(idx)
+        entry_key = self.activation_parser.select_primary_key(row['prompt_hash'])
 
         # Filter to relevant layers and pad if necessary
         padded_activations = []
@@ -155,7 +171,7 @@ class ActivationDataset(Dataset):
         selected_views = [act.squeeze(0) if act.ndim == 3 and act.shape[0] == 1 else act for act in selected_views]
         views_activations = torch.stack(selected_views, dim=0)
 
-        return {
+        sample = {
             'hashkey': row['prompt_hash'],
             'halu': torch.tensor(row['halu'], dtype=torch.float32),
             'all_activations': filled_activations,
@@ -163,6 +179,7 @@ class ActivationDataset(Dataset):
             'view_indices': torch.tensor(selected_view_indices, dtype=torch.long),
             'input_length': input_length
         }
+        return self._attach_response_logprobs(sample, entry_key)
 
     def _fill_missing_layers(self, layers: List[Optional[torch.Tensor]]) -> List[torch.Tensor]:
         reference = next((act for act in layers if act is not None), None)
@@ -200,6 +217,78 @@ class ActivationDataset(Dataset):
                 f"need {self.num_views}, found {len(available_layers)}"
             )
         return random.sample(available_layers, self.num_views)
+
+    @staticmethod
+    def _to_tensor(value: Any, dtype: Optional[torch.dtype] = None) -> Optional[torch.Tensor]:
+        if value is None:
+            return None
+        if isinstance(value, torch.Tensor):
+            tensor = value
+        elif isinstance(value, np.ndarray):
+            tensor = torch.from_numpy(value)
+        else:
+            tensor = torch.as_tensor(value)
+        if dtype is not None:
+            tensor = tensor.to(dtype=dtype)
+        return tensor
+
+    def _attach_response_logprobs(self, sample: Dict[str, Any], entry_key: str) -> Dict[str, Any]:
+        if not self.include_response_logprobs:
+            return sample
+
+        target_len = int(self.pad_length)
+        target_top_k = int(self.response_logprobs_top_k)
+
+        token_ids_out = torch.full((target_len,), -1, dtype=torch.int32)
+        token_logprobs_out = torch.full((target_len,), float("nan"), dtype=torch.float32)
+        topk_ids_out = torch.full((target_len, target_top_k), -1, dtype=torch.int32)
+        topk_logprobs_out = torch.full((target_len, target_top_k), float("nan"), dtype=torch.float32)
+        token_mask = torch.zeros((target_len,), dtype=torch.bool)
+
+        copied_len = 0
+        copied_top_k = 0
+
+        payload = self.activation_parser.get_response_logprobs(entry_key)
+        if payload is not None:
+            token_ids = self._to_tensor(payload.get("response_token_ids"), dtype=torch.int32)
+            token_logprobs = self._to_tensor(payload.get("response_token_logprobs"), dtype=torch.float32)
+            topk_ids = self._to_tensor(payload.get("response_topk_token_ids"), dtype=torch.int32)
+            topk_logprobs = self._to_tensor(payload.get("response_topk_logprobs"), dtype=torch.float32)
+
+            if (
+                token_ids is not None
+                and token_logprobs is not None
+                and topk_ids is not None
+                and topk_logprobs is not None
+                and token_ids.ndim == 1
+                and token_logprobs.ndim == 1
+                and topk_ids.ndim == 2
+                and topk_logprobs.ndim == 2
+            ):
+                copied_len = min(
+                    target_len,
+                    int(token_ids.shape[0]),
+                    int(token_logprobs.shape[0]),
+                    int(topk_ids.shape[0]),
+                    int(topk_logprobs.shape[0]),
+                )
+                copied_top_k = min(target_top_k, int(topk_ids.shape[1]), int(topk_logprobs.shape[1]))
+                if copied_len > 0 and copied_top_k > 0:
+                    token_ids_out[:copied_len] = token_ids[:copied_len]
+                    token_logprobs_out[:copied_len] = token_logprobs[:copied_len]
+                    topk_ids_out[:copied_len, :copied_top_k] = topk_ids[:copied_len, :copied_top_k]
+                    topk_logprobs_out[:copied_len, :copied_top_k] = topk_logprobs[:copied_len, :copied_top_k]
+                    token_mask[:copied_len] = True
+
+        sample["response_token_ids"] = token_ids_out
+        sample["response_token_logprobs"] = token_logprobs_out
+        sample["response_topk_token_ids"] = topk_ids_out
+        sample["response_topk_logprobs"] = topk_logprobs_out
+        sample["response_logprob_mask"] = token_mask
+        sample["response_logprob_len"] = torch.tensor(copied_len, dtype=torch.long)
+        sample["response_logprobs_top_k"] = torch.tensor(target_top_k, dtype=torch.long)
+        sample["response_logprobs_available_top_k"] = torch.tensor(copied_top_k, dtype=torch.long)
+        return sample
 
     def _getitem_zarr(self, idx: int) -> Dict[str, Any]:
         row = self.df.iloc[idx]
@@ -291,7 +380,7 @@ class ActivationDataset(Dataset):
         selected_views = [act.squeeze(0) if act.ndim == 3 and act.shape[0] == 1 else act for act in selected_views]
         views_activations = torch.stack(selected_views, dim=0)
 
-        return {
+        sample = {
             'hashkey': row['prompt_hash'],
             'halu': torch.tensor(row['halu'], dtype=torch.float32),
             'all_activations': filled_activations,
@@ -299,6 +388,7 @@ class ActivationDataset(Dataset):
             'view_indices': torch.tensor(selected_view_indices, dtype=torch.long),
             'input_length': input_length
         }
+        return self._attach_response_logprobs(sample, entry_key)
     
 
 
@@ -390,6 +480,14 @@ class ActivationParser:
             return None
         if hasattr(self.activation_logger, "get_layer_activation"):
             return self.activation_logger.get_layer_activation(entry_key, layer_idx, sequence_mode=sequence_mode)
+        return None
+
+    def get_response_logprobs(self, entry_key: str) -> Optional[Dict[str, Any]]:
+        """Retrieve response token-level logprob features for the given entry key."""
+        if self.activation_logger is None:
+            return None
+        if hasattr(self.activation_logger, "get_response_logprobs"):
+            return self.activation_logger.get_response_logprobs(entry_key)
         return None
 
     def _load_metadata(self) -> Dict[str, Any]:
@@ -565,6 +663,8 @@ class ActivationParser:
         num_views: int = 2,
         view_sampling_with_replacement: bool = False,
         return_all_activations: bool = False,
+        include_response_logprobs: bool = False,
+        response_logprobs_top_k: int = 20,
         backend: Literal["auto", "zarr"] = "auto",
     ) -> ActivationDataset:
         """
@@ -576,6 +676,8 @@ class ActivationParser:
             fixed_layer: If specified, one activation will always be from this layer (index in relevant_layers)
             num_views: Number of views to sample per example
             view_sampling_with_replacement: Whether to sample with replacement when selecting views
+            include_response_logprobs: Whether to include token-level response logprob features
+            response_logprobs_top_k: Number of top logprobs to expose per response token
 
         Returns:
             ActivationDataset instance for the specified split
@@ -600,6 +702,8 @@ class ActivationParser:
             num_views=num_views,
             view_sampling_with_replacement=view_sampling_with_replacement,
             return_all_activations=return_all_activations,
+            include_response_logprobs=include_response_logprobs,
+            response_logprobs_top_k=response_logprobs_top_k,
         )
 
     def close(self):

@@ -31,6 +31,7 @@ class ZarrActivationsLogger:
         response_max_tokens: Optional[int] = None,
         prompt_chunk_tokens: Optional[int] = None,
         response_chunk_tokens: Optional[int] = None,
+        response_logprobs_top_k: Optional[int] = None,
         dtype: str = "float16",
         verbose: bool = True,
     ):
@@ -50,6 +51,7 @@ class ZarrActivationsLogger:
             response_max_tokens: Fixed maximum response tokens (R_max)
             prompt_chunk_tokens: Prompt chunk length (tokens)
             response_chunk_tokens: Response chunk length (tokens)
+            response_logprobs_top_k: Number of top logprobs to persist per response token
             dtype: Numpy dtype for stored activations
             verbose: Whether to log detailed initialization
         """
@@ -80,6 +82,10 @@ class ZarrActivationsLogger:
             prompt_chunk_tokens = int(os.environ.get("ACTIVATION_PROMPT_CHUNK_TOKENS", 128))
         if response_chunk_tokens is None:
             response_chunk_tokens = int(os.environ.get("ACTIVATION_RESPONSE_CHUNK_TOKENS", response_max_tokens))
+        if response_logprobs_top_k is None:
+            response_logprobs_top_k = int(os.environ.get("ACTIVATION_LOGPROBS_TOPK", 20))
+        if response_logprobs_top_k <= 0:
+            raise ValueError("response_logprobs_top_k must be > 0")
 
         if self.activation_chunk_shape is not None:
             token_chunk = int(self.activation_chunk_shape[2])
@@ -102,6 +108,7 @@ class ZarrActivationsLogger:
         self.response_max_tokens = response_max_tokens
         self.prompt_chunk_tokens = prompt_chunk_tokens
         self.response_chunk_tokens = response_chunk_tokens
+        self.response_logprobs_top_k = int(response_logprobs_top_k)
         if self.activation_chunk_shape is not None:
             self.prompt_chunk_tokens = int(self.activation_chunk_shape[2])
             self.response_chunk_tokens = int(self.activation_chunk_shape[2])
@@ -161,6 +168,10 @@ class ZarrActivationsLogger:
         self._prompt_len = None
         self._response_len = None
         self._sample_key = None
+        self._response_token_ids = None
+        self._response_token_logprobs = None
+        self._response_topk_token_ids = None
+        self._response_topk_logprobs = None
         self._layer_count = None
         self._hidden_size = None
         self._target_layer_indices = None
@@ -212,6 +223,10 @@ class ZarrActivationsLogger:
         self._prompt_len = self.arrays_group["prompt_len"] if "prompt_len" in self.arrays_group else None
         self._response_len = self.arrays_group["response_len"] if "response_len" in self.arrays_group else None
         self._sample_key = self.arrays_group["sample_key"] if "sample_key" in self.arrays_group else None
+        self._response_token_ids = self.arrays_group["response_token_ids"] if "response_token_ids" in self.arrays_group else None
+        self._response_token_logprobs = self.arrays_group["response_token_logprobs"] if "response_token_logprobs" in self.arrays_group else None
+        self._response_topk_token_ids = self.arrays_group["response_topk_token_ids"] if "response_topk_token_ids" in self.arrays_group else None
+        self._response_topk_logprobs = self.arrays_group["response_topk_logprobs"] if "response_topk_logprobs" in self.arrays_group else None
 
         self._layer_count = int(self._prompt_activations.shape[1])
         self._hidden_size = int(self._prompt_activations.shape[-1])
@@ -219,6 +234,8 @@ class ZarrActivationsLogger:
         self.prompt_max_tokens = int(self._prompt_activations.shape[2])
         if self._response_activations is not None:
             self.response_max_tokens = int(self._response_activations.shape[2])
+        if self._response_topk_logprobs is not None:
+            self.response_logprobs_top_k = int(self._response_topk_logprobs.shape[2])
 
         if self.target_layers == "first_half":
             self._target_layer_indices = set(range(self._layer_count // 2))
@@ -243,6 +260,7 @@ class ZarrActivationsLogger:
 
     def _ensure_arrays(self, num_layers: int, hidden_size: int):
         if self._prompt_activations is not None:
+            self._ensure_logprob_arrays()
             return
 
         self._layer_count = num_layers
@@ -308,6 +326,8 @@ class ZarrActivationsLogger:
             overwrite=False,
         )
 
+        self._ensure_logprob_arrays()
+
         self.root.attrs.update(
             {
                 "schema_version": "zarr-v1",
@@ -315,12 +335,65 @@ class ZarrActivationsLogger:
                 "hidden_size": hidden_size,
                 "prompt_max_tokens": self.prompt_max_tokens,
                 "response_max_tokens": self.response_max_tokens,
+                "response_logprobs_top_k": self.response_logprobs_top_k,
                 "prompt_chunk_tokens": self.prompt_chunk_tokens,
                 "response_chunk_tokens": self.response_chunk_tokens,
                 "activation_chunk_shape": activation_chunk_shape,
                 "dtype": str(self.dtype),
             }
         )
+
+    def _ensure_logprob_arrays(self):
+        if self.read_only:
+            return
+
+        sample_chunk = max(1, min(self.chunk_size, 4096))
+        token_chunk = max(1, min(self.response_chunk_tokens, self.response_max_tokens))
+        top_k = int(self.response_logprobs_top_k)
+
+        if self._response_token_ids is None:
+            self._response_token_ids = self.arrays_group.require_dataset(
+                "response_token_ids",
+                shape=(0, self.response_max_tokens),
+                chunks=(sample_chunk, token_chunk),
+                dtype=np.int32,
+                fill_value=-1,
+                compressor=None,
+                overwrite=False,
+            )
+
+        if self._response_token_logprobs is None:
+            self._response_token_logprobs = self.arrays_group.require_dataset(
+                "response_token_logprobs",
+                shape=(0, self.response_max_tokens),
+                chunks=(sample_chunk, token_chunk),
+                dtype=np.float32,
+                fill_value=np.nan,
+                compressor=None,
+                overwrite=False,
+            )
+
+        if self._response_topk_token_ids is None:
+            self._response_topk_token_ids = self.arrays_group.require_dataset(
+                "response_topk_token_ids",
+                shape=(0, self.response_max_tokens, top_k),
+                chunks=(sample_chunk, token_chunk, top_k),
+                dtype=np.int32,
+                fill_value=-1,
+                compressor=None,
+                overwrite=False,
+            )
+
+        if self._response_topk_logprobs is None:
+            self._response_topk_logprobs = self.arrays_group.require_dataset(
+                "response_topk_logprobs",
+                shape=(0, self.response_max_tokens, top_k),
+                chunks=(sample_chunk, token_chunk, top_k),
+                dtype=np.float32,
+                fill_value=np.nan,
+                compressor=None,
+                overwrite=False,
+            )
 
     def _resolve_activation_chunk_shape(self, num_layers: int, hidden_size: int) -> Tuple[int, int, int, int]:
         if self.activation_chunk_shape is None:
@@ -423,6 +496,58 @@ class ZarrActivationsLogger:
 
         return prompt_acts, response_acts, prompt_len, response_len
 
+    @staticmethod
+    def _as_numpy(array_like: Any, *, dtype: Optional[np.dtype] = None) -> Optional[np.ndarray]:
+        if array_like is None:
+            return None
+        if isinstance(array_like, torch.Tensor):
+            arr = array_like.detach().cpu().numpy()
+        else:
+            arr = np.asarray(array_like)
+        if dtype is not None:
+            arr = arr.astype(dtype, copy=False)
+        return arr
+
+    def _extract_response_logprob_payload(self, entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        model_outputs = entry.get("model_outputs")
+
+        def _read(name: str) -> Any:
+            if name in entry:
+                return entry.get(name)
+            if model_outputs is not None and hasattr(model_outputs, name):
+                return getattr(model_outputs, name)
+            return None
+
+        token_ids = self._as_numpy(_read("response_token_ids"), dtype=np.int32)
+        token_logprobs = self._as_numpy(_read("response_token_logprobs"), dtype=np.float32)
+        topk_token_ids = self._as_numpy(_read("response_topk_token_ids"), dtype=np.int32)
+        topk_logprobs = self._as_numpy(_read("response_topk_logprobs"), dtype=np.float32)
+
+        if token_ids is None or token_logprobs is None or topk_token_ids is None or topk_logprobs is None:
+            return None
+        if token_ids.ndim != 1 or token_logprobs.ndim != 1:
+            return None
+        if topk_token_ids.ndim != 2 or topk_logprobs.ndim != 2:
+            return None
+        if token_ids.shape[0] != token_logprobs.shape[0]:
+            return None
+        if topk_token_ids.shape != topk_logprobs.shape:
+            return None
+
+        provided_top_k = entry.get("response_logprobs_top_k")
+        if provided_top_k is None and model_outputs is not None and hasattr(model_outputs, "response_logprobs_top_k"):
+            provided_top_k = getattr(model_outputs, "response_logprobs_top_k")
+        if provided_top_k is None:
+            provided_top_k = int(topk_token_ids.shape[1])
+
+        return {
+            "token_ids": token_ids,
+            "token_logprobs": token_logprobs,
+            "topk_token_ids": topk_token_ids,
+            "topk_logprobs": topk_logprobs,
+            "top_k": int(provided_top_k),
+        }
+
     def log_entry(self, key: str, entry: Dict[str, Any]):
         """
         Log an entry to the Zarr store.
@@ -502,6 +627,14 @@ class ZarrActivationsLogger:
         self._prompt_len.resize((idx + 1,))
         self._response_len.resize((idx + 1,))
         self._sample_key.resize((idx + 1,))
+        if self._response_token_ids is not None:
+            self._response_token_ids.resize((idx + 1, self.response_max_tokens))
+        if self._response_token_logprobs is not None:
+            self._response_token_logprobs.resize((idx + 1, self.response_max_tokens))
+        if self._response_topk_token_ids is not None:
+            self._response_topk_token_ids.resize((idx + 1, self.response_max_tokens, self.response_logprobs_top_k))
+        if self._response_topk_logprobs is not None:
+            self._response_topk_logprobs.resize((idx + 1, self.response_max_tokens, self.response_logprobs_top_k))
 
         stored_prompt_len = int(min(prompt_len or 0, self.prompt_max_tokens))
         stored_response_len = int(min(response_len or 0, self.response_max_tokens))
@@ -509,6 +642,43 @@ class ZarrActivationsLogger:
         self._prompt_len[idx] = stored_prompt_len
         self._response_len[idx] = stored_response_len
         self._sample_key[idx] = str(key)
+
+        stored_logprob_len = 0
+        stored_logprob_top_k = 0
+        logprob_payload = self._extract_response_logprob_payload(entry)
+        if (
+            logprob_payload is not None
+            and stored_response_len > 0
+            and self._response_token_ids is not None
+            and self._response_token_logprobs is not None
+            and self._response_topk_token_ids is not None
+            and self._response_topk_logprobs is not None
+        ):
+            token_ids = logprob_payload["token_ids"]
+            token_logprobs = logprob_payload["token_logprobs"]
+            topk_token_ids = logprob_payload["topk_token_ids"]
+            topk_logprobs = logprob_payload["topk_logprobs"]
+
+            available_len = min(
+                stored_response_len,
+                int(token_ids.shape[0]),
+                int(token_logprobs.shape[0]),
+                int(topk_token_ids.shape[0]),
+                int(topk_logprobs.shape[0]),
+            )
+            incoming_top_k = min(int(topk_token_ids.shape[1]), int(topk_logprobs.shape[1]))
+            stored_logprob_top_k = min(self.response_logprobs_top_k, incoming_top_k)
+
+            if available_len > 0 and stored_logprob_top_k > 0:
+                self._response_token_ids[idx, :available_len] = token_ids[:available_len]
+                self._response_token_logprobs[idx, :available_len] = token_logprobs[:available_len]
+                self._response_topk_token_ids[idx, :available_len, :stored_logprob_top_k] = topk_token_ids[
+                    :available_len, :stored_logprob_top_k
+                ]
+                self._response_topk_logprobs[idx, :available_len, :stored_logprob_top_k] = topk_logprobs[
+                    :available_len, :stored_logprob_top_k
+                ]
+                stored_logprob_len = int(available_len)
 
         for layer_idx in range(num_layers):
             if layer_idx not in self._target_layer_indices:
@@ -524,11 +694,27 @@ class ZarrActivationsLogger:
                 response_arr = layer_response.squeeze(0)[:stored_response_len].to(dtype=torch.float16)
                 self._response_activations[idx, layer_idx, :stored_response_len, :] = response_arr.cpu().numpy()
 
-        metadata_entry = {k: v for k, v in entry.items() if k not in {"model_outputs", "all_layers_activations"}}
+        metadata_entry = {
+            k: v
+            for k, v in entry.items()
+            if k
+            not in {
+                "model_outputs",
+                "all_layers_activations",
+                "response_token_ids",
+                "response_token_logprobs",
+                "response_topk_token_ids",
+                "response_topk_logprobs",
+            }
+        }
         metadata_entry["key"] = key
         metadata_entry["sample_index"] = idx
         metadata_entry["prompt_len"] = stored_prompt_len
         metadata_entry["response_len"] = stored_response_len
+        metadata_entry["has_response_logprobs"] = bool(stored_logprob_len > 0)
+        metadata_entry["response_logprobs_len"] = int(stored_logprob_len)
+        if stored_logprob_len > 0:
+            metadata_entry["response_logprobs_top_k"] = int(stored_logprob_top_k)
         metadata_entry["logging_config"] = {
             "target_layers": self.target_layers,
             "sequence_mode": self.sequence_mode,
@@ -588,7 +774,69 @@ class ZarrActivationsLogger:
                 activations.append(torch.from_numpy(combined))
 
         meta["all_layers_activations"] = activations
+        logprob_len = int(meta.get("response_logprobs_len", 0) or 0)
+        if (
+            self._response_token_ids is not None
+            and self._response_token_logprobs is not None
+            and self._response_topk_token_ids is not None
+            and self._response_topk_logprobs is not None
+        ):
+            if logprob_len <= 0 and response_len > 0:
+                sentinel_ids = self._response_token_ids[idx, :response_len]
+                logprob_len = int(np.count_nonzero(sentinel_ids >= 0))
+            if logprob_len > 0:
+                top_k = int(self._response_topk_logprobs.shape[2])
+                max_len = min(response_len, logprob_len)
+                meta["response_token_ids"] = torch.from_numpy(self._response_token_ids[idx, :max_len])
+                meta["response_token_logprobs"] = torch.from_numpy(self._response_token_logprobs[idx, :max_len])
+                meta["response_topk_token_ids"] = torch.from_numpy(
+                    self._response_topk_token_ids[idx, :max_len, :top_k]
+                )
+                meta["response_topk_logprobs"] = torch.from_numpy(
+                    self._response_topk_logprobs[idx, :max_len, :top_k]
+                )
+                meta["response_logprobs_top_k"] = top_k
         return meta
+
+    def get_response_logprobs(self, key: str) -> Optional[Dict[str, torch.Tensor]]:
+        """Retrieve token-level response logprob features for a key."""
+        if key not in self._index:
+            return None
+        if (
+            self._response_token_ids is None
+            or self._response_token_logprobs is None
+            or self._response_topk_token_ids is None
+            or self._response_topk_logprobs is None
+        ):
+            return None
+
+        meta = self._index[key]
+        idx = meta.get("sample_index")
+        if idx is None:
+            return None
+
+        response_len = int(self._response_len[idx]) if self._response_len is not None else 0
+        logprob_len = int(meta.get("response_logprobs_len", 0) or 0)
+        if logprob_len <= 0 and response_len > 0:
+            sentinel_ids = self._response_token_ids[idx, :response_len]
+            logprob_len = int(np.count_nonzero(sentinel_ids >= 0))
+        if logprob_len <= 0:
+            return None
+
+        max_len = min(response_len, logprob_len)
+        top_k = int(self._response_topk_logprobs.shape[2])
+        return {
+            "response_token_ids": torch.from_numpy(self._response_token_ids[idx, :max_len]),
+            "response_token_logprobs": torch.from_numpy(self._response_token_logprobs[idx, :max_len]),
+            "response_topk_token_ids": torch.from_numpy(
+                self._response_topk_token_ids[idx, :max_len, :top_k]
+            ),
+            "response_topk_logprobs": torch.from_numpy(
+                self._response_topk_logprobs[idx, :max_len, :top_k]
+            ),
+            "response_logprobs_top_k": top_k,
+            "response_len": max_len,
+        }
 
     def get_layer_activation(self, key: str, layer_idx: int, sequence_mode: str = "response") -> Optional[torch.Tensor]:
         """

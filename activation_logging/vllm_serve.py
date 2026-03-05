@@ -56,6 +56,10 @@ def main():
     parser.add_argument("--sequence-mode", type=str, default="all",
                         choices=["all", "prompt", "response"],
                         help="Which tokens to extract activations for (default: all)")
+    parser.add_argument("--logprobs-top-k", type=int, default=20,
+                        help="Number of top logprobs to persist per generated token (default: 20)")
+    parser.add_argument("--disable-logprobs", action="store_true",
+                        help="Disable response token logprob logging (enabled by default)")
     
     args = parser.parse_args()
 
@@ -85,6 +89,8 @@ def main():
     os.environ["SERVER_LOG_FILE"] = args.log_file  # Add log file path to environment
     os.environ["ACTIVATION_TARGET_LAYERS"] = args.target_layers  # Add target layers setting
     os.environ["ACTIVATION_SEQUENCE_MODE"] = args.sequence_mode  # Add sequence mode setting
+    os.environ["ACTIVATION_LOGPROBS_ENABLED"] = "0" if args.disable_logprobs else "1"
+    os.environ["ACTIVATION_LOGPROBS_TOPK"] = str(max(1, int(args.logprobs_top_k)))
     os.environ["DEFAULT_MODEL"] = args.model
     if args.auth_token:
         os.environ["HF_TOKEN"] = args.auth_token
@@ -103,6 +109,8 @@ def main():
     logger.info(f"Activations Path: {activations_path}")
     logger.info(f"Target Layers: {args.target_layers}")
     logger.info(f"Sequence Mode: {args.sequence_mode}")
+    logger.info(f"Response Logprobs Enabled: {not args.disable_logprobs}")
+    logger.info(f"Response Logprobs Top-K: {max(1, int(args.logprobs_top_k))}")
 
     # Create zarr parent directory if it doesn't exist
     activations_dir = os.path.dirname(activations_path)

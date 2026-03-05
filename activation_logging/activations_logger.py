@@ -483,6 +483,32 @@ class ActivationsLogger:
 
         return act
 
+    def get_response_logprobs(self, key: str) -> Optional[Dict[str, Any]]:
+        """Retrieve token-level response logprob features for a given key."""
+        if getattr(self, "_backend", None) is not None and hasattr(self._backend, "get_response_logprobs"):
+            return self._backend.get_response_logprobs(key)
+
+        result = self.get_entry_by_key(key)
+        if result is None:
+            return None
+
+        token_ids = result.get("response_token_ids")
+        token_logprobs = result.get("response_token_logprobs")
+        topk_ids = result.get("response_topk_token_ids")
+        topk_logprobs = result.get("response_topk_logprobs")
+
+        if token_ids is None or token_logprobs is None or topk_ids is None or topk_logprobs is None:
+            return None
+
+        return {
+            "response_token_ids": token_ids,
+            "response_token_logprobs": token_logprobs,
+            "response_topk_token_ids": topk_ids,
+            "response_topk_logprobs": topk_logprobs,
+            "response_logprobs_top_k": int(topk_logprobs.shape[-1]),
+            "response_len": int(token_ids.shape[0]),
+        }
+
     def list_entries(self) -> List[str]:
         """
         List all entry keys in the metadata store.

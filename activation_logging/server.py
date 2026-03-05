@@ -14,6 +14,7 @@ import glob
 import faulthandler
 import sys
 import traceback
+import numpy as np
 from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, Tuple
@@ -233,6 +234,16 @@ def _env_bool(name: str, default: bool) -> bool:
     return v.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+DEFAULT_LOGPROBS_ENABLED = _env_bool("ACTIVATION_LOGPROBS_ENABLED", True)
+DEFAULT_LOGPROBS_TOP_K = _env_int("ACTIVATION_LOGPROBS_TOPK", 20)
+if DEFAULT_LOGPROBS_TOP_K <= 0:
+    logger.warning(
+        "Invalid ACTIVATION_LOGPROBS_TOPK=%s; falling back to 20",
+        DEFAULT_LOGPROBS_TOP_K,
+    )
+    DEFAULT_LOGPROBS_TOP_K = 20
+
+
 def _should_use_vllm_backend(model_name: str) -> bool:
     """Decide whether to route inference through vLLM.
 
@@ -318,6 +329,57 @@ def _format_chat_prompt_for_model(model_name: str, messages: List[Dict[str, str]
 
     # Fallback: role-tag concatenation
     return "\n".join([f"{m.get('role', 'user')}: {m.get('content', '')}" for m in messages])
+
+
+def _extract_generation_logprobs(
+    outputs: Any,
+    generated_ids: torch.Tensor,
+    trim_pos: Optional[int],
+    top_k: int,
+) -> Optional[Dict[str, Any]]:
+    """Extract generated-token log-probability features from generation outputs.
+
+    Returns arrays for generated token ids, selected-token logprobs, and top-k
+    token/logprob candidates per generated step.
+    """
+    if outputs is None or generated_ids is None:
+        return None
+
+    score_steps = getattr(outputs, "scores", None)
+    if not score_steps:
+        return None
+
+    total_generated = int(generated_ids.shape[0])
+    if total_generated <= 0:
+        return None
+
+    usable_steps = min(len(score_steps), total_generated)
+    if trim_pos is not None:
+        usable_steps = min(usable_steps, int(trim_pos))
+    if usable_steps <= 0:
+        return None
+
+    first_step = score_steps[0]
+    if first_step is None or first_step.ndim < 2:
+        return None
+    vocab_size = int(first_step.shape[-1])
+    safe_top_k = max(1, min(int(top_k), vocab_size))
+
+    # Vectorized log-softmax/top-k extraction for all generated steps.
+    step_logits = torch.stack([step[0] for step in score_steps[:usable_steps]], dim=0).to(dtype=torch.float32)
+    step_logprobs = torch.log_softmax(step_logits, dim=-1)
+
+    selected_ids = generated_ids[:usable_steps].to(device=step_logprobs.device, dtype=torch.long)
+    selected_logprobs = step_logprobs.gather(1, selected_ids.unsqueeze(1)).squeeze(1)
+    topk_logprobs, topk_token_ids = torch.topk(step_logprobs, k=safe_top_k, dim=-1)
+
+    return {
+        "response_token_ids": selected_ids.detach().cpu().numpy().astype(np.int32, copy=False),
+        "response_token_logprobs": selected_logprobs.detach().cpu().numpy().astype(np.float32, copy=False),
+        "response_topk_token_ids": topk_token_ids.detach().cpu().numpy().astype(np.int32, copy=False),
+        "response_topk_logprobs": topk_logprobs.detach().cpu().numpy().astype(np.float32, copy=False),
+        "response_logprobs_top_k": int(safe_top_k),
+    }
 
 
 def run_inference_vllm(
@@ -1015,6 +1077,7 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
                 top_p=top_p,
                 return_dict_in_generate=True,
                 output_hidden_states=True,
+                output_scores=DEFAULT_LOGPROBS_ENABLED,
                 do_sample=True if temperature > 0.0 else False,
                 pad_token_id=tokenizer.pad_token_id
             )
@@ -1035,6 +1098,22 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
         trim_start = time.time()
         response_text, trim_pos = trim_response(tokenizer, gen_ids, response_text)
         trim_time = time.time() - trim_start
+
+        if DEFAULT_LOGPROBS_ENABLED:
+            logprob_payload = _extract_generation_logprobs(
+                outputs=outputs,
+                generated_ids=gen_ids,
+                trim_pos=trim_pos,
+                top_k=DEFAULT_LOGPROBS_TOP_K,
+            )
+            if logprob_payload is not None:
+                for field_name, field_value in logprob_payload.items():
+                    setattr(outputs, field_name, field_value)
+                logger.info(
+                    "Captured response logprobs for %s tokens (top_k=%s)",
+                    len(logprob_payload["response_token_ids"]),
+                    logprob_payload["response_logprobs_top_k"],
+                )
 
         inference_time = time.time() - start_time
         logger.info(f"Inference completed in {inference_time:.2f} seconds")
@@ -1925,6 +2004,7 @@ async def startup_event():
         "DEFAULT_MODEL", "ACTIVATION_STORAGE_PATH", "ACTIVATION_LMDB_PATH",
         "ACTIVATION_LOGGER_TYPE", "GGUF_MODELS_DIR", "HF_TOKEN",
         "ACTIVATION_TARGET_LAYERS", "ACTIVATION_SEQUENCE_MODE",
+        "ACTIVATION_LOGPROBS_ENABLED", "ACTIVATION_LOGPROBS_TOPK",
         "TRIM_OUTPUT_AT", "SERVER_LOG_FILE"
     ]
     for var in env_vars_to_log:
