@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
-from tqdm.autonotebook import tqdm
 from torch.utils.data import DataLoader
+from utils.progress import tqdm
 
 import numpy as np
 from sklearn.metrics import roc_auc_score

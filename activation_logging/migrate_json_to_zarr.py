@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional
 import numpy as np
 import torch
 from loguru import logger
-from tqdm.autonotebook import tqdm
+from utils.progress import tqdm
 
 from .activations_logger import JsonActivationsLogger
 from .zarr_activations_logger import ZarrActivationsLogger
@@ -149,7 +149,7 @@ def migrate_json_to_zarr(
     if progress:
         iterator = tqdm(keys, desc="Migrating JSON → Zarr", unit="entry")
         if verbose:
-            logger.info("Migration progress bar enabled (tqdm.autonotebook)")
+            logger.info("Migration progress bar enabled (utils.progress/tqdm.auto)")
 
     for key in iterator:
         try:

@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 import torch
 from loguru import logger
 from torch.utils.data import DataLoader, IterableDataset
-from tqdm.autonotebook import tqdm
+from utils.progress import tqdm
 
 from .contrastive_evaluator import (
     ContrastiveEvaluator,

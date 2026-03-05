@@ -1,8 +1,7 @@
-from tqdm.autonotebook import tqdm
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, WeightedRandomSampler, IterableDataset, get_worker_info
-from tqdm import tqdm
+from utils.progress import tqdm
 import torch.nn as nn
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from .evaluation import evaluate, intra_inter_margin, intra_sample_cosine_mean
@@ -686,7 +685,6 @@ def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, ba
     """
     from torch.utils.data import DataLoader
     import torch
-    from tqdm import tqdm
 
     assert batch_size % sub_batch_size == 0, "batch_size must be divisible by sub_batch_size"
 

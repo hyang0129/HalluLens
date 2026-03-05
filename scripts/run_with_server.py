@@ -69,6 +69,11 @@ from loguru import logger
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+from utils.progress import install_tqdm_global
+
+_TQDM_BACKEND = install_tqdm_global()
+logger.debug(f"tqdm backend configured: {_TQDM_BACKEND}")
+
 # Import ServerManager from utils.lm
 from utils import lm
 

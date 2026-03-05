@@ -88,6 +88,7 @@ We aim to extend our method to work on benchmarks from the **LLMsKnow repository
 - **`utils/`**: Core utilities for evaluation, caching, and model interfaces
 - **`scripts/`**: Automation scripts for running experiments
 - **`data/`**: Data management and download utilities
+- **`docs/setup/TQDM_PROGRESS_ADAPTER.md`**: Notebook/CLI-safe tqdm adapter usage
 
 ### 🌐 Remote Development
 - **`REMOTE_DEV_SETUP.md`**: Comprehensive guide for GPU-accelerated remote development

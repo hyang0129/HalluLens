@@ -33,7 +33,7 @@ else:
     _WDS_IMPORT_ERROR = None
 
 try:
-    from tqdm import tqdm
+    from utils.progress import tqdm
 except Exception:  # pragma: no cover - optional dependency
     tqdm = None
 

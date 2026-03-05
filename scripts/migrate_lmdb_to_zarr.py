@@ -1,7 +1,7 @@
 import os
 from activation_logging.activations_logger import ActivationsLogger
 from activation_logging.zarr_activations_logger import ZarrActivationsLogger
-from tqdm import tqdm
+from utils.progress import tqdm
 import shutil
 
 def check_disk_space(lmdb_path, zarr_path):

@@ -10,7 +10,7 @@ import numpy as np
 from typing import Any, Dict, Optional, List, Callable, Tuple, Union, Type
 from loguru import logger
 import torch 
-from tqdm.autonotebook import tqdm
+from utils.progress import tqdm
 from .compression import BaseCompressor, NoCompression, ZstdCompression, ZSTD_AVAILABLE
 import json
 from pathlib import Path
