@@ -121,7 +121,7 @@ def main():
     # Two server options:
     # 1. Using uvicorn directly (easier for debugging)
     uvicorn_cmd = [
-        "uvicorn", "activation_logging.server:app",
+        sys.executable, "-m", "uvicorn", "activation_logging.server:app",
         "--host", args.host,
         "--port", str(args.port),
         "--log-level", "warning",

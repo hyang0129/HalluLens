@@ -5,6 +5,11 @@ Unified script to run HalluLens tasks with automatic server management.
 This script automatically starts the activation logging server and runs one of the three
 generation steps, eliminating the need for manual server startup.
 
+Note:
+    In this runner, setting inference_method="vllm" starts the OpenAI-compatible
+    FastAPI server via uvicorn (activation_logging.server:app, launched through
+    activation_logging.vllm_serve), rather than invoking raw `vllm serve` directly.
+
 Can be used as a CLI script or imported as a Python module (e.g., from a Jupyter notebook).
 When used as a Python module, the client (inference/task) always runs in the calling thread,
 which avoids tqdm RAM issues in Jupyter.
