@@ -102,6 +102,146 @@ class ProgressiveCompressor(nn.Module):
         x_pooled = x.mean(dim=1)  # (B, dim)
         return self.final_proj(x_pooled)  # (B, 512)
 
+class LogprobReconProgressiveCompressor(nn.Module):
+    """ProgressiveCompressor with auxiliary logprob reconstruction (Mechanism F).
+
+    Adds a lightweight auxiliary decoder ``g: R^d -> R^recon_seq_len`` that,
+    during training, reconstructs the per-token logprob sequence from the
+    compressed embedding ``z``.  The training objective is:
+
+        L = L_SupCon(z) + λ · L_recon(g(z), ℓ)
+
+    where ``ℓ`` is the per-token logprob sequence and ``L_recon`` is MSE.
+
+    The auxiliary decoder is discarded at inference.  ``forward()`` is
+    identical to ``ProgressiveCompressor`` so the model can be used as a
+    drop-in replacement downstream.
+
+    Parameters
+    ----------
+    input_dim : int
+        Activation dimension (e.g. 4096 for Llama-8B).
+    final_dim : int
+        Output embedding dimension.
+    dropout, input_dropout : float
+        Dropout rates forwarded to the inner encoder.
+    normalize_input : bool
+        If True, apply ``LayerNorm`` to raw activations before encoding.
+    recon_seq_len : int
+        Fixed output length for the reconstructed logprob sequence.  The
+        actual per-token logprob target is resampled to this length via
+        linear interpolation during ``recon_loss()``.  Default 64.
+    recon_hidden_dim : int
+        Hidden dimension of the two-layer MLP decoder.  Default 256.
+    recon_lambda : float
+        Weight ``λ`` for the reconstruction term in the combined loss.
+        Used by the training function; can be overridden at call time.
+    logprob_var_threshold : float
+        If the batch-level variance of the logprob target falls below this
+        value the reconstruction term is suppressed (returns 0) and a
+        ``"suppressed": True`` diagnostic is emitted.  Prevents the
+        decoder from wasting capacity when logprob is near-constant.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 4096,
+        final_dim: int = 512,
+        dropout: float = 0.1,
+        input_dropout: float = 0.2,
+        normalize_input: bool = False,
+        recon_seq_len: int = 64,
+        recon_hidden_dim: int = 256,
+        recon_lambda: float = 1.0,
+        logprob_var_threshold: float = 1e-4,
+    ):
+        super().__init__()
+        self.recon_seq_len = int(recon_seq_len)
+        self.recon_lambda = float(recon_lambda)
+        self.logprob_var_threshold = float(logprob_var_threshold)
+
+        self.encoder = ProgressiveCompressor(
+            input_dim=int(input_dim),
+            final_dim=int(final_dim),
+            dropout=float(dropout),
+            input_dropout=float(input_dropout),
+            normalize_input=bool(normalize_input),
+        )
+
+        # Auxiliary decoder: z (B, final_dim) → logprob_pred (B, recon_seq_len)
+        self.decoder = nn.Sequential(
+            nn.Linear(int(final_dim), int(recon_hidden_dim)),
+            nn.GELU(),
+            nn.Linear(int(recon_hidden_dim), self.recon_seq_len),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Standard forward — identical to ProgressiveCompressor.
+
+        The auxiliary decoder is **not** called.  Use this path for
+        inference and for evaluation utilities that expect a single tensor.
+
+        x : (B, L, input_dim)
+        returns : (B, final_dim)
+        """
+        return self.encoder(x)
+
+    def forward_with_recon(self, x: torch.Tensor):
+        """Forward pass with auxiliary reconstruction.
+
+        Returns
+        -------
+        z : (B, final_dim)
+        logprob_pred : (B, recon_seq_len)
+        """
+        z = self.encoder(x)
+        logprob_pred = self.decoder(z)
+        return z, logprob_pred
+
+    def recon_loss(
+        self,
+        logprob_pred: torch.Tensor,
+        logprob_target: torch.Tensor,
+    ):
+        """Compute MSE reconstruction loss with variance diagnostic.
+
+        Parameters
+        ----------
+        logprob_pred : (B, recon_seq_len)
+            Decoder output from ``forward_with_recon``.
+        logprob_target : (B, L)
+            Per-token logprob sequences for the batch.  May have a
+            different length L than ``recon_seq_len``; will be resampled.
+
+        Returns
+        -------
+        loss : scalar Tensor
+            MSE loss, or zero when suppressed.
+        diagnostics : dict
+            ``logprob_var`` (float) and ``suppressed`` (bool).
+        """
+        target = logprob_target.float()
+
+        # Variance diagnostic — suppress when logprob is near-constant.
+        logprob_var = float(target.var())
+        if logprob_var < self.logprob_var_threshold:
+            zero = torch.zeros(1, device=logprob_pred.device).squeeze()
+            return zero, {"logprob_var": logprob_var, "suppressed": True}
+
+        # Resample target to fixed seq len via linear interpolation.
+        # F.interpolate expects (B, C, L) → operate on (B, 1, L_orig).
+        if target.shape[-1] != self.recon_seq_len:
+            target = F.interpolate(
+                target.unsqueeze(1),        # (B, 1, L)
+                size=self.recon_seq_len,
+                mode="linear",
+                align_corners=False,
+            ).squeeze(1)                    # (B, recon_seq_len)
+
+        loss = F.mse_loss(logprob_pred, target)
+        return loss, {"logprob_var": logprob_var, "suppressed": False}
+
+
 class LastLayerHaluClassifier(nn.Module):
     """
     Transformer-based classifier for hallucination detection using last layer activations.

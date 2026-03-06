@@ -41,10 +41,15 @@ from activation_research.metrics import cosine_similarity_ood_stats, mahalanobis
 from activation_research.model import (  # noqa: E402
     HallucinationClassifier,
     LastLayerHaluClassifier,
+    LogprobReconProgressiveCompressor,
     ProgressiveCompressor,
     SimpleHaluClassifier,
 )
-from activation_research.training import train_contrastive, train_halu_classifier
+from activation_research.training import (
+    train_contrastive,
+    train_contrastive_logprob_recon,
+    train_halu_classifier,
+)
 
 
 @dataclass(frozen=True)
@@ -210,9 +215,13 @@ def _build_model(
     input_dropout: float,
 ) -> torch.nn.Module:
     if routine == "contrastive":
-        if model_name != "progressive_compressor":
-            raise ValueError(f"Unsupported contrastive model: {model_name}")
-        return ProgressiveCompressor(input_dim=input_dim, final_dim=final_dim, input_dropout=input_dropout)
+        if model_name == "progressive_compressor":
+            return ProgressiveCompressor(input_dim=input_dim, final_dim=final_dim, input_dropout=input_dropout)
+        if model_name == "logprob_recon_compressor":
+            return LogprobReconProgressiveCompressor(
+                input_dim=input_dim, final_dim=final_dim, input_dropout=input_dropout
+            )
+        raise ValueError(f"Unsupported contrastive model: {model_name}")
 
     if routine == "classifier":
         if model_name == "simple_halu_classifier":
@@ -241,24 +250,44 @@ def _train(
     num_workers: int,
     checkpoint_dir: str,
     resume_from: Optional[str],
+    recon_lambda: float = None,
 ) -> None:
     if routine == "contrastive":
-        train_contrastive(
-            model,
-            train_dataset,
-            test_dataset=test_dataset,
-            epochs=epochs,
-            batch_size=batch_size,
-            lr=lr,
-            temperature=temperature,
-            device=device,
-            num_workers=num_workers,
-            sub_batch_size=sub_batch_size,
-            use_labels=True,
-            ignore_label=-1,
-            checkpoint_dir=checkpoint_dir,
-            resume_from=resume_from,
-        )
+        if isinstance(model, LogprobReconProgressiveCompressor):
+            train_contrastive_logprob_recon(
+                model,
+                train_dataset,
+                test_dataset=test_dataset,
+                epochs=epochs,
+                batch_size=batch_size,
+                lr=lr,
+                temperature=temperature,
+                device=device,
+                num_workers=num_workers,
+                sub_batch_size=sub_batch_size,
+                use_labels=True,
+                ignore_label=-1,
+                checkpoint_dir=checkpoint_dir,
+                resume_from=resume_from,
+                recon_lambda=recon_lambda,
+            )
+        else:
+            train_contrastive(
+                model,
+                train_dataset,
+                test_dataset=test_dataset,
+                epochs=epochs,
+                batch_size=batch_size,
+                lr=lr,
+                temperature=temperature,
+                device=device,
+                num_workers=num_workers,
+                sub_batch_size=sub_batch_size,
+                use_labels=True,
+                ignore_label=-1,
+                checkpoint_dir=checkpoint_dir,
+                resume_from=resume_from,
+            )
         return
 
     if routine == "classifier":
@@ -305,10 +334,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         default="progressive_compressor",
         choices=[
             "progressive_compressor",
+            "logprob_recon_compressor",
             "simple_halu_classifier",
             "last_layer_transformer",
             "hallucination_classifier",
         ],
+    )
+    parser.add_argument(
+        "--recon-lambda",
+        type=float,
+        default=None,
+        help="λ weight for the logprob reconstruction term (logprob_recon_compressor only). "
+             "Defaults to model.recon_lambda (1.0).",
     )
 
     parser.add_argument("--train-layers", default="14-29", help="Layers used to sample training pairs")
@@ -509,6 +546,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         num_workers=args.num_workers,
         checkpoint_dir=str(ckpt_dir),
         resume_from=resume_from,
+        recon_lambda=getattr(args, "recon_lambda", None),
     )
 
     if not args.do_ood_eval:

@@ -659,6 +659,346 @@ def train_contrastive(model, train_dataset, test_dataset=None,
                 _cleanup_legacy_checkpoints(checkpoint_dir, keep_filenames={'contrastive_last.pt'})
 
 
+def _contrastive_collate_with_logprob(batch):
+    """Collate for logprob-reconstruction contrastive training.
+
+    Extends ``_contrastive_collate_kview`` by also collecting the per-token
+    logprob sequence.  Recognises two key names in order of preference:
+
+    * ``"logprob"`` – explicit logprob tensor (any shape, will be flattened).
+    * ``"response_token_logprobs"`` – key produced by ``ActivationDataset``
+      when ``include_response_logprobs=True``; NaN-padded ``(pad_length,)``
+      tensor.
+
+    If neither key is present in all items the ``"logprob"`` output key is
+    omitted so the training function can fall back to SupCon-only.
+    """
+    out = _contrastive_collate_kview(batch)
+
+    logprob_src = None
+    for key in ("logprob", "response_token_logprobs"):
+        if all(key in b for b in batch):
+            logprob_src = key
+            break
+
+    if logprob_src is not None:
+        raw = [b[logprob_src] for b in batch]
+        max_len = max(lp.shape[-1] if isinstance(lp, torch.Tensor) else len(lp) for lp in raw)
+        padded = []
+        for lp in raw:
+            if not isinstance(lp, torch.Tensor):
+                lp = torch.tensor(lp, dtype=torch.float32)
+            lp = lp.float().reshape(-1)
+            if lp.shape[0] < max_len:
+                lp = torch.nn.functional.pad(lp, (0, max_len - lp.shape[0]), value=float("nan"))
+            padded.append(lp)
+        out["logprob"] = torch.stack(padded, dim=0)  # (B, max_len)
+
+    return out
+
+
+def train_contrastive_logprob_recon(
+    model,
+    train_dataset,
+    test_dataset=None,
+    epochs=10,
+    batch_size=512,
+    lr=1e-6,
+    temperature=0.07,
+    device="cuda",
+    num_workers=16,
+    sub_batch_size=64,
+    checkpoint_dir="checkpoints",
+    save_every=1,
+    resume_from=None,
+    persistent_workers=True,
+    cleanup_legacy_checkpoints: bool = True,
+    snapshot_every: int = 0,
+    snapshot_keep_last: int = 5,
+    use_labels=False,
+    ignore_label=-1,
+    same_sample_weight=1.0,
+    same_class_weight=1.0,
+    balanced_sampling=False,
+    recon_lambda: float = None,
+):
+    """Train a ``LogprobReconProgressiveCompressor`` with auxiliary logprob reconstruction.
+
+    Loss per step:
+
+        L = L_SupCon(z) + λ · L_recon(g(z), ℓ)
+
+    ``λ`` defaults to ``model.recon_lambda`` but can be overridden via
+    ``recon_lambda``.  When the batch contains no ``"logprob"`` field (e.g.
+    the dataset does not expose it) the reconstruction term is silently
+    omitted and training degrades to standard contrastive.
+
+    Parameters
+    ----------
+    model : LogprobReconProgressiveCompressor
+    train_dataset, test_dataset : dataset
+    epochs, batch_size, lr, temperature, device, num_workers, sub_batch_size,
+    checkpoint_dir, save_every, resume_from, persistent_workers,
+    cleanup_legacy_checkpoints, snapshot_every, snapshot_keep_last,
+    use_labels, ignore_label, same_sample_weight, same_class_weight,
+    balanced_sampling :
+        Same semantics as ``train_contrastive``.
+    recon_lambda : float or None
+        Override ``model.recon_lambda``.  Pass ``None`` to use the model default.
+    """
+    _lambda = float(recon_lambda) if recon_lambda is not None else model.recon_lambda
+
+    def _call_model(m, x, layer_idx=None):
+        if layer_idx is None:
+            return m.forward_with_recon(x)
+        try:
+            # LayerAware wrapper: inject layer_idx into encoder, then call decoder
+            z = m.encoder(x, layer_idx=layer_idx) if hasattr(m.encoder, "forward") else m.encoder(x)
+            logprob_pred = m.decoder(z)
+            return z, logprob_pred
+        except TypeError:
+            return m.forward_with_recon(x)
+
+    assert batch_size % sub_batch_size == 0, "batch_size must be divisible by sub_batch_size"
+
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    model = model.to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    loss_fn = SupConLoss(
+        temperature=temperature,
+        ignore_label=ignore_label,
+        same_sample_weight=same_sample_weight,
+        same_class_weight=same_class_weight,
+    )
+
+    start_epoch = 0
+    best_loss = float("inf")
+
+    if resume_from is not None:
+        checkpoint_path = (
+            resume_from if os.path.isabs(resume_from) else os.path.join(checkpoint_dir, resume_from)
+        )
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Resume checkpoint not found: {checkpoint_path}")
+        ckpt = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        start_epoch = ckpt.get("epoch", 0) + 1
+        best_loss = ckpt.get("best_loss", float("inf"))
+        logger.info(f"Resumed training from epoch {start_epoch}")
+
+    is_iterable = isinstance(train_dataset, IterableDataset)
+    sampler = (
+        _build_balanced_sampler(train_dataset)
+        if balanced_sampling and use_labels and not is_iterable
+        else None
+    )
+    use_persistent_workers = bool(persistent_workers and num_workers and num_workers > 0)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=sub_batch_size,
+        shuffle=(sampler is None and not is_iterable),
+        sampler=sampler,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=use_persistent_workers,
+        collate_fn=_contrastive_collate_with_logprob,
+    )
+
+    test_loader = None
+    if test_dataset is not None:
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=use_persistent_workers,
+            collate_fn=_contrastive_collate_with_logprob,
+        )
+
+    from utils.progress import tqdm as _tqdm
+
+    for epoch in _tqdm(range(start_epoch, epochs), desc="Epochs"):
+        logger.info(f"Starting epoch {epoch + 1}/{epochs}")
+        model.train()
+
+        total_loss = total_supcon = total_recon = 0.0
+        total_intra_cos = total_intra_inter = 0.0
+        n_batches = 0
+
+        try:
+            total_steps = len(train_loader)
+        except TypeError:
+            total_steps = None
+
+        buffer_views = []
+        buffer_view_indices = []
+        buffer_logprobs = []
+        buffer_labels = [] if use_labels else None
+        buffer_sample_ids = [] if use_labels else None
+
+        i = 0
+        loop = _tqdm(train_loader, desc=f"Epoch {epoch + 1}/{epochs}", leave=False)
+        for batch in loop:
+            i += 1
+
+            views = batch["views_activations"].to(device, non_blocking=True)
+            buffer_views.append(views)
+
+            if "view_indices" in batch:
+                buffer_view_indices.append(batch["view_indices"].to(device, non_blocking=True))
+
+            if "logprob" in batch:
+                buffer_logprobs.append(batch["logprob"].to(device, non_blocking=True))
+
+            if use_labels:
+                labels = batch["halu"].to(device, non_blocking=True)
+                if labels.dim() == 0:
+                    labels = labels.unsqueeze(0)
+                elif labels.dim() > 1:
+                    labels = labels.view(-1)
+                buffer_labels.append(labels)
+
+                hashkeys = batch["hashkey"]
+                if isinstance(hashkeys, str):
+                    hashkeys = [hashkeys]
+                sample_ids = torch.tensor(
+                    [hash(hk) % 1_000_000 for hk in hashkeys], dtype=torch.long, device=device
+                )
+                buffer_sample_ids.append(sample_ids)
+
+            buffer_full = len(buffer_views) * sub_batch_size == batch_size
+            last_batch = total_steps is not None and i == total_steps
+
+            if buffer_full or last_batch:
+                views_full = torch.cat(buffer_views, dim=0)
+                view_idx_full = torch.cat(buffer_view_indices, dim=0) if buffer_view_indices else None
+                logprob_full = torch.cat(buffer_logprobs, dim=0) if buffer_logprobs else None
+                buffer_views = []
+                buffer_view_indices = []
+                buffer_logprobs = []
+
+                bsz, num_views, seq_len, hidden_dim = views_full.shape
+                x_flat = views_full.reshape(bsz * num_views, seq_len, hidden_dim)
+                view_idx_flat = view_idx_full.reshape(bsz * num_views) if view_idx_full is not None else None
+
+                z_flat, logprob_pred_flat = _call_model(model, x_flat, layer_idx=view_idx_flat)
+                z_views = z_flat.reshape(bsz, num_views, -1)
+
+                # SupCon loss
+                if use_labels:
+                    labels_full = torch.cat(buffer_labels, dim=0)
+                    sample_ids_full = torch.cat(buffer_sample_ids, dim=0)
+                    buffer_labels = []
+                    buffer_sample_ids = []
+                    supcon = loss_fn(z_views, labels=labels_full, sample_ids=sample_ids_full)
+                else:
+                    supcon = loss_fn(z_views)
+
+                # Auxiliary reconstruction loss
+                recon = torch.zeros(1, device=device).squeeze()
+                recon_diag = {}
+                if logprob_full is not None and _lambda > 0.0:
+                    # Expand logprob from (B, L) to (B*num_views, L) to match z_flat
+                    logprob_expanded = logprob_full.unsqueeze(1).expand(-1, num_views, -1)
+                    logprob_expanded = logprob_expanded.reshape(bsz * num_views, -1)
+                    # Mask out padding NaNs with the sequence mean
+                    nan_mask = logprob_expanded.isnan()
+                    if nan_mask.any():
+                        row_means = logprob_expanded.nanmean(dim=-1, keepdim=True)
+                        logprob_expanded = logprob_expanded.masked_fill(nan_mask, 0.0)
+                        logprob_expanded = logprob_expanded + nan_mask.float() * row_means
+                    recon, recon_diag = model.recon_loss(logprob_pred_flat, logprob_expanded)
+
+                loss = supcon + _lambda * recon
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                total_loss += loss.item()
+                total_supcon += supcon.item()
+                total_recon += float(recon)
+                total_intra_cos += intra_sample_cosine_mean(z_views)
+                total_intra_inter += intra_inter_margin(z_views)
+                n_batches += 1
+
+                avg_loss = total_loss / n_batches
+                loop.set_postfix(
+                    loss=avg_loss,
+                    supcon=total_supcon / n_batches,
+                    recon=total_recon / n_batches,
+                    suppressed=recon_diag.get("suppressed", "N/A"),
+                )
+
+        avg_loss = total_loss / max(1, n_batches)
+        avg_supcon = total_supcon / max(1, n_batches)
+        avg_recon = total_recon / max(1, n_batches)
+        avg_intra_cos = total_intra_cos / max(1, n_batches)
+        avg_intra_inter = total_intra_inter / max(1, n_batches)
+        print(
+            f"Epoch {epoch + 1}/{epochs} - Loss: {avg_loss:.4f} "
+            f"(SupCon={avg_supcon:.4f}, Recon={avg_recon:.4f}) "
+            f"- IntraCos: {avg_intra_cos:.4f} - IntraInterMargin: {avg_intra_inter:.4f}"
+        )
+
+        test_loss = float("inf")
+        test_intra_cos = test_intra_inter = 0.0
+        if test_loader is not None:
+            test_loss, test_intra_cos, test_intra_inter = evaluate(
+                model,
+                test_loader,
+                batch_size=batch_size,
+                loss_fn=loss_fn,
+                device=device,
+                sub_batch_size=sub_batch_size,
+                use_labels=use_labels,
+                ignore_label=ignore_label,
+            )
+            print(
+                f"Epoch {epoch + 1}/{epochs} - Test Loss: {test_loss:.4f} "
+                f"- Test IntraCos: {test_intra_cos:.4f} - Test IntraInterMargin: {test_intra_inter:.4f}"
+            )
+
+        is_last_epoch = epoch == epochs - 1
+        if (epoch + 1) % save_every == 0 or is_last_epoch:
+            checkpoint = {
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "train_loss": avg_loss,
+                "train_supcon": avg_supcon,
+                "train_recon": avg_recon,
+                "train_intra_cos": avg_intra_cos,
+                "train_intra_inter_margin": avg_intra_inter,
+                "test_loss": test_loss,
+                "test_intra_cos": test_intra_cos,
+                "test_intra_inter_margin": test_intra_inter,
+                "best_loss": min(best_loss, test_loss),
+                "temperature": temperature,
+                "lr": lr,
+                "recon_lambda": _lambda,
+            }
+
+            last_path = os.path.join(checkpoint_dir, "contrastive_last.pt")
+            _atomic_torch_save(checkpoint, last_path)
+
+            _save_and_prune_snapshots(
+                checkpoint_dir=checkpoint_dir,
+                snapshot_prefix="contrastive",
+                epoch_one_indexed=epoch + 1,
+                checkpoint=checkpoint,
+                snapshot_every=snapshot_every,
+                snapshot_keep_last=snapshot_keep_last,
+                is_last_epoch=is_last_epoch,
+            )
+
+            if cleanup_legacy_checkpoints:
+                _cleanup_legacy_checkpoints(checkpoint_dir, keep_filenames={"contrastive_last.pt"})
+
+
 def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, batch_size=512, lr=1e-4, device='cuda', num_workers=4, sub_batch_size=64,
                          checkpoint_dir='checkpoints', save_every=1, resume_from=None, persistent_workers=True,
                          cleanup_legacy_checkpoints: bool = True,
