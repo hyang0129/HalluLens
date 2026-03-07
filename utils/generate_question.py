@@ -15,6 +15,8 @@ import pandas as pd
 from transformers import AutoTokenizer
 import os
 from utils.qa_utils import split_doc, sentence_tokenize
+from loguru import logger
+from utils.log_config import add_file_sink
 
 
 QA_GENERATION_CHUNK_SIZE = int(os.environ.get("QA_GENERATION_CHUNK_SIZE", "5"))
@@ -253,10 +255,24 @@ class WikiQA:
 
             for i, answer in enumerate(ans_results):
                 answer_justified = self.justify_answerability(answer)
+                title = all_data[i].get('title', '?')
+                question = all_data[i].get('prompt', '?')
                 if answer_justified == -1:
                     filter_count += 1
+                    ans_lower = answer.strip().lower()
+                    if ans_lower == "unanswerable" or "unanswerable" in ans_lower or ans_lower.startswith("unfortunately"):
+                        reason = "unanswerable"
+                    elif self.task == 'precise' and len(answer.split()) > 10:
+                        reason = f"answer_too_long ({len(answer.split())} words)"
+                    else:
+                        reason = "filtered"
+                    logger.debug(
+                        f"[QA-REJECT] reason={reason} | title={title!r} "
+                        f"| q={question!r} | a={answer.strip()!r}"
+                    )
                     continue  # filter out unanswerable questions
 
+                logger.debug(f"[QA-ACCEPT] title={title!r} | q={question!r} | a={answer_justified!r}")
                 all_data[i]['answer'] = answer
                 QAs.append(all_data[i])
                 # Save immediately so progress survives interruptions.
@@ -278,7 +294,14 @@ def precise_QA_generation_run_batch(
         output_path="",
         from_scratch=False,
         max_workers=1,
+        log_file=None,
     ):
+
+    if log_file:
+        from pathlib import Path
+        client_log = str(Path(log_file).parent / "client.log")
+        add_file_sink(client_log)
+        logger.info(f"[generate] Client logging to: {client_log}")
     
     print("Wiki Source ={}...".format(wiki_input_path))
     print(f"Question generation concurrency: max_workers={max_workers}")

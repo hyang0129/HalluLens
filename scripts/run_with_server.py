@@ -22,8 +22,8 @@ Usage (Python):
     run_experiment(step="all", task="precisewikiqa", model="meta-llama/Llama-3.1-8B-Instruct", N=100)
 
 Examples:
-    # Generate prompts (PreciseWikiQA) - uses --model for question generation
-    python scripts/run_with_server.py --step generate --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --N 100
+    # Generate prompts (PreciseWikiQA) - requires --q_generator for question generation
+    python scripts/run_with_server.py --step generate --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --q_generator meta-llama/Llama-3.1-70B-Instruct --N 100
 
     # Generate with different model for questions vs inference
     python scripts/run_with_server.py --step generate --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --q_generator meta-llama/Llama-3.1-70B-Instruct --N 100
@@ -35,7 +35,7 @@ Examples:
     python scripts/run_with_server.py --step eval --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct
 
     # Run all steps in sequence (PreciseWikiQA)
-    python scripts/run_with_server.py --step all --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --N 100 --logger-type lmdb --activations-path shared/goodwiki.zarr/activations.zarr --log-file shared/goodwiki.zarr/server.log
+    python scripts/run_with_server.py --step all --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --q_generator meta-llama/Llama-3.1-70B-Instruct --N 100 --logger-type lmdb --activations-path shared/goodwiki.zarr/activations.zarr --log-file shared/goodwiki.zarr/server.log
 
     # TriviaQA inference and evaluation
     python scripts/run_with_server.py --step all --task triviaqa --model meta-llama/Llama-3.1-8B-Instruct --N 1000 --logger-type lmdb --activations-path shared/triviaqa_unfiltered_dev/activations.lmdb --log-file shared/triviaqa_unfiltered_dev/server.log
@@ -53,10 +53,10 @@ Examples:
     python scripts/run_with_server.py --step inference --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --logger-type lmdb --activations-path custom/activations.lmdb --log-file custom/server.log
 
     # Question generation with increased concurrency (8 parallel requests)
-    python scripts/run_with_server.py --step generate --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --N 100 --max-workers-qgen 8
+    python scripts/run_with_server.py --step generate --task precisewikiqa --model meta-llama/Llama-3.1-8B-Instruct --q_generator meta-llama/Llama-3.1-70B-Instruct --N 100 --max-workers-qgen 8
 
     # LongWiki with concurrent question generation
-    python scripts/run_with_server.py --step generate --task longwiki --model meta-llama/Llama-3.1-70B-Instruct --N 50 --max-workers-qgen 4
+    python scripts/run_with_server.py --step generate --task longwiki --model meta-llama/Llama-3.1-70B-Instruct --q_generator meta-llama/Llama-3.1-70B-Instruct --N 50 --max-workers-qgen 4
 
     # name for the q generator
      Llama-3.3-70B-Instruct-Q6_K_L
@@ -94,6 +94,14 @@ from utils import lm
 ServerManager = lm.ServerManager
 get_server_manager = lm.get_server_manager
 set_server_manager = lm.set_server_manager
+
+
+Q_GENERATOR_REQUIRED_TASKS = {"precisewikiqa", "longwiki"}
+
+
+def requires_q_generator(step, task):
+    """Return True when the requested run includes generation for a task that needs q_generator."""
+    return task in Q_GENERATOR_REQUIRED_TASKS and step in {"generate", "all"}
 
 
 def check_dependencies(task, step):
@@ -238,7 +246,7 @@ def run_task_step(step, task, model, **kwargs):
                 mode=kwargs.get("mode", "dynamic"),
                 N=kwargs.get("N", 1),
                 qa_output_path=kwargs.get("qa_output_path", ""),
-                q_generator=kwargs.get("q_generator") or model,
+                q_generator=kwargs.get("q_generator"),
                 max_workers_qgen=kwargs.get("max_workers_qgen", 1),
                 generations_file_path=kwargs.get("generations_file_path", ""),
                 eval_results_path=kwargs.get("eval_results_path", ""),
@@ -260,7 +268,7 @@ def run_task_step(step, task, model, **kwargs):
                 exp_mode=kwargs.get("exp_mode", "longwiki"),
                 N=kwargs.get("N", 5),
                 db_path=kwargs.get("db_path", "data/wiki_data/.cache/enwiki-20230401.db"),
-                q_generator=kwargs.get("q_generator", "meta-llama/Meta-Llama-3.1-70B-Instruct"),
+                q_generator=kwargs.get("q_generator"),
                 claim_extractor=kwargs.get("claim_extractor", "meta-llama/Llama-3.1-405B-Instruct-FP8"),
                 abstain_evaluator=kwargs.get("abstain_evaluator", "meta-llama/Llama-3.1-70B-Instruct"),
                 verifier=kwargs.get("verifier", "meta-llama/Llama-3.1-405B-Instruct-FP8"),
@@ -415,6 +423,12 @@ def run_experiment(
 
     if not check_dependencies(task, step):
         raise RuntimeError(f"Missing dependencies for task={task}, step={step}")
+
+    if requires_q_generator(step, task) and not q_generator:
+        raise ValueError(
+            "q_generator is required for generate/all runs on precisewikiqa and longwiki. "
+            "Pass --q_generator in CLI or q_generator=... in run_experiment()."
+        )
 
     log_file_path = log_file or "server.log"
     logger.info(f"Server log file: {log_file_path}")
@@ -624,7 +638,10 @@ def main():
     parser.add_argument("--max_inference_tokens", type=int, default=256, help="Maximum number of tokens to generate per inference")
     parser.add_argument("--generations_file_path", help="Path for generations file")
     parser.add_argument("--eval_results_path", help="Path for evaluation results (default: co-located with generations file)")
-    parser.add_argument("--q_generator", help="Question generator model")
+    parser.add_argument(
+        "--q_generator",
+        help="Question generator model (required for generate/all on precisewikiqa and longwiki)",
+    )
     parser.add_argument("--qa_output_path", help="Custom QA output path")
     parser.add_argument("--quick_debug_mode", action="store_true", help="Quick debug mode (first 5 questions)")
     parser.add_argument("--max-workers-qgen", type=int, default=1, help="Maximum concurrent requests for question generation (default: 1)")
@@ -676,6 +693,12 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if requires_q_generator(args.step, args.task) and not args.q_generator:
+        parser.error(
+            "--q_generator is required when --step is 'generate' or 'all' for "
+            "--task precisewikiqa or --task longwiki"
+        )
 
     # Re-configure logging with the user-requested level (if provided)
     if args.log_level:

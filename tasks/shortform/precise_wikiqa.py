@@ -552,7 +552,8 @@ def run_step(step, model, wiki_src="goodwiki", mode="dynamic", N=1,
                         N=remaining,
                         q_generator=q_generator,
                         output_path=QA_OUTPUT_PATH,
-                        max_workers=max_workers_qgen)
+                        max_workers=max_workers_qgen,
+                        log_file=log_file)
                     print(f" Generated {len(new_QAs)} new QA pairs")
                     print(f" Total QA pairs now: {len(QAs) + len(new_QAs)}")
                 else:
@@ -565,7 +566,8 @@ def run_step(step, model, wiki_src="goodwiki", mode="dynamic", N=1,
                     N=N,
                     q_generator=q_generator,
                     output_path=QA_OUTPUT_PATH,
-                    max_workers=max_workers_qgen)
+                    max_workers=max_workers_qgen,
+                    log_file=log_file)
                 print(f" Generated {len(QAs)} QA pairs")
             else:
                 raise NotImplementedError(f"mode {wiki_src} not implemented")

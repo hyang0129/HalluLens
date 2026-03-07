@@ -59,6 +59,36 @@ def _resolve_level(level: str | None = None) -> str:
     return level
 
 
+def add_file_sink(log_file_path: str, level: str = "DEBUG") -> "int | None":
+    """Add a file sink to loguru, appending to the given path.
+
+    Intended to let the client-side (generate/inference) write into the
+    same log file as the server so both streams are visible in one place.
+
+    Args:
+        log_file_path: Destination file.  Parent directories are created
+                       automatically.  Pass ``None`` / ``""`` to no-op.
+        level: Minimum log level written to the file (default DEBUG so
+               per-pair accept/reject lines are captured).
+
+    Returns:
+        The loguru sink ID (pass to ``logger.remove()`` to detach) or
+        ``None`` when *log_file_path* is falsy.
+    """
+    if not log_file_path:
+        return None
+    import pathlib
+    pathlib.Path(log_file_path).parent.mkdir(parents=True, exist_ok=True)
+    return logger.add(
+        log_file_path,
+        level=level,
+        format="{time:YYYY-MM-DDTHH:mm:ss.SSSSSS} | {name} | {level} - {message}",
+        mode="a",
+        enqueue=True,   # thread-safe: safe to call from worker threads
+        encoding="utf-8",
+    )
+
+
 def configure_logging(level: str | None = None, *, force: bool = False) -> str:
     """Configure loguru for the current process.
 
