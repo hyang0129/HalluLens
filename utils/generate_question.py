@@ -31,39 +31,66 @@ QA_GENERATION_CHUNK_SIZE = int(os.environ.get("QA_GENERATION_CHUNK_SIZE", "5"))
 """
 # 
 
-PRECISE_Q_GENERATION_PROMPT = """You are generating a benchmark question.
+PRECISE_Q_GENERATION_PROMPT = """You are generating a benchmark reading-comprehension question.
 
-Task:
-Generate exactly ONE factual question about "{wiki_title}" that is fully answerable from the reference.
+Goal:
+Write ONE short factual question about "{wiki_title}" that can be answered directly from the reference.
 
-Strict rules:
-- Output exactly one question.
-- The output must end with a single "?".
-- Do NOT include an answer.
-- Do NOT include numbering, bullets, or multiple questions.
-- Do NOT include any explanation, prefix, or suffix text.
-- If impossible, output exactly: [NO QUESTION]
-- The question must be answerable within 10 words 
-- The question must have exactly one correct answer (note that 04/12 and April 12 counts as one correct answer)
+Constraints:
+- The answer must appear explicitly in the reference.
+- The answer should be short (10 words or fewer).
+- The question must end with "?".
+- The question should require locating a specific fact in the text.
+- Avoid vague questions (e.g., "What is this article about?").
+- Do NOT copy sentences from the reference.
+- Output only the question.
+- If no good question can be written, output exactly: [NO QUESTION]
 
-Return format (exactly one line):
-{{"question":"<one concise question ending with ?>"}} 
+Examples:
+
+Reference:
+Albert Einstein was a German-born theoretical physicist who developed the theory of relativity.
+Question:
+What theory did Albert Einstein develop?
+
+Reference:
+Super Mario Bros. was released in Japan on September 13, 1985.
+Question:
+When was Super Mario Bros. released in Japan?
+
+Reference:
+The Amazon River flows through Brazil, Peru, and Colombia.
+Question:
+Which country does the Amazon River flow through?
+
+Reference:
+The Eiffel Tower is a wrought-iron lattice tower in Paris, France.
+Question:
+In which city is the Eiffel Tower located?
 
 Reference:
 {wiki_document}
 """
 
+
 PRECISE_ANSWERABILITY_PROMPT = """Determine whether the question is answerable from the reference.
 
-If the question is malformed (multiple questions, list format, includes answer text), return exactly:
+Rules:
+- If the question is malformed, contains multiple questions, or includes answer text, return:
 unanswerable
 
-If answerable, return only the shortest exact answer span from the reference (<= 10 words).
-No explanation. No extra text.
+- If the answer does not appear in the reference, return:
+unanswerable
 
-Reference document: {ref_document}
+- If answerable, return ONLY the shortest exact answer span from the reference (10 words or fewer).
 
-Question: {question}
+Output only the answer span or "unanswerable".
+
+Reference:
+{ref_document}
+
+Question:
+{question}
 """
 
 LONGFORM_Q_GENERATION_PROMPT ="""I would like you to act as an essay question generator. I will provide a reference and you will generate a factual knowledge based question about "{wiki_title}" based on the reference. The specific requirements are as follows:
@@ -397,13 +424,14 @@ def precise_QA_generation_run_batch(
                 already_completed = sum(1 for _ in reader)
         except Exception:
             already_completed = 0
+    effective_N = max(0, N - already_completed)
     lm.initialize_progress_tracking(total_requests=int(2 * N), already_completed=int(2 * already_completed))
 
     wiki_data_all = pd.read_json(wiki_input_path, orient='records', lines=True)
 
     # level set up
     low_level, high_level = 8, 10
-    per_level_count = N//(high_level-low_level)
+    per_level_count = effective_N//(high_level-low_level)
 
     print()
     print("START TO GENERATE QUESTION N={}...".format(N))

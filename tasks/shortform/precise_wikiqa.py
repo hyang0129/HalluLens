@@ -539,17 +539,16 @@ def run_step(step, model, wiki_src="goodwiki", mode="dynamic", N=1,
                 print(f" Target already reached! {len(QAs)} >= {N}")
                 print(f"   Using first {N} QA pairs")
             else:
-                remaining = N - len(QAs)
                 print(f" Resume statistics:")
                 print(f"   - Target: {N}")
                 print(f"   - Already completed: {len(QAs)}")
-                print(f"   - Remaining to generate: {remaining}")
+                print(f"   - Remaining to generate: {N - len(QAs)}")
                 print(f"   - Progress: {len(QAs)/N*100:.1f}%")
                 if 'goodwiki' in wiki_src:
-                    print(f" Generating {remaining} additional QA pairs...")
+                    print(f" Generating {N - len(QAs)} additional QA pairs...")
                     new_QAs = precise_qa.precise_QA_generation_run_batch(
                         wiki_input_path=f"{base_path}/data/wiki_data/doc_goodwiki_h_score.jsonl",
-                        N=remaining,
+                        N=N,
                         q_generator=q_generator,
                         output_path=QA_OUTPUT_PATH,
                         max_workers=max_workers_qgen,

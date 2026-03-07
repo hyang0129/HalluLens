@@ -306,9 +306,11 @@ bin_QAs = qa.per_bin_generation_batch(wiki_data, output_path, per_level_count, p
 # after:
 bin_QAs = qa.per_bin_generation_batch(
     wiki_data, output_path, per_level_count, progress_bar=pbar,
-    global_N=N if n_shards is not None else None,
+    global_N=(already_completed + effective_N) if n_shards is not None else None,
 )
 ```
+
+Note: `already_completed` and `effective_N` are already in scope at this point. `already_completed + effective_N` equals the original `N` argument, which is the absolute file target. Passing `effective_N` alone would be wrong in the resume case (the file already has `already_completed` lines, so `file_lines >= effective_N` would trigger immediately).
 
 No other changes to `precise_QA_generation_run_batch`.
 
