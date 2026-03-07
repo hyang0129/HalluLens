@@ -205,6 +205,7 @@ class ServerManager:
         stdout_target = subprocess.DEVNULL
         stderr_target = subprocess.DEVNULL
         if self.log_file_path:
+            os.makedirs(os.path.dirname(self.log_file_path) or ".", exist_ok=True)
             log_f = open(self.log_file_path, "a", encoding="utf-8")
             stdout_target = log_f
             stderr_target = log_f

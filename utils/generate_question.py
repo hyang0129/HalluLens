@@ -6,6 +6,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from tqdm.contrib.concurrent import thread_map
+from tqdm.auto import tqdm
 import jsonlines
 import argparse
 import random
@@ -173,7 +174,7 @@ class WikiQA:
         print("Already having questions N=", len(out_lines))
         return out_lines
  
-    def per_bin_generation_batch(self, wiki_data, output_path, N):
+    def per_bin_generation_batch(self, wiki_data, output_path, N, progress_bar=None):
         QAs = []
 
         output_dir = "/".join(output_path.split("/")[:-1])
@@ -181,7 +182,6 @@ class WikiQA:
             os.makedirs(output_dir)
 
         chunk_size = max(1, QA_GENERATION_CHUNK_SIZE)
-        print(f"Processing wiki_data in chunks of {chunk_size} for frequent saving...")
 
         filter_count = 0
 
@@ -229,32 +229,28 @@ class WikiQA:
                 Q_MAKING_PROMPTS.append(prompt)
                 all_data.append(obj)
 
-            print("Generating questions...")
             results = thread_map(
                 lambda p: lm.call_vllm_api(p, self.q_generator, temperature=0.7, top_p=0.9),
                 Q_MAKING_PROMPTS,
                 max_workers=self.max_workers,
-                desc=f"using {self.q_generator}",
+                disable=True,
             )
             for i, r in enumerate(results):
                 all_data[i]['prompt'] = r
 
             # 2. CHECK ANSWERABILITY (same logic, just chunked)
-            print("Making prompts to check answerability...")
             instruct = self.ANSWERABILITY_PROMPT
             prompts_answerability = [
                 instruct.format(ref_document=obj['reference'], question=obj['prompt'])
                 for obj in all_data
             ]
-            print("Generating answers...")
             ans_results = thread_map(
                 lambda p: lm.generate(p, self.q_generator),
                 prompts_answerability,
                 max_workers=self.max_workers,
-                desc=f"using {self.q_generator}",
+                disable=True,
             )
 
-            print("Filtering out unanswerable questions...")
             for i, answer in enumerate(ans_results):
                 answer_justified = self.justify_answerability(answer)
                 if answer_justified == -1:
@@ -266,12 +262,12 @@ class WikiQA:
                 # Save immediately so progress survives interruptions.
                 with jsonlines.open(output_path, 'a') as writer:
                     writer.write(all_data[i])
+                if progress_bar is not None:
+                    progress_bar.update(1)
 
                 if len(QAs) >= N:
-                    print("Finished. Filter out {} unanswerable questions.".format(filter_count))
                     break
 
-        print(filter_count)
         return QAs
 
 ############################################################################################################
@@ -310,16 +306,17 @@ def precise_QA_generation_run_batch(
     print("START TO GENERATE QUESTION N={}...".format(N))
     QAs_all = []
 
-    for bin in range(low_level,high_level):
+    with tqdm(total=N, initial=already_completed, desc="Generating QA pairs", unit="qa") as pbar:
+        for bin in range(low_level,high_level):
 
-        level_wiki = wiki_data_all[wiki_data_all['h_score_cat'] == bin]
-        level_wiki = level_wiki.sample(n=per_level_count, replace=True) 
-        wiki_data = level_wiki.to_dict(orient='records')
-        random.shuffle(wiki_data)
+            level_wiki = wiki_data_all[wiki_data_all['h_score_cat'] == bin]
+            level_wiki = level_wiki.sample(n=per_level_count, replace=True)
+            wiki_data = level_wiki.to_dict(orient='records')
+            random.shuffle(wiki_data)
 
-        wiki_data = wiki_data[:per_level_count+100] # add 100 buffer
-        bin_QAs = qa.per_bin_generation_batch(wiki_data, output_path, per_level_count)
-        QAs_all.extend(bin_QAs)
+            wiki_data = wiki_data[:per_level_count+100] # add 100 buffer
+            bin_QAs = qa.per_bin_generation_batch(wiki_data, output_path, per_level_count, progress_bar=pbar)
+            QAs_all.extend(bin_QAs)
 
     return QAs_all
 ############################################################################################################
@@ -363,16 +360,17 @@ def longform_QA_generation_run_batch(
     low_level, high_level = low_level, high_level
     per_level_count = N//(high_level-low_level) if N != 250 else 50
 
-    for bin in range(low_level,high_level):
-        level_wiki = wiki_data_all[wiki_data_all['h_score_cat'] == bin]
-        level_wiki = level_wiki.sample(frac=1) 
-        wiki_data = level_wiki.to_dict(orient='records')
-        random.shuffle(wiki_data)
-        wiki_data = wiki_data[:per_level_count+5] #todo 100
+    with tqdm(total=N, initial=already_completed, desc="Generating QA pairs", unit="qa") as pbar:
+        for bin in range(low_level,high_level):
+            level_wiki = wiki_data_all[wiki_data_all['h_score_cat'] == bin]
+            level_wiki = level_wiki.sample(frac=1)
+            wiki_data = level_wiki.to_dict(orient='records')
+            random.shuffle(wiki_data)
+            wiki_data = wiki_data[:per_level_count+5] #todo 100
 
-        bin_QAs = qa.per_bin_generation_batch(wiki_data, output_path, per_level_count)
-        assert len(bin_QAs) == per_level_count
-        QAs_all.extend(bin_QAs)
+            bin_QAs = qa.per_bin_generation_batch(wiki_data, output_path, per_level_count, progress_bar=pbar)
+            assert len(bin_QAs) == per_level_count
+            QAs_all.extend(bin_QAs)
 
     return QAs_all
 
