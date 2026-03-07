@@ -29,29 +29,40 @@ QA_GENERATION_CHUNK_SIZE = int(os.environ.get("QA_GENERATION_CHUNK_SIZE", "5"))
 """
 # 
 
-PRECISE_Q_GENERATION_PROMPT = """I would like you to act as a question generator. I will provide reference and you will generate a factual knowledge based question about "{wiki_title}" based on the reference. The specific requirements are as follows:
+PRECISE_Q_GENERATION_PROMPT = """You are generating a benchmark question.
 
-1. The question can be fully answered based only on the reference material.
-2. The question should be objective and not open-ended.
-3. The question should be concise.
-4. The question should not require additional information to answer.
-5. the question's answer should be a word or a phrase.
-6. the question should have only one answer.
+Task:
+Generate exactly ONE factual question about "{wiki_title}" that is fully answerable from the reference.
+
+Strict rules:
+- Output exactly one question.
+- The output must end with a single "?".
+- Do NOT include an answer.
+- Do NOT include numbering, bullets, or multiple questions.
+- Do NOT include any explanation, prefix, or suffix text.
+- If impossible, output exactly: [NO QUESTION]
+- The question must be answerable within 10 words 
+- The question must have exactly one correct answer (note that 04/12 and April 12 counts as one correct answer)
+
+Return format (exactly one line):
+{"question":"<one concise question ending with ?>"} 
 
 Reference:
 {wiki_document}
-
-Please reply with the question only without any explanation or additional information:
 """
 
-PRECISE_ANSWERABILITY_PROMPT = """I would like you to judge question's answerability and answer the question. 
-I will provide a question and reference document, and you will judge whether the question is fully answerable based only on the reference document, i.e., whether the answer is included in the reference. 
-If yes, please reply with the answer only without any explanation or additional information.
-If no, please reply with "unanswerable" only.
+PRECISE_ANSWERABILITY_PROMPT = """Determine whether the question is answerable from the reference.
+
+If the question is malformed (multiple questions, list format, includes answer text), return exactly:
+unanswerable
+
+If answerable, return only the shortest exact answer span from the reference (<= 10 words).
+No explanation. No extra text.
 
 Reference document: {ref_document}
 
-Question: {question}"""
+Question: {question}
+"""
 
 LONGFORM_Q_GENERATION_PROMPT ="""I would like you to act as an essay question generator. I will provide a reference and you will generate a factual knowledge based question about "{wiki_title}" based on the reference. The specific requirements are as follows:
 1. The question can be fully answered based only on the reference.
@@ -408,6 +419,6 @@ if __name__ == "__main__":
     parser.add_argument("--min_len", type=int, default=200)
     parser.add_argument("--max_len", type=int, default=400)
     args = parser.parse_args()
-    
+
 
 
