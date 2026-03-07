@@ -35,6 +35,7 @@ webdataset>=0.2.86
 
 # Progress bars and CLI
 tqdm>=4.65.0
+filelock>=1.0.0
 
 # Long-form text processing
 segtok>=1.5.11
