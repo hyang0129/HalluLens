@@ -51,23 +51,28 @@ Examples:
     Super Mario Bros. was released in Japan on September 13, 1985.
 
     Output:
-    {"question":"When was Super Mario Bros. released in Japan?"}
+    {{"question":"When was Super Mario Bros. released in Japan?"}}
 
     Reference:
     Mount Everest is the highest mountain on Earth, standing 8,848 meters tall.
 
     Output:
-    {"question":"What is the height of Mount Everest?"}
+    {{"question":"What is the height of Mount Everest?"}}
 
     Reference:
     The Pacific Ocean is the largest ocean on Earth.
 
     Output:
-    {"question":"Which is the largest ocean on Earth?"}
+    {{"question":"Which is the largest ocean on Earth?"}}
     
 
 Return format (exactly one line):
-{{"question":"<one concise question ending with ?>"}} """
+{{"question":"<one concise question ending with ?>"}} 
+
+Reference:
+{wiki_document}
+
+"""
 
 
 PRECISE_ANSWERABILITY_PROMPT = """Determine whether the question is answerable from the reference.
