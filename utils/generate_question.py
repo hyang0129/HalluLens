@@ -9,7 +9,9 @@ from tqdm.contrib.concurrent import thread_map
 from tqdm.auto import tqdm
 import jsonlines
 import argparse
+import json
 import random
+import re
 from utils import lm
 import pandas as pd
 from transformers import AutoTokenizer
@@ -45,7 +47,7 @@ Strict rules:
 - The question must have exactly one correct answer (note that 04/12 and April 12 counts as one correct answer)
 
 Return format (exactly one line):
-{"question":"<one concise question ending with ?>"} 
+{{"question":"<one concise question ending with ?>"}} 
 
 Reference:
 {wiki_document}
@@ -114,6 +116,61 @@ class WikiQA:
 
         self.encoding = AutoTokenizer.from_pretrained('meta-llama/Llama-3.1-70B-Instruct', trust_remote_code=True)
 
+    def normalize_generated_question(self, reply):
+        """Normalize model output into a single plain-text question.
+
+        Returns:
+            str: normalized question text
+            int: -1 when the output is malformed or unusable
+        """
+        if reply is None:
+            return -1
+
+        text = str(reply).strip()
+        if not text:
+            return -1
+
+        lower_text = text.lower()
+        if lower_text.startswith("unfortunately") or lower_text == "[no question]":
+            return -1
+
+        # Remove markdown fences if the model wraps structured output.
+        if text.startswith("```"):
+            lines = text.splitlines()
+            text = "\n".join(line for line in lines if not line.strip().startswith("```"))
+            text = text.strip()
+
+        # Extract question text when model follows JSON return format.
+        if text.startswith("{") or '"question"' in text:
+            try:
+                obj = json.loads(text)
+                if isinstance(obj, dict) and "question" in obj:
+                    text = str(obj["question"]).strip()
+            except Exception:
+                match = re.search(r'"question"\s*:\s*"((?:\\.|[^"])*)"', text, flags=re.DOTALL)
+                if match:
+                    text = match.group(1).replace('\\"', '"').strip()
+
+        # Normalize whitespace and punctuation spacing.
+        text = " ".join(text.split())
+        if not text:
+            return -1
+
+        if self.task == 'precise':
+            # Keep precise questions strict: exactly one concise question.
+            if text.count("?") != 1 or not text.endswith("?"):
+                return -1
+            if len(text.split()) > 30:
+                return -1
+            if re.search(r"(?:^|\s)\d+\.\s", text):
+                return -1
+
+            lowered = text.lower()
+            if "please answer the questions" in lowered or "reference document" in lowered:
+                return -1
+
+        return text
+
         
 
     def generate_QA_with_doc(self, title, document, language='en', min_len=500, max_len=750, only_one_doc=False):
@@ -149,11 +206,8 @@ class WikiQA:
     def generate_question_with_doc(self, title, document):
         instruct = self.Q_GENERATION_PROMPT 
         prompt = instruct.format(wiki_title=title, wiki_document=document.strip())
-        reply = lm.generate(prompt, self.q_generator, temperature=0.7, top_p=0.9)
-        if reply.lower().startswith("unfortunately"):
-            return -1
-        
-        return reply.strip()
+        reply = lm.generate(prompt, self.q_generator, temperature=0.2, top_p=0.9, max_tokens=96)
+        return self.normalize_generated_question(reply)
     
     def generate_answerability(self, q, doc):
         instruct = self.ANSWERABILITY_PROMPT
@@ -243,19 +297,34 @@ class WikiQA:
                 all_data.append(obj)
 
             results = thread_map(
-                lambda p: lm.call_vllm_api(p, self.q_generator, temperature=0.7, top_p=0.9),
+                lambda p: lm.call_vllm_api(p, self.q_generator, temperature=0.2, top_p=0.9, max_tokens=96),
                 Q_MAKING_PROMPTS,
                 max_workers=self.max_workers,
                 disable=True,
             )
             for i, r in enumerate(results):
-                all_data[i]['prompt'] = r
+                all_data[i]['prompt_raw'] = r
+                all_data[i]['prompt'] = self.normalize_generated_question(r)
+
+            valid_data = []
+            for obj in all_data:
+                if obj['prompt'] == -1:
+                    filter_count += 1
+                    logger.debug(
+                        f"[QA-REJECT] reason=invalid_question_format | title={obj.get('title', '?')!r} "
+                        f"| q_raw={obj.get('prompt_raw', '')!r}"
+                    )
+                    continue
+                valid_data.append(obj)
+
+            if not valid_data:
+                continue
 
             # 2. CHECK ANSWERABILITY (same logic, just chunked)
             instruct = self.ANSWERABILITY_PROMPT
             prompts_answerability = [
                 instruct.format(ref_document=obj['reference'], question=obj['prompt'])
-                for obj in all_data
+                for obj in valid_data
             ]
             ans_results = thread_map(
                 lambda p: lm.generate(p, self.q_generator),
@@ -266,8 +335,8 @@ class WikiQA:
 
             for i, answer in enumerate(ans_results):
                 answer_justified = self.justify_answerability(answer)
-                title = all_data[i].get('title', '?')
-                question = all_data[i].get('prompt', '?')
+                title = valid_data[i].get('title', '?')
+                question = valid_data[i].get('prompt', '?')
                 if answer_justified == -1:
                     filter_count += 1
                     ans_lower = answer.strip().lower()
@@ -284,11 +353,11 @@ class WikiQA:
                     continue  # filter out unanswerable questions
 
                 logger.debug(f"[QA-ACCEPT] title={title!r} | q={question!r} | a={answer_justified!r}")
-                all_data[i]['answer'] = answer
-                QAs.append(all_data[i])
+                valid_data[i]['answer'] = answer_justified
+                QAs.append(valid_data[i])
                 # Save immediately so progress survives interruptions.
                 with jsonlines.open(output_path, 'a') as writer:
-                    writer.write(all_data[i])
+                    writer.write(valid_data[i])
                 if progress_bar is not None:
                     progress_bar.update(1)
 
