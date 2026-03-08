@@ -58,11 +58,14 @@ Examples:
     # LongWiki with concurrent question generation
     python scripts/run_with_server.py --step generate --task longwiki --model meta-llama/Llama-3.1-70B-Instruct --q_generator meta-llama/Llama-3.1-70B-Instruct --N 50 --max-workers-qgen 4
 
-    # name for the q generator
-     Llama-3.3-70B-Instruct-Q6_K_L
+    # Supported q_generator models (both served via vLLM, no activation logging):
+    #   neuralmagic/Llama-3.3-70B-Instruct-quantized.w8a8  (W8A8, ~70GB, routed via vLLM w8a8 path)
+    #   Qwen/Qwen2.5-72B-Instruct-GPTQ-Int8                (GPTQ-Int8, ~72GB, routed via vLLM GPTQ path)
     """
 
 import argparse
+import json
+import math
 import os
 import subprocess
 import sys
@@ -212,6 +215,107 @@ def determine_generations_file_path(task_name, model, generations_file_path=None
     return f"output/{task_name}/{model_name}/generation.jsonl"
 
 
+def _is_null_like(value):
+    """Return True for JSON nulls and NaN-like numeric values."""
+    return value is None or (isinstance(value, float) and math.isnan(value))
+
+
+def sanitize_naturalquestions_eval_input(generations_file_path):
+    """Create a type-safe JSONL copy for Natural Questions eval.
+
+    The original evaluator assumes `answer` and `generation` are strings and calls
+    `.lower()` on both. Some generation files contain null/NaN/non-string values,
+    which causes runtime failures. Rows with null-like gold answers are excluded
+    from evaluation, and a sanitized sidecar JSONL file is written and returned.
+    """
+    source_path = Path(generations_file_path)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Generations file not found: {source_path}")
+
+    sanitized_path = source_path.with_name(
+        f"{source_path.stem}.sanitized_for_eval{source_path.suffix}"
+    )
+
+    read_rows = 0
+    written_rows = 0
+    excluded_rows = 0
+    changed_lines = 0
+    answer_null_like = 0
+    answer_non_string = 0
+    generation_null_like = 0
+    generation_non_string = 0
+
+    with source_path.open("r", encoding="utf-8") as infile, sanitized_path.open("w", encoding="utf-8") as outfile:
+        for line_number, line in enumerate(infile, 1):
+            if not line.strip():
+                continue
+
+            read_rows += 1
+
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid JSON in {source_path} at line {line_number}: {exc}"
+                ) from exc
+
+            line_changed = False
+
+            answer_value = record.get("answer")
+            # Exclude rows with missing gold answers from correctness evaluation.
+            if _is_null_like(answer_value):
+                answer_null_like += 1
+                excluded_rows += 1
+                continue
+            if not isinstance(answer_value, str):
+                line_changed = True
+                answer_non_string += 1
+                record["answer"] = str(answer_value)
+
+            generation_value = record.get("generation")
+            if not isinstance(generation_value, str):
+                line_changed = True
+                if _is_null_like(generation_value):
+                    generation_null_like += 1
+                    record["generation"] = ""
+                else:
+                    generation_non_string += 1
+                    record["generation"] = str(generation_value)
+
+            if line_changed:
+                changed_lines += 1
+
+            outfile.write(json.dumps(record) + "\n")
+            written_rows += 1
+
+    if written_rows == 0:
+        raise ValueError(
+            "Natural Questions eval sanitizer excluded all rows; no valid records remain for evaluation."
+        )
+
+    if excluded_rows or changed_lines:
+        logger.warning(
+            "Sanitized Natural Questions eval input at {}: kept {}/{} rows, excluded {} rows with null-like answers; "
+            "modified {} kept rows (answer non-string={}, generation null-like={}, generation non-string={})",
+            sanitized_path,
+            written_rows,
+            read_rows,
+            excluded_rows,
+            changed_lines,
+            answer_non_string,
+            generation_null_like,
+            generation_non_string,
+        )
+    else:
+        logger.info(
+            "Natural Questions eval input is already type-safe: {} ({} rows)",
+            source_path,
+            read_rows,
+        )
+
+    return str(sanitized_path)
+
+
 def run_task_step(step, task, model, **kwargs):
     """Run a single task step by calling the task module directly (no subprocess).
 
@@ -330,6 +434,17 @@ def run_task_step(step, task, model, **kwargs):
                 logger.info("Natural Questions doesn't have a generate step - skipping")
                 return None
             from tasks.llmsknow.natural_questions import run_step as _run
+
+            generations_file_path = kwargs.get("generations_file_path")
+            if step == "eval":
+                if not generations_file_path:
+                    model_name = model.split("/")[-1]
+                    output_base_dir = kwargs.get("output_dir") or "output"
+                    generations_file_path = (
+                        f"{output_base_dir}/natural_questions/{model_name}/generation.jsonl"
+                    )
+                generations_file_path = sanitize_naturalquestions_eval_input(generations_file_path)
+
             _run(
                 step=step,
                 model=model,
@@ -339,7 +454,7 @@ def run_task_step(step, task, model, **kwargs):
                 max_tokens=kwargs.get("max_tokens", 64),
                 temperature=kwargs.get("temperature", 0.0),
                 N=kwargs.get("N"),
-                generations_file_path=kwargs.get("generations_file_path"),
+                generations_file_path=generations_file_path,
                 eval_results_path=kwargs.get("eval_results_path"),
                 log_file=kwargs.get("log_file"),
                 quick_debug_mode=kwargs.get("quick_debug_mode", False),

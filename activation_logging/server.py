@@ -262,7 +262,12 @@ def _should_use_vllm_backend(model_name: str) -> bool:
         return False
 
     # Automatic heuristic for known quantized naming conventions.
+    # W8A8 (e.g. neuralmagic/Llama-3.3-70B-Instruct-quantized.w8a8)
     if ".w8a8" in model_l or model_l.endswith("w8a8") or "quantized.w8a8" in model_l:
+        return True
+
+    # GPTQ (e.g. Qwen/Qwen2.5-72B-Instruct-GPTQ-Int8)
+    if "gptq" in model_l:
         return True
 
     # Optional override: regex list to force vLLM for matching model ids.
