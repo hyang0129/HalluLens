@@ -41,3 +41,4 @@ server.log
 *_client.log
 *_server.log
 metadata.json
+generation(1).jsonl
