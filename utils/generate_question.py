@@ -73,50 +73,51 @@ Reference:
 {wiki_document}
 
 """
-PRECISE_ANSWERABILITY_PROMPT = """You are verifying whether a question can be answered using the reference text.
 
-Follow these rules strictly:
+PRECISE_ANSWERABILITY_PROMPT = """You are checking whether a question can be answered using the reference text. The task ends after the first answer.
 
-1. The answer MUST appear verbatim in the reference.
-2. If the question cannot be answered directly from the reference, output:
+Rules:
+- The answer MUST appear verbatim in the reference.
+- If the answer does not appear in the reference, output: unanswerable
+- If the question is malformed, contains multiple questions, or includes the answer itself, output: unanswerable
+- If answerable, return ONLY the shortest exact answer span from the reference (maximum 10 words).
+- Do NOT explain.
+- Do NOT generate additional questions or answers.
+- Output ONLY one line.
+
+### Examples
+
+Reference:
+Super Mario Bros. was released in Japan on September 13, 1985.
+
+Question:
+When was Super Mario Bros. released in Japan?
+
+Answer:
+September 13, 1985
+
+
+Reference:
+The Eiffel Tower is located in Paris, France.
+
+Question:
+Where is the Eiffel Tower located?
+
+Answer:
+Paris, France
+
+
+Reference:
+The Pacific Ocean is the largest ocean on Earth.
+
+Question:
+What is the capital of France?
+
+Answer:
 unanswerable
-3. If the question is malformed, contains multiple questions, or includes the answer itself, output:
-unanswerable
-4. If answerable, return ONLY the shortest exact answer span copied from the reference (maximum 10 words).
-5. Do NOT explain your reasoning.
-6. Do NOT output anything except the answer span or the word "unanswerable".
-
-Examples:
-
-    Reference:
-    Super Mario Bros. was released in Japan on September 13, 1985.
-
-    Question:
-    When was Super Mario Bros. released in Japan?
-
-    Output:
-    September 13, 1985
-
-    Reference:
-    The Eiffel Tower is located in Paris, France.
-
-    Question:
-    Where is the Eiffel Tower located?
-
-    Output:
-    Paris, France
-
-    Reference:
-    The Pacific Ocean is the largest ocean on Earth.
-
-    Question:
-    What is the capital of France?
-
-    Output:
-    unanswerable
 
 
-Now complete the task.
+### Task
 
 Reference:
 {ref_document}
@@ -124,7 +125,7 @@ Reference:
 Question:
 {question}
 
-Output:
+Final Answer:
 """
 
 LONGFORM_Q_GENERATION_PROMPT ="""I would like you to act as an essay question generator. I will provide a reference and you will generate a factual knowledge based question about "{wiki_title}" based on the reference. The specific requirements are as follows:
