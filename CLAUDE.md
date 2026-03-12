@@ -93,6 +93,24 @@ bash scripts/download_data.sh
 
 Prototype notebooks are migrated to `scripts/train_activation_model.py` for reproducible CLI runs.
 
+## Compute Contexts
+
+**At the start of any session, check `.env` in the repo root for `COMPUTE_CONTEXT`:**
+```bash
+# .env is gitignored — set it manually on each machine
+COMPUTE_CONTEXT=LOCAL_CPU   # or REMOTE_GPU
+```
+
+### Context: LOCAL_CPU (default if `.env` absent or unset)
+- No GPU available; avoid launching vLLM servers or GPU-heavy training
+- Can edit code, run lightweight scripts, inspect data, analyze results
+- GPU tasks must be deferred or routed through the Jupyter server
+
+### Context: REMOTE_GPU
+- H100 GPU accessible via Jupyter notebook server at `http://localhost:8889`
+- GPU-intensive work (inference, activation logging, model training) can run here via notebooks or CLI
+- Preferred workflow: use notebooks for interactive GPU work, CLI scripts for batch jobs
+
 ## Development Notes
 
 - Remote GPU development: see `REMOTE_DEV_SETUP.md` and `./connect_gpu.sh`
