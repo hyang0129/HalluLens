@@ -87,6 +87,11 @@ bash scripts/download_data.sh
 
 ## Notebooks
 
+**Rule: all notebooks live in `notebooks/`. Never place notebooks in the repo root.**
+- Working copies for active runs may be temporarily moved to the root, but must be returned to `notebooks/` when done.
+- Root-level `*.ipynb` files are gitignored.
+
+Key notebooks in `notebooks/`:
 - `b_contrastive_training_with_new_trainer.ipynb` — contrastive model training
 - `c_layeraware_training_with_new_trainer.ipynb` — layer-aware training
 - `k_view_loader_profile.ipynb` — K-view loader profiling

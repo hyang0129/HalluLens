@@ -5,15 +5,8 @@ development
 shared
 shared/
 
-# Untracked notebooks
-a_contrastive_training_with_new_trainer.ipynb
-a_layeraware_training_with_new_trainer.ipynb
-a_preparing_training_precise_qa_halu_as_outlier2.ipynb
-b_logprob_recon_contrastive_training-Copy1.ipynb
-generation.ipynb
-naturalquestions_logprobs_n100.ipynb
-run_with_server_inference_notebook-Copy1.ipynb
-run_with_server_inference_notebook.ipynb
+# Root-level notebooks (all notebooks should live in notebooks/)
+/*.ipynb
 
 # Jupyter checkpoints
 .ipynb_checkpoints/
