@@ -66,3 +66,4 @@ server.log
 *_server.log
 metadata.json
 generation(1).jsonl
+nq_logprob_recon_contrastive_training.ipynb

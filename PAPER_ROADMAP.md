@@ -292,6 +292,14 @@ Per benchmark (PreciseWikiQA-short, TriviaQA, …):
    - Produces the tables/plots needed for a paper.
 5. **Literature sweep for SOTA**
    - Create `SOTA_TRACKER.md` / spreadsheet with verified numbers + settings.
+6. **[ TODO ] Qwen2.5 question generation (replacement for LLaMA 70B qgen)**
+   - **Context:** LLaMA 70B question generator has been unreliable; Qwen2.5 is the target replacement.
+   - **Current state:** `Qwen/Qwen2.5-72B-Instruct-GPTQ-Int8` is listed as a “supported” q_generator in `run_with_server.py` docstring (line 63), but is **not yet added to `model_map` in `utils/lm.py`**, and the vLLM `ServerManager` does not pass `--quantization gptq` when launching the server for GPTQ models — so it will fail if invoked.
+   - **Work needed:**
+     1. Add `Qwen/Qwen2.5-72B-Instruct-GPTQ-Int8` to `model_map` in `utils/lm.py`.
+     2. Add GPTQ quantization detection in `ServerManager.start_server()` (or `vllm_serve.py`) so `--quantization gptq` is passed to vLLM when the model name contains `GPTQ`.
+     3. Smoke-test: run `--step generate --task precisewikiqa --q_generator Qwen/Qwen2.5-72B-Instruct-GPTQ-Int8 --N 10` to validate end-to-end.
+     4. (Optional) Also validate smaller Qwen2.5 variants (7B/14B) as faster/cheaper qgen options if 72B is too slow.
 
 ## 9) Risks / Common Failure Modes (Plan for Them)
 

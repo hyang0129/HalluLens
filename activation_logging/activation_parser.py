@@ -499,9 +499,9 @@ class ActivationParser:
         gendf['abstain'] = data['abstantion']
         gendf['halu'] = data['halu_test_res']
 
-        gendf['prompt_hash'] = gendf['prompt'].apply(lambda x : 
-                                                    hashlib.sha256(('user: ' + 
-                                                                    x).encode("utf-8")).hexdigest())
+        # note that previous versions may have used a different variation (eg prepending "user")
+        gendf['prompt_hash'] = gendf['prompt'].apply(lambda x :
+                                                    hashlib.sha256(x.encode("utf-8")).hexdigest())
 
         gendf = gendf[~gendf['prompt_hash'].duplicated(keep=False)]
 
