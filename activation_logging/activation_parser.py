@@ -9,6 +9,7 @@ from typing import Dict, Any, List, Optional, Literal
 from pathlib import Path
 from loguru import logger
 import pandas as pd
+import psutil
 from sklearn.model_selection import train_test_split
 import torch
 from torch.utils.data import Dataset
@@ -393,6 +394,148 @@ class ActivationDataset(Dataset):
 
 
 
+class PreloadedActivationDataset(Dataset):
+    """RAM-resident activation dataset.
+
+    All activations are loaded from zarr into a numpy array at construction time
+    via :meth:`ActivationParser.get_dataset` with ``preload=True``.
+    ``__getitem__`` performs zero-copy views via ``torch.from_numpy`` — no disk
+    I/O during training.
+
+    Safe for multi-worker DataLoaders: on Linux the default fork start method
+    means workers inherit the array via copy-on-write and physical pages are
+    never duplicated (validated by PSS measurement).
+    """
+
+    def __init__(
+        self,
+        cache: np.ndarray,
+        labels: np.ndarray,
+        prompt_hashes: List[str],
+        num_views: int,
+        pad_length: int,
+        fixed_layer: Optional[int] = None,
+        view_sampling_with_replacement: bool = False,
+        min_target_layers: int = 2,
+        include_response_logprobs: bool = False,
+        response_logprobs_top_k: int = 20,
+        _logprob_token_ids: Optional[np.ndarray] = None,
+        _logprob_token_logprobs: Optional[np.ndarray] = None,
+        _logprob_topk_ids: Optional[np.ndarray] = None,
+        _logprob_topk_logprobs: Optional[np.ndarray] = None,
+    ):
+        self.cache = cache                    # (N, L, T, H) float16, never written after init
+        self.labels = labels                  # (N,)
+        self.prompt_hashes = prompt_hashes    # len N
+        self.num_views = int(num_views)
+        self.pad_length = int(pad_length)
+        self.fixed_layer = fixed_layer
+        self.view_sampling_with_replacement = bool(view_sampling_with_replacement)
+        self.min_target_layers = int(min_target_layers)
+        self.L = cache.shape[1]
+        self.include_response_logprobs = bool(include_response_logprobs)
+        self.response_logprobs_top_k = int(response_logprobs_top_k)
+        self._logprob_token_ids = _logprob_token_ids
+        self._logprob_token_logprobs = _logprob_token_logprobs
+        self._logprob_topk_ids = _logprob_topk_ids
+        self._logprob_topk_logprobs = _logprob_topk_logprobs
+
+    def __len__(self) -> int:
+        return len(self.cache)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        acts = torch.from_numpy(self.cache[idx])   # (L, T, H) — zero-copy view
+        view_indices = self._select_view_indices(list(range(self.L)))
+        views = acts[view_indices]                 # (K, T, H)
+        sample: Dict[str, Any] = {
+            'hashkey': self.prompt_hashes[idx],
+            'halu': torch.tensor(float(self.labels[idx]), dtype=torch.float32),
+            'views_activations': views,
+            'view_indices': torch.tensor(view_indices, dtype=torch.long),
+        }
+        if self.include_response_logprobs:
+            sample.update(self._get_logprobs(idx))
+        return sample
+
+    def _select_view_indices(self, available_layers: List[int]) -> List[int]:
+        if self.fixed_layer is not None and self.fixed_layer not in available_layers:
+            raise ValueError(f"Fixed layer {self.fixed_layer} is not available in the relevant layers")
+
+        if self.fixed_layer is not None:
+            other_layers = [i for i in available_layers if i != self.fixed_layer]
+            if self.view_sampling_with_replacement:
+                if not other_layers and self.num_views > 1:
+                    raise ValueError(f"No other layers available besides fixed layer {self.fixed_layer}")
+                sampled = random.choices(other_layers, k=self.num_views - 1) if self.num_views > 1 else []
+            else:
+                if len(other_layers) < self.num_views - 1:
+                    raise ValueError(
+                        f"Not enough layers for strict K-view sampling with fixed layer: "
+                        f"need {self.num_views - 1} additional layers, found {len(other_layers)}"
+                    )
+                sampled = random.sample(other_layers, self.num_views - 1)
+            return [self.fixed_layer, *sampled]
+
+        if self.view_sampling_with_replacement:
+            if not available_layers:
+                raise ValueError("No available layers found for this sample")
+            return random.choices(available_layers, k=self.num_views)
+
+        if len(available_layers) < self.num_views:
+            raise ValueError(
+                f"Not enough layers for strict K-view sampling: "
+                f"need {self.num_views}, found {len(available_layers)}"
+            )
+        return random.sample(available_layers, self.num_views)
+
+    def _get_logprobs(self, idx: int) -> Dict[str, Any]:
+        target_len = self.pad_length
+        target_top_k = self.response_logprobs_top_k
+
+        token_ids_out = torch.full((target_len,), -1, dtype=torch.int32)
+        token_logprobs_out = torch.full((target_len,), float("nan"), dtype=torch.float32)
+        topk_ids_out = torch.full((target_len, target_top_k), -1, dtype=torch.int32)
+        topk_logprobs_out = torch.full((target_len, target_top_k), float("nan"), dtype=torch.float32)
+        token_mask = torch.zeros((target_len,), dtype=torch.bool)
+        copied_len = 0
+        copied_top_k = 0
+
+        if (
+            self._logprob_token_ids is not None
+            and self._logprob_token_logprobs is not None
+            and self._logprob_topk_ids is not None
+            and self._logprob_topk_logprobs is not None
+        ):
+            raw_ids = self._logprob_token_ids[idx]
+            raw_lps = self._logprob_token_logprobs[idx]
+            raw_topk_ids = self._logprob_topk_ids[idx]
+            raw_topk_lps = self._logprob_topk_logprobs[idx]
+
+            copied_len = min(target_len, raw_ids.shape[0])
+            copied_top_k = min(target_top_k, raw_topk_ids.shape[1])
+            if copied_len > 0 and copied_top_k > 0:
+                token_ids_out[:copied_len] = torch.from_numpy(raw_ids[:copied_len].astype(np.int32))
+                token_logprobs_out[:copied_len] = torch.from_numpy(raw_lps[:copied_len].astype(np.float32))
+                topk_ids_out[:copied_len, :copied_top_k] = torch.from_numpy(
+                    raw_topk_ids[:copied_len, :copied_top_k].astype(np.int32)
+                )
+                topk_logprobs_out[:copied_len, :copied_top_k] = torch.from_numpy(
+                    raw_topk_lps[:copied_len, :copied_top_k].astype(np.float32)
+                )
+                token_mask[:copied_len] = True
+
+        return {
+            "response_token_ids": token_ids_out,
+            "response_token_logprobs": token_logprobs_out,
+            "response_topk_token_ids": topk_ids_out,
+            "response_topk_logprobs": topk_logprobs_out,
+            "response_logprob_mask": token_mask,
+            "response_logprob_len": torch.tensor(copied_len, dtype=torch.long),
+            "response_logprobs_top_k": torch.tensor(target_top_k, dtype=torch.long),
+            "response_logprobs_available_top_k": torch.tensor(copied_top_k, dtype=torch.long),
+        }
+
+
 class ActivationParser:
     def __init__(self, inference_json: str, eval_json: str, activations_path: str,
                  df: Optional[pd.DataFrame] = None, logger_type: str = "zarr",
@@ -653,6 +796,141 @@ class ActivationParser:
 
         return row, result, activations, input_length
 
+    @staticmethod
+    def _estimate_preload_bytes(
+        N: int,
+        L: int,
+        T: int,
+        H: int,
+        include_logprobs: bool = False,
+        response_logprobs_top_k: int = 20,
+    ) -> int:
+        """Estimate bytes required to hold a preloaded activation cache in RAM."""
+        act_bytes = N * L * T * H * 2  # float16
+        logprob_bytes = 0
+        if include_logprobs:
+            # token_ids (int32) + token_logprobs (float32) + topk_ids (int32) + topk_logprobs (float32)
+            logprob_bytes = N * T * (4 + 4 + response_logprobs_top_k * 4 + response_logprobs_top_k * 4)
+        return act_bytes + logprob_bytes
+
+    @staticmethod
+    def _check_ram_available(estimated_bytes: int, buffer: float = 0.10) -> None:
+        """Raise MemoryError if estimated_bytes exceed available RAM minus a safety buffer.
+
+        Args:
+            estimated_bytes: Expected allocation size in bytes.
+            buffer: Fractional headroom required beyond the allocation (default 10%).
+        """
+        available = psutil.virtual_memory().available
+        required = estimated_bytes * (1.0 + buffer)
+        if required > available:
+            raise MemoryError(
+                f"Preload would require ~{estimated_bytes / 1024**3:.1f} GB but only "
+                f"{available / 1024**3:.1f} GB available "
+                f"(including {buffer * 100:.0f}% safety buffer). "
+                "Pass check_ram=False to skip this check."
+            )
+
+    def _preload_from_zarr(
+        self,
+        df_split: pd.DataFrame,
+        relevant_layers: List[int],
+        pad_length: int,
+        include_logprobs: bool,
+        response_logprobs_top_k: int,
+    ) -> Dict[str, Any]:
+        """Bulk-read activations from zarr into a RAM-resident numpy array.
+
+        Reads all relevant layers for one sample at a time, matching the default
+        zarr chunk layout (1, 1, T, H) where each chunk covers one sample × one
+        layer.  This access pattern is maximally sequential on disk: chunks for
+        sample i are stored contiguously before chunks for sample i+1.  Positions
+        with no zarr entry are zero-filled and a warning is emitted.
+
+        Returns:
+            dict with keys: cache (N,L,T,H), labels (N,), prompt_hashes (N,)
+            and optionally logprob arrays when include_logprobs is True.
+        """
+        log_inst = self.activation_logger  # ZarrActivationsLogger
+
+        # Resolve zarr integer row index for each df row (in split order)
+        df_positions: List[int] = []
+        zr_indices: List[int] = []
+        missing: List[int] = []
+
+        for pos, (_, row) in enumerate(df_split.iterrows()):
+            key = self.select_primary_key(row['prompt_hash'])
+            meta = log_inst._index.get(key)
+            if meta is not None and meta.get('sample_index') is not None:
+                df_positions.append(pos)
+                zr_indices.append(int(meta['sample_index']))
+            else:
+                missing.append(pos)
+
+        if missing:
+            logger.warning(
+                f"Preload: {len(missing)} samples have no zarr entry — those rows will be zero-filled"
+            )
+
+        N = len(df_split)
+        L = len(relevant_layers)
+        zarr_resp = log_inst._response_activations   # (N_total, L_total, T_zarr, H)
+        H = int(zarr_resp.shape[-1])
+        T_zarr = int(zarr_resp.shape[2])
+        T_read = min(pad_length, T_zarr)
+
+        cache = np.zeros((N, L, pad_length, H), dtype=np.float16)
+
+        logger.info(
+            f"Preloading {N} samples × {L} layers × {T_read} tokens × {H} hidden "
+            f"({N * L * T_read * H * 2 / 1024**3:.2f} GB) ..."
+        )
+
+        # Sample-first loop: for each sample read all L relevant layers in one
+        # zarr slice.  With (1, 1, T, H) chunk shape the chunks for sample i are
+        # laid out contiguously on disk, so this is maximally sequential I/O.
+        from tqdm.auto import tqdm
+        with tqdm(total=len(zr_indices), desc=f"Preloading {split}", unit="sample") as pbar:
+            for df_pos, zr_idx in zip(df_positions, zr_indices):
+                # zarr_resp[zr_idx, relevant_layers, :T_read, :] → (L, T_read, H)
+                cache[df_pos, :, :T_read, :] = np.asarray(
+                    zarr_resp[zr_idx, relevant_layers, :T_read, :]
+                )
+                pbar.update(1)
+
+        result: Dict[str, Any] = {
+            'cache': cache,
+            'labels': df_split['halu'].to_numpy(),
+            'prompt_hashes': df_split['prompt_hash'].tolist(),
+        }
+
+        if include_logprobs and log_inst._response_token_ids is not None:
+            top_k_avail = int(log_inst._response_topk_logprobs.shape[2])
+            top_k_use = min(response_logprobs_top_k, top_k_avail)
+            T_lp = min(pad_length, int(log_inst._response_token_ids.shape[1]))
+
+            lp_ids = np.full((N, T_lp), -1, dtype=np.int32)
+            lp_lps = np.full((N, T_lp), np.nan, dtype=np.float32)
+            lp_topk_ids = np.full((N, T_lp, top_k_use), -1, dtype=np.int32)
+            lp_topk_lps = np.full((N, T_lp, top_k_use), np.nan, dtype=np.float32)
+
+            if zr_indices:
+                zr_arr = np.array(zr_indices, dtype=np.intp)
+                lp_ids[df_positions] = np.asarray(log_inst._response_token_ids)[zr_arr, :T_lp]
+                lp_lps[df_positions] = np.asarray(log_inst._response_token_logprobs)[zr_arr, :T_lp]
+                lp_topk_ids[df_positions] = np.asarray(log_inst._response_topk_token_ids)[zr_arr, :T_lp, :top_k_use]
+                lp_topk_lps[df_positions] = np.asarray(log_inst._response_topk_logprobs)[zr_arr, :T_lp, :top_k_use]
+
+            result.update({
+                'logprob_token_ids': lp_ids,
+                'logprob_token_logprobs': lp_lps,
+                'logprob_topk_ids': lp_topk_ids,
+                'logprob_topk_logprobs': lp_topk_lps,
+            })
+
+        logger.info("Preload complete.")
+        return result
+
     def get_dataset(
         self,
         split: Literal['train', 'test'],
@@ -666,7 +944,9 @@ class ActivationParser:
         include_response_logprobs: bool = False,
         response_logprobs_top_k: int = 20,
         backend: Literal["auto", "zarr"] = "auto",
-    ) -> ActivationDataset:
+        preload: bool = False,
+        check_ram: bool = True,
+    ) -> Dataset:
         """
         Get a PyTorch Dataset for the specified split.
 
@@ -676,16 +956,68 @@ class ActivationParser:
             fixed_layer: If specified, one activation will always be from this layer (index in relevant_layers)
             num_views: Number of views to sample per example
             view_sampling_with_replacement: Whether to sample with replacement when selecting views
+            return_all_activations: If True, include all relevant layers in all_activations
             include_response_logprobs: Whether to include token-level response logprob features
             response_logprobs_top_k: Number of top logprobs to expose per response token
+            preload: If True, bulk-read all activations into RAM at construction time and return a
+                PreloadedActivationDataset.  __getitem__ becomes a pure in-memory op — no zarr I/O
+                during training.  Recommended when RAM >> dataset size.
+            check_ram: When preload=True, estimate required RAM and raise MemoryError if available
+                RAM (with a 10% safety buffer) is insufficient.  Pass False to skip the check.
 
         Returns:
-            ActivationDataset instance for the specified split
+            ActivationDataset (zarr-backed) or PreloadedActivationDataset (RAM-backed) instance.
         """
         if backend not in {"auto", "zarr"}:
             raise ValueError(
                 "backend must be one of: 'auto', 'zarr'. "
                 "WDS backend is deprecated and no longer supported."
+            )
+
+        _relevant_layers = relevant_layers if relevant_layers is not None else list(range(16, 30))
+
+        if preload:
+            df_split = self.df[self.df['split'] == split].reset_index(drop=True)
+            H = int(self.activation_logger._response_activations.shape[-1])
+
+            if check_ram:
+                est = self._estimate_preload_bytes(
+                    N=len(df_split),
+                    L=len(_relevant_layers),
+                    T=pad_length,
+                    H=H,
+                    include_logprobs=include_response_logprobs,
+                    response_logprobs_top_k=response_logprobs_top_k,
+                )
+                est_gb = est / 1024**3
+                avail_gb = psutil.virtual_memory().available / 1024**3
+                logger.info(
+                    f"Preload RAM estimate: {est_gb:.2f} GB required, {avail_gb:.2f} GB available"
+                )
+                self._check_ram_available(est)
+
+            data = self._preload_from_zarr(
+                df_split=df_split,
+                relevant_layers=_relevant_layers,
+                pad_length=pad_length,
+                include_logprobs=include_response_logprobs,
+                response_logprobs_top_k=response_logprobs_top_k,
+            )
+            return PreloadedActivationDataset(
+                cache=data['cache'],
+                labels=data['labels'],
+                prompt_hashes=data['prompt_hashes'],
+                num_views=num_views,
+                pad_length=pad_length,
+                fixed_layer=fixed_layer,
+                view_sampling_with_replacement=view_sampling_with_replacement,
+                min_target_layers=min_target_layers,
+                include_response_logprobs=include_response_logprobs,
+                response_logprobs_top_k=response_logprobs_top_k,
+                _logprob_token_ids=data.get('logprob_token_ids'),
+                _logprob_token_logprobs=data.get('logprob_token_logprobs'),
+                _logprob_topk_ids=data.get('logprob_topk_ids'),
+                _logprob_topk_logprobs=data.get('logprob_topk_logprobs'),
             )
 
         return ActivationDataset(
