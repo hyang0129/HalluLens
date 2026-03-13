@@ -419,6 +419,7 @@ class PreloadedActivationDataset(Dataset):
         min_target_layers: int = 2,
         include_response_logprobs: bool = False,
         response_logprobs_top_k: int = 20,
+        relevant_layers: Optional[List[int]] = None,
         _logprob_token_ids: Optional[np.ndarray] = None,
         _logprob_token_logprobs: Optional[np.ndarray] = None,
         _logprob_topk_ids: Optional[np.ndarray] = None,
@@ -433,6 +434,7 @@ class PreloadedActivationDataset(Dataset):
         self.view_sampling_with_replacement = bool(view_sampling_with_replacement)
         self.min_target_layers = int(min_target_layers)
         self.L = cache.shape[1]
+        self.relevant_layers = relevant_layers if relevant_layers is not None else list(range(self.L))
         self.include_response_logprobs = bool(include_response_logprobs)
         self.response_logprobs_top_k = int(response_logprobs_top_k)
         self._logprob_token_ids = _logprob_token_ids
@@ -442,6 +444,53 @@ class PreloadedActivationDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self.cache)
+
+    def slice_layers(
+        self,
+        layers: List[int],
+        num_views: Optional[int] = None,
+    ) -> "PreloadedActivationDataset":
+        """Return a new dataset backed by a subset of layers from this cache.
+
+        The returned dataset shares the underlying numpy memory — no copy is
+        made.  ``layers`` are specified as model layer indices (matching
+        ``self.relevant_layers``), not positional indices.
+
+        Args:
+            layers: Model layer indices to keep (must be a subset of
+                ``self.relevant_layers``).
+            num_views: Number of views to sample.  Defaults to
+                ``len(layers)`` so that all selected layers are used.
+        """
+        pos_indices = []
+        for layer in layers:
+            if layer not in self.relevant_layers:
+                raise ValueError(
+                    f"Layer {layer} not in preloaded relevant_layers {self.relevant_layers}"
+                )
+            pos_indices.append(self.relevant_layers.index(layer))
+
+        sliced_cache = self.cache[:, pos_indices, :, :]  # numpy fancy index — view when contiguous
+        if num_views is None:
+            num_views = len(layers)
+
+        return PreloadedActivationDataset(
+            cache=sliced_cache,
+            labels=self.labels,
+            prompt_hashes=self.prompt_hashes,
+            num_views=num_views,
+            pad_length=self.pad_length,
+            fixed_layer=self.fixed_layer,
+            view_sampling_with_replacement=self.view_sampling_with_replacement,
+            min_target_layers=min(self.min_target_layers, len(layers)),
+            include_response_logprobs=self.include_response_logprobs,
+            response_logprobs_top_k=self.response_logprobs_top_k,
+            relevant_layers=list(layers),
+            _logprob_token_ids=self._logprob_token_ids,
+            _logprob_token_logprobs=self._logprob_token_logprobs,
+            _logprob_topk_ids=self._logprob_topk_ids,
+            _logprob_topk_logprobs=self._logprob_topk_logprobs,
+        )
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         acts = torch.from_numpy(self.cache[idx])   # (L, T, H) — zero-copy view
@@ -838,6 +887,7 @@ class ActivationParser:
         pad_length: int,
         include_logprobs: bool,
         response_logprobs_top_k: int,
+        split: str = "data",
     ) -> Dict[str, Any]:
         """Bulk-read activations from zarr into a RAM-resident numpy array.
 
@@ -1002,6 +1052,7 @@ class ActivationParser:
                 pad_length=pad_length,
                 include_logprobs=include_response_logprobs,
                 response_logprobs_top_k=response_logprobs_top_k,
+                split=split,
             )
             return PreloadedActivationDataset(
                 cache=data['cache'],
@@ -1014,6 +1065,7 @@ class ActivationParser:
                 min_target_layers=min_target_layers,
                 include_response_logprobs=include_response_logprobs,
                 response_logprobs_top_k=response_logprobs_top_k,
+                relevant_layers=_relevant_layers,
                 _logprob_token_ids=data.get('logprob_token_ids'),
                 _logprob_token_logprobs=data.get('logprob_token_logprobs'),
                 _logprob_topk_ids=data.get('logprob_topk_ids'),

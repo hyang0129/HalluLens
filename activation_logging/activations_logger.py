@@ -66,7 +66,7 @@ class ActivationsLogger:
                 **zarr_config,
             )
             return
-            
+
         self.target_layers = target_layers
         self.sequence_mode = sequence_mode
         self.verbose = verbose
@@ -106,6 +106,12 @@ class ActivationsLogger:
         if self.read_only:
             self.keys = self.list_entries()
     
+    def __getattr__(self, name):
+        backend = self.__dict__.get("_backend")
+        if backend is not None:
+            return getattr(backend, name)
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
     def _get_compressor(self, compression: Union[str, BaseCompressor, None]) -> BaseCompressor:
         """
         Get the appropriate compressor based on the compression parameter.
