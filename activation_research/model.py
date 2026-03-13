@@ -346,6 +346,43 @@ class HallucinationClassifier(nn.Module):
         return torch.sigmoid(self.net(last_token))  # (B, 1) - removed squeeze()
 
 
+class LinearProbe(nn.Module):
+    """True linear probe for hallucination detection.
+
+    Single linear layer on pooled activations — the simplest possible
+    baseline.  Used for per-layer probing sweeps: train one probe per
+    layer, report AUROC per layer.
+
+    Parameters
+    ----------
+    input_dim : int
+        Activation dimension (e.g. 4096).
+    pooling : str
+        ``"mean"`` pools over the sequence dimension, ``"last"`` takes
+        the last token only.
+    """
+
+    def __init__(self, input_dim: int = 4096, pooling: str = "mean"):
+        super().__init__()
+        pooling = pooling.lower().strip()
+        if pooling not in ("mean", "last"):
+            raise ValueError(f"pooling must be 'mean' or 'last', got '{pooling}'")
+        self.pooling = pooling
+        self.linear = nn.Linear(input_dim, 1)
+
+    def forward(self, x):
+        """
+        x: (B, L, D)
+        returns: (B, 1) sigmoid probability
+        """
+        x = x.float()
+        if self.pooling == "mean":
+            pooled = x.mean(dim=1)      # (B, D)
+        else:
+            pooled = x[:, -1, :]         # (B, D)
+        return torch.sigmoid(self.linear(pooled))
+
+
 class FiLMConditioner(nn.Module):
     """Feature-wise Linear Modulation (FiLM) conditioner.
 

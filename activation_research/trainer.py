@@ -782,6 +782,217 @@ class ContrastiveTrainer(Trainer):
         logger.info(f"Resumed training from epoch {self.start_epoch}")
 
 
+@dataclass
+class LinearProbeTrainerConfig(TrainerConfig):
+    """Configuration for `LinearProbeTrainer`."""
+
+    pooling: str = "mean"
+    balanced_sampling: bool = True
+
+
+class LinearProbeTrainer(Trainer):
+    """Trainer for per-layer linear probe hallucination detection.
+
+    Trains a single ``LinearProbe`` on the activations provided by the
+    dataset.  The dataset should be configured with ``num_views=1`` and
+    ``min_target_layers=1`` so that ``views_activations`` is ``(1, L, D)``.
+
+    The training loop uses BCE loss and reports AUROC on the validation
+    split each epoch.
+    """
+
+    def __init__(self, model: torch.nn.Module, *, config: LinearProbeTrainerConfig):
+        self.probe_config = config
+        super().__init__(model, config=config)
+        self.loss_fn = torch.nn.BCELoss()
+        self.best_auroc: float = 0.0
+
+    def training_step(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, Dict[str, float]]:
+        # views_activations: (B, 1, seq_len, D) → squeeze view dim
+        x = batch["views_activations"].to(self.device, non_blocking=True)
+        if x.dim() == 4:
+            x = x.squeeze(1)  # (B, seq_len, D)
+        labels = batch["halu"].to(self.device, non_blocking=True).float().view(-1, 1)
+
+        preds = self.model(x)  # (B, 1)
+        loss = self.loss_fn(preds, labels)
+
+        acc = float(((preds > 0.5).float() == labels).float().mean().item())
+        return loss, {"acc": acc}
+
+    def train_epoch(self, *, epoch: int, train_dataset) -> Dict[str, float]:
+        self.model.train()
+        train_loader, steps_per_epoch, train_iter = self._build_train_iterator(train_dataset)
+
+        total_loss = 0.0
+        total_acc = 0.0
+        n_steps = 0
+
+        if steps_per_epoch is not None:
+            loop = tqdm(range(steps_per_epoch), desc=f"Epoch {epoch+1}/{self.config.max_epochs}", leave=False)
+        else:
+            loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{self.config.max_epochs}", leave=False)
+
+        for i, _ in enumerate(loop, start=1):
+            if train_iter is not None:
+                try:
+                    batch = next(train_iter)
+                except StopIteration:
+                    train_iter = iter(train_loader)
+                    batch = next(train_iter)
+            else:
+                batch = _
+
+            loss, metrics = self.training_step(batch)
+
+            self.optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            if self.config.grad_clip_norm is not None and float(self.config.grad_clip_norm) > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), max_norm=float(self.config.grad_clip_norm)
+                )
+            self.optimizer.step()
+
+            total_loss += float(loss.detach().cpu().item())
+            total_acc += float(metrics.get("acc", 0.0))
+            n_steps += 1
+            loop.set_postfix(loss=total_loss / n_steps, acc=total_acc / n_steps)
+
+        out = {
+            "train_loss": total_loss / max(1, n_steps),
+            "train_acc": total_acc / max(1, n_steps),
+        }
+        logger.info(f"Train: loss={out['train_loss']:.4f}, acc={out['train_acc']:.4f}")
+        return out
+
+    def validate(self, *, epoch: int, val_dataset) -> Dict[str, float]:
+        self.model.eval()
+        val_loader, eval_max_batches, _ = self._build_val_loader(val_dataset)
+
+        all_preds = []
+        all_labels = []
+        total_loss = 0.0
+        n_batches = 0
+
+        with torch.no_grad():
+            for i, batch in enumerate(val_loader):
+                if eval_max_batches is not None and i >= eval_max_batches:
+                    break
+                x = batch["views_activations"].to(self.device, non_blocking=True)
+                if x.dim() == 4:
+                    x = x.squeeze(1)
+                labels = batch["halu"].to(self.device, non_blocking=True).float().view(-1, 1)
+
+                preds = self.model(x)
+                loss = self.loss_fn(preds, labels)
+                total_loss += float(loss.item())
+                n_batches += 1
+
+                all_preds.append(preds.cpu())
+                all_labels.append(labels.cpu())
+
+        all_preds = torch.cat(all_preds).numpy()
+        all_labels = torch.cat(all_labels).numpy()
+
+        from sklearn.metrics import roc_auc_score
+        try:
+            auroc = float(roc_auc_score(all_labels, all_preds))
+        except ValueError:
+            auroc = float("nan")
+
+        self.best_auroc = max(self.best_auroc, auroc)
+
+        out = {
+            "val_loss": total_loss / max(1, n_batches),
+            "val_auroc": auroc,
+            "best_auroc": self.best_auroc,
+        }
+        logger.info(f"Val: loss={out['val_loss']:.4f}, auroc={out['val_auroc']:.4f}")
+        return out
+
+    def train_dataloader(self, train_dataset) -> DataLoader:
+        dataset = train_dataset
+        is_iterable = isinstance(dataset, IterableDataset)
+
+        sampler = None
+        if bool(self.probe_config.balanced_sampling) and not is_iterable:
+            sampler = _build_balanced_sampler(dataset)
+
+        return DataLoader(
+            dataset,
+            batch_size=int(self.config.batch_size),
+            shuffle=(sampler is None and not is_iterable),
+            sampler=sampler,
+            num_workers=int(self.config.num_workers),
+            pin_memory=True,
+            persistent_workers=bool(
+                self.config.persistent_workers and int(self.config.num_workers) > 0
+            ),
+        )
+
+    def maybe_save_checkpoint(
+        self,
+        *,
+        epoch: int,
+        train_metrics: Dict[str, float],
+        val_metrics: Dict[str, float],
+        is_last_epoch: bool,
+    ) -> float:
+        checkpoint_start = time.perf_counter()
+
+        if int(self.config.save_every) <= 0:
+            return 0.0
+
+        should_save = ((epoch + 1) % int(self.config.save_every) == 0) or bool(is_last_epoch)
+        if not should_save:
+            return 0.0
+
+        checkpoint = {
+            "epoch": int(epoch),
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "lr": float(self.config.lr),
+            **train_metrics,
+            **val_metrics,
+        }
+
+        last_path = os.path.join(self.config.checkpoint_dir, "linear_probe_last.pt")
+        _atomic_torch_save(checkpoint, last_path)
+
+        _save_and_prune_snapshots(
+            checkpoint_dir=self.resolve_snapshot_dir(),
+            snapshot_prefix="linear_probe",
+            epoch_one_indexed=epoch + 1,
+            checkpoint=checkpoint,
+            snapshot_every=int(self.config.snapshot_every),
+            snapshot_keep_last=int(self.config.snapshot_keep_last),
+            is_last_epoch=bool(is_last_epoch),
+        )
+
+        if bool(self.config.cleanup_legacy_checkpoints):
+            _cleanup_legacy_checkpoints(
+                self.config.checkpoint_dir,
+                keep_filenames={"linear_probe_last.pt"},
+            )
+
+        elapsed = float(time.perf_counter() - checkpoint_start)
+        return elapsed
+
+    def load_checkpoint(self, resume_from: str) -> None:
+        checkpoint_path = resume_from
+        if not os.path.isabs(checkpoint_path):
+            checkpoint_path = os.path.join(self.config.checkpoint_dir, resume_from)
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Resume checkpoint not found: {checkpoint_path}")
+
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.start_epoch = int(checkpoint.get("epoch", 0)) + 1
+        self.best_auroc = float(checkpoint.get("best_auroc", 0.0))
+        logger.info(f"Resumed linear probe training from epoch {self.start_epoch}")
+
+
 class LayerAwareContrastiveTrainer(Trainer):
     """Trainer for contrastive learning with layer-aware encoders.
 

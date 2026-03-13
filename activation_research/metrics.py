@@ -111,6 +111,132 @@ def _calibrate_knn_k(
     return int(best_k)
 
 
+def _entropy_from_topk_logprobs(topk_logprobs: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Approximate Shannon entropy from top-k logprob vectors.
+
+    Parameters
+    ----------
+    topk_logprobs : (N, T, K) float
+        Log-probabilities for the top-K tokens at each of T positions for N samples.
+    mask : (N, T) bool
+        True for real tokens, False for padding.
+
+    Returns
+    -------
+    per_sample_entropy : (N,) float
+        Mean per-token entropy averaged over non-padding positions.
+    """
+    # Convert logprobs to probabilities, renormalize over top-k
+    probs = np.exp(topk_logprobs.astype(np.float64))        # (N, T, K)
+    probs = np.clip(probs, 1e-12, None)
+    probs = probs / probs.sum(axis=-1, keepdims=True)        # renormalize
+
+    # Shannon entropy per token: -sum(p * log(p))
+    token_entropy = -np.sum(probs * np.log(probs + 1e-12), axis=-1)  # (N, T)
+
+    # Mask and average over real tokens
+    token_entropy = np.where(mask, token_entropy, 0.0)
+    token_counts = mask.sum(axis=-1).clip(min=1)
+    return (token_entropy.sum(axis=-1) / token_counts).astype(np.float32)
+
+
+def token_entropy_ood_stats(
+    test_records,
+    outlier_class: int = 1,
+):
+    """Compute hallucination detection AUROC from token-level logprob statistics.
+
+    This is a non-learned baseline: no training is needed.  For each test
+    sample the function extracts stored logprob features and scores them
+    directly.
+
+    Supported scoring methods (all computed at once):
+
+    * **mean_logprob** – mean of selected-token logprobs (higher = more
+      confident = less likely hallucinated).
+    * **min_logprob** – minimum token logprob (most uncertain token).
+    * **mean_entropy** – mean per-token entropy approximated from top-K
+      logprobs (higher entropy = more uncertain).
+
+    Parameters
+    ----------
+    test_records : list[dict]
+        Each record must contain:
+        - ``halu`` : int (0 or 1)
+        - ``response_token_logprobs`` : Tensor (T,)
+        - ``response_logprob_mask`` : Tensor (T,) bool
+        Optionally:
+        - ``response_topk_logprobs`` : Tensor (T, K)  (needed for entropy)
+
+    outlier_class : int
+        Which label to treat as outlier.
+
+    Returns
+    -------
+    dict
+        Per-method AUROC and summary statistics.
+    """
+    if not test_records:
+        return {}
+
+    labels = np.array([int(r["halu"]) for r in test_records], dtype=np.int32)
+    binary_labels = (labels == int(outlier_class)).astype(np.int32)
+
+    # --- mean / min logprob ---
+    token_logprobs_list = []
+    masks_list = []
+    for r in test_records:
+        lp = r["response_token_logprobs"]
+        if isinstance(lp, torch.Tensor):
+            lp = lp.numpy()
+        mask = r["response_logprob_mask"]
+        if isinstance(mask, torch.Tensor):
+            mask = mask.numpy().astype(bool)
+        token_logprobs_list.append(lp.astype(np.float64))
+        masks_list.append(mask)
+
+    token_logprobs = np.stack(token_logprobs_list)  # (N, T)
+    masks = np.stack(masks_list)                     # (N, T)
+
+    # Replace padding with 0 for mean, +inf for min
+    masked_lp = np.where(masks, token_logprobs, 0.0)
+    counts = masks.sum(axis=-1).clip(min=1)
+
+    mean_lp = (masked_lp.sum(axis=-1) / counts).astype(np.float32)
+    # For min: set padding to +inf so it's ignored
+    min_lp = np.where(masks, token_logprobs, np.inf).min(axis=-1).astype(np.float32)
+
+    # Higher logprob = more confident = less OOD → negate for OOD scoring
+    mean_lp_scores = -mean_lp
+    min_lp_scores = -min_lp
+
+    stats = {
+        "mean_logprob_auroc": float(_safe_auroc(binary_labels, mean_lp_scores)),
+        "min_logprob_auroc": float(_safe_auroc(binary_labels, min_lp_scores)),
+        "mean_logprob_mean": float(mean_lp.mean()),
+        "mean_logprob_std": float(mean_lp.std()),
+    }
+
+    # --- entropy (if top-k available) ---
+    has_topk = all("response_topk_logprobs" in r for r in test_records)
+    if has_topk:
+        topk_list = []
+        for r in test_records:
+            tk = r["response_topk_logprobs"]
+            if isinstance(tk, torch.Tensor):
+                tk = tk.numpy()
+            topk_list.append(tk.astype(np.float64))
+        topk = np.stack(topk_list)  # (N, T, K)
+
+        mean_entropy = _entropy_from_topk_logprobs(topk, masks)
+        # Higher entropy = more uncertain = more OOD
+        stats["mean_entropy_auroc"] = float(_safe_auroc(binary_labels, mean_entropy))
+        stats["mean_entropy_mean"] = float(mean_entropy.mean())
+        stats["mean_entropy_std"] = float(mean_entropy.std())
+
+    return stats
+
+
 def mahalanobis_ood_stats(train_records, test_records, outlier_class=1, train_label_filter: str = "id_only"):
     train_records = _filter_train_records_by_label(train_records, outlier_class=outlier_class, train_label_filter=train_label_filter)
 

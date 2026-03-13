@@ -41,6 +41,7 @@ from activation_research.metrics import cosine_similarity_ood_stats, mahalanobis
 from activation_research.model import (  # noqa: E402
     HallucinationClassifier,
     LastLayerHaluClassifier,
+    LinearProbe,
     LogprobReconProgressiveCompressor,
     ProgressiveCompressor,
     SimpleHaluClassifier,
@@ -169,12 +170,18 @@ def _default_checkpoint_name(routine: str) -> str:
         return "contrastive_last.pt"
     if routine == "classifier":
         return "halu_classifier_last.pt"
+    if routine == "linear_probe":
+        return "linear_probe_last.pt"
+    if routine == "token_entropy":
+        return ""  # no checkpoint for non-learned method
     raise ValueError(f"Unknown routine: {routine}")
 
 
 def _auto_resume_checkpoint_path(checkpoint_dir: Path, routine: str) -> Optional[str]:
     """Return absolute checkpoint path to resume from, if present."""
     last_name = _default_checkpoint_name(routine)
+    if not last_name:
+        return None  # non-learned method
     candidate = checkpoint_dir / last_name
     if candidate.exists():
         return str(candidate)
@@ -231,6 +238,12 @@ def _build_model(
         if model_name == "hallucination_classifier":
             return HallucinationClassifier(dim=input_dim, layer_index=0)
         raise ValueError(f"Unsupported classifier model: {model_name}")
+
+    if routine == "linear_probe":
+        return LinearProbe(input_dim=input_dim, pooling="mean")
+
+    if routine == "token_entropy":
+        return None  # non-learned method, no model needed
 
     raise ValueError(f"Unknown routine: {routine}")
 
@@ -306,6 +319,34 @@ def _train(
         )
         return
 
+    if routine == "linear_probe":
+        from activation_research.trainer import LinearProbeTrainer, LinearProbeTrainerConfig
+
+        config = LinearProbeTrainerConfig(
+            max_epochs=epochs,
+            batch_size=batch_size,
+            lr=lr,
+            num_workers=num_workers,
+            device=device,
+            checkpoint_dir=checkpoint_dir,
+            resume_from=resume_from,
+        )
+        trainer = LinearProbeTrainer(model, config=config)
+        trainer.fit(train_dataset, val_dataset=test_dataset)
+        return
+
+    if routine == "token_entropy":
+        from activation_research.token_entropy import TokenEntropyDetector
+
+        detector = TokenEntropyDetector(outlier_class=1)
+        stats = detector.score(test_dataset, batch_size=batch_size, num_workers=num_workers)
+        # Save results
+        import json
+        results_path = Path(checkpoint_dir).parent / "token_entropy_results.json"
+        results_path.write_text(json.dumps(stats, indent=2))
+        logger.info(f"Token-entropy results saved to {results_path}")
+        return
+
     raise ValueError(f"Unknown routine: {routine}")
 
 
@@ -327,7 +368,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--logger-type", choices=["lmdb", "json", "wds"], default="json")
     parser.add_argument("--seed", type=int, default=42)
 
-    parser.add_argument("--routine", choices=["contrastive", "classifier"], default="contrastive")
+    parser.add_argument("--routine", choices=["contrastive", "classifier", "linear_probe", "token_entropy"], default="contrastive")
     parser.add_argument(
         "--model",
         dest="model_name",
@@ -338,6 +379,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "simple_halu_classifier",
             "last_layer_transformer",
             "hallucination_classifier",
+            "linear_probe",
         ],
     )
     parser.add_argument(
@@ -460,8 +502,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     input_dim = _infer_activation_dim(ap, train_layers)
     logger.info(f"Inferred activation dim: {input_dim}")
 
-    # Datasets
-    min_target_layers = 2 if args.routine == "contrastive" else 1
+    # Datasets — configure views/layers based on routine
+    if args.routine == "contrastive":
+        min_target_layers = 2
+        num_views = 2
+    elif args.routine in ("linear_probe", "token_entropy"):
+        min_target_layers = 1
+        num_views = 1
+    else:
+        min_target_layers = 1
+        num_views = 2  # classifier uses all_activations, views not critical
+
+    # Token entropy requires logprobs
+    include_logprobs = args.include_response_logprobs or args.routine == "token_entropy"
 
     train_dataset = ap.get_dataset(
         "train",
@@ -469,7 +522,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         fixed_layer=fixed_layer_train,
         pad_length=args.pad_length,
         min_target_layers=min_target_layers,
-        include_response_logprobs=args.include_response_logprobs,
+        num_views=num_views,
+        include_response_logprobs=include_logprobs,
         response_logprobs_top_k=args.response_logprobs_top_k,
     )
     test_dataset = ap.get_dataset(
@@ -478,11 +532,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         fixed_layer=fixed_layer_train,
         pad_length=args.pad_length,
         min_target_layers=min_target_layers,
-        include_response_logprobs=args.include_response_logprobs,
+        num_views=num_views,
+        include_response_logprobs=include_logprobs,
         response_logprobs_top_k=args.response_logprobs_top_k,
     )
 
-    # Model
+    # Model (None for non-learned methods like token_entropy)
     model = _build_model(
         routine=args.routine,
         model_name=args.model_name,
@@ -515,7 +570,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         id_label=int(args.id_label),
         final_dim=args.final_dim,
         input_dropout=args.input_dropout,
-        include_response_logprobs=bool(args.include_response_logprobs),
+        include_response_logprobs=bool(include_logprobs),
         response_logprobs_top_k=int(args.response_logprobs_top_k),
     )
 
@@ -524,7 +579,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger.info(f"Training: routine={args.routine} model={args.model_name} device={device}")
 
     resume_from = args.resume_from
-    if resume_from is None and not args.no_resume:
+    if args.routine == "token_entropy":
+        resume_from = None  # non-learned method, no checkpoints
+    elif resume_from is None and not args.no_resume:
         auto_path = _auto_resume_checkpoint_path(ckpt_dir, args.routine)
         if auto_path is not None:
             resume_from = auto_path
