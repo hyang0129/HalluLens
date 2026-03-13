@@ -87,9 +87,10 @@ bash scripts/download_data.sh
 
 ## Notebooks
 
-**Rule: all notebooks live in `notebooks/`. Never place notebooks in the repo root.**
-- Working copies for active runs may be temporarily moved to the root, but must be returned to `notebooks/` when done.
-- Root-level `*.ipynb` files are gitignored.
+**IMPORTANT: Before doing ANY work with notebooks, read [`NOTEBOOK_WORKFLOW.md`](NOTEBOOK_WORKFLOW.md) first.** It defines the master/working-copy workflow, required cells, and rules for syncing changes.
+
+- **Master notebooks** live in `notebooks/` — these are git-tracked reference copies. Do not run them.
+- **Working notebooks** are copies in the repo root for active execution. Root-level `*.ipynb` files are gitignored.
 
 Key notebooks in `notebooks/`:
 - `b_contrastive_training_with_new_trainer.ipynb` — contrastive model training
