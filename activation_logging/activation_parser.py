@@ -420,14 +420,15 @@ class PreloadedActivationDataset(Dataset):
         include_response_logprobs: bool = False,
         response_logprobs_top_k: int = 20,
         relevant_layers: Optional[List[int]] = None,
+        _row_indices: Optional[np.ndarray] = None,
         _logprob_token_ids: Optional[np.ndarray] = None,
         _logprob_token_logprobs: Optional[np.ndarray] = None,
         _logprob_topk_ids: Optional[np.ndarray] = None,
         _logprob_topk_logprobs: Optional[np.ndarray] = None,
     ):
         self.cache = cache                    # (N, L, T, H) float16, never written after init
-        self.labels = labels                  # (N,)
-        self.prompt_hashes = prompt_hashes    # len N
+        self.labels = labels                  # (N,) or (N_split,) when using _row_indices
+        self.prompt_hashes = prompt_hashes    # len N_split
         self.num_views = int(num_views)
         self.pad_length = int(pad_length)
         self.fixed_layer = fixed_layer
@@ -437,13 +438,14 @@ class PreloadedActivationDataset(Dataset):
         self.relevant_layers = relevant_layers if relevant_layers is not None else list(range(self.L))
         self.include_response_logprobs = bool(include_response_logprobs)
         self.response_logprobs_top_k = int(response_logprobs_top_k)
+        self._row_indices = _row_indices      # None = direct indexing, array = memmap indirection
         self._logprob_token_ids = _logprob_token_ids
         self._logprob_token_logprobs = _logprob_token_logprobs
         self._logprob_topk_ids = _logprob_topk_ids
         self._logprob_topk_logprobs = _logprob_topk_logprobs
 
     def __len__(self) -> int:
-        return len(self.cache)
+        return len(self.labels)
 
     def slice_layers(
         self,
@@ -486,6 +488,7 @@ class PreloadedActivationDataset(Dataset):
             include_response_logprobs=self.include_response_logprobs,
             response_logprobs_top_k=self.response_logprobs_top_k,
             relevant_layers=list(layers),
+            _row_indices=self._row_indices,
             _logprob_token_ids=self._logprob_token_ids,
             _logprob_token_logprobs=self._logprob_token_logprobs,
             _logprob_topk_ids=self._logprob_topk_ids,
@@ -493,7 +496,8 @@ class PreloadedActivationDataset(Dataset):
         )
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        acts = torch.from_numpy(self.cache[idx])   # (L, T, H) — zero-copy view
+        cache_idx = int(self._row_indices[idx]) if self._row_indices is not None else idx
+        acts = torch.from_numpy(np.array(self.cache[cache_idx]))  # (L, T, H)
         view_indices = self._select_view_indices(list(range(self.L)))
         views = acts[view_indices]                 # (K, T, H)
         sample: Dict[str, Any] = {
@@ -503,7 +507,7 @@ class PreloadedActivationDataset(Dataset):
             'view_indices': torch.tensor(view_indices, dtype=torch.long),
         }
         if self.include_response_logprobs:
-            sample.update(self._get_logprobs(idx))
+            sample.update(self._get_logprobs(idx, cache_idx))
         return sample
 
     def _select_view_indices(self, available_layers: List[int]) -> List[int]:
@@ -537,7 +541,9 @@ class PreloadedActivationDataset(Dataset):
             )
         return random.sample(available_layers, self.num_views)
 
-    def _get_logprobs(self, idx: int) -> Dict[str, Any]:
+    def _get_logprobs(self, idx: int, cache_idx: Optional[int] = None) -> Dict[str, Any]:
+        if cache_idx is None:
+            cache_idx = idx
         target_len = self.pad_length
         target_top_k = self.response_logprobs_top_k
 
@@ -555,10 +561,10 @@ class PreloadedActivationDataset(Dataset):
             and self._logprob_topk_ids is not None
             and self._logprob_topk_logprobs is not None
         ):
-            raw_ids = self._logprob_token_ids[idx]
-            raw_lps = self._logprob_token_logprobs[idx]
-            raw_topk_ids = self._logprob_topk_ids[idx]
-            raw_topk_lps = self._logprob_topk_logprobs[idx]
+            raw_ids = self._logprob_token_ids[cache_idx]
+            raw_lps = self._logprob_token_logprobs[cache_idx]
+            raw_topk_ids = self._logprob_topk_ids[cache_idx]
+            raw_topk_lps = self._logprob_topk_logprobs[cache_idx]
 
             copied_len = min(target_len, raw_ids.shape[0])
             copied_top_k = min(target_top_k, raw_topk_ids.shape[1])
@@ -629,6 +635,7 @@ class ActivationParser:
         self._activation_logger = None
         self._group_index = None
         self._wds_shards = None
+        self._preloaded_splits = None   # cached result of _preload_all_splits
 
         # For backward compatibility, also store as lmdb_path
         self.lmdb_path = activations_path
@@ -880,6 +887,258 @@ class ActivationParser:
                 "Pass check_ram=False to skip this check."
             )
 
+    # ------------------------------------------------------------------
+    # Memmap preload cache
+    # ------------------------------------------------------------------
+
+    def _memmap_cache_fingerprint(
+        self,
+        relevant_layers: List[int],
+        pad_length: int,
+        include_logprobs: bool,
+        response_logprobs_top_k: int,
+    ) -> str:
+        """Deterministic cache key for a set of preload parameters."""
+        zarr_path_resolved = str(Path(self.activations_path).resolve())
+        zarr_count = int(self.activation_logger._response_activations.shape[0])
+        key_parts = (
+            zarr_path_resolved,
+            sorted(relevant_layers),
+            pad_length,
+            zarr_count,
+            self.random_seed,
+            include_logprobs,
+            response_logprobs_top_k,
+        )
+        return hashlib.sha256(repr(key_parts).encode()).hexdigest()[:16]
+
+    def _memmap_cache_dir(self, fingerprint: str) -> Path:
+        """Resolve cache directory path under the zarr store."""
+        zarr_path = Path(self.activations_path).resolve()
+        return zarr_path / "_memmap_cache" / fingerprint
+
+    def _save_memmap_cache(
+        self,
+        cache_dir: Path,
+        data: Dict[str, Any],
+        fingerprint: str,
+        relevant_layers: List[int],
+        pad_length: int,
+        include_logprobs: bool,
+        response_logprobs_top_k: int,
+        train_indices: np.ndarray,
+        test_indices: np.ndarray,
+    ) -> None:
+        """Write preloaded arrays as .npy files for subsequent memmap loading."""
+        import shutil
+
+        tmp_dir = cache_dir.parent / f".tmp_{fingerprint}"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            np.save(tmp_dir / "activations.npy", data['cache'])
+            np.save(tmp_dir / "labels.npy", data['labels'].astype(np.int8))
+            np.save(tmp_dir / "prompt_hashes.npy",
+                    np.array(data['prompt_hashes'], dtype='U64'))
+            np.save(tmp_dir / "train_indices.npy", train_indices)
+            np.save(tmp_dir / "test_indices.npy", test_indices)
+
+            if include_logprobs:
+                for key in ('logprob_token_ids', 'logprob_token_logprobs',
+                            'logprob_topk_ids', 'logprob_topk_logprobs'):
+                    if key in data and data[key] is not None:
+                        np.save(tmp_dir / f"{key}.npy", data[key])
+
+            manifest = {
+                "fingerprint": fingerprint,
+                "relevant_layers": relevant_layers,
+                "pad_length": pad_length,
+                "include_logprobs": include_logprobs,
+                "response_logprobs_top_k": response_logprobs_top_k,
+                "activation_shape": list(data['cache'].shape),
+                "activation_dtype": str(data['cache'].dtype),
+                "n_train": int(len(train_indices)),
+                "n_test": int(len(test_indices)),
+                "n_total": int(data['cache'].shape[0]),
+                "zarr_sample_count": int(
+                    self.activation_logger._response_activations.shape[0]
+                ),
+            }
+            (tmp_dir / "manifest.json").write_text(
+                json.dumps(manifest, indent=2), encoding="utf-8"
+            )
+
+            # Atomic rename (same filesystem)
+            if cache_dir.exists():
+                shutil.rmtree(cache_dir)
+            tmp_dir.rename(cache_dir)
+        except Exception:
+            if tmp_dir.exists():
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
+
+    def _load_memmap_cache(
+        self,
+        cache_dir: Path,
+        include_logprobs: bool,
+    ) -> Optional[Dict[str, Any]]:
+        """Load cached arrays via memmap.  Returns None on cache miss."""
+        manifest_path = cache_dir / "manifest.json"
+        if not manifest_path.exists():
+            return None
+
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+        # Staleness check: zarr sample count must match
+        zarr_count = int(self.activation_logger._response_activations.shape[0])
+        if manifest.get("zarr_sample_count") != zarr_count:
+            logger.warning(
+                f"Memmap cache stale: zarr has {zarr_count} samples, "
+                f"cache has {manifest.get('zarr_sample_count')}. Rebuilding."
+            )
+            return None
+
+        act_path = cache_dir / "activations.npy"
+        if not act_path.exists():
+            return None
+
+        data: Dict[str, Any] = {
+            'cache': np.load(act_path, mmap_mode='r'),
+            'labels': np.load(cache_dir / "labels.npy", mmap_mode='r'),
+            'prompt_hashes': np.load(
+                cache_dir / "prompt_hashes.npy"
+            ).tolist(),  # small array, load eagerly
+            'train_indices': np.load(cache_dir / "train_indices.npy"),
+            'test_indices': np.load(cache_dir / "test_indices.npy"),
+        }
+
+        if include_logprobs and manifest.get("include_logprobs"):
+            for key in ('logprob_token_ids', 'logprob_token_logprobs',
+                        'logprob_topk_ids', 'logprob_topk_logprobs'):
+                npy_path = cache_dir / f"{key}.npy"
+                if npy_path.exists():
+                    data[key] = np.load(npy_path, mmap_mode='r')
+
+        return data
+
+    def _split_cached_data(
+        self,
+        data: Dict[str, Any],
+        train_indices: np.ndarray,
+        test_indices: np.ndarray,
+        is_memmap: bool = False,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Split the full preloaded data into per-split dicts.
+
+        When *is_memmap* is True, activation and logprob arrays are kept as the
+        full memmap and a ``_row_indices`` array is attached for indirection in
+        ``__getitem__``.  This avoids materialising a copy of the large array.
+        """
+        result: Dict[str, Dict[str, Any]] = {}
+        for split_name, indices in [('train', train_indices), ('test', test_indices)]:
+            if is_memmap:
+                split_data: Dict[str, Any] = {
+                    'cache': data['cache'],               # full memmap
+                    'labels': np.asarray(data['labels'])[indices],
+                    'prompt_hashes': [data['prompt_hashes'][i] for i in indices],
+                    '_row_indices': indices,
+                }
+                for key in ('logprob_token_ids', 'logprob_token_logprobs',
+                            'logprob_topk_ids', 'logprob_topk_logprobs'):
+                    if key in data:
+                        split_data[key] = data[key]       # full memmap
+            else:
+                split_data = {
+                    'cache': data['cache'][indices],
+                    'labels': data['labels'][indices],
+                    'prompt_hashes': [data['prompt_hashes'][i] for i in indices],
+                }
+                for key in ('logprob_token_ids', 'logprob_token_logprobs',
+                            'logprob_topk_ids', 'logprob_topk_logprobs'):
+                    if key in data and data[key] is not None:
+                        split_data[key] = data[key][indices]
+            result[split_name] = split_data
+        return result
+
+    def _preload_all_splits(
+        self,
+        relevant_layers: List[int],
+        pad_length: int,
+        include_logprobs: bool,
+        response_logprobs_top_k: int,
+        check_ram: bool = True,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Load all splits, using memmap cache when available.
+
+        First call reads from zarr and writes a cache.  Subsequent calls memmap
+        the cache files — effectively instant.
+        """
+        fingerprint = self._memmap_cache_fingerprint(
+            relevant_layers, pad_length, include_logprobs, response_logprobs_top_k
+        )
+        cache_dir = self._memmap_cache_dir(fingerprint)
+
+        # Try cache
+        cached = self._load_memmap_cache(cache_dir, include_logprobs)
+        if cached is not None:
+            train_idx = cached.pop('train_indices')
+            test_idx = cached.pop('test_indices')
+            logger.info(
+                f"Loaded memmap cache from {cache_dir} "
+                f"(train={len(train_idx)}, test={len(test_idx)})"
+            )
+            return self._split_cached_data(cached, train_idx, test_idx, is_memmap=True)
+
+        # Cache miss — full preload from zarr
+        logger.info("Memmap cache miss; preloading all samples from zarr ...")
+        df_all = self.df.reset_index(drop=True)
+        train_mask = (self.df['split'] == 'train').values
+        test_mask = (self.df['split'] == 'test').values
+
+        H = int(self.activation_logger._response_activations.shape[-1])
+        if check_ram:
+            est = self._estimate_preload_bytes(
+                N=len(df_all), L=len(relevant_layers), T=pad_length, H=H,
+                include_logprobs=include_logprobs,
+                response_logprobs_top_k=response_logprobs_top_k,
+            )
+            est_gb = est / 1024**3
+            avail_gb = psutil.virtual_memory().available / 1024**3
+            logger.info(
+                f"Preload RAM estimate (all splits): "
+                f"{est_gb:.2f} GB required, {avail_gb:.2f} GB available"
+            )
+            self._check_ram_available(est)
+
+        data = self._preload_from_zarr(
+            df_split=df_all,
+            relevant_layers=relevant_layers,
+            pad_length=pad_length,
+            include_logprobs=include_logprobs,
+            response_logprobs_top_k=response_logprobs_top_k,
+            split="all",
+        )
+
+        train_indices = np.where(train_mask)[0].astype(np.int64)
+        test_indices = np.where(test_mask)[0].astype(np.int64)
+
+        # Write cache (best-effort)
+        try:
+            self._save_memmap_cache(
+                cache_dir, data, fingerprint, relevant_layers,
+                pad_length, include_logprobs, response_logprobs_top_k,
+                train_indices, test_indices,
+            )
+            logger.info(f"Saved memmap cache to {cache_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to save memmap cache: {e}")
+
+        return self._split_cached_data(
+            data, train_indices, test_indices, is_memmap=False
+        )
+
     def _preload_from_zarr(
         self,
         df_split: pd.DataFrame,
@@ -1027,36 +1286,26 @@ class ActivationParser:
         _relevant_layers = relevant_layers if relevant_layers is not None else list(range(16, 30))
 
         if preload:
-            df_split = self.df[self.df['split'] == split].reset_index(drop=True)
-            H = int(self.activation_logger._response_activations.shape[-1])
-
-            if check_ram:
-                est = self._estimate_preload_bytes(
-                    N=len(df_split),
-                    L=len(_relevant_layers),
-                    T=pad_length,
-                    H=H,
+            cache_key = (
+                tuple(_relevant_layers), pad_length,
+                include_response_logprobs, response_logprobs_top_k,
+            )
+            if self._preloaded_splits is None or self._preloaded_splits[0] != cache_key:
+                splits = self._preload_all_splits(
+                    relevant_layers=_relevant_layers,
+                    pad_length=pad_length,
                     include_logprobs=include_response_logprobs,
                     response_logprobs_top_k=response_logprobs_top_k,
+                    check_ram=check_ram,
                 )
-                est_gb = est / 1024**3
-                avail_gb = psutil.virtual_memory().available / 1024**3
-                logger.info(
-                    f"Preload RAM estimate: {est_gb:.2f} GB required, {avail_gb:.2f} GB available"
-                )
-                self._check_ram_available(est)
+                self._preloaded_splits = (cache_key, splits)
+            else:
+                splits = self._preloaded_splits[1]
 
-            data = self._preload_from_zarr(
-                df_split=df_split,
-                relevant_layers=_relevant_layers,
-                pad_length=pad_length,
-                include_logprobs=include_response_logprobs,
-                response_logprobs_top_k=response_logprobs_top_k,
-                split=split,
-            )
+            data = splits[split]
             return PreloadedActivationDataset(
                 cache=data['cache'],
-                labels=data['labels'],
+                labels=data['labels'] if isinstance(data['labels'], np.ndarray) else np.array(data['labels']),
                 prompt_hashes=data['prompt_hashes'],
                 num_views=num_views,
                 pad_length=pad_length,
@@ -1066,6 +1315,7 @@ class ActivationParser:
                 include_response_logprobs=include_response_logprobs,
                 response_logprobs_top_k=response_logprobs_top_k,
                 relevant_layers=_relevant_layers,
+                _row_indices=data.get('_row_indices'),
                 _logprob_token_ids=data.get('logprob_token_ids'),
                 _logprob_token_logprobs=data.get('logprob_token_logprobs'),
                 _logprob_topk_ids=data.get('logprob_topk_ids'),

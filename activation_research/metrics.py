@@ -454,9 +454,9 @@ def knn_ood_stats(
             sample_idx = rng.choice(np.arange(len(train_records)), size=max_train_size, replace=False)
             train_records = [train_records[int(idx)] for idx in sample_idx]
 
-    # Stack train/test embeddings (z1). Use CPU numpy for sklearn.
-    train_z = torch.stack([r["z1"] for r in train_records]).detach().cpu().numpy()
-    test_z = torch.stack([r["z1"] for r in test_records]).detach().cpu().numpy()
+    # Stack train/test embeddings. Use CPU numpy for sklearn.
+    train_z = torch.stack([_record_embedding(r) for r in train_records]).detach().cpu().numpy()
+    test_z = torch.stack([_record_embedding(r) for r in test_records]).detach().cpu().numpy()
     test_labels = torch.tensor([r["halu"] for r in test_records], dtype=torch.int32).squeeze()
 
     train_labels_binary = None
