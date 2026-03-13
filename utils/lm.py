@@ -149,16 +149,25 @@ class ServerManager:
         model,
         host="0.0.0.0",
         port=8000,
-        logger_type="lmdb",
+        logger_type="zarr",
         activations_path=None,
         log_file_path=None,
         startup_timeout=None,
+        max_model_len=None,
+        gpu_memory_utilization=None,
     ):
         self.model = model
         self.host = host
         self.port = port
         self.logger_type = logger_type
-        self.activations_path = activations_path or f"lmdb_data/{model.replace('/', '_')}_activations.lmdb"
+        self.activations_path = activations_path or f"activations/{model.replace('/', '_')}.zarr"
+        self.max_model_len = max_model_len
+        self.gpu_memory_utilization = gpu_memory_utilization
+        if log_file_path is None:
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            model_slug = model.replace("/", "_")
+            log_file_path = f"server_{model_slug}_{timestamp}.log"
         self.log_file_path = log_file_path
         self.server_process = None
         if startup_timeout is None:
@@ -195,6 +204,10 @@ class ServerManager:
         # Add log file path if specified
         if self.log_file_path:
             cmd.extend(["--log-file", self.log_file_path])
+        if self.max_model_len is not None:
+            cmd.extend(["--max-model-len", str(self.max_model_len)])
+        if self.gpu_memory_utilization is not None:
+            cmd.extend(["--gpu-memory-utilization", str(self.gpu_memory_utilization)])
             logger.info(f"Server behavior logs will be written to: {self.log_file_path}")
 
         logger.info(f"Server command: {' '.join(cmd)}")
@@ -730,7 +743,18 @@ model_map = {   'meta-llama/Llama-3.1-405B-Instruct-FP8': {'name': 'llama3.1_405
                                                         'server_urls': [f"http://{CUSTOM_SERVER}:8000/v1"],
                                                     },
 
-                                                    
+                # Qwen2.5 models (q_generator replacements for LLaMA 70B)
+                'Qwen/Qwen2.5-72B-Instruct-GPTQ-Int8': {'name': 'qwen2.5_72B_gptq_int8',
+                                                        'server_urls': [f"http://{CUSTOM_SERVER}:8000/v1"],
+                                                    },
+                'Qwen/Qwen2.5-14B-Instruct': {'name': 'qwen2.5_14B',
+                                                        'server_urls': [f"http://{CUSTOM_SERVER}:8000/v1"],
+                                                    },
+                'Qwen/Qwen2.5-7B-Instruct': {'name': 'qwen2.5_7B',
+                                                        'server_urls': [f"http://{CUSTOM_SERVER}:8000/v1"],
+                                                    },
+
+
             }
 ########################################################################################################
 

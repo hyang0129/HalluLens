@@ -60,7 +60,13 @@ def main():
                         help="Number of top logprobs to persist per generated token (default: 20)")
     parser.add_argument("--disable-logprobs", action="store_true",
                         help="Disable response token logprob logging (enabled by default)")
-    
+    parser.add_argument("--max-model-len", type=int, default=None,
+                        help="Maximum sequence length (prompt+response). Lower values reduce KV cache memory. "
+                             "Overrides VLLM_MAX_MODEL_LEN env var.")
+    parser.add_argument("--gpu-memory-utilization", type=float, default=None,
+                        help="Fraction of GPU memory reserved for vLLM (0.0–1.0). "
+                             "Overrides VLLM_GPU_MEMORY_UTILIZATION env var.")
+
     args = parser.parse_args()
 
     # Add file sink for server logs (always at INFO level).
@@ -95,6 +101,12 @@ def main():
     if args.auth_token:
         os.environ["HF_TOKEN"] = args.auth_token
         logger.info("Using provided HuggingFace token for model access")
+    if args.max_model_len is not None:
+        os.environ["VLLM_MAX_MODEL_LEN"] = str(args.max_model_len)
+        logger.info(f"Max model length: {args.max_model_len}")
+    if args.gpu_memory_utilization is not None:
+        os.environ["VLLM_GPU_MEMORY_UTILIZATION"] = str(args.gpu_memory_utilization)
+        logger.info(f"GPU memory utilization: {args.gpu_memory_utilization}")
     
     # Set trim sequence if provided
     if args.trim_output_at:
