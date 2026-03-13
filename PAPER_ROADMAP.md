@@ -122,7 +122,7 @@ We should target a benchmark breadth **similar to or greater than** LLMsKnow, wh
 From `external/LLMsKnow/README.md`, the suite includes:
 - TriviaQA
 - Movies
-- HotpotQA
+- HotpotQA — implemented at `tasks/llmsknow/hotpotqa.py`; notebook: `notebooks/hotpotqa_pipeline.ipynb`
 - Winobias
 - Winogrande
 - NLI (MNLI)
@@ -134,7 +134,11 @@ Goal: run our method on as many of these as feasible, at least covering **QA + c
 
 ### C) Add-on benchmarks (paper-strengthening)
 Not currently integrated, but worth adding for breadth:
-- TruthfulQA (already partially present via `precise_truthfulqa.py`)
+- TruthfulQA (`tasks/shortform/truthfulqa.py`) — **eval-only**. Only 817 total samples
+  (~400 per class), which is too small for contrastive training. Use exclusively for
+  cross-dataset generalization testing: train on PreciseWikiQA/TriviaQA, report AUROC
+  on TruthfulQA to demonstrate transfer across hallucination regimes (factual-recall →
+  misconception-driven). Notebook: `notebooks/truthfulqa_pipeline.ipynb`.
 - HaluEval / FactScore-style evaluations (if we can define consistent labels)
 - FEVER-like fact verification (if we can derive binary correctness signals)
 

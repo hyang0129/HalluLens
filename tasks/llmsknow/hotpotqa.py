@@ -1,0 +1,353 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+
+"""
+HotpotQA task for HalluLens.
+
+Dataset: https://huggingface.co/datasets/hotpot_qa  (distractor config)
+  - validation: 7,405 questions  ← default for inference / eval
+  - train:     90,447 questions  ← available for large-scale runs
+
+Evaluation mode: CLOSED-BOOK (no supporting passages provided in the prompt).
+The model must rely on parametric memory; incorrect answers are treated as hallucinations.
+
+Why HotpotQA?
+  Multi-hop questions require chaining two facts across two Wikipedia articles (bridge
+  questions) or comparing attributes of two entities (comparison questions).  This is a
+  qualitatively different reasoning demand from TriviaQA/NQ and tests whether hallucination
+  detection generalises to multi-step inference.
+
+Evaluation method:
+  Correctness = case-insensitive substring match of the gold answer in the model response.
+  Hallucination = response does not contain the gold answer.
+
+Output eval_results.json schema (ActivationParser-compatible):
+  {
+    "evaluator_abstantion": "hotpotqa_no_abstain",
+    "evaluator_hallucination": "hotpotqa_substring_match",
+    "abstantion": [false, ...],
+    "halu_test_res": [true, false, ...],   # True = hallucinated
+    "total_count": N, "accurate_count": K, "hallu_count": N-K,
+    "refusal_count": 0,
+    "correct_rate": float, "halu_Rate": float, "refusal_Rate": 0.0
+  }
+"""
+
+import json
+import os
+import argparse
+from pathlib import Path
+
+import pandas as pd
+import jsonlines
+
+from utils import exp
+
+
+# ---------------------------------------------------------------------------
+# Dataset loading
+# ---------------------------------------------------------------------------
+
+def load_hotpotqa(split="validation", n_samples=None):
+    """
+    Load HotpotQA from HuggingFace (distractor config, closed-book: no passages provided).
+
+    Args:
+        split: "validation" (7,405) or "train" (90,447)
+        n_samples: cap on number of samples; None = entire split
+
+    Returns:
+        List of dicts with keys: id, question, answer, type, level
+    """
+    from datasets import load_dataset
+
+    print(f"Loading HotpotQA (distractor / {split}) from HuggingFace...")
+    dataset = load_dataset("hotpot_qa", "distractor", trust_remote_code=True)[split]
+
+    data = []
+    for item in dataset:
+        data.append({
+            "id": item["id"],
+            "question": item["question"],
+            "answer": item["answer"],
+            "type": item.get("type", ""),      # "bridge" or "comparison"
+            "level": item.get("level", ""),    # "easy", "medium", "hard"
+        })
+
+    if n_samples is not None and n_samples < len(data):
+        data = data[:n_samples]
+
+    print(f"Loaded {len(data)} HotpotQA samples from '{split}' split")
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Evaluation helpers
+# ---------------------------------------------------------------------------
+
+def is_correct(generation: str, answer: str) -> bool:
+    """Case-insensitive substring check."""
+    return answer.lower().strip() in generation.lower().strip()
+
+
+def compute_correctness(generations: list[str], answers: list[str]) -> list[bool]:
+    return [is_correct(gen, ans) for gen, ans in zip(generations, answers)]
+
+
+# ---------------------------------------------------------------------------
+# Inference
+# ---------------------------------------------------------------------------
+
+def format_prompt(question: str) -> str:
+    return f"Answer the question concisely.\n\nQ: {question}\nA:"
+
+
+class HotpotQAInference:
+    """Run model inference on HotpotQA (closed-book, no context provided)."""
+
+    def __init__(self, model_path, output_base_dir="output", split="validation",
+                 n_samples=None, generations_file_path=None):
+        self.model_path = model_path
+        self.model_name = model_path.split("/")[-1]
+        self.split = split
+
+        self.task_output_dir = f"{output_base_dir}/hotpotqa/{self.model_name}"
+        os.makedirs(self.task_output_dir, exist_ok=True)
+
+        self.generations_file_path = (
+            generations_file_path or f"{self.task_output_dir}/generation.jsonl"
+        )
+
+        self.data = load_hotpotqa(split=split, n_samples=n_samples)
+
+    def run_inference(self, inference_method="vllm", max_tokens=128, temperature=0.0,
+                      logger_type="lmdb", activations_path=None, log_file=None,
+                      resume=True, max_retries=3, base_delay=1.0):
+        rows = []
+        for item in self.data:
+            rows.append({
+                "id": item["id"],
+                "question": item["question"],
+                "answer": item["answer"],
+                "type": item["type"],
+                "level": item["level"],
+                "prompt": format_prompt(item["question"]),
+            })
+        prompts_df = pd.DataFrame(rows)
+
+        print(f"Starting HotpotQA inference | model={self.model_path} | split={self.split} | N={len(prompts_df)}")
+
+        exp.run_exp(
+            task="hotpotqa",
+            model_path=self.model_path,
+            all_prompts=prompts_df,
+            generations_file_path=self.generations_file_path,
+            inference_method=inference_method,
+            max_tokens=max_tokens,
+            max_workers=1,
+            max_retries=max_retries,
+            base_delay=base_delay,
+            logger_type=logger_type,
+            activations_path=activations_path,
+            log_file_path=log_file,
+            resume=resume,
+        )
+        print(f"Inference complete → {self.generations_file_path}")
+
+
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+
+class HotpotQAEval:
+    """Score model generations against HotpotQA gold answers."""
+
+    def __init__(self, model_path, generations_file_path=None, output_base_dir="output",
+                 quick_debug_mode=False):
+        self.model_name = model_path.split("/")[-1]
+
+        if generations_file_path:
+            self.generations_file_path = generations_file_path
+            self.output_path = os.path.dirname(generations_file_path)
+        else:
+            self.output_path = f"{output_base_dir}/hotpotqa/{self.model_name}"
+            self.generations_file_path = f"{self.output_path}/generation.jsonl"
+
+        if not os.path.exists(self.generations_file_path):
+            raise FileNotFoundError(
+                f"Generations file not found: {self.generations_file_path}\n"
+                "Run inference first."
+            )
+
+        self.df = pd.read_json(self.generations_file_path, lines=True)
+
+        if quick_debug_mode:
+            print("Quick debug mode: using first 50 samples")
+            self.df = self.df.head(50)
+
+        print(f"Loaded {len(self.df)} generations for evaluation")
+
+    def run_eval(self, eval_results_path=None, log_file=None):
+        generations = self.df["generation"].tolist()
+        answers = self.df["answer"].tolist()
+
+        correctness = compute_correctness(generations, answers)  # True = correct
+
+        n = len(correctness)
+        correct_count = sum(correctness)
+        incorrect_count = n - correct_count
+
+        halu_test_res = [not c for c in correctness]
+        abstantion = [False] * n
+
+        res = {
+            "evaluator_abstantion": "hotpotqa_no_abstain",
+            "evaluator_hallucination": "hotpotqa_substring_match",
+            "abstantion": abstantion,
+            "halu_test_res": halu_test_res,
+            "total_count": n,
+            "accurate_count": correct_count,
+            "hallu_count": incorrect_count,
+            "refusal_count": 0,
+            "correct_rate": correct_count / max(1, n),
+            "halu_Rate": incorrect_count / max(1, n),
+            "refusal_Rate": 0.0,
+            "prompt": self.df["prompt"].tolist() if "prompt" in self.df.columns else [""] * n,
+            "generation": generations,
+            "answer": answers,
+        }
+
+        out_path = eval_results_path or f"{self.output_path}/eval_results.json"
+        os.makedirs(os.path.dirname(out_path) if os.path.dirname(out_path) else ".", exist_ok=True)
+        with open(out_path, "w") as f:
+            json.dump(res, f, indent=2)
+        print(f"Eval results saved → {out_path}")
+
+        # Per-sample raw_eval_res.jsonl
+        raw_path = f"{self.output_path}/raw_eval_res.jsonl"
+        with jsonlines.open(raw_path, mode="w") as writer:
+            for i, (_, row) in enumerate(self.df.iterrows()):
+                writer.write({
+                    "id": row.get("id", ""),
+                    "question": row.get("question", ""),
+                    "answer": answers[i],
+                    "generation": generations[i],
+                    "type": row.get("type", ""),
+                    "level": row.get("level", ""),
+                    "is_correct": correctness[i],
+                    "is_hallucination": halu_test_res[i],
+                    "is_abstaining": False,
+                })
+        print(f"Raw eval results saved → {raw_path}")
+
+        print("\n" + "=" * 60)
+        print("EVALUATION SUMMARY — HotpotQA")
+        print("=" * 60)
+        print(f"Model          : {self.model_name}")
+        print(f"Total samples  : {n}")
+        print(f"Correct        : {correct_count}  ({correct_count/max(1,n):.1%})")
+        print(f"Hallucinated   : {incorrect_count}  ({incorrect_count/max(1,n):.1%})")
+        print("=" * 60)
+
+        return res
+
+
+# ---------------------------------------------------------------------------
+# Unified run_step interface
+# ---------------------------------------------------------------------------
+
+def run_step(step, model, output_dir="output", split="validation",
+             inference_method="vllm", max_tokens=128, temperature=0.0, N=None,
+             generations_file_path=None, eval_results_path=None, log_file=None,
+             logger_type="lmdb", activations_path=None,
+             quick_debug_mode=False, resume=True, max_retries=3, base_delay=1.0):
+    """Run a single step of the HotpotQA task. Callable from Python directly."""
+
+    if step == "inference":
+        runner = HotpotQAInference(
+            model_path=model,
+            output_base_dir=output_dir,
+            split=split,
+            n_samples=N,
+            generations_file_path=generations_file_path,
+        )
+        runner.run_inference(
+            inference_method=inference_method,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            logger_type=logger_type,
+            activations_path=activations_path,
+            log_file=log_file,
+            resume=resume,
+            max_retries=max_retries,
+            base_delay=base_delay,
+        )
+
+    elif step == "eval":
+        evaluator = HotpotQAEval(
+            model_path=model,
+            generations_file_path=generations_file_path,
+            output_base_dir=output_dir,
+            quick_debug_mode=quick_debug_mode,
+        )
+        evaluator.run_eval(eval_results_path=eval_results_path, log_file=log_file)
+
+    else:
+        raise ValueError(f"Unknown step '{step}'. HotpotQA supports: inference, eval")
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="HotpotQA inference and evaluation (closed-book)")
+
+    parser.add_argument("--do_inference", action="store_true")
+    parser.add_argument("--do_eval", action="store_true")
+
+    parser.add_argument("--model", type=str, required=True)
+    parser.add_argument("--output_dir", type=str, default="output")
+    parser.add_argument("--split", type=str, default="validation", choices=["validation", "train"],
+                        help="HotpotQA split to use (default: validation = 7,405 questions)")
+    parser.add_argument("--N", type=int, default=None,
+                        help="Number of samples (None = entire split)")
+    parser.add_argument("--max_tokens", type=int, default=128)
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--inference_method", type=str, default="vllm")
+    parser.add_argument("--logger_type", type=str, default="lmdb", choices=["lmdb", "json", "zarr"])
+    parser.add_argument("--activations_path", type=str, default=None)
+    parser.add_argument("--log_file", type=str, default=None)
+    parser.add_argument("--generations_file_path", type=str, default=None)
+    parser.add_argument("--eval_results_path", type=str, default=None)
+    parser.add_argument("--quick_debug_mode", action="store_true")
+    parser.add_argument("--no_resume", action="store_true")
+
+    args = parser.parse_args()
+
+    if args.do_inference:
+        run_step("inference", args.model,
+                 output_dir=args.output_dir,
+                 split=args.split,
+                 inference_method=args.inference_method,
+                 max_tokens=args.max_tokens,
+                 temperature=args.temperature,
+                 N=args.N,
+                 generations_file_path=args.generations_file_path,
+                 log_file=args.log_file,
+                 logger_type=args.logger_type,
+                 activations_path=args.activations_path,
+                 resume=not args.no_resume)
+
+    if args.do_eval:
+        run_step("eval", args.model,
+                 output_dir=args.output_dir,
+                 generations_file_path=args.generations_file_path,
+                 eval_results_path=args.eval_results_path,
+                 quick_debug_mode=args.quick_debug_mode)
+
+    if not args.do_inference and not args.do_eval:
+        print("No action specified. Use --do_inference and/or --do_eval")
+        parser.print_help()
