@@ -157,7 +157,72 @@ Alongside the Zarr, write a plain JSONL file (one line per prompt) for human-rea
 
 This is written incrementally (one line at a time) with resume support keyed on `prompt_hash`.
 
-### 2.4 Server-side key assignment — how the server handles repeated calls for the same prompt
+### 2.4 Client-side request construction
+
+The client (`utils/lm.py`) calls the server via the OpenAI Python SDK:
+
+```python
+# current call_vllm_api — no custom fields, temperature fixed at 0.0
+chat_completion = client.chat.completions.create(
+    model=model,
+    messages=[{"role": "user", "content": prompt}],
+    max_tokens=max_tokens,
+    temperature=temperature,   # always 0.0 in run_exp's inference_fn lambda
+    top_p=top_p
+)
+```
+
+Three issues for selfcheck:
+
+**Issue 1 — Custom server fields require `extra_body`.**
+The server's Pydantic model accepts `multi_sample`, `request_id`, `sample_group_id`, `sample_index` — but these are not standard OpenAI fields. The OpenAI Python SDK passes them via `extra_body`:
+
+```python
+chat_completion = client.chat.completions.create(
+    model=model,
+    messages=[{"role": "user", "content": prompt}],
+    temperature=0.7,                    # must be > 0 for stochastic samples
+    extra_body={
+        "multi_sample": True,
+        "request_id": f"sc_{i}",        # deterministic → key = {prompt_hash}_sc_{i}
+        "sample_group_id": prompt_hash, # groups with the existing greedy row
+        "sample_index": i + 1,          # 0 = greedy (already logged)
+    }
+)
+```
+
+**Issue 2 — Temperature is hardcoded to 0.0 in `run_exp`.**
+`run_exp` builds `inference_fn = lambda p: call_vllm_api(p, ..., temperature=0.0, ...)`. Selfcheck needs a separate callable with `temperature=selfcheck_temperature`. This is a minor change — the selfcheck step has its own loop and does not go through `run_exp`.
+
+**Issue 3 — No per-request opt-out of activation logging on the server.**
+The server always logs activations for non-GGUF models:
+```python
+if not model_name.endswith('.gguf') and model_outputs is not None:
+    logger_to_use.log_entry(entry_key, {...})
+```
+There is no `skip_activation_logging` field. For the text-only samples (indices `selfcheck_log_activations..selfcheck_k-1`), the two options are:
+
+| Option | Pros | Cons |
+|---|---|---|
+| **A. Add `skip_activation_logging` field to server** | Clean separation, no second server | Requires server change; server still runs the model (activations are computed, just not persisted) |
+| **B. Call a second raw vLLM port** (if `vllm_serve.py` exposes one) | No server code change; truly skips logging | Requires a second server process or a separate port on the same vLLM instance |
+
+**Recommended: Option A** — add `skip_activation_logging: bool = False` to the request model and wrap the `log_entry` call in `if not request.skip_activation_logging`. This is a one-line server change and keeps a single server endpoint for all calls.
+
+For text-only selfcheck samples, the client then sends:
+```python
+extra_body={
+    "multi_sample": True,
+    "request_id": f"sc_{i}",
+    "sample_group_id": prompt_hash,
+    "sample_index": i + 1,
+    "skip_activation_logging": True,   # ← new field
+}
+```
+
+This ensures the key is still deterministic (for any future activation upgrade), but no Zarr row is written.
+
+### 2.5 Server-side key assignment — how the server handles repeated calls for the same prompt
 
 The server (`activation_logging/server.py`) builds Zarr keys via `build_entry_key()`:
 
@@ -330,8 +395,10 @@ Output: `selfcheck_results.json` parallel to `eval_results.json`.
 
 | File | Change | Priority |
 |---|---|---|
+| `activation_logging/server.py` | Add `skip_activation_logging: bool = False` to `CompletionRequest` and `ChatCompletionRequest`; wrap `log_entry` call in `if not request.skip_activation_logging` | High |
 | `scripts/run_with_server.py` | Add `selfcheck` step; wire `--selfcheck-k`, `--selfcheck-temperature`, `--selfcheck-log-activations` flags | High |
-| `tasks/shortform/precise_wikiqa.py` | `run_step_selfcheck()`: iterate prompts, route first N samples through activation-logging server, remaining through vLLM directly, write `selfcheck_samples.jsonl` | High |
+| `tasks/shortform/precise_wikiqa.py` | `run_step_selfcheck()`: iterate prompts, call server with `extra_body` including deterministic `request_id="sc_{i}"` and `skip_activation_logging=True` for text-only samples | High |
+| `utils/lm.py` | Add `call_vllm_api_selfcheck()` (or `extra_body` param to `call_vllm_api`) for passing custom fields to the server | High |
 | `activation_logging/activation_parser.py` | Add `get_selfcheck_entries()` method; add `include_selfcheck` param to `ActivationDataset` | Medium |
 | `tasks/shortform/precise_wikiqa.py` | New `SelfCheckEval` class (n-gram scorer first, BERTScore/NLI later) | Medium |
 | `requirements.txt` | `selfcheckgpt` package (from pypi); `bert_score` (optional) | Low |
