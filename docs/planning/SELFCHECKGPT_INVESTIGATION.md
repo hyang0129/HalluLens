@@ -164,18 +164,60 @@ A standalone step that can be appended to any existing run:
 ```bash
 python scripts/run_with_server.py \
     --step selfcheck \
-    --inference-json shared/goodwiki/generation.jsonl \
-    --activations-path shared/goodwiki/activations.zarr \
-    --selfcheck-k 10 \
+    --inference-json shared/hotpotqa/generation.jsonl \
+    --activations-path shared/hotpotqa/activations.zarr \
+    --selfcheck-k 20 \
+    --selfcheck-log-activations 5 \
     --selfcheck-temperature 0.7
 ```
 
-Internal flow:
-1. Read existing `generation.jsonl` to get prompts + prompt hashes.
-2. Read `selfcheck_samples.jsonl` (if exists) to skip already-sampled prompts (resume).
-3. For each unsampled prompt, make `k` API calls at `temperature > 0` to the running vLLM server.
-4. Log each sample to the existing Zarr with key `{prompt_hash}_sc_{i}`.
-5. Append a line to `selfcheck_samples.jsonl`.
+#### Resume / reuse logic
+
+The scenario: HotpotQA was already fully run (greedy inference + activation logging). Now we add selfcheck. The step must reuse all existing saved data and be safely restartable.
+
+**Sources of truth (checked in order):**
+
+1. `selfcheck_samples.jsonl` — one line per prompt hash, written atomically after all k samples for that prompt are done. A line present with `len(selfcheck_samples) == selfcheck_k` means the prompt is fully done, skip it.
+
+2. Zarr index (`meta/index.jsonl`) — tracks which `_sc_` keys have been written. Used as a fallback if `selfcheck_samples.jsonl` is missing or partially written (e.g., crash mid-write).
+
+**Resume decision tree per prompt:**
+
+```
+for prompt_hash in generation.jsonl:
+
+    # Greedy — always reuse, never re-run
+    assert prompt_hash in zarr_index   # written by original inference run
+
+    # Check JSONL first (fast path)
+    jsonl_entry = selfcheck_samples_jsonl.get(prompt_hash)
+    if jsonl_entry and len(jsonl_entry["selfcheck_samples"]) == selfcheck_k:
+        continue  # fully done
+
+    # Partial resume: find which sample indices are already saved
+    existing_sc_indices = {
+        i for i in range(selfcheck_k)
+        if f"{prompt_hash}_sc_{i}" in zarr_index          # has activations
+        or jsonl_entry_has_sample(jsonl_entry, i)         # text-only, already in JSONL
+    }
+
+    for i in range(selfcheck_k):
+        if i in existing_sc_indices:
+            continue  # already have this sample, skip
+
+        sc_key = f"{prompt_hash}_sc_{i}"
+        if i < selfcheck_log_activations:
+            call_logging_server(prompt, key=sc_key)   # activations + logprobs → Zarr
+        else:
+            call_vllm_direct(prompt)                  # logprobs → JSONL only
+
+    # Write/update JSONL entry once all k are done
+    write_selfcheck_jsonl(prompt_hash, all_k_samples)
+```
+
+**Why write JSONL only after all k are done:** atomic per-prompt writes prevent partially-written lines. On resume, a missing JSONL line for a prompt triggers a Zarr-index scan to find which `_sc_` keys already exist, then only the missing samples are generated.
+
+**Greedy is never re-generated:** `--step selfcheck` never touches the greedy Zarr row at `prompt_hash`. It only writes `{prompt_hash}_sc_{i}` keys and `selfcheck_samples.jsonl`. The original `generation.jsonl` is read-only input.
 
 ### 2.5 `ActivationParser` additions
 
