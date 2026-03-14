@@ -174,7 +174,9 @@ def build_entry_key(prompt, request_id, multi_sample):
 
 `multi_sample` mode is triggered when any of `multi_sample=True`, `sample_index`, `sample_group_id`, or `request_id` is set on the request.
 
-**Problem:** if the client calls the server k times for the same prompt without passing a deterministic `request_id`, each call gets a random UUID suffix → keys like `{prompt_hash}_a3f2b1c0`, `{prompt_hash}_99de12ab` — unpredictable, unscannable, not resumable.
+**Normal single-inference path (existing pipeline):** `multi_sample=False` → `build_entry_key` returns `prompt_key` directly. No UUID, no suffix. Key is always just `SHA256(prompt)`. This is correct and unaffected.
+
+**Selfcheck path:** the client must set `multi_sample=True` (or equivalently pass `sample_index` / `request_id`) to avoid overwriting the greedy Zarr row. But if `multi_sample=True` and no `request_id` is supplied, the server falls back to a random UUID suffix → keys like `{prompt_hash}_a3f2b1c0` — unpredictable and not resumable.
 
 **Solution: the client must pass a deterministic `request_id` per sample index.**
 
