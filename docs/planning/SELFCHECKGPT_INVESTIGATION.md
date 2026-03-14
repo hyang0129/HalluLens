@@ -100,13 +100,38 @@ for i in range(selfcheck_k):
 
 **What gets logged per sample type** (example: selfcheck_k=20, selfcheck_log_activations=5):
 
-| Sample | Key | Zarr row? | Activations? | Logprobs? | Text? |
-|---|---|---|---|---|---|
-| Greedy (existing) | `{hash}` | Yes (existing) | Yes | Yes | generation.jsonl |
-| SC sample 0..4 | `{hash}_sc_0` .. `{hash}_sc_4` | Yes (new) | Yes | Yes | selfcheck_samples.jsonl |
-| SC sample 5..19 | `{hash}_sc_5` .. `{hash}_sc_19` | No | No | No | selfcheck_samples.jsonl |
+| Sample | Key | Zarr row? | Activations? | Logprobs in Zarr? | Logprobs in JSONL? | Text? |
+|---|---|---|---|---|---|---|
+| Greedy (existing) | `{hash}` | Yes (existing) | Yes | Yes | — | generation.jsonl |
+| SC sample 0..4 | `{hash}_sc_0` .. `{hash}_sc_4` | Yes (new) | Yes | Yes | Yes | selfcheck_samples.jsonl |
+| SC sample 5..19 | `{hash}_sc_5` .. `{hash}_sc_19` | No | No | No | **Yes** | selfcheck_samples.jsonl |
 
-Total: 1 existing greedy row + 5 new stochastic Zarr rows + 15 text-only.
+Total: 1 existing greedy row + 5 new stochastic Zarr rows + 15 text+logprob-only.
+
+**Logprobs for text-only samples:** vLLM returns token logprobs as part of every response payload — no activation hooks required. The direct vLLM call already gets them. We store them inline in `selfcheck_samples.jsonl` rather than Zarr:
+
+```json
+{
+  "prompt_hash": "abc123...",
+  "selfcheck_samples": [
+    {
+      "zarr_key": "abc123..._sc_0",
+      "generation": "sample text",
+      "has_zarr_activations": true,
+      "token_logprobs": null
+    },
+    {
+      "zarr_key": "abc123..._sc_5",
+      "generation": "sample text",
+      "has_zarr_activations": false,
+      "token_logprobs": [-0.12, -1.4, -0.03, ...],
+      "topk_logprobs": [[(-0.12, 1234), (-0.9, 5678), ...], ...]
+    }
+  ]
+}
+```
+
+For samples with Zarr rows, `token_logprobs` is `null` in the JSONL (read from Zarr instead to avoid duplication). This keeps `selfcheck_samples.jsonl` as the single lookup point regardless of whether a sample has activations.
 
 **Storage estimate** (example: 1000 prompts, 32 layers, hidden=4096, R_max=64):
 - Per-row Zarr cost ≈ 32 × 64 × 4096 × 2 bytes (float16) ≈ 16 MB
