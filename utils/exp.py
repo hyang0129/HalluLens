@@ -62,6 +62,8 @@ def run_exp(
     inference_method="vllm",
     max_workers=64,
     max_tokens=512,
+    temperature=0.0,
+    top_p=1.0,
     return_gen = False,
     max_retries=3,
     base_delay=1.0,
@@ -85,6 +87,8 @@ def run_exp(
         inference_method: Inference method (vllm, openai, custom)
         max_workers: DEPRECATED - kept for backward compatibility, inference is now single-threaded
         max_tokens: Maximum tokens to generate
+        temperature: Sampling temperature (default: 0.0 for greedy). Set > 0 for stochastic sampling.
+        top_p: Top-p sampling parameter (default: 1.0)
         return_gen: Whether to return generations
         max_retries: Maximum retry attempts
         base_delay: Base delay for exponential backoff
@@ -197,12 +201,12 @@ def run_exp(
 
         # Define inference function based on method
         if inference_method == 'openai':
-            inference_fn = lambda p: lm.openai_generate(p, model=model_path, temperature=0.0, top_p=1.0, max_tokens=max_tokens)
+            inference_fn = lambda p: lm.openai_generate(p, model=model_path, temperature=temperature, top_p=top_p, max_tokens=max_tokens)
         elif inference_method == "vllm":
             port = None
-            inference_fn = lambda p: lm.call_vllm_api(p, model=model_path, temperature=0.0, top_p=1.0, max_tokens=max_tokens, port=port, max_retries=max_retries, base_delay=base_delay)
+            inference_fn = lambda p: lm.call_vllm_api(p, model=model_path, temperature=temperature, top_p=top_p, max_tokens=max_tokens, port=port, max_retries=max_retries, base_delay=base_delay)
         elif inference_method == "custom":
-            inference_fn = lambda p: lm.generate(p, model=model_path, temperature=0.0, top_p=1.0, max_tokens=max_tokens, max_retries=max_retries, base_delay=base_delay)
+            inference_fn = lambda p: lm.generate(p, model=model_path, temperature=temperature, top_p=top_p, max_tokens=max_tokens, max_retries=max_retries, base_delay=base_delay)
         else:
             raise NotImplementedError(f"No method {inference_method}")
 

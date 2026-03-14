@@ -758,7 +758,7 @@ model_map = {   'meta-llama/Llama-3.1-405B-Instruct-FP8': {'name': 'llama3.1_405
             }
 ########################################################################################################
 
-def call_vllm_api(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512, port=None, i=0, max_retries=3, base_delay=1.0):
+def call_vllm_api(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512, port=None, i=0, max_retries=3, base_delay=1.0, extra_body: dict | None = None):
     """
     Call vLLM API with retry mechanism for timeout errors.
 
@@ -772,6 +772,9 @@ def call_vllm_api(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512, por
         i: Server index for model_map
         max_retries: Maximum number of retry attempts (default: 3)
         base_delay: Base delay in seconds for exponential backoff (default: 1.0)
+        extra_body: Optional dict of extra fields to pass to the API (e.g. multi_sample,
+                    request_id, skip_activation_logging). The OpenAI SDK silently drops
+                    non-standard fields unless they are forwarded via extra_body.
 
     Returns:
         Generated text content
@@ -829,7 +832,8 @@ def call_vllm_api(prompt, model, temperature=0.0, top_p=1.0, max_tokens=512, por
                     {"role": "user","content": prompt}],
                 max_tokens=max_tokens,
                 temperature=temperature,
-                top_p=top_p
+                top_p=top_p,
+                **({"extra_body": extra_body} if extra_body else {})
             )
 
             request_time = time.time() - start_time
