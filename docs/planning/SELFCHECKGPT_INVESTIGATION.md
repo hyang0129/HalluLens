@@ -177,9 +177,15 @@ The scenario: HotpotQA was already fully run (greedy inference + activation logg
 
 **Sources of truth (checked in order):**
 
-1. `selfcheck_samples.jsonl` — one line per prompt hash, written atomically after all k samples for that prompt are done. A line present with `len(selfcheck_samples) == selfcheck_k` means the prompt is fully done, skip it.
+1. `selfcheck_samples.jsonl` — one line per prompt hash. Tracks text + logprobs for each sample, plus `has_zarr_activations` per entry. The line also records the parameters it was generated with: `selfcheck_k` and `selfcheck_log_activations`.
 
 2. Zarr index (`meta/index.jsonl`) — tracks which `_sc_` keys have been written. Used as a fallback if `selfcheck_samples.jsonl` is missing or partially written (e.g., crash mid-write).
+
+**A prompt is fully done only when BOTH conditions hold:**
+- `len(jsonl_entry["selfcheck_samples"]) == selfcheck_k` — all text samples present
+- `sum(1 for s in jsonl_entry["selfcheck_samples"] if s["has_zarr_activations"]) == selfcheck_log_activations` — correct number of activation-logged rows
+
+This matters for the case where a prior run used `selfcheck_log_activations=3` and the current run specifies `selfcheck_log_activations=5` — the text samples are complete but the activation count is insufficient, so the missing activation rows must be generated.
 
 **Resume decision tree per prompt:**
 
@@ -189,33 +195,48 @@ for prompt_hash in generation.jsonl:
     # Greedy — always reuse, never re-run
     assert prompt_hash in zarr_index   # written by original inference run
 
-    # Check JSONL first (fast path)
+    # Load existing JSONL entry (may be None, partial, or complete)
     jsonl_entry = selfcheck_samples_jsonl.get(prompt_hash)
-    if jsonl_entry and len(jsonl_entry["selfcheck_samples"]) == selfcheck_k:
-        continue  # fully done
+    existing_samples = jsonl_entry["selfcheck_samples"] if jsonl_entry else []
 
-    # Partial resume: find which sample indices are already saved
-    existing_sc_indices = {
-        i for i in range(selfcheck_k)
-        if f"{prompt_hash}_sc_{i}" in zarr_index          # has activations
-        or jsonl_entry_has_sample(jsonl_entry, i)         # text-only, already in JSONL
+    # Count what we already have
+    existing_text_indices = {i for i, s in enumerate(existing_samples)}
+    existing_activation_indices = {
+        i for i, s in enumerate(existing_samples)
+        if s.get("has_zarr_activations")
+        or f"{prompt_hash}_sc_{i}" in zarr_index  # Zarr fallback for crash recovery
     }
 
+    # Both conditions must be satisfied to skip
+    text_complete = (len(existing_text_indices) == selfcheck_k)
+    activations_complete = (len(existing_activation_indices) == selfcheck_log_activations)
+    if text_complete and activations_complete:
+        continue  # fully done
+
+    # Generate missing samples
     for i in range(selfcheck_k):
-        if i in existing_sc_indices:
-            continue  # already have this sample, skip
+        needs_text = i not in existing_text_indices
+        needs_activations = (i < selfcheck_log_activations) and (i not in existing_activation_indices)
+
+        if not needs_text and not needs_activations:
+            continue  # already have everything for this index
 
         sc_key = f"{prompt_hash}_sc_{i}"
-        if i < selfcheck_log_activations:
-            call_logging_server(prompt, key=sc_key)   # activations + logprobs → Zarr
-        else:
-            call_vllm_direct(prompt)                  # logprobs → JSONL only
+        if needs_activations:
+            # Must (re-)call activation-logging server to get Zarr row
+            response = call_logging_server(prompt, key=sc_key)
+        elif needs_text:
+            # Text-only: call vLLM directly
+            response = call_vllm_direct(prompt)
 
-    # Write/update JSONL entry once all k are done
-    write_selfcheck_jsonl(prompt_hash, all_k_samples)
+        # Update in-memory sample list, merge with existing where present
+        upsert_sample(existing_samples, i, sc_key, response)
+
+    # Rewrite JSONL line atomically once all k samples are complete
+    write_selfcheck_jsonl(prompt_hash, existing_samples)
 ```
 
-**Why write JSONL only after all k are done:** atomic per-prompt writes prevent partially-written lines. On resume, a missing JSONL line for a prompt triggers a Zarr-index scan to find which `_sc_` keys already exist, then only the missing samples are generated.
+**Key edge case — upgrading activation count:** if a sample index `i < selfcheck_log_activations` already has a text entry in JSONL (`needs_text=False`) but no Zarr row (`needs_activations=True`), the logging server is called and only the activation/logprob data is written to Zarr. The text in the JSONL entry is unchanged. This lets you upgrade `selfcheck_log_activations` on a prior run without re-generating any text.
 
 **Greedy is never re-generated:** `--step selfcheck` never touches the greedy Zarr row at `prompt_hash`. It only writes `{prompt_hash}_sc_{i}` keys and `selfcheck_samples.jsonl`. The original `generation.jsonl` is read-only input.
 
