@@ -25,70 +25,134 @@ The core idea: a hallucinated fact tends to be inconsistent across multiple stoc
 
 ---
 
-## 2. What Needs to Change in HalluLens
+## 2. Storage Design: Appending to Existing Zarr Stores
 
-### 2.1 Inference step — multi-sampling
+The critical requirement is that SelfCheck sampling can run **after** a primary inference run has already been logged to Zarr — a separate, append-only step that doesn't touch the greedy-pass data.
 
-Currently: **one generation per prompt** in `generation.jsonl`.
+### 2.1 Zarr key naming convention
 
-We need: **k stochastic samples per prompt**, stored alongside the greedy answer.
+The existing codebase already has multi-sample grouping infrastructure:
 
-**Proposed schema change to `generation.jsonl`:**
+- `ZarrActivationsLogger` stores entries by arbitrary string key.
+- `ActivationParser._build_group_index()` groups entries by `sample_group_id` metadata field, falling back to `key.split("_")[0]`.
+- `ActivationParser.select_primary_key()` picks the entry with `sample_index == 0` as the greedy answer.
+- `ActivationParser.get_group_keys(prompt_hash)` returns **all** keys for a group.
+
+**We can use this directly.** SelfCheck samples are stored in the same Zarr with keys:
+
+```
+{prompt_hash}           ← existing greedy entry (sample_index=0)
+{prompt_hash}_sc_0      ← stochastic sample 0  (sample_index=1)
+{prompt_hash}_sc_1      ← stochastic sample 1  (sample_index=2)
+...
+{prompt_hash}_sc_{k-1}  ← stochastic sample k-1
+```
+
+Each `_sc_` entry's Zarr metadata (written to `meta/index.jsonl`) includes:
+```json
+{
+  "key": "{prompt_hash}_sc_0",
+  "sample_group_id": "{prompt_hash}",
+  "sample_index": 1,
+  "is_selfcheck_sample": true,
+  "selfcheck_sample_index": 0,
+  "temperature": 0.7,
+  "generation": "stochastic answer text",
+  "prompt": "..."
+}
+```
+
+`_build_group_index()` groups by `sample_group_id`, so `get_group_keys(prompt_hash)` returns all of them. `select_primary_key()` returns the `sample_index == 0` greedy entry, leaving existing code paths unchanged.
+
+### 2.2 Logprobs and activations for samples
+
+Because each SelfCheck sample is a full Zarr entry, it gets the same arrays as the greedy pass:
+- `response_activations` — shape `(1, num_layers, response_max_tokens, hidden_size)`
+- `response_token_ids`, `response_token_logprobs` — per-token logprob
+- `response_topk_token_ids`, `response_topk_logprobs` — top-k logprobs
+
+**No changes needed to `ZarrActivationsLogger`** — it just logs each sample as a new row.
+
+### 2.3 Companion text file: `selfcheck_samples.jsonl`
+
+Alongside the Zarr, write a plain JSONL file (one line per prompt) for human-readable inspection and to support text-only scorers without touching Zarr:
 
 ```json
 {
-  "index": 42,
+  "prompt_hash": "abc123...",
   "prompt": "Answer in one sentence. Q:...\n A:",
-  "answer": "gold answer",
   "generation": "primary greedy answer",
   "selfcheck_samples": [
-    "sampled answer 1 (temp=0.7)",
-    "sampled answer 2 (temp=0.7)",
-    "sampled answer 3 (temp=0.7)"
+    {"zarr_key": "abc123..._sc_0", "generation": "sample 1", "temperature": 0.7},
+    {"zarr_key": "abc123..._sc_1", "generation": "sample 2", "temperature": 0.7}
   ]
 }
 ```
 
-- `generation` stays as the greedy/primary response (used for all other evaluators).
-- `selfcheck_samples` is a new array of k stochastic samples at temperature > 0.
+This is written incrementally (one line at a time) with resume support keyed on `prompt_hash`.
 
-This is backward compatible: existing loaders ignore unknown fields.
+### 2.4 New inference step: `--step selfcheck`
 
-### 2.2 How to generate the samples
+A standalone step that can be appended to any existing run:
 
-**Option A — Extra API calls during inference (simplest):**
-- After each greedy generation, make `k` additional calls with `temperature=0.7` (or similar).
-- Already supported by the OpenAI-protocol server in `activation_logging/server.py`.
-- Activated with a flag like `--selfcheck-samples k`.
-- Adds `k × inference_time` cost per prompt.
+```bash
+python scripts/run_with_server.py \
+    --step selfcheck \
+    --inference-json shared/goodwiki/generation.jsonl \
+    --activations-path shared/goodwiki/activations.zarr \
+    --selfcheck-k 10 \
+    --selfcheck-temperature 0.7
+```
 
-**Option B — Batch multi-sampling via vLLM `n` parameter:**
-- vLLM supports `n` completions per request. Pass `n=k+1` with temperature > 0.
-- First completion = samples; take greedy separately (or use `best_of`).
-- Much faster (single forward pass for batch), but requires changes to how we call the server.
-- More invasive server changes.
+Internal flow:
+1. Read existing `generation.jsonl` to get prompts + prompt hashes.
+2. Read `selfcheck_samples.jsonl` (if exists) to skip already-sampled prompts (resume).
+3. For each unsampled prompt, make `k` API calls at `temperature > 0` to the running vLLM server.
+4. Log each sample to the existing Zarr with key `{prompt_hash}_sc_{i}`.
+5. Append a line to `selfcheck_samples.jsonl`.
 
-**Recommendation for investigation phase: Option A** — minimal code change, lets us validate the approach before optimizing.
+### 2.5 `ActivationParser` additions
 
-### 2.3 Evaluation step — SelfCheck scorer
+Add one method to expose selfcheck samples to downstream consumers:
 
-A new offline scorer that reads the multi-sample `generation.jsonl` and produces a SelfCheck score per prompt. This fits naturally as a new step or a new evaluator class alongside `PreciseQAEval`.
-
-**Pseudocode:**
 ```python
-for row in generation_jsonl:
+def get_selfcheck_entries(
+    self,
+    prompt_hash: str,
+    include_activations: bool = False,
+    include_logprobs: bool = True,
+) -> List[Dict[str, Any]]:
+    """Return metadata (+ optional activations/logprobs) for all selfcheck
+    samples of a given prompt. Returns empty list if none logged."""
+    all_keys = self.get_group_keys(prompt_hash)
+    sc_keys = [k for k in all_keys if "_sc_" in k]
+    results = []
+    for key in sorted(sc_keys):
+        if include_activations:
+            entry = self.activation_logger.get_entry(key)
+        else:
+            entry = self.activation_logger.get_entry_by_key(key, metadata_only=True) or {}
+        if include_logprobs and not include_activations:
+            entry["logprobs"] = self.get_response_logprobs(key)
+        results.append(entry)
+    return results
+```
+
+`ActivationDataset.__getitem__` optionally attaches selfcheck entries when `include_selfcheck=True`.
+
+### 2.6 SelfCheck scorer (offline, text-only)
+
+A new evaluator class that reads `selfcheck_samples.jsonl` (no Zarr needed for n-gram/BERTScore):
+
+```python
+for row in selfcheck_samples_jsonl:
     sentences = sentence_tokenize(row["generation"])
-    samples = row["selfcheck_samples"]
-    scores = [selfcheck_score(sentence, samples) for sentence in sentences]
+    samples = [s["generation"] for s in row["selfcheck_samples"]]
+    scores = [selfcheck_ngram_score(sentence, samples) for sentence in sentences]
     row["selfcheck_score"] = mean(scores)   # higher = more hallucinated
 ```
 
 Output: `selfcheck_results.json` parallel to `eval_results.json`.
-
-### 2.4 Activation logging — no change needed (initially)
-
-SelfCheckGPT is black-box: it only needs the text of samples. No activation changes required.
-Later, if we want to study *why* SelfCheck works, we can log activations for the samples too.
 
 ---
 
@@ -96,23 +160,23 @@ Later, if we want to study *why* SelfCheck works, we can log activations for the
 
 | File | Change | Priority |
 |---|---|---|
-| `tasks/shortform/precise_wikiqa.py` | Add `--selfcheck-samples k` flag; make `k` extra stochastic calls per prompt; write `selfcheck_samples` array to `generation.jsonl` | High |
-| `utils/exp.py` | Thread-safe / incremental save of multi-sample arrays | High |
-| `tasks/shortform/precise_wikiqa.py` | New `SelfCheckEval` class (n-gram scorer first, BERTScore/NLI later) | High |
-| `scripts/run_with_server.py` | Wire `--selfcheck-samples` into the inference and eval steps | Medium |
-| `requirements.txt` | `selfcheckgpt` package (from pypi), `bert_score` (optional, for BERTScore variant) | Low |
+| `scripts/run_with_server.py` | Add `selfcheck` step; wire `--selfcheck-k` and `--selfcheck-temperature` flags | High |
+| `tasks/shortform/precise_wikiqa.py` | `run_step_selfcheck()`: iterate prompts, make k API calls, log to Zarr with `_sc_` keys, write `selfcheck_samples.jsonl` | High |
+| `activation_logging/activation_parser.py` | Add `get_selfcheck_entries()` method; add `include_selfcheck` param to `ActivationDataset` | Medium |
+| `tasks/shortform/precise_wikiqa.py` | New `SelfCheckEval` class (n-gram scorer first, BERTScore/NLI later) | Medium |
+| `requirements.txt` | `selfcheckgpt` package (from pypi); `bert_score` (optional) | Low |
 
 ---
 
 ## 4. Open Questions
 
-1. **Temperature for samples:** 0.7 is the paper default; should we expose this as a flag?
-2. **Sentence tokenizer:** paper uses spacy (`en_core_web_sm`); is that already in our env?
-3. **Greedy vs sampled:** Do we want a true greedy pass (temperature=0) + k sampled, or k+1 sampled? The paper uses the greedy answer as "the response to evaluate."
-4. **k budget:** Paper uses `k=20` samples; at what `k` does performance plateau? Should we run a sweep?
-5. **Activation logging for samples:** Should activations be logged for the stochastic samples too (for future SE / SEP comparisons)? Would significantly increase storage.
-6. **Comparable eval labels:** SelfCheckGPT produces a continuous score; our `eval_results.json` labels are binary (CORRECT/INCORRECT). We need to threshold or report AUROC directly.
-7. **Resume logic:** The current resume key is `prompt`. With multi-samples, resume should check both `prompt` and whether `selfcheck_samples` has length `k`.
+1. **Temperature for samples:** 0.7 is the paper default; expose as `--selfcheck-temperature` flag.
+2. **Sentence tokenizer:** paper uses spacy (`en_core_web_sm`); need to check if it's in the env or add it.
+3. **Greedy vs sampled:** Keep `temperature=0` greedy as the primary (already logged); run k stochastic samples separately. Paper evaluates greedy answer against stochastic samples.
+4. **k budget:** Paper uses `k=20`; at what `k` does AUROC plateau? Plan a sweep over k={5, 10, 20}.
+5. **Activation logging for samples:** Yes — because each `_sc_` entry is a full Zarr row, activations are logged automatically. Storage cost: `k × size_of_one_greedy_entry`. For k=10 on 1000 prompts, ~10× the current Zarr size. Consider `--selfcheck-log-activations` flag to opt out.
+6. **Comparable eval labels:** SelfCheckGPT produces a continuous score. Report AUROC against our binary `halu_test_res` labels from `eval_results.json`.
+7. **Resume logic:** `selfcheck_samples.jsonl` is the resume record. If a line exists for a `prompt_hash` and has `len(selfcheck_samples) == k`, skip it. The Zarr keys also act as a fallback resume check via `get_group_keys`.
 
 ---
 
