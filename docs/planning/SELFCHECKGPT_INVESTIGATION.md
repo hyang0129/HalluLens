@@ -157,7 +157,46 @@ Alongside the Zarr, write a plain JSONL file (one line per prompt) for human-rea
 
 This is written incrementally (one line at a time) with resume support keyed on `prompt_hash`.
 
-### 2.4 New inference step: `--step selfcheck`
+### 2.4 Server-side key assignment — how the server handles repeated calls for the same prompt
+
+The server (`activation_logging/server.py`) builds Zarr keys via `build_entry_key()`:
+
+```python
+def build_entry_key(prompt, request_id, multi_sample):
+    prompt_key = prompt_hash(prompt)          # SHA256 of prompt text
+    if not multi_sample:
+        return prompt_key, prompt_key, None   # key = prompt hash — OVERWRITES on repeat calls
+
+    resolved_request_id = request_id or str(uuid.uuid4())[:8]   # random if not supplied
+    entry_key = f"{prompt_key}_{resolved_request_id}"
+    return entry_key, prompt_key, resolved_request_id
+```
+
+`multi_sample` mode is triggered when any of `multi_sample=True`, `sample_index`, `sample_group_id`, or `request_id` is set on the request.
+
+**Problem:** if the client calls the server k times for the same prompt without passing a deterministic `request_id`, each call gets a random UUID suffix → keys like `{prompt_hash}_a3f2b1c0`, `{prompt_hash}_99de12ab` — unpredictable, unscannable, not resumable.
+
+**Solution: the client must pass a deterministic `request_id` per sample index.**
+
+For selfcheck sample `i`, the client sets `request_id = f"sc_{i}"`:
+
+```python
+# results in entry_key = f"{prompt_hash}_sc_{i}"
+response = call_logging_server(
+    prompt,
+    multi_sample=True,
+    request_id=f"sc_{i}",
+    sample_group_id=prompt_hash,
+    sample_index=i + 1,   # 0 = greedy (already logged), 1..k = stochastic
+    temperature=temp,
+)
+```
+
+This gives exactly the `{prompt_hash}_sc_{i}` key scheme the resume logic depends on. SHA-256 hashes are pure hex (no underscores), so `key.split("_")[0]` in `_build_group_index()` correctly recovers the prompt hash as the group ID.
+
+**No server changes needed** — `request_id` is already an accepted field on both `/v1/completions` and `/v1/chat/completions`. The client just needs to set it explicitly rather than letting the server generate a random one.
+
+### 2.5 New inference step: `--step selfcheck`
 
 A standalone step that can be appended to any existing run:
 
@@ -240,7 +279,7 @@ for prompt_hash in generation.jsonl:
 
 **Greedy is never re-generated:** `--step selfcheck` never touches the greedy Zarr row at `prompt_hash`. It only writes `{prompt_hash}_sc_{i}` keys and `selfcheck_samples.jsonl`. The original `generation.jsonl` is read-only input.
 
-### 2.5 `ActivationParser` additions
+### 2.6 `ActivationParser` additions
 
 Add one method to expose selfcheck samples to downstream consumers:
 
@@ -269,7 +308,7 @@ def get_selfcheck_entries(
 
 `ActivationDataset.__getitem__` optionally attaches selfcheck entries when `include_selfcheck=True`.
 
-### 2.6 SelfCheck scorer (offline, text-only)
+### 2.7 SelfCheck scorer (offline, text-only)
 
 A new evaluator class that reads `selfcheck_samples.jsonl` (no Zarr needed for n-gram/BERTScore):
 
