@@ -394,6 +394,44 @@ class ActivationDataset(Dataset):
 
 
 
+class SingleLayerDataset(Dataset):
+    """Deterministic single-layer dataset for linear probing.
+
+    Returns activations for exactly one layer — no view sampling, no
+    randomness.  ``__getitem__`` returns ``views_activations`` with shape
+    ``(1, T, H)`` for compatibility with ``LinearProbeTrainer``.
+    """
+
+    def __init__(
+        self,
+        cache: np.ndarray,
+        labels: np.ndarray,
+        prompt_hashes: List[str],
+        layer_pos: int,
+        layer_id: int,
+        _row_indices: Optional[np.ndarray] = None,
+    ):
+        self.cache = cache                    # (N, L, T, H)
+        self.labels = labels
+        self.prompt_hashes = prompt_hashes
+        self.layer_pos = layer_pos            # positional index into dim-1
+        self.layer_id = layer_id              # model layer number (for metadata)
+        self._row_indices = _row_indices
+
+    def __len__(self) -> int:
+        return len(self.labels)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        cache_idx = int(self._row_indices[idx]) if self._row_indices is not None else idx
+        act = torch.from_numpy(np.array(self.cache[cache_idx, self.layer_pos]))  # (T, H)
+        return {
+            'hashkey': self.prompt_hashes[idx],
+            'halu': torch.tensor(float(self.labels[idx]), dtype=torch.float32),
+            'views_activations': act.unsqueeze(0),  # (1, T, H)
+            'view_indices': torch.tensor([self.layer_id], dtype=torch.long),
+        }
+
+
 class PreloadedActivationDataset(Dataset):
     """RAM-resident activation dataset.
 
@@ -493,6 +531,29 @@ class PreloadedActivationDataset(Dataset):
             _logprob_token_logprobs=self._logprob_token_logprobs,
             _logprob_topk_ids=self._logprob_topk_ids,
             _logprob_topk_logprobs=self._logprob_topk_logprobs,
+        )
+
+    def get_single_layer_dataset(self, layer: int) -> "SingleLayerDataset":
+        """Return a deterministic single-layer dataset for linear probing.
+
+        Unlike ``slice_layers``, this returns a ``SingleLayerDataset`` that
+        always yields the activation for exactly one layer — no view sampling.
+
+        Args:
+            layer: Model layer index (must be in ``self.relevant_layers``).
+        """
+        if layer not in self.relevant_layers:
+            raise ValueError(
+                f"Layer {layer} not in preloaded relevant_layers {self.relevant_layers}"
+            )
+        layer_pos = self.relevant_layers.index(layer)
+        return SingleLayerDataset(
+            cache=self.cache,
+            labels=self.labels,
+            prompt_hashes=self.prompt_hashes,
+            layer_pos=layer_pos,
+            layer_id=layer,
+            _row_indices=self._row_indices,
         )
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:

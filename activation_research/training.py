@@ -284,13 +284,14 @@ class SupConLoss(nn.Module):
         else:
             raise ValueError('Unknown mode: {}'.format(self.contrast_mode))
 
-        # compute logits
+        # compute logits (clamp to prevent overflow in exp)
         anchor_dot_contrast = torch.div(
             torch.matmul(anchor_feature, contrast_feature.T),
             self.temperature)
         # for numerical stability
         logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
         logits = anchor_dot_contrast - logits_max.detach()
+        logits = torch.clamp(logits, min=-50.0, max=50.0)
 
         # tile mask
         mask = mask.repeat(anchor_count, contrast_count)
@@ -303,23 +304,24 @@ class SupConLoss(nn.Module):
         )
         mask = mask * logits_mask
 
-        # compute log_prob
+        # compute log_prob (add eps to prevent log(0))
         exp_logits = torch.exp(logits) * logits_mask
-        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True))
+        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True) + 1e-12)
 
         # compute mean of log-likelihood over positive
         # modified to handle edge cases when there is no positive pair
-        # for an anchor point. 
-        # Edge case e.g.:- 
+        # for an anchor point.
+        # Edge case e.g.:-
         # features of shape: [4,1,...]
         # labels:            [0,1,1,2]
-        # loss before mean:  [nan, ..., ..., nan] 
+        # loss before mean:  [nan, ..., ..., nan]
         mask_pos_pairs = mask.sum(1)
         mask_pos_pairs = torch.where(mask_pos_pairs < 1e-6, 1, mask_pos_pairs)
         mean_log_prob_pos = (mask * log_prob).sum(1) / mask_pos_pairs
 
-        # loss
+        # loss — zero out any residual NaN from anchors with no positives
         loss = - (self.temperature / self.base_temperature) * mean_log_prob_pos
+        loss = torch.where(torch.isfinite(loss), loss, torch.zeros_like(loss))
         loss = loss.view(anchor_count, batch_size).mean()
 
         return loss
