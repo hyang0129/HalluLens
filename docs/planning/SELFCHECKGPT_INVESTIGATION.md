@@ -69,8 +69,8 @@ Each `_sc_` entry's Zarr metadata (written to `meta/index.jsonl`) includes:
 Generating 20 stochastic samples at inference time but only storing activations for 5 of them requires decoupling the **text sampling count** from the **activation logging count**.
 
 **Parameters:**
-- `--selfcheck-k 20` — number of stochastic text responses to generate (all stored in `selfcheck_samples.jsonl`)
-- `--selfcheck-log-activations 5` — how many of those to also log to Zarr (default: 1, i.e., greedy only; set to N to get greedy + N-1 stochastic)
+- `--selfcheck-k 20` — number of **extra** stochastic samples to generate beyond the greedy pass (21 total: 1 greedy + 20 stochastic). All 20 texts stored in `selfcheck_samples.jsonl`.
+- `--selfcheck-log-activations 5` — how many of the 20 stochastic samples to also log to Zarr (default: 0). The greedy Zarr row already exists and is not counted here.
 
 **Key challenge — hash is prompt-level, not answer-level:**
 The existing Zarr is keyed by `prompt_hash` (SHA-256 of the prompt text). This works because each prompt had exactly one answer. For multiple answers to the same prompt, the Zarr key **must include the sample index** to be unique. The proposed `{prompt_hash}_sc_{i}` scheme solves this — the existing `_build_group_index()` groups by the prefix (splitting on `_`), so the greedy entry at `{prompt_hash}` and stochastic entries at `{prompt_hash}_sc_0`, `{prompt_hash}_sc_1` etc. are all grouped together correctly.
@@ -78,14 +78,13 @@ The existing Zarr is keyed by `prompt_hash` (SHA-256 of the prompt text). This w
 **Inference loop (per prompt):**
 
 ```python
-# 1. Greedy pass — already logged, skip if exists in Zarr
-greedy_key = prompt_hash
-# already logged in prior inference run
+# 1. Greedy pass — already logged in the prior inference run, skip
+greedy_key = prompt_hash  # existing Zarr row
 
-# 2. Stochastic passes
+# 2. Stochastic passes (selfcheck_k=20 extra samples)
 for i in range(selfcheck_k):
     sc_key = f"{prompt_hash}_sc_{i}"
-    log_activations = (i < selfcheck_log_activations - 1)  # -1 because greedy already counts
+    log_activations = (i < selfcheck_log_activations)  # first N get full Zarr row
 
     if log_activations:
         # Call activation-logging server (FastAPI + vLLM hooks)
@@ -99,19 +98,19 @@ for i in range(selfcheck_k):
     append_selfcheck_text(prompt_hash, sc_key, response.text, logged=log_activations)
 ```
 
-**What gets logged per sample type:**
+**What gets logged per sample type** (example: selfcheck_k=20, selfcheck_log_activations=5):
 
 | Sample | Key | Zarr row? | Activations? | Logprobs? | Text? |
 |---|---|---|---|---|---|
 | Greedy (existing) | `{hash}` | Yes (existing) | Yes | Yes | generation.jsonl |
-| SC sample 0..N-2 | `{hash}_sc_0` .. `{hash}_sc_{N-2}` | Yes (new) | Yes | Yes | selfcheck_samples.jsonl |
-| SC sample N-1..k-1 | `{hash}_sc_{N-1}` .. `{hash}_sc_{k-1}` | No | No | No | selfcheck_samples.jsonl |
+| SC sample 0..4 | `{hash}_sc_0` .. `{hash}_sc_4` | Yes (new) | Yes | Yes | selfcheck_samples.jsonl |
+| SC sample 5..19 | `{hash}_sc_5` .. `{hash}_sc_19` | No | No | No | selfcheck_samples.jsonl |
 
-For N=5, k=20: 1 greedy + 4 stochastic with activations + 16 text-only.
+Total: 1 existing greedy row + 5 new stochastic Zarr rows + 15 text-only.
 
 **Storage estimate** (example: 1000 prompts, 32 layers, hidden=4096, R_max=64):
 - Per-row Zarr cost ≈ 32 × 64 × 4096 × 2 bytes (float16) ≈ 16 MB
-- 1000 prompts × 4 extra activation rows ≈ 64 GB — significant, expose `--selfcheck-log-activations` clearly.
+- 1000 prompts × 5 extra activation rows ≈ 80 GB — significant, expose `--selfcheck-log-activations` clearly.
 
 **No changes needed to `ZarrActivationsLogger`** — it already supports arbitrary string keys and append-only writes.
 
@@ -216,7 +215,7 @@ Output: `selfcheck_results.json` parallel to `eval_results.json`.
 2. **Sentence tokenizer:** paper uses spacy (`en_core_web_sm`); need to check if it's in the env or add it.
 3. **Greedy vs sampled:** Keep `temperature=0` greedy as the primary (already logged); run k stochastic samples separately. Paper evaluates greedy answer against stochastic samples.
 4. **k budget:** Paper uses `k=20`; at what `k` does AUROC plateau? Plan a sweep over k={5, 10, 20}.
-5. **Activation logging for samples:** Controlled by `--selfcheck-log-activations N` (greedy already counts as 1). Text-only samples skip the activation-logging server and call vLLM directly. Storage cost for N=5, k=20, 1000 prompts ≈ 64 GB of extra Zarr data — expose this clearly in docs.
+5. **Activation logging for samples:** Controlled by `--selfcheck-log-activations N` — N extra Zarr rows beyond the existing greedy row. Text-only samples skip the activation-logging server and call vLLM directly. Storage cost for N=5, k=20, 1000 prompts ≈ 80 GB of extra Zarr data — expose this clearly in docs.
 6. **Comparable eval labels:** SelfCheckGPT produces a continuous score. Report AUROC against our binary `halu_test_res` labels from `eval_results.json`.
 7. **Resume logic:** `selfcheck_samples.jsonl` is the resume record. If a line exists for a `prompt_hash` and has `len(selfcheck_samples) == k`, skip it. The Zarr keys also act as a fallback resume check via `get_group_keys`.
 
