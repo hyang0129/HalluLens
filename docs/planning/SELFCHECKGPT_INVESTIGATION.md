@@ -64,14 +64,56 @@ Each `_sc_` entry's Zarr metadata (written to `meta/index.jsonl`) includes:
 
 `_build_group_index()` groups by `sample_group_id`, so `get_group_keys(prompt_hash)` returns all of them. `select_primary_key()` returns the `sample_index == 0` greedy entry, leaving existing code paths unchanged.
 
-### 2.2 Logprobs and activations for samples
+### 2.2 Selective activation logging: `selfcheck_k` vs `activation_log_count`
 
-Because each SelfCheck sample is a full Zarr entry, it gets the same arrays as the greedy pass:
-- `response_activations` — shape `(1, num_layers, response_max_tokens, hidden_size)`
-- `response_token_ids`, `response_token_logprobs` — per-token logprob
-- `response_topk_token_ids`, `response_topk_logprobs` — top-k logprobs
+Generating 20 stochastic samples at inference time but only storing activations for 5 of them requires decoupling the **text sampling count** from the **activation logging count**.
 
-**No changes needed to `ZarrActivationsLogger`** — it just logs each sample as a new row.
+**Parameters:**
+- `--selfcheck-k 20` — number of stochastic text responses to generate (all stored in `selfcheck_samples.jsonl`)
+- `--selfcheck-log-activations 5` — how many of those to also log to Zarr (default: 1, i.e., greedy only; set to N to get greedy + N-1 stochastic)
+
+**Key challenge — hash is prompt-level, not answer-level:**
+The existing Zarr is keyed by `prompt_hash` (SHA-256 of the prompt text). This works because each prompt had exactly one answer. For multiple answers to the same prompt, the Zarr key **must include the sample index** to be unique. The proposed `{prompt_hash}_sc_{i}` scheme solves this — the existing `_build_group_index()` groups by the prefix (splitting on `_`), so the greedy entry at `{prompt_hash}` and stochastic entries at `{prompt_hash}_sc_0`, `{prompt_hash}_sc_1` etc. are all grouped together correctly.
+
+**Inference loop (per prompt):**
+
+```python
+# 1. Greedy pass — already logged, skip if exists in Zarr
+greedy_key = prompt_hash
+# already logged in prior inference run
+
+# 2. Stochastic passes
+for i in range(selfcheck_k):
+    sc_key = f"{prompt_hash}_sc_{i}"
+    log_activations = (i < selfcheck_log_activations - 1)  # -1 because greedy already counts
+
+    if log_activations:
+        # Call activation-logging server (FastAPI + vLLM hooks)
+        # Zarr row written with key sc_key
+        response = call_logging_server(prompt, temperature=temp, zarr_key=sc_key)
+    else:
+        # Call vLLM directly (no hooks, no Zarr write) — text only
+        response = call_vllm_direct(prompt, temperature=temp)
+
+    # Text always goes to selfcheck_samples.jsonl regardless
+    append_selfcheck_text(prompt_hash, sc_key, response.text, logged=log_activations)
+```
+
+**What gets logged per sample type:**
+
+| Sample | Key | Zarr row? | Activations? | Logprobs? | Text? |
+|---|---|---|---|---|---|
+| Greedy (existing) | `{hash}` | Yes (existing) | Yes | Yes | generation.jsonl |
+| SC sample 0..N-2 | `{hash}_sc_0` .. `{hash}_sc_{N-2}` | Yes (new) | Yes | Yes | selfcheck_samples.jsonl |
+| SC sample N-1..k-1 | `{hash}_sc_{N-1}` .. `{hash}_sc_{k-1}` | No | No | No | selfcheck_samples.jsonl |
+
+For N=5, k=20: 1 greedy + 4 stochastic with activations + 16 text-only.
+
+**Storage estimate** (example: 1000 prompts, 32 layers, hidden=4096, R_max=64):
+- Per-row Zarr cost ≈ 32 × 64 × 4096 × 2 bytes (float16) ≈ 16 MB
+- 1000 prompts × 4 extra activation rows ≈ 64 GB — significant, expose `--selfcheck-log-activations` clearly.
+
+**No changes needed to `ZarrActivationsLogger`** — it already supports arbitrary string keys and append-only writes.
 
 ### 2.3 Companion text file: `selfcheck_samples.jsonl`
 
@@ -160,8 +202,8 @@ Output: `selfcheck_results.json` parallel to `eval_results.json`.
 
 | File | Change | Priority |
 |---|---|---|
-| `scripts/run_with_server.py` | Add `selfcheck` step; wire `--selfcheck-k` and `--selfcheck-temperature` flags | High |
-| `tasks/shortform/precise_wikiqa.py` | `run_step_selfcheck()`: iterate prompts, make k API calls, log to Zarr with `_sc_` keys, write `selfcheck_samples.jsonl` | High |
+| `scripts/run_with_server.py` | Add `selfcheck` step; wire `--selfcheck-k`, `--selfcheck-temperature`, `--selfcheck-log-activations` flags | High |
+| `tasks/shortform/precise_wikiqa.py` | `run_step_selfcheck()`: iterate prompts, route first N samples through activation-logging server, remaining through vLLM directly, write `selfcheck_samples.jsonl` | High |
 | `activation_logging/activation_parser.py` | Add `get_selfcheck_entries()` method; add `include_selfcheck` param to `ActivationDataset` | Medium |
 | `tasks/shortform/precise_wikiqa.py` | New `SelfCheckEval` class (n-gram scorer first, BERTScore/NLI later) | Medium |
 | `requirements.txt` | `selfcheckgpt` package (from pypi); `bert_score` (optional) | Low |
@@ -174,7 +216,7 @@ Output: `selfcheck_results.json` parallel to `eval_results.json`.
 2. **Sentence tokenizer:** paper uses spacy (`en_core_web_sm`); need to check if it's in the env or add it.
 3. **Greedy vs sampled:** Keep `temperature=0` greedy as the primary (already logged); run k stochastic samples separately. Paper evaluates greedy answer against stochastic samples.
 4. **k budget:** Paper uses `k=20`; at what `k` does AUROC plateau? Plan a sweep over k={5, 10, 20}.
-5. **Activation logging for samples:** Yes — because each `_sc_` entry is a full Zarr row, activations are logged automatically. Storage cost: `k × size_of_one_greedy_entry`. For k=10 on 1000 prompts, ~10× the current Zarr size. Consider `--selfcheck-log-activations` flag to opt out.
+5. **Activation logging for samples:** Controlled by `--selfcheck-log-activations N` (greedy already counts as 1). Text-only samples skip the activation-logging server and call vLLM directly. Storage cost for N=5, k=20, 1000 prompts ≈ 64 GB of extra Zarr data — expose this clearly in docs.
 6. **Comparable eval labels:** SelfCheckGPT produces a continuous score. Report AUROC against our binary `halu_test_res` labels from `eval_results.json`.
 7. **Resume logic:** `selfcheck_samples.jsonl` is the resume record. If a line exists for a `prompt_hash` and has `len(selfcheck_samples) == k`, skip it. The Zarr keys also act as a fallback resume check via `get_group_keys`.
 
