@@ -42,8 +42,9 @@ from pathlib import Path
 
 import pandas as pd
 import jsonlines
+from tqdm import tqdm
 
-from utils import exp
+from utils import exp, lm
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +256,191 @@ class HotpotQAEval:
 
 
 # ---------------------------------------------------------------------------
+# LLM-judge evaluation
+# ---------------------------------------------------------------------------
+
+IS_CORRECT_RESPONSE = """You are given a question, a model response, and the correct answer.
+Your task is to determine whether the model response conveys the correct answer.
+
+The question may require multi-hop reasoning (bridge or comparison).
+Accept semantically equivalent answers even if phrased differently from the gold answer.
+For yes/no questions accept any response that clearly expresses the correct polarity.
+
+Answer with exactly one word: CORRECT or INCORRECT.
+
+Question: {prompt}
+Response: {generation}
+Correct Answer: {gold_answer}
+
+YOUR JUDGEMENT:"""
+
+
+class HotpotQALLMEval:
+    """Score HotpotQA generations with an LLM judge, alongside substring match for comparison."""
+
+    DEFAULT_EVALUATOR = "neuralmagic-ent/Llama-3.3-70B-Instruct-quantized.w8a8"
+
+    def __init__(self, model_path, generations_file_path=None, output_base_dir="output",
+                 evaluator=None, quick_debug_mode=False):
+        self.model_name = model_path.split("/")[-1]
+        self.evaluator = evaluator or self.DEFAULT_EVALUATOR
+
+        if generations_file_path:
+            self.generations_file_path = generations_file_path
+            self.output_path = os.path.dirname(generations_file_path)
+        else:
+            self.output_path = f"{output_base_dir}/hotpotqa/{self.model_name}"
+            self.generations_file_path = f"{self.output_path}/generation.jsonl"
+
+        if not os.path.exists(self.generations_file_path):
+            raise FileNotFoundError(
+                f"Generations file not found: {self.generations_file_path}\n"
+                "Run inference first."
+            )
+
+        self.df = pd.read_json(self.generations_file_path, lines=True)
+
+        if quick_debug_mode:
+            print("Quick debug mode: using first 50 samples")
+            self.df = self.df.head(50)
+
+        print(f"Loaded {len(self.df)} generations for LLM evaluation")
+
+    def _run_llm_judge(self, resume=True):
+        """Call the LLM judge for each sample; return list of raw string responses."""
+        raw_path = f"{self.output_path}/llm_halu_eval_raw.jsonl"
+
+        judge_prompts = [
+            IS_CORRECT_RESPONSE.format(
+                prompt=row["prompt"],
+                generation=row["generation"],
+                gold_answer=row["answer"],
+            )
+            for _, row in self.df.iterrows()
+        ]
+
+        existing = []
+        prompts_to_run = judge_prompts
+
+        if resume and os.path.exists(raw_path):
+            try:
+                with open(raw_path) as f:
+                    existing = [json.loads(l)["eval_res"] for l in f]
+                if len(existing) >= len(judge_prompts):
+                    print(f"All {len(judge_prompts)} LLM evaluations already cached.")
+                    return existing
+                prompts_to_run = judge_prompts[len(existing):]
+                print(f"Resuming LLM eval: {len(existing)} done, {len(prompts_to_run)} remaining.")
+            except Exception as e:
+                print(f"Warning: could not load cached results ({e}), starting fresh.")
+                existing = []
+                prompts_to_run = judge_prompts
+
+        server_was_running = lm.check_server_health("http://0.0.0.0:8000")
+        server_manager = None
+        if not server_was_running:
+            print(f"Starting evaluation server for {self.evaluator}...")
+            server_manager = lm.ServerManager(
+                model=self.evaluator,
+                host="0.0.0.0",
+                port=8000,
+                logger_type="lmdb",
+                activations_path=None,
+            )
+            server_manager.start_server()
+            lm.set_server_manager(server_manager)
+
+        lm.initialize_progress_tracking(len(judge_prompts), already_completed=len(existing))
+
+        try:
+            file_mode = "a" if existing else "w"
+            new_results = []
+            with open(raw_path, file_mode, encoding="utf-8") as f:
+                for prompt in tqdm(prompts_to_run, desc=f"LLM eval ({self.evaluator})"):
+                    result = lm.generate(prompt, self.evaluator)
+                    new_results.append(result)
+                    f.write(json.dumps({"eval_res": result}, ensure_ascii=False) + "\n")
+                    f.flush()
+        finally:
+            if server_manager and not server_was_running:
+                server_manager.stop_server()
+                lm.set_server_manager(None)
+
+        print(f"LLM eval saved → {raw_path}")
+        return existing + new_results
+
+    def run_eval(self, eval_results_path=None, resume=True):
+        raw_responses = self._run_llm_judge(resume=resume)
+
+        generations = self.df["generation"].tolist()
+        answers = self.df["answer"].tolist()
+
+        # LLM judge verdict
+        llm_correct = []
+        for txt in raw_responses:
+            first = txt.strip().split()[0].lower().rstrip(".,;:") if txt.strip() else ""
+            llm_correct.append(first == "correct")
+
+        # Substring match for comparison
+        substring_correct = compute_correctness(generations, answers)
+
+        n = len(llm_correct)
+        llm_halu = [not c for c in llm_correct]
+        substring_halu = [not c for c in substring_correct]
+
+        llm_correct_count = sum(llm_correct)
+        substring_correct_count = sum(substring_correct)
+
+        # Agreement between the two methods
+        agree_count = sum(a == b for a, b in zip(llm_halu, substring_halu))
+
+        res = {
+            "evaluator_abstantion": "hotpotqa_no_abstain",
+            "evaluator_hallucination": f"hotpotqa_llm_judge:{self.evaluator}",
+            "abstantion": [False] * n,
+            # Primary results from LLM judge
+            "halu_test_res": llm_halu,
+            "total_count": n,
+            "accurate_count": llm_correct_count,
+            "hallu_count": n - llm_correct_count,
+            "refusal_count": 0,
+            "correct_rate": llm_correct_count / max(1, n),
+            "halu_Rate": (n - llm_correct_count) / max(1, n),
+            "refusal_Rate": 0.0,
+            # Substring match for comparison
+            "substring_halu_test_res": substring_halu,
+            "substring_correct_rate": substring_correct_count / max(1, n),
+            "substring_halu_Rate": (n - substring_correct_count) / max(1, n),
+            "evaluator_agreement_rate": agree_count / max(1, n),
+            # Raw data
+            "llm_judge_raw": raw_responses,
+            "prompt": self.df["prompt"].tolist() if "prompt" in self.df.columns else [""] * n,
+            "generation": generations,
+            "answer": answers,
+            "type": self.df["type"].tolist() if "type" in self.df.columns else [""] * n,
+        }
+
+        out_path = eval_results_path or f"{self.output_path}/eval_results_llm.json"
+        os.makedirs(os.path.dirname(out_path) if os.path.dirname(out_path) else ".", exist_ok=True)
+        with open(out_path, "w") as f:
+            json.dump(res, f, indent=2)
+
+        print("\n" + "=" * 60)
+        print("EVALUATION SUMMARY — HotpotQA (LLM Judge vs Substring)")
+        print("=" * 60)
+        print(f"Model          : {self.model_name}")
+        print(f"Evaluator      : {self.evaluator}")
+        print(f"Total samples  : {n}")
+        print(f"LLM   correct  : {llm_correct_count}  ({llm_correct_count/max(1,n):.1%})")
+        print(f"Substr correct : {substring_correct_count}  ({substring_correct_count/max(1,n):.1%})")
+        print(f"Agreement      : {agree_count}  ({agree_count/max(1,n):.1%})")
+        print(f"Results saved  : {out_path}")
+        print("=" * 60)
+
+        return res
+
+
+# ---------------------------------------------------------------------------
 # Unified run_step interface
 # ---------------------------------------------------------------------------
 
@@ -262,7 +448,8 @@ def run_step(step, model, output_dir="output", split="validation",
              inference_method="vllm", max_tokens=128, temperature=0.0, N=None,
              generations_file_path=None, eval_results_path=None, log_file=None,
              logger_type="lmdb", activations_path=None,
-             quick_debug_mode=False, resume=True, max_retries=3, base_delay=1.0):
+             quick_debug_mode=False, resume=True, max_retries=3, base_delay=1.0,
+             llm_evaluator=None):
     """Run a single step of the HotpotQA task. Callable from Python directly."""
 
     if step == "inference":
@@ -294,8 +481,18 @@ def run_step(step, model, output_dir="output", split="validation",
         )
         evaluator.run_eval(eval_results_path=eval_results_path, log_file=log_file)
 
+    elif step == "eval_llm":
+        evaluator = HotpotQALLMEval(
+            model_path=model,
+            generations_file_path=generations_file_path,
+            output_base_dir=output_dir,
+            evaluator=llm_evaluator,
+            quick_debug_mode=quick_debug_mode,
+        )
+        evaluator.run_eval(eval_results_path=eval_results_path, resume=resume)
+
     else:
-        raise ValueError(f"Unknown step '{step}'. HotpotQA supports: inference, eval")
+        raise ValueError(f"Unknown step '{step}'. HotpotQA supports: inference, eval, eval_llm")
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +504,10 @@ if __name__ == "__main__":
 
     parser.add_argument("--do_inference", action="store_true")
     parser.add_argument("--do_eval", action="store_true")
+    parser.add_argument("--do_eval_llm", action="store_true",
+                        help="Run LLM-judge evaluation (outputs both LLM and substring results)")
+    parser.add_argument("--llm_evaluator", type=str, default=None,
+                        help=f"Model to use as LLM judge (default: {HotpotQALLMEval.DEFAULT_EVALUATOR})")
 
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--output_dir", type=str, default="output")
@@ -348,6 +549,15 @@ if __name__ == "__main__":
                  eval_results_path=args.eval_results_path,
                  quick_debug_mode=args.quick_debug_mode)
 
-    if not args.do_inference and not args.do_eval:
-        print("No action specified. Use --do_inference and/or --do_eval")
+    if args.do_eval_llm:
+        run_step("eval_llm", args.model,
+                 output_dir=args.output_dir,
+                 generations_file_path=args.generations_file_path,
+                 eval_results_path=args.eval_results_path,
+                 quick_debug_mode=args.quick_debug_mode,
+                 llm_evaluator=args.llm_evaluator,
+                 resume=not args.no_resume)
+
+    if not args.do_inference and not args.do_eval and not args.do_eval_llm:
+        print("No action specified. Use --do_inference, --do_eval, and/or --do_eval_llm")
         parser.print_help()

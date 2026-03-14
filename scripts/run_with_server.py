@@ -507,6 +507,7 @@ def run_task_step(step, task, model, **kwargs):
                 activations_path=kwargs.get("activations_path"),
                 quick_debug_mode=kwargs.get("quick_debug_mode", False),
                 resume=kwargs.get("resume", True),
+                llm_evaluator=kwargs.get("llm_evaluator"),
             )
 
         else:
@@ -565,6 +566,7 @@ def run_experiment(
     temperature=0.0,
     resume=True,
     resume_eval=True,
+    llm_evaluator=None,
 ):
     """Run a HalluLens experiment with automatic server management.
 
@@ -744,6 +746,8 @@ def run_experiment(
             # Natural Questions specific
             output_dir=output_dir,
             temperature=temperature,
+            # HotpotQA LLM eval specific
+            llm_evaluator=llm_evaluator,
         )
 
         if step == "all":
