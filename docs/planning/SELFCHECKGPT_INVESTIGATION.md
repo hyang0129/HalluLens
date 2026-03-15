@@ -20,7 +20,7 @@ The core idea: a hallucinated fact tends to be inconsistent across multiple stoc
 |---|---|---|
 | n-gram (BM25) | Sentence appears verbatim/near-verbatim in samples | None |
 | BERTScore | Semantic similarity between sentence and samples | HF encoder (e.g. `roberta-large`) |
-| NLI | Entailment score: samples entail the sentence | DeBERTa MNLI (`potsawee/longformer-large-4096-answering-race` or similar) |
+| NLI | Entailment score: samples entail the sentence | DeBERTa MNLI (`potsawee/DeBERTa-v3-large-mnli-fever-anli-ling-wanli`) |
 | LLM-prompting | Ask GPT-style model whether sample supports sentence | External LLM API |
 
 ---
@@ -38,31 +38,32 @@ The existing codebase already has multi-sample grouping infrastructure:
 - `ActivationParser.select_primary_key()` picks the entry with `sample_index == 0` as the greedy answer.
 - `ActivationParser.get_group_keys(prompt_hash)` returns **all** keys for a group.
 
-**We can use this directly.** SelfCheck samples are stored in the same Zarr with keys:
+**We can use this directly.** SelfCheck samples are stored in the same Zarr with **content-addressed keys** — a double hash of prompt + response:
 
 ```
-{prompt_hash}           ← existing greedy entry (sample_index=0)
-{prompt_hash}_sc_0      ← stochastic sample 0  (sample_index=1)
-{prompt_hash}_sc_1      ← stochastic sample 1  (sample_index=2)
-...
-{prompt_hash}_sc_{k-1}  ← stochastic sample k-1
+{prompt_hash}                     ← existing greedy entry (sample_index=0)
+{prompt_hash}_sc_{response_hash}  ← stochastic sample  (sample_index=1..k)
 ```
+
+Where `response_hash = SHA256(response_text)[:16]` (first 16 hex chars — collision-safe within a prompt group, keeps keys readable).
+
+**Why double hash instead of sequential indices (`_sc_0`, `_sc_1`, ...)?**
+Content-addressed keys cryptographically bind each Zarr row's activations to the exact response text that produced them. With index-based keys, a crash-and-resume could silently pair activations from one generation with text from a different generation at the same index. Double hashing makes this impossible — the key itself proves the activation/text correspondence.
 
 Each `_sc_` entry's Zarr metadata (written to `meta/index.jsonl`) includes:
 ```json
 {
-  "key": "{prompt_hash}_sc_0",
+  "key": "{prompt_hash}_sc_{response_hash}",
   "sample_group_id": "{prompt_hash}",
   "sample_index": 1,
   "is_selfcheck_sample": true,
-  "selfcheck_sample_index": 0,
   "temperature": 0.7,
   "generation": "stochastic answer text",
   "prompt": "..."
 }
 ```
 
-`_build_group_index()` groups by `sample_group_id`, so `get_group_keys(prompt_hash)` returns all of them. `select_primary_key()` returns the `sample_index == 0` greedy entry, leaving existing code paths unchanged.
+`_build_group_index()` groups by `sample_group_id`, so `get_group_keys(prompt_hash)` returns all of them. `select_primary_key()` returns the `sample_index == 0` greedy entry, leaving existing code paths unchanged. SHA-256 hex digests contain no underscores, so `key.split("_")[0]` in the fallback path still correctly recovers the prompt hash as the group ID.
 
 ### 2.2 Selective activation logging: `selfcheck_k` vs `activation_log_count`
 
@@ -70,45 +71,60 @@ Generating 20 stochastic samples at inference time but only storing activations 
 
 **Parameters:**
 - `--selfcheck-k 20` — number of **extra** stochastic samples to generate beyond the greedy pass (21 total: 1 greedy + 20 stochastic). All 20 texts stored in `selfcheck_samples.jsonl`.
-- `--selfcheck-log-activations 5` — how many of the 20 stochastic samples to also log to Zarr (default: 0). The greedy Zarr row already exists and is not counted here.
+- `--selfcheck-log-activations 0` (default) — **minimum** number of stochastic samples that should have activations logged to Zarr. If the current count is below this minimum, new samples are generated with activation logging until the minimum is met. These new samples are appended (increasing effective `k`) rather than retroactively adding activations to existing text-only samples (see §2.6.4 activation integrity rule). The greedy Zarr row already exists and is not counted here.
 
 **Key challenge — hash is prompt-level, not answer-level:**
-The existing Zarr is keyed by `prompt_hash` (SHA-256 of the prompt text). This works because each prompt had exactly one answer. For multiple answers to the same prompt, the Zarr key **must include the sample index** to be unique. The proposed `{prompt_hash}_sc_{i}` scheme solves this — the existing `_build_group_index()` groups by the prefix (splitting on `_`), so the greedy entry at `{prompt_hash}` and stochastic entries at `{prompt_hash}_sc_0`, `{prompt_hash}_sc_1` etc. are all grouped together correctly.
+The existing Zarr is keyed by `prompt_hash` (SHA-256 of the prompt text). This works because each prompt had exactly one answer. For multiple answers to the same prompt, the Zarr key **must include the response** to be unique. The content-addressed `{prompt_hash}_sc_{response_hash}` scheme solves this — the key is unique per distinct response, and `_build_group_index()` groups by the prefix, so the greedy entry at `{prompt_hash}` and stochastic entries at `{prompt_hash}_sc_{response_hash}` are all grouped together correctly.
 
-**Inference loop (per prompt):**
+**Selfcheck inference loop (per prompt):**
 
 ```python
-# 1. Greedy pass — already logged in the prior inference run, skip
+import hashlib
+
+def response_hash(text: str) -> str:
+    """Short content hash for keying selfcheck samples."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+# 1. Greedy pass — already logged by the inference step (or a prior run), skip
 greedy_key = prompt_hash  # existing Zarr row
 
-# 2. Stochastic passes (selfcheck_k=20 extra samples)
-for i in range(selfcheck_k):
-    sc_key = f"{prompt_hash}_sc_{i}"
-    log_activations = (i < selfcheck_log_activations)  # first N get full Zarr row
+# 2. Stochastic passes — k and log_activations are minimums
+# If we already have enough, this loop is a no-op
+existing_count = len(existing_samples)
+existing_act_count = sum(1 for s in existing_samples if s.get("has_zarr_activations"))
+need_more_text = max(0, selfcheck_k - existing_count)
+need_more_acts = max(0, selfcheck_log_activations - existing_act_count)
+# New samples to generate: enough to satisfy both minimums
+new_sample_count = max(need_more_text, need_more_acts)
+
+for j in range(new_sample_count):
+    log_activations = (j < need_more_acts)  # first need_more_acts new samples get Zarr rows
 
     if log_activations:
         # Call activation-logging server (FastAPI + vLLM hooks)
-        # Zarr row written with key sc_key
-        response = call_logging_server(prompt, temperature=temp, zarr_key=sc_key)
+        # Server computes sc_key = f"{prompt_hash}_sc_{response_hash(text)}" AFTER generation
+        response = call_logging_server(prompt, temperature=temp)
+        sc_key = f"{prompt_hash}_sc_{response_hash(response.text)}"
     else:
         # Call vLLM directly (no hooks, no Zarr write) — text only
         response = call_vllm_direct(prompt, temperature=temp)
+        sc_key = f"{prompt_hash}_sc_{response_hash(response.text)}"
 
     # Text always goes to selfcheck_samples.jsonl regardless
     append_selfcheck_text(prompt_hash, sc_key, response.text, logged=log_activations)
 ```
 
-**What gets logged per sample type** (example: selfcheck_k=20, selfcheck_log_activations=5):
+**What gets logged per sample type** (example: first run k=20 la=0, then re-run k=20 la=2):
 
-| Sample | Key | Zarr row? | Activations? | Logprobs in Zarr? | Logprobs in JSONL? | Text? |
-|---|---|---|---|---|---|---|
-| Greedy (existing) | `{hash}` | Yes (existing) | Yes | Yes | — | generation.jsonl |
-| SC sample 0..4 | `{hash}_sc_0` .. `{hash}_sc_4` | Yes (new) | Yes | Yes | Yes | selfcheck_samples.jsonl |
-| SC sample 5..19 | `{hash}_sc_5` .. `{hash}_sc_19` | No | No | No | **Yes** | selfcheck_samples.jsonl |
+| Sample | Key | Zarr row? | Text? | When generated |
+|---|---|---|---|---|
+| Greedy | `{hash}` | Yes (existing) | generation.jsonl | inference step |
+| SC 0..19 | `{hash}_sc_{rhash_i}` | No | selfcheck_samples.jsonl | first run (text-only) |
+| SC 20..21 | `{hash}_sc_{rhash_j}` | Yes | selfcheck_samples.jsonl | second run (with activations) |
 
-Total: 1 existing greedy row + 5 new stochastic Zarr rows + 15 text+logprob-only.
+Total after second run: effective k=22 (20 text-only + 2 with Zarr rows). The 2 new samples have activations that exactly match their text — guaranteed by the content-addressed key.
 
-**Logprobs for text-only samples:** vLLM returns token logprobs as part of every response payload — no activation hooks required. The direct vLLM call already gets them. We store them inline in `selfcheck_samples.jsonl` rather than Zarr:
+**Logprobs for text-only samples:** vLLM can return token logprobs, but this requires explicitly passing `logprobs=True` (and optionally `top_logprobs=N`) in the API request — it is not returned by default. The text-only call path must include these parameters. We store logprobs inline in `selfcheck_samples.jsonl` rather than Zarr:
 
 ```json
 {
@@ -135,7 +151,8 @@ For samples with Zarr rows, `token_logprobs` is `null` in the JSONL (read from Z
 
 **Storage estimate** (example: 1000 prompts, 32 layers, hidden=4096, R_max=64):
 - Per-row Zarr cost ≈ 32 × 64 × 4096 × 2 bytes (float16) ≈ 16 MB
-- 1000 prompts × 5 extra activation rows ≈ 80 GB — significant, expose `--selfcheck-log-activations` clearly.
+- Default (`selfcheck_log_activations=0`): zero extra Zarr storage — text + logprobs only in JSONL.
+- With 5 activation rows: 1000 prompts × 5 rows ≈ 80 GB — significant, opt-in only.
 
 **No changes needed to `ZarrActivationsLogger`** — it already supports arbitrary string keys and append-only writes.
 
@@ -149,8 +166,8 @@ Alongside the Zarr, write a plain JSONL file (one line per prompt) for human-rea
   "prompt": "Answer in one sentence. Q:...\n A:",
   "generation": "primary greedy answer",
   "selfcheck_samples": [
-    {"zarr_key": "abc123..._sc_0", "generation": "sample 1", "temperature": 0.7},
-    {"zarr_key": "abc123..._sc_1", "generation": "sample 2", "temperature": 0.7}
+    {"zarr_key": "abc123..._sc_a1b2c3d4e5f67890", "generation": "sample 1", "temperature": 0.7},
+    {"zarr_key": "abc123..._sc_f0e1d2c3b4a59876", "generation": "sample 2", "temperature": 0.7}
   ]
 }
 ```
@@ -184,12 +201,15 @@ chat_completion = client.chat.completions.create(
     temperature=0.7,                    # must be > 0 for stochastic samples
     extra_body={
         "multi_sample": True,
-        "request_id": f"sc_{i}",        # deterministic → key = {prompt_hash}_sc_{i}
         "sample_group_id": prompt_hash, # groups with the existing greedy row
         "sample_index": i + 1,          # 0 = greedy (already logged)
+        # request_id is NOT set here — the server computes entry_key
+        # from prompt_hash + response_hash AFTER generation (see §2.5)
     }
 )
 ```
+
+Note: `call_vllm_api` currently has no `extra_body` parameter. Adding `extra_body: Optional[dict] = None` is backward-compatible (all existing callers use keyword args), but the internal `client.chat.completions.create()` call must be updated to pass `**(extra_body or {})` as well.
 
 **Issue 2 — Temperature is hardcoded to 0.0 in `run_exp`.**
 `run_exp` builds `inference_fn = lambda p: call_vllm_api(p, ..., temperature=0.0, ...)`. Selfcheck needs a separate callable with `temperature=selfcheck_temperature`. This is a minor change — the selfcheck step has its own loop and does not go through `run_exp`.
@@ -213,16 +233,15 @@ For text-only selfcheck samples, the client then sends:
 ```python
 extra_body={
     "multi_sample": True,
-    "request_id": f"sc_{i}",
     "sample_group_id": prompt_hash,
     "sample_index": i + 1,
     "skip_activation_logging": True,   # ← new field
 }
 ```
 
-This ensures the key is still deterministic (for any future activation upgrade), but no Zarr row is written.
+No Zarr row is written. The content-addressed key (prompt+response hash) is still computed server-side and returned in the response `id` field for the client to record in JSONL.
 
-### 2.5 Server-side key assignment — how the server handles repeated calls for the same prompt
+### 2.5 Server-side key assignment — content-addressed keys
 
 The server (`activation_logging/server.py`) builds Zarr keys via `build_entry_key()`:
 
@@ -237,131 +256,200 @@ def build_entry_key(prompt, request_id, multi_sample):
     return entry_key, prompt_key, resolved_request_id
 ```
 
-`multi_sample` mode is triggered when any of `multi_sample=True`, `sample_index`, `sample_group_id`, or `request_id` is set on the request.
+**Normal single-inference path (existing pipeline):** `multi_sample=False` → `build_entry_key` returns `prompt_key` directly. Unaffected.
 
-**Normal single-inference path (existing pipeline):** `multi_sample=False` → `build_entry_key` returns `prompt_key` directly. No UUID, no suffix. Key is always just `SHA256(prompt)`. This is correct and unaffected.
+**Selfcheck path — content-addressed key from prompt + response:**
 
-**Selfcheck path:** the client must set `multi_sample=True` (or equivalently pass `sample_index` / `request_id`) to avoid overwriting the greedy Zarr row. But if `multi_sample=True` and no `request_id` is supplied, the server falls back to a random UUID suffix → keys like `{prompt_hash}_a3f2b1c0` — unpredictable and not resumable.
+Instead of the client passing a deterministic `request_id`, the server computes the entry key **after generation** using a hash of the response text. This binds the Zarr key to the exact text that produced the activations, making activation/text mismatches structurally impossible.
 
-**Solution: the client must pass a deterministic `request_id` per sample index.**
-
-For selfcheck sample `i`, the client sets `request_id = f"sc_{i}"`:
+**Required server change:** Move `build_entry_key()` call to **after** inference in the chat completions endpoint (currently at line 1890, before inference at line 1907). In the completions endpoint it's already after inference. Updated `build_entry_key`:
 
 ```python
-# results in entry_key = f"{prompt_hash}_sc_{i}"
-response = call_logging_server(
-    prompt,
-    multi_sample=True,
-    request_id=f"sc_{i}",
-    sample_group_id=prompt_hash,
-    sample_index=i + 1,   # 0 = greedy (already logged), 1..k = stochastic
-    temperature=temp,
-)
+def build_entry_key(prompt: str, request_id: Optional[str], multi_sample: bool,
+                    response_text: Optional[str] = None) -> Tuple[str, str, Optional[str]]:
+    prompt_key = prompt_hash(prompt)
+    if not multi_sample:
+        return prompt_key, prompt_key, None
+
+    if request_id:
+        # Explicit request_id — use as-is (backward compatible)
+        resolved_request_id = request_id
+    elif response_text is not None:
+        # Content-addressed: key includes response hash
+        resolved_request_id = f"sc_{hashlib.sha256(response_text.encode()).hexdigest()[:16]}"
+    else:
+        # Fallback (should not happen for selfcheck path)
+        resolved_request_id = str(uuid.uuid4())[:8]
+
+    entry_key = f"{prompt_key}_{resolved_request_id}"
+    return entry_key, prompt_key, resolved_request_id
 ```
 
-This gives exactly the `{prompt_hash}_sc_{i}` key scheme the resume logic depends on. SHA-256 hashes are pure hex (no underscores), so `key.split("_")[0]` in `_build_group_index()` correctly recovers the prompt hash as the group ID.
+The client sets `multi_sample=True` and `sample_group_id=prompt_hash` but does **not** set `request_id`. The server computes the key after generation. The response `id` field returns the computed `entry_key`, which the client records in `selfcheck_samples.jsonl`.
 
-**No server changes needed** — `request_id` is already an accepted field on both `/v1/completions` and `/v1/chat/completions`. The client just needs to set it explicitly rather than letting the server generate a random one.
+SHA-256 hex digests contain no underscores, so `key.split("_")[0]` in `_build_group_index()` correctly recovers the prompt hash as the group ID. The `_sc_` infix is a fixed marker separating prompt hash from response hash.
 
-### 2.5 New inference step: `--step selfcheck`
+### 2.6 Declarative single-command design
 
-A standalone step that can be appended to any existing run:
+Instead of separate `--step` invocations, `run_with_server.py` becomes declarative: you specify **what outputs you want** and the script figures out what's already done and fills in the rest. The same command is both the initial run and the resume command.
+
+#### 2.6.1 Usage
 
 ```bash
+# Full run: greedy inference + selfcheck + eval — single command
 python scripts/run_with_server.py \
-    --step selfcheck \
-    --inference-json shared/hotpotqa/generation.jsonl \
-    --activations-path shared/hotpotqa/activations.zarr \
+    --step all \
+    --task precisewikiqa \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --N 1000 \
     --selfcheck-k 20 \
-    --selfcheck-log-activations 5 \
-    --selfcheck-temperature 0.7
+    --selfcheck-temperature 0.7 \
+    --logger-type zarr \
+    --activations-path shared/goodwiki/activations.zarr
+
+# Resume after crash — exact same command, picks up where it left off
+# (same command as above)
+
+# Add activation-logged samples to a completed text-only run (k=20, la=0):
+# k minimum already met, but la deficit = 2. Generates 2 NEW samples
+# (indices 20–21) with activations. Effective k becomes 22.
+python scripts/run_with_server.py \
+    --step all ... --selfcheck-k 20 --selfcheck-log-activations 2
+
+# Existing behavior preserved: no selfcheck flags = greedy-only (current default)
+python scripts/run_with_server.py --step all --task precisewikiqa ...
 ```
 
-#### Resume / reuse logic
+When `--selfcheck-k` is present, `--step all` expands to: `generate → inference → selfcheck → eval` (two-pass — all greedy inference completes before selfcheck begins). When absent, behavior is unchanged: `generate → inference → eval`.
 
-The scenario: HotpotQA was already fully run (greedy inference + activation logging). Now we add selfcheck. The step must reuse all existing saved data and be safely restartable.
+`--step selfcheck` also works standalone for post-hoc use against an existing run.
 
-**Sources of truth (checked in order):**
+#### 2.6.2 Two-pass execution model
 
-1. `selfcheck_samples.jsonl` — one line per prompt hash. Tracks text + logprobs for each sample, plus `has_zarr_activations` per entry. The line also records the parameters it was generated with: `selfcheck_k` and `selfcheck_log_activations`.
+The implementation uses two sequential passes, preserving the existing inference step untouched:
 
-2. Zarr index (`meta/index.jsonl`) — tracks which `_sc_` keys have been written. Used as a fallback if `selfcheck_samples.jsonl` is missing or partially written (e.g., crash mid-write).
+**Pass 1 — Greedy inference** (existing `inference` step, unchanged):
+Iterates all prompts, generates greedy responses, logs activations to Zarr, writes `generation.jsonl`. Resumes via existing `generation.jsonl` prompt_hash check.
 
-**A prompt is fully done only when BOTH conditions hold:**
-- `len(jsonl_entry["selfcheck_samples"]) == selfcheck_k` — all text samples present
-- `sum(1 for s in jsonl_entry["selfcheck_samples"] if s["has_zarr_activations"]) == selfcheck_log_activations` — correct number of activation-logged rows
+**Pass 2 — Selfcheck sampling** (new `selfcheck` step):
+Reads completed `generation.jsonl`, iterates all prompts, generates `selfcheck_k` stochastic samples per prompt, writes `selfcheck_samples.jsonl`. Resumes via per-prompt completion check.
 
-This matters for the case where a prior run used `selfcheck_log_activations=3` and the current run specifies `selfcheck_log_activations=5` — the text samples are complete but the activation count is insufficient, so the missing activation rows must be generated.
+Both passes run within a single `--step all` invocation. The server stays up across both.
 
-**Resume decision tree per prompt:**
+#### 2.6.3 Per-prompt completion model (selfcheck pass)
+
+`selfcheck_k` and `selfcheck_log_activations` are **minimums**. A prompt is complete when both are satisfied. If more samples are needed (for text or activations), new samples are appended — existing samples are never re-run or modified.
 
 ```
 for prompt_hash in generation.jsonl:
 
-    # Greedy — always reuse, never re-run
-    assert prompt_hash in zarr_index   # written by original inference run
+    existing = load_selfcheck_entry(prompt_hash)  # from selfcheck_samples.jsonl
+    existing_count = len(existing)
+    existing_act_count = sum(1 for s in existing if s.get("has_zarr_activations"))
 
-    # Load existing JSONL entry (may be None, partial, or complete)
-    jsonl_entry = selfcheck_samples_jsonl.get(prompt_hash)
-    existing_samples = jsonl_entry["selfcheck_samples"] if jsonl_entry else []
+    # Corruption check: verify activation samples have matching Zarr rows
+    for sample in existing:
+        if sample.get("has_zarr_activations"):
+            zarr_entry = activation_logger.get_entry_metadata(sample["zarr_key"])
+            if zarr_entry is None or zarr_entry.get("response") != sample["generation"]:
+                # Zarr/JSONL mismatch — discard this prompt and redo entirely
+                log.warning(f"Corrupt entry for {prompt_hash}: Zarr/JSONL mismatch, resetting")
+                delete_zarr_sc_keys(prompt_hash)  # remove all _sc_ keys for this prompt
+                existing = []
+                existing_count = 0
+                existing_act_count = 0
+                break
 
-    # Count what we already have
-    existing_text_indices = {i for i, s in enumerate(existing_samples)}
-    existing_activation_indices = {
-        i for i, s in enumerate(existing_samples)
-        if s.get("has_zarr_activations")
-        or f"{prompt_hash}_sc_{i}" in zarr_index  # Zarr fallback for crash recovery
-    }
+    need_more_text = max(0, selfcheck_k - existing_count)
+    need_more_acts = max(0, selfcheck_log_activations - existing_act_count)
+    new_sample_count = max(need_more_text, need_more_acts)
 
-    # Both conditions must be satisfied to skip
-    text_complete = (len(existing_text_indices) == selfcheck_k)
-    activations_complete = (len(existing_activation_indices) == selfcheck_log_activations)
-    if text_complete and activations_complete:
-        continue  # fully done
+    if new_sample_count == 0:
+        continue  # both minimums satisfied
 
-    # Generate missing samples
-    for i in range(selfcheck_k):
-        needs_text = i not in existing_text_indices
-        needs_activations = (i < selfcheck_log_activations) and (i not in existing_activation_indices)
+    for j in range(new_sample_count):
+        log_activations = (j < need_more_acts)  # activation samples generated first
 
-        if not needs_text and not needs_activations:
-            continue  # already have everything for this index
+        if log_activations:
+            # Server computes content-addressed key after generation
+            response = call_logging_server(prompt, temperature=sc_temp)
+            sc_key = response.id  # server returns {prompt_hash}_sc_{response_hash}
+        else:
+            response = call_vllm_direct(prompt, temperature=sc_temp)
+            sc_key = f"{prompt_hash}_sc_{response_hash(response.text)}"
 
-        sc_key = f"{prompt_hash}_sc_{i}"
-        if needs_activations:
-            # Must (re-)call activation-logging server to get Zarr row
-            response = call_logging_server(prompt, key=sc_key)
-        elif needs_text:
-            # Text-only: call vLLM directly
-            response = call_vllm_direct(prompt)
+        append_sample(existing, sc_key, response, has_activations=log_activations)
 
-        # Update in-memory sample list, merge with existing where present
-        upsert_sample(existing_samples, i, sc_key, response)
-
-    # Rewrite JSONL line atomically once all k samples are complete
-    write_selfcheck_jsonl(prompt_hash, existing_samples)
+    write_selfcheck_jsonl(prompt_hash, existing)  # per-prompt batch write
 ```
 
-**Key edge case — upgrading activation count:** if a sample index `i < selfcheck_log_activations` already has a text entry in JSONL (`needs_text=False`) but no Zarr row (`needs_activations=True`), the logging server is called and only the activation/logprob data is written to Zarr. The text in the JSONL entry is unchanged. This lets you upgrade `selfcheck_log_activations` on a prior run without re-generating any text.
+#### 2.6.4 Activation integrity rule
 
-**Greedy is never re-generated:** `--step selfcheck` never touches the greedy Zarr row at `prompt_hash`. It only writes `{prompt_hash}_sc_{i}` keys and `selfcheck_samples.jsonl`. The original `generation.jsonl` is read-only input.
+**Activations are bound to their generation at creation time and are never retroactively added.**
 
-### 2.6 `ActivationParser` additions
+Stochastic sampling produces different text each time, so re-running inference for a sample index would produce activations for a *different* answer than the text stored in `selfcheck_samples.jsonl`. To prevent this silent mismatch:
 
-Add one method to expose selfcheck samples to downstream consumers:
+- Existing samples are never re-run or modified. New samples are always appended.
+- When `selfcheck_log_activations` exceeds the current activation count, new samples are generated *with* activation logging to make up the deficit. These new samples increase effective `k`.
+- Every Zarr row's activations correspond exactly to the text stored alongside it — enforced structurally by the content-addressed key (`prompt_hash + response_hash`).
+- On resume, a corruption check verifies that each activation-flagged JSONL entry has a matching Zarr row with identical response text. If any mismatch is found, the entire prompt's selfcheck entries are discarded and regenerated.
+
+**Example — adding activations after a text-only run:**
+
+| Run | `selfcheck_k` | `selfcheck_log_activations` | Result |
+|---|---|---|---|
+| First | 20 | 0 | 20 text-only samples (indices 0–19) |
+| Second | 20 | 2 | `k` minimum already met (20 ≥ 20), but `la` deficit = 2. Generates 2 new samples (indices 20–21) with activations. Effective k = 22. |
+| Third | 20 | 2 | Both minimums met (22 ≥ 20, 2 ≥ 2). No-op. |
+| Fourth | 25 | 2 | `k` deficit = 3, `la` already met. Generates 3 new text-only samples (indices 22–24). Effective k = 25. |
+
+#### 2.6.5 Resume edge cases
+
+**Crash mid-prompt:** JSONL is written per-prompt after all samples for that prompt complete. A crash mid-prompt loses at most `k` samples for one prompt — acceptable given `k` is typically 20 and regeneration is cheap. On resume, the incomplete prompt has no JSONL entry and is simply retried from scratch.
+
+**Corruption detection:** On resume, every activation-flagged JSONL entry is checked against Zarr (see corruption check in §2.6.3). If the JSONL says `has_zarr_activations=True` but the Zarr row is missing or has different response text, the entire prompt's selfcheck data is discarded and regenerated. This handles:
+- Crash after Zarr write but before JSONL write (orphan Zarr rows cleaned up)
+- Crash after partial JSONL write (truncated JSON line → parse error → discard)
+- Any future data corruption
+
+**Greedy is never re-generated:** The selfcheck pass never touches the greedy Zarr row at `prompt_hash`. It only writes `{prompt_hash}_sc_{response_hash}` keys. `generation.jsonl` is read-only input to the selfcheck phase.
+
+### 2.7 `ActivationParser` additions
+
+Add one method to expose selfcheck samples to downstream consumers. **Note:** `get_group_keys()` only returns samples with Zarr rows. For a complete view (including text-only samples), this method also reads `selfcheck_samples.jsonl`:
 
 ```python
 def get_selfcheck_entries(
     self,
     prompt_hash: str,
+    selfcheck_jsonl_path: Optional[str] = None,
     include_activations: bool = False,
     include_logprobs: bool = True,
 ) -> List[Dict[str, Any]]:
     """Return metadata (+ optional activations/logprobs) for all selfcheck
-    samples of a given prompt. Returns empty list if none logged."""
+    samples of a given prompt. Returns empty list if none logged.
+
+    Merges two sources:
+    - selfcheck_samples.jsonl (all samples, text + logprobs)
+    - Zarr group index (only samples with activations)
+    """
+    results = []
+
+    # Primary source: JSONL has all samples (text-only and activation-logged)
+    if selfcheck_jsonl_path:
+        jsonl_entry = load_selfcheck_entry(prompt_hash, selfcheck_jsonl_path)
+        for sample in jsonl_entry:
+            entry = dict(sample)
+            if include_activations and sample.get("has_zarr_activations"):
+                zarr_data = self.activation_logger.get_entry(sample["zarr_key"])
+                if zarr_data:
+                    entry.update(zarr_data)
+            results.append(entry)
+        return results
+
+    # Fallback: Zarr-only (returns only activation-logged samples)
     all_keys = self.get_group_keys(prompt_hash)
     sc_keys = [k for k in all_keys if "_sc_" in k]
-    results = []
     for key in sorted(sc_keys):
         if include_activations:
             entry = self.activation_logger.get_entry(key)
@@ -375,7 +463,7 @@ def get_selfcheck_entries(
 
 `ActivationDataset.__getitem__` optionally attaches selfcheck entries when `include_selfcheck=True`.
 
-### 2.7 SelfCheck scorer (offline, text-only)
+### 2.8 SelfCheck scorer (offline, text-only)
 
 A new evaluator class that reads `selfcheck_samples.jsonl` (no Zarr needed for n-gram/BERTScore):
 
@@ -395,11 +483,11 @@ Output: `selfcheck_results.json` parallel to `eval_results.json`.
 
 | File | Change | Priority |
 |---|---|---|
-| `activation_logging/server.py` | Add `skip_activation_logging: bool = False` to `CompletionRequest` and `ChatCompletionRequest`; wrap `log_entry` call in `if not request.skip_activation_logging` | High |
-| `scripts/run_with_server.py` | Add `selfcheck` step; wire `--selfcheck-k`, `--selfcheck-temperature`, `--selfcheck-log-activations` flags | High |
-| `tasks/shortform/precise_wikiqa.py` | `run_step_selfcheck()`: iterate prompts, call server with `extra_body` including deterministic `request_id="sc_{i}"` and `skip_activation_logging=True` for text-only samples | High |
-| `utils/lm.py` | Add `call_vllm_api_selfcheck()` (or `extra_body` param to `call_vllm_api`) for passing custom fields to the server | High |
-| `activation_logging/activation_parser.py` | Add `get_selfcheck_entries()` method; add `include_selfcheck` param to `ActivationDataset` | Medium |
+| `activation_logging/server.py` | (1) Add `skip_activation_logging: bool = False` to `CompletionRequest` and `ChatCompletionRequest`; wrap `log_entry` call in `if not request.skip_activation_logging`. (2) Add `response_text` param to `build_entry_key()`; when `multi_sample=True` and no `request_id`, compute content-addressed key as `{prompt_hash}_sc_{SHA256(response)[:16]}`. (3) Move `build_entry_key()` call to after inference in chat completions endpoint (already post-inference in completions endpoint). | High |
+| `scripts/run_with_server.py` | Add `--selfcheck-k`, `--selfcheck-temperature`, `--selfcheck-log-activations` flags; when present, insert `selfcheck` into `--step all` sequence (`generate → inference → selfcheck → eval`); add `selfcheck` as a valid `--step` choice for standalone use | High |
+| `tasks/shortform/precise_wikiqa.py` | `run_step_selfcheck()`: iterate prompts from `generation.jsonl`, check per-prompt completion state (§2.6.3) including corruption check, call server with `extra_body` including `skip_activation_logging=True` for text-only samples; server returns content-addressed key in response `id` | High |
+| `utils/lm.py` | Add `extra_body: Optional[dict] = None` param to `call_vllm_api`; pass `**(extra_body or {})` to `client.chat.completions.create()`. Add `logprobs=True` support for selfcheck text-only calls. | High |
+| `activation_logging/activation_parser.py` | Add `get_selfcheck_entries()` method that merges JSONL (all samples) with Zarr (activation-logged only); add `include_selfcheck` param to `ActivationDataset` | Medium |
 | `tasks/shortform/precise_wikiqa.py` | New `SelfCheckEval` class (n-gram scorer first, BERTScore/NLI later) | Medium |
 | `requirements.txt` | `selfcheckgpt` package (from pypi); `bert_score` (optional) | Low |
 
@@ -408,12 +496,12 @@ Output: `selfcheck_results.json` parallel to `eval_results.json`.
 ## 4. Open Questions
 
 1. **Temperature for samples:** 0.7 is the paper default; expose as `--selfcheck-temperature` flag.
-2. **Sentence tokenizer:** paper uses spacy (`en_core_web_sm`); need to check if it's in the env or add it.
+2. **Sentence tokenizer:** paper uses spacy (`en_core_web_sm`); `nltk.sent_tokenize` may suffice and avoids adding the spacy dependency — check if nltk is already in the env.
 3. **Greedy vs sampled:** Keep `temperature=0` greedy as the primary (already logged); run k stochastic samples separately. Paper evaluates greedy answer against stochastic samples.
 4. **k budget:** Paper uses `k=20`; at what `k` does AUROC plateau? Plan a sweep over k={5, 10, 20}.
 5. **Activation logging for samples:** Controlled by `--selfcheck-log-activations N` — N extra Zarr rows beyond the existing greedy row. Text-only samples skip the activation-logging server and call vLLM directly. Storage cost for N=5, k=20, 1000 prompts ≈ 80 GB of extra Zarr data — expose this clearly in docs.
 6. **Comparable eval labels:** SelfCheckGPT produces a continuous score. Report AUROC against our binary `halu_test_res` labels from `eval_results.json`.
-7. **Resume logic:** `selfcheck_samples.jsonl` is the resume record. If a line exists for a `prompt_hash` and has `len(selfcheck_samples) == k`, skip it. The Zarr keys also act as a fallback resume check via `get_group_keys`.
+7. **Resume logic:** `selfcheck_samples.jsonl` is the resume record. If a line exists for a `prompt_hash` and has `len(selfcheck_samples) >= k`, skip it. On resume, activation-flagged entries are verified against Zarr — if either side is corrupt or mismatched, the entire prompt is discarded and regenerated (see §2.6.5).
 
 ---
 
