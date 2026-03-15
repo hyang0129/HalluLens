@@ -524,33 +524,341 @@ def _load_metadata(self) -> pd.DataFrame:
 
 ---
 
-## Phase 4: Server-Side Batching
+## Phase 4: Model Adapter + Server-Side Batching
 
-**Goal:** Replace the global `inference_lock` with a batch queue. Biggest throughput impact.
-**File:** `activation_logging/server.py`
-**Risk:** High — changes core inference path. Requires Phase 2.
+**Goal:** Introduce an adapter that owns all model-specific behavior (inference, hidden state extraction, batching). The server becomes model-agnostic — it just calls `adapter.infer()` and gets clean results.
+**Files:** `activation_logging/model_adapter.py` (new), `activation_logging/server.py`
+**Risk:** High — replaces core inference path. Requires Phase 2.
 
-### 4a. Add `BatchInferenceQueue` class
+### Design rationale
+
+Currently, model-specific logic is scattered across three places:
+
+| Concern | Current location | Problem |
+|---------|-----------------|---------|
+| Model loading + tokenization | `server.py:get_model_and_tokenizer()` | Tied to server globals |
+| HF `model.generate()` call | `server.py:run_inference()` (line 946) | Knows about hidden states, logprobs, trimming |
+| Hidden state extraction | `zarr_activations_logger.py:_extract_prompt_response()` (line 450) | Logger shouldn't know about HF output format |
+
+The adapter consolidates all three. The server says "run these prompts, give me activations" and the adapter handles everything model-specific. The logger receives pre-extracted `List[Tensor]` per-layer activations — no `model_outputs` object.
+
+### 4a. Define `InferenceResult` dataclass
+
+**File:** `activation_logging/model_adapter.py` (new)
 
 ```python
-import concurrent.futures
+from dataclasses import dataclass, field
+from typing import List, Optional, Dict, Any
+import torch
+import numpy as np
 
+@dataclass
+class InferenceResult:
+    """Clean output from the model adapter. No model-specific objects."""
+    prompt: str
+    response_text: str
+    input_length: int                                  # token count
+    activations: Optional[List[Optional[torch.Tensor]]]  # per-layer, shape (1, seq_len, hidden)
+    logprobs: Optional[Dict[str, Any]] = None          # token_ids, token_logprobs, topk_*
+    trim_position: Optional[int] = None
+```
+
+This is what the server and logger consume. No HF `GenerateOutput`, no `model_outputs` — just tensors and metadata.
+
+### 4b. Define `ModelAdapter` base class and HF implementation
+
+**File:** `activation_logging/model_adapter.py`
+
+```python
+from abc import ABC, abstractmethod
+
+class ModelAdapter(ABC):
+    """Abstracts model-specific inference and activation extraction.
+
+    The server calls infer() or infer_batch() and gets back InferenceResult
+    objects with pre-extracted activations. The adapter owns:
+    - Model/tokenizer loading and caching
+    - Tokenization (including left-padding for batches)
+    - model.generate() with the right flags for activation capture
+    - Hidden state extraction and per-request splitting
+    - Response trimming and logprob extraction
+    """
+
+    @abstractmethod
+    def infer(self, prompt: str, max_tokens: int = 512,
+              temperature: float = 0.0, top_p: float = 1.0) -> InferenceResult:
+        """Run single-prompt inference. Returns clean InferenceResult."""
+        ...
+
+    @abstractmethod
+    def infer_batch(self, prompts: List[str], max_tokens: int = 512,
+                    temperature: float = 0.0, top_p: float = 1.0) -> List[InferenceResult]:
+        """Run batched inference. Returns one InferenceResult per prompt.
+
+        Default implementation falls back to sequential infer() calls.
+        Subclasses override for true batching.
+        """
+        return [self.infer(p, max_tokens, temperature, top_p) for p in prompts]
+
+    @abstractmethod
+    def supports_activations(self) -> bool:
+        """Whether this adapter can capture activations."""
+        ...
+
+
+class HFTransformersAdapter(ModelAdapter):
+    """Adapter for HuggingFace Transformers models with activation capture.
+
+    Wraps model.generate(output_hidden_states=True) and handles the HF-specific
+    hidden state format: outputs.hidden_states[0] = prompt states (num_layers,),
+    outputs.hidden_states[1:] = per-generation-step states.
+    """
+
+    def __init__(self, model_name: str, auth_token: Optional[str] = None,
+                 target_layers: str = "all", sequence_mode: str = "all",
+                 enable_logprobs: bool = True, logprobs_top_k: int = 5):
+        self._model_name = model_name
+        self._auth_token = auth_token
+        self._target_layers = target_layers
+        self._sequence_mode = sequence_mode
+        self._enable_logprobs = enable_logprobs
+        self._logprobs_top_k = logprobs_top_k
+        self._model = None
+        self._tokenizer = None
+        self._target_layer_indices = None
+
+    def _ensure_loaded(self):
+        """Lazy-load model and tokenizer on first use."""
+        if self._model is not None:
+            return
+        # Reuse existing get_model_and_tokenizer from server.py
+        from activation_logging.server import get_model_and_tokenizer
+        self._model, self._tokenizer = get_model_and_tokenizer(
+            self._model_name, self._auth_token
+        )
+
+    def supports_activations(self) -> bool:
+        return True
+
+    def infer(self, prompt: str, max_tokens: int = 512,
+              temperature: float = 0.0, top_p: float = 1.0) -> InferenceResult:
+        """Single-prompt inference with activation capture."""
+        results = self.infer_batch([prompt], max_tokens, temperature, top_p)
+        return results[0]
+
+    def infer_batch(self, prompts: List[str], max_tokens: int = 512,
+                    temperature: float = 0.0, top_p: float = 1.0) -> List[InferenceResult]:
+        """Batched inference with per-request activation extraction."""
+        self._ensure_loaded()
+        model, tokenizer = self._model, self._tokenizer
+        device = next(model.parameters()).device
+
+        # Left-pad for causal LM batching
+        tokenizer.padding_side = "left"
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        inputs = tokenizer(prompts, return_tensors="pt", padding=True,
+                          truncation=True).to(device)
+
+        # Track per-prompt input lengths (before padding)
+        input_lengths = [
+            len(tokenizer.encode(p, add_special_tokens=True)) for p in prompts
+        ]
+
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=max_tokens,
+                temperature=temperature if temperature > 0 else 1.0,
+                do_sample=temperature > 0,
+                output_hidden_states=True,
+                output_scores=self._enable_logprobs,
+                return_dict_in_generate=True,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+
+        # Split results per request
+        results = []
+        for i, prompt in enumerate(prompts):
+            gen_start = inputs.input_ids.shape[1]
+            gen_ids = outputs.sequences[i, gen_start:]
+            response_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
+
+            # Trim response
+            response_text, trim_pos = trim_response(tokenizer, gen_ids, response_text)
+
+            # Extract per-request activations from HF hidden states
+            activations = self._extract_activations(outputs, i, input_lengths[i], trim_pos)
+
+            # Extract logprobs if enabled
+            logprobs = None
+            if self._enable_logprobs and hasattr(outputs, 'scores'):
+                logprobs = self._extract_logprobs(outputs, i, gen_ids, trim_pos)
+
+            results.append(InferenceResult(
+                prompt=prompt,
+                response_text=response_text,
+                input_length=input_lengths[i],
+                activations=activations,
+                logprobs=logprobs,
+                trim_position=trim_pos,
+            ))
+
+        return results
+
+    def _extract_activations(self, outputs, batch_idx: int,
+                             input_length: int, trim_pos: Optional[int]
+                             ) -> Optional[List[Optional[torch.Tensor]]]:
+        """Extract per-layer activations for a single request from batched output.
+
+        HF generate output format with output_hidden_states=True:
+        - outputs.hidden_states[0]: prompt hidden states
+          tuple of (num_layers,) tensors, each (batch, prompt_seq_len, hidden)
+        - outputs.hidden_states[1:]: per-generation-step hidden states
+          each is tuple of (num_layers,) tensors, each (batch, 1, hidden)
+
+        We extract batch_idx from dim=0, then concatenate across generation steps
+        to get per-layer tensors of shape (1, prompt_len + response_len, hidden).
+        """
+        if not hasattr(outputs, 'hidden_states') or outputs.hidden_states is None:
+            return None
+
+        all_hidden_states = outputs.hidden_states
+        prompt_hidden = all_hidden_states[0]  # tuple of (num_layers,) tensors
+        gen_hiddens = all_hidden_states[1:]   # list of tuples
+
+        if trim_pos is not None:
+            gen_hiddens = gen_hiddens[:trim_pos]
+
+        num_layers = len(prompt_hidden)
+        if self._target_layer_indices is None:
+            self._target_layer_indices = self._resolve_target_layers(num_layers)
+
+        prompt_len = min(prompt_hidden[0].shape[1], input_length)
+        response_len = len(gen_hiddens)
+
+        # For batched input with left-padding, the prompt activations may
+        # include padding. We need to skip the padding tokens.
+        pad_offset = prompt_hidden[0].shape[1] - input_length
+        if pad_offset < 0:
+            pad_offset = 0
+
+        activations = []
+        for layer_idx in range(num_layers):
+            if layer_idx not in self._target_layer_indices:
+                activations.append(None)
+                continue
+
+            # Prompt: extract this request's slice, skipping padding
+            prompt_act = prompt_hidden[layer_idx][batch_idx:batch_idx+1, pad_offset:pad_offset+prompt_len, :]
+
+            # Response: concatenate per-step hidden states for this request
+            if response_len > 0:
+                response_act = torch.cat(
+                    [step[layer_idx][batch_idx:batch_idx+1, :, :] for step in gen_hiddens],
+                    dim=1
+                )
+            else:
+                hidden_size = prompt_act.shape[-1]
+                response_act = prompt_act.new_zeros((1, 0, hidden_size))
+
+            # Combine based on sequence_mode
+            if self._sequence_mode == "prompt":
+                activations.append(prompt_act)
+            elif self._sequence_mode == "response":
+                activations.append(response_act)
+            else:
+                activations.append(torch.cat([prompt_act, response_act], dim=1))
+
+        return activations
+
+    def _resolve_target_layers(self, num_layers: int) -> set:
+        if self._target_layers == "first_half":
+            return set(range(num_layers // 2))
+        elif self._target_layers == "second_half":
+            return set(range(num_layers // 2, num_layers))
+        return set(range(num_layers))
+
+    def _extract_logprobs(self, outputs, batch_idx: int,
+                          gen_ids: torch.Tensor, trim_pos: Optional[int]
+                          ) -> Optional[Dict[str, Any]]:
+        """Extract per-token logprobs for a single request from batched output."""
+        if not hasattr(outputs, 'scores') or not outputs.scores:
+            return None
+
+        scores = outputs.scores  # tuple of (gen_steps,) tensors, each (batch, vocab)
+        if trim_pos is not None:
+            scores = scores[:trim_pos]
+
+        num_tokens = len(scores)
+        if num_tokens == 0:
+            return None
+
+        token_ids = gen_ids[:num_tokens].cpu().numpy().astype(np.int32)
+        token_logprobs = np.zeros(num_tokens, dtype=np.float32)
+        topk_ids = np.zeros((num_tokens, self._logprobs_top_k), dtype=np.int32)
+        topk_logprobs_arr = np.zeros((num_tokens, self._logprobs_top_k), dtype=np.float32)
+
+        for t, score in enumerate(scores):
+            log_probs = torch.log_softmax(score[batch_idx], dim=-1)
+            token_logprobs[t] = log_probs[token_ids[t]].item()
+            topk_vals, topk_idx = torch.topk(log_probs, self._logprobs_top_k)
+            topk_ids[t] = topk_idx.cpu().numpy()
+            topk_logprobs_arr[t] = topk_vals.cpu().numpy()
+
+        return {
+            "response_token_ids": token_ids,
+            "response_token_logprobs": token_logprobs,
+            "response_topk_token_ids": topk_ids,
+            "response_topk_logprobs": topk_logprobs_arr,
+            "response_logprobs_top_k": self._logprobs_top_k,
+        }
+
+
+class GGUFAdapter(ModelAdapter):
+    """Adapter for GGUF/llama.cpp models. No activation capture."""
+
+    def supports_activations(self) -> bool:
+        return False
+
+    def infer(self, prompt, max_tokens=512, temperature=0.0, top_p=1.0):
+        # Delegates to existing llama.cpp inference path in server.py
+        from activation_logging.server import run_inference
+        response_text, _, input_length, trim_pos = run_inference(
+            prompt, max_tokens, temperature, top_p, model_name=self._model_name
+        )
+        return InferenceResult(
+            prompt=prompt, response_text=response_text,
+            input_length=input_length, activations=None,
+            trim_position=trim_pos,
+        )
+```
+
+### 4c. Add `BatchInferenceQueue` using the adapter
+
+**File:** `activation_logging/server.py`
+
+The queue is now simple — it just collects requests and calls `adapter.infer_batch()`:
+
+```python
 class BatchInferenceQueue:
-    """Accumulates incoming requests into batches for model.generate()."""
+    """Collects incoming HTTP requests and dispatches them to the adapter in batches."""
 
-    def __init__(self, max_batch_size: int = 8, max_wait_ms: float = 50.0):
+    def __init__(self, adapter: ModelAdapter, max_batch_size: int = 8,
+                 max_wait_ms: float = 50.0):
+        self._adapter = adapter
         self._max_batch_size = max_batch_size
         self._max_wait = max_wait_ms / 1000.0
         self._pending: List[Tuple[str, dict, concurrent.futures.Future]] = []
         self._lock = threading.Lock()
         self._batch_event = threading.Event()
         self._shutdown = False
-        self._worker = threading.Thread(target=self._batch_loop, name="batch-inference", daemon=True)
+        self._worker = threading.Thread(target=self._batch_loop,
+                                        name="batch-inference", daemon=True)
         self._worker.start()
 
     def submit(self, prompt: str, params: dict) -> concurrent.futures.Future:
-        """Submit a single inference request. Returns Future resolving to
-        (response_text, model_outputs, input_length, trim_pos)."""
         future = concurrent.futures.Future()
         with self._lock:
             self._pending.append((prompt, params, future))
@@ -560,7 +868,6 @@ class BatchInferenceQueue:
 
     def _batch_loop(self):
         while not self._shutdown:
-            # Wait for batch to fill or timeout
             self._batch_event.wait(timeout=self._max_wait)
             with self._lock:
                 if not self._pending:
@@ -569,135 +876,155 @@ class BatchInferenceQueue:
                 batch = self._pending[:self._max_batch_size]
                 self._pending = self._pending[self._max_batch_size:]
                 self._batch_event.clear()
-
             self._run_batch(batch)
 
     def _run_batch(self, batch):
-        """Run batched model.generate() and dispatch results to futures."""
         prompts = [b[0] for b in batch]
         params_list = [b[1] for b in batch]
         futures = [b[2] for b in batch]
 
         try:
-            model_name = params_list[0].get("model_name", DEFAULT_MODEL)
-            model, tokenizer = get_model_and_tokenizer(model_name)
-
-            # Left-pad tokenization for causal LM batching
-            tokenizer.padding_side = "left"
-            if tokenizer.pad_token is None:
-                tokenizer.pad_token = tokenizer.eos_token
-
-            inputs = tokenizer(prompts, return_tensors="pt", padding=True,
-                             truncation=True).to(model.device)
-            input_lengths = [
-                len(tokenizer.encode(p, add_special_tokens=True))
-                for p in prompts
-            ]
-
-            max_new_tokens = max(p.get("max_tokens", 512) for p in params_list)
+            max_tokens = max(p.get("max_tokens", 512) for p in params_list)
             temperature = params_list[0].get("temperature", 0.0)
+            top_p = params_list[0].get("top_p", 1.0)
 
-            with torch.no_grad():
-                outputs = model.generate(
-                    **inputs,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature if temperature > 0 else 1.0,
-                    do_sample=temperature > 0,
-                    output_hidden_states=True,
-                    return_dict_in_generate=True,
-                )
+            results = self._adapter.infer_batch(
+                prompts, max_tokens=max_tokens,
+                temperature=temperature, top_p=top_p
+            )
 
-            # Split results per request
-            for i, future in enumerate(futures):
-                try:
-                    pad_len = inputs.input_ids.shape[1] - input_lengths[i]
-                    gen_start = inputs.input_ids.shape[1]  # after all padding + prompt
-                    gen_ids = outputs.sequences[i, gen_start:]
-                    response_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
-
-                    # Extract per-request model_outputs for activation logging
-                    per_request_outputs = _split_hidden_states(outputs, i, input_lengths[i], pad_len)
-
-                    future.set_result((response_text, per_request_outputs, input_lengths[i], None))
-                except Exception as e:
-                    future.set_exception(e)
+            for future, result in zip(futures, results):
+                future.set_result(result)
 
         except Exception as e:
-            # If the entire batch fails, fail all futures
             for future in futures:
                 if not future.done():
                     future.set_exception(e)
 ```
 
-### 4b. Add `_split_hidden_states` helper
+The queue knows nothing about models, hidden states, or activation formats. It just routes prompts to the adapter and results to futures.
 
+### 4d. Update `log_entry()` to accept pre-extracted activations
+
+**File:** `activation_logging/zarr_activations_logger.py`
+
+Currently `log_entry` accepts `entry["model_outputs"]` and calls `_extract_prompt_response` internally. With the adapter, activations arrive pre-extracted. Add support for `entry["all_layers_activations"]` (already partially handled at line 578-606 but needs cleanup):
+
+The existing code path at line 578 already handles `all_layers_activations`:
 ```python
-def _split_hidden_states(outputs, batch_idx: int, input_length: int, pad_length: int):
-    """Extract per-request hidden states from batched model output.
-
-    HF model.generate with output_hidden_states=True returns hidden states
-    per generation step. We need to reconstruct per-layer activations for
-    the full sequence (prompt + response) for a single batch item.
-
-    Returns a model_outputs-like object compatible with ZarrActivationsLogger.extract_activations().
-    """
-    # Implementation depends on HF generate output format.
-    # outputs.hidden_states is a tuple of (num_gen_steps,) where each step
-    # has (num_layers,) tensors of shape (batch, seq, hidden).
-    #
-    # This is the most complex part of batching and requires careful testing
-    # with the specific model architecture.
-    #
-    # TODO: Implement and test with Llama-3.1-8B-Instruct
-    raise NotImplementedError("Hidden state splitting requires model-specific implementation")
+elif "all_layers_activations" in entry:
+    all_layers = entry.get("all_layers_activations")
+    ...
 ```
 
-**This is the hardest part.** HF `model.generate()` with `output_hidden_states=True` returns hidden states per generation step, not as a single tensor. The exact format depends on whether `use_cache=True` (default) and the model architecture. This needs a dedicated implementation + test pass with the target model.
+This path is already compatible with the adapter output. The adapter sets:
+```python
+entry = {
+    "all_layers_activations": result.activations,  # List[Optional[Tensor]]
+    "input_length": result.input_length,
+    "prompt": result.prompt,
+    "response": result.response_text,
+    # ... logprob fields from result.logprobs ...
+}
+```
 
-### 4c. Wire batch queue into request handlers
+No changes needed to `log_entry` itself — the `all_layers_activations` path already works. The `model_outputs` path becomes the legacy fallback.
 
-**Replace** the `inference_lock` block in chat completions (lines 1900-1916):
+### 4e. Wire adapter into server request handlers
+
+**Replace** the inference section of the chat completions endpoint:
 
 ```python
-# Before:
+# Before (lines 1900-1960):
 with inference_lock:
-    response_text, model_outputs, input_length, trim_pos = run_inference(
-        prompt=prompt, max_tokens=effective_max_tokens,
-        temperature=params['temperature'], top_p=params['top_p'],
-        model_name=model_name, auth_token=request.auth_token
-    )
+    response_text, model_outputs, input_length, trim_pos = run_inference(...)
+
+if not model_name.endswith('.gguf') and model_outputs is not None:
+    logger_to_use.log_entry(entry_key, {
+        "model_outputs": model_outputs,
+        ...
+    })
 
 # After:
-if _batch_queue and not model_name.endswith('.gguf'):
+if _batch_queue:
     future = _batch_queue.submit(prompt, {
         "max_tokens": effective_max_tokens,
         "temperature": params['temperature'],
         "top_p": params['top_p'],
-        "model_name": model_name,
-        "auth_token": request.auth_token,
     })
-    response_text, model_outputs, input_length, trim_pos = future.result()
+    result: InferenceResult = future.result()
 else:
-    # Fallback: sequential inference (GGUF models, or batching disabled)
-    with inference_lock:
-        response_text, model_outputs, input_length, trim_pos = run_inference(...)
+    result = _adapter.infer(prompt, max_tokens=effective_max_tokens,
+                            temperature=params['temperature'],
+                            top_p=params['top_p'])
+
+response_text = result.response_text
+
+# Log activations via async writer
+if result.activations is not None and _async_writer:
+    log_data = {
+        "all_layers_activations": result.activations,
+        "input_length": result.input_length,
+        "prompt": prompt,
+        "response": response_text,
+        "model": model_name,
+        "prompt_hash": prompt_key,
+        "multi_sample": multi_sample,
+        "sample_group_id": sample_group_id,
+        "sample_index": request.sample_index,
+        "request_id": resolved_request_id,
+    }
+    if result.logprobs:
+        log_data.update(result.logprobs)
+    _async_writer.enqueue(entry_key, log_data)
+elif result.activations is None:
+    # Text-only (GGUF or skip_activation_logging)
+    if _async_writer:
+        _async_writer.enqueue(entry_key, {
+            "prompt": prompt, "response": response_text,
+            "model": model_name, "prompt_hash": prompt_key,
+        }, metadata_only=True)
 ```
 
-**Initialize** at startup:
+**Initialize** adapter and queue at startup:
 
 ```python
+_adapter: Optional[ModelAdapter] = None
 _batch_queue: Optional[BatchInferenceQueue] = None
 
 @app.on_event("startup")
 async def startup_event():
-    global _batch_queue
-    max_batch_size = int(os.environ.get("MAX_BATCH_SIZE", "1"))  # default: no batching
-    if max_batch_size > 1:
-        _batch_queue = BatchInferenceQueue(max_batch_size=max_batch_size)
+    global _adapter, _batch_queue
+
+    model_name = DEFAULT_MODEL
+    if model_name.lower().endswith('.gguf'):
+        _adapter = GGUFAdapter(model_name)
+    else:
+        _adapter = HFTransformersAdapter(
+            model_name,
+            target_layers=os.environ.get("ACTIVATION_TARGET_LAYERS", "all"),
+            sequence_mode=os.environ.get("ACTIVATION_SEQUENCE_MODE", "all"),
+            enable_logprobs=DEFAULT_LOGPROBS_ENABLED,
+            logprobs_top_k=DEFAULT_LOGPROBS_TOP_K,
+        )
+
+    max_batch_size = int(os.environ.get("MAX_BATCH_SIZE", "1"))
+    if max_batch_size > 1 and _adapter.supports_activations():
+        _batch_queue = BatchInferenceQueue(_adapter, max_batch_size=max_batch_size)
         logger.info(f"Batch inference enabled: max_batch_size={max_batch_size}")
 ```
 
-**Test:** Run with `MAX_BATCH_SIZE=1` — should behave identically to current. Run with `MAX_BATCH_SIZE=4` — verify throughput improvement and activation correctness.
+### 4f. What this replaces
+
+| Before | After | Notes |
+|--------|-------|-------|
+| `run_inference()` (server.py:946) | `HFTransformersAdapter.infer()` | Same logic, cleaner boundary |
+| `_extract_prompt_response()` (zarr:450) | `HFTransformersAdapter._extract_activations()` | Moved to adapter; logger no longer parses HF outputs |
+| `_extract_generation_logprobs()` (server.py:1108) | `HFTransformersAdapter._extract_logprobs()` | Moved to adapter |
+| `inference_lock` (server.py:557) | `BatchInferenceQueue._batch_loop` | Lock replaced by queue; adapter.infer_batch is inherently serialized on GPU |
+| `get_model_and_tokenizer()` | `HFTransformersAdapter._ensure_loaded()` | Reuses existing function internally |
+
+**Test:** Run with `MAX_BATCH_SIZE=1` — should produce identical activations and response text to current pipeline. Run with `MAX_BATCH_SIZE=4` — verify per-request activations match batch_size=1 results for the same prompts. Compare Zarr outputs byte-for-byte (float16 rounding may differ slightly for padded vs unpadded — verify within tolerance).
 
 ---
 
@@ -799,7 +1126,7 @@ Phase 1 (Zarr logger: log_metadata, overwrite, get_entry)
    │
    ├──→ Phase 2 (async writer)
    │       │
-   │       └──→ Phase 4 (batch inference queue)
+   │       └──→ Phase 4 (model adapter + batch queue)
    │               │
    │               └──→ Phase 5 (concurrent client)
    │
@@ -810,6 +1137,8 @@ Phase 1 (Zarr logger: log_metadata, overwrite, get_entry)
 
 Phases 2 and 3 can be developed in parallel on separate branches.
 
+Phase 4 introduces the `ModelAdapter` abstraction (`activation_logging/model_adapter.py`), which is also the natural extension point for future model backends (e.g., vLLM with activation capture, or different model architectures).
+
 ---
 
 ## Test Strategy
@@ -819,5 +1148,7 @@ Phases 2 and 3 can be developed in parallel on separate branches.
 | 1 | Unit tests on `ZarrActivationsLogger` | `log_metadata`, key overwrite, `get_entry` with `None` idx |
 | 2 | Integration: run inference with async writer | All entries in Zarr after shutdown; crash recovery |
 | 3 | End-to-end: `--step all` with Zarr resume | Exported `generation.jsonl` matches old client-write baseline |
-| 4 | Batch correctness: compare batch=1 vs batch=4 | Per-sample activations and response text must be identical |
+| 4a | Adapter unit: `HFTransformersAdapter.infer()` vs old `run_inference()` | Response text and activation shapes match for same prompt |
+| 4b | Adapter batch: `infer_batch([p1,p2])` vs `[infer(p1), infer(p2)]` | Per-request activations match within float16 tolerance |
+| 4c | Adapter integration: adapter + async writer + batch queue | End-to-end with `MAX_BATCH_SIZE=4`, verify Zarr correctness |
 | 5 | Throughput: benchmark batch=8, concurrent=16 | Measure samples/sec on H100, compare to baseline ~0.05 s/s |
