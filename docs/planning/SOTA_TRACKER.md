@@ -74,28 +74,45 @@ When we present results, we should either:
 
 These are the methods we can likely implement and compare in the current pipeline, given available artifacts and our **response-level binary classification** scope.
 
-| Method / Paper | Bucket | Implementation difficulty | Notes | Link |
-|---|---|---|---|---|
-| LLMs Know More Than They Show (Orgad et al.) | Activations / Logits | NA | Includes probing + baselines like `p_true` and logprob | https://arxiv.org/abs/2410.02707 |
-| SelfCheckGPT (Manakul et al., 2023) | Black-box / text-only | easy | **Implementation viability:** very feasible baseline in HalluLens: generate $k$ sampled responses per prompt, then score inconsistency between the main answer’s sentences and the sampled passages. **Variants:** n-gram / BERTScore (needs `bert_score` + HF encoder) / NLI (uses DeBERTa MNLI) / LLM-prompting (best reported uses GPT-3.5/4-style API prompting). **HalluLens fit:** straightforward offline scorer over `(prompt, answer, sampled_answers)`; comparability hinges on the sampling budget $k$ and whether an extra verifier model/API is allowed. Code: https://github.com/potsawee/selfcheckgpt | https://arxiv.org/abs/2303.08896 |
-| Semantic Entropy Probes (Kossen et al., 2024) | Activations / Logits | medium | **Implementation viability:** strong comparator for HalluLens because it explicitly uses hidden states (probe) to predict semantic uncertainty. **Repo implementation details:** SE is computed via a 3-step pipeline (`generate_answers.py` → `compute_uncertainties.py` → `analyze_results.py`) that samples multiple responses, saves log-likelihoods and hidden states, then computes semantic-entropy metrics; SEP training is done in `semantic_entropy_probes/latent-probe.ipynb` using linear probes on two token positions (TBG, SLT). **Two baselines to track:** (1) full **Semantic Entropy (SE)** requires multi-sampling per prompt (5–10x) + token log-likelihoods and a semantic entailment/equivalence model (repo supports DeBERTa MNLI or GPT-3.5/4-style entailment); (2) **SEP probe** is cheap at test time (single generation) but requires a training set where SE is computed as target (so you still pay the multi-sample + entailment cost once). **HalluLens fit:** feasible offline with our activation logs (token positions like last-token / pre-EOS / pre-gen) and OpenAI-protocol inference; results are comparable only when reporting the same sampling+entailment budget used to define SE targets. Code: https://github.com/OATML/semantic-entropy-probes | https://arxiv.org/abs/2406.15927 |
-| Semantic Energy (Ma et al., 2025) | Logits/uncertainty-based | medium | **Implementation viability:** feasible as a strong non-activation baseline, but repo is notebook-only (no library/CLI). Requires (a) multi-sampling per prompt (e.g., $n\approx7$), (b) token-level sampled logprobs/logits, and (c) semantic clustering via an external verifier model (they use `TIGER-Lab/general-verifier`). **HalluLens fit:** implement as an offline scorer over our `(prompt, samples, logprobs)` artifacts; comparable within “uncertainty + multi-sample + verifier” budget. Code: https://github.com/MaHuanAAA/SemanticEnergy | https://arxiv.org/abs/2508.14496 |
-| Geometry of Truth / Layer-wise Semantic Dynamics (Mir, 2025) | Activations / Logits | medium | Public code: https://github.com/amir-hameed-mir/Sirraya_LSD_Code. HF/torch implementation that (a) extracts mean-pooled hidden states for *all layers*, (b) trains projection heads into a shared space, then (c) computes layer-wise cosine-alignment “trajectory” features vs a provided `truth` string (final/mean/max alignment, convergence layer, stability, velocity/acceleration, oscillations) and fits a lightweight classifier. **Integration fit:** feasible offline using HalluLens activation logs for QA-style tasks where a gold truth string exists (e.g., reference answer). | https://arxiv.org/abs/2510.04933 |
+**Key: what the selfcheck pipeline now provides** (see `SELFCHECKGPT_INVESTIGATION.md`):
+- `selfcheck_samples.jsonl`: k stochastic text responses per prompt, plus token-level logprobs (→ full sequence log-likelihood) for every sample, even text-only ones
+- Zarr: activations for up to N stochastic samples per prompt
+- The above is an append-only step on any existing run — no re-inference needed
 
-### 3.1) Additional candidate methods (for tracking only)
+| Method / Paper | Bucket | Implementation difficulty | Unblocked by selfcheck? | Notes | Link |
+|---|---|---|---|---|---|
+| LLMs Know More Than They Show (Orgad et al.) | Activations / Logits | NA | No (already viable, single-pass) | Includes probing + baselines like `p_true` and logprob | https://arxiv.org/abs/2410.02707 |
+| SelfCheckGPT (Manakul et al., 2023) | Black-box / text-only | easy | **Yes — primary motivation** | Needs k samples ✓ + text ✓. Variants: n-gram (no extra model), BERTScore (needs `bert_score`), NLI (needs DeBERTa MNLI). | https://arxiv.org/abs/2303.08896 |
+| Semantic Entropy (Farquhar et al., 2024) | Logits/uncertainty-based | medium | **Yes — now unblocked** | Needs: k samples ✓, sequence log-likelihoods ✓ (sum of `token_logprobs` from JSONL). **One missing piece: semantic equivalence clustering** (DeBERTa MNLI forward pass on sample pairs — offline, CPU-feasible). This is a minor post-processing step on `selfcheck_samples.jsonl`. Code: https://github.com/jlko/semantic_uncertainty | https://arxiv.org/abs/2402.09733 |
+| Semantic Entropy Probes (Kossen et al., 2024) | Activations / Logits | medium | **Yes — unblocked once SE is computed** | SE labels (from above) serve as probe training targets; hidden states at last-token / pre-EOS positions already in Zarr. Same DeBERTa clustering step unlocks both SE and SEP. **SEP is then a linear probe on existing activations — no new inference.** Code: https://github.com/OATML/semantic-entropy-probes | https://arxiv.org/abs/2406.15927 |
+| Semantic Energy (Ma et al., 2025) | Logits/uncertainty-based | medium | **Yes — unblocked** | Needs: k samples ✓, token-level logprobs ✓, semantic clustering via `TIGER-Lab/general-verifier`. Same structure as SE but uses a different verifier. Can share the DeBERTa clustering step or use their verifier. Repo is notebook-only; port to offline scorer over `selfcheck_samples.jsonl`. Code: https://github.com/MaHuanAAA/SemanticEnergy | https://arxiv.org/abs/2508.14496 |
+| Geometry of Truth / Layer-wise Semantic Dynamics (Mir, 2025) | Activations / Logits | medium | No (already viable, single-pass) | Uses mean-pooled hidden states across layers vs a gold truth string. Feasible offline from existing activation logs for QA tasks with a reference answer. | https://arxiv.org/abs/2510.04933 |
 
-| Method / Paper | Bucket | Implementation difficulty | Notes | Link |
+### 3.0.1) The one minor additional change that unlocks a cluster of methods
+
+**Add a semantic equivalence clustering step** (offline, run once after selfcheck sampling):
+
+1. For each prompt, take the k=20 answer texts from `selfcheck_samples.jsonl`.
+2. Run DeBERTa MNLI (or `cross-encoder/nli-deberta-v3-base`) on all O(k²) answer pairs to classify as entailing/contradicting/neutral.
+3. Cluster entailing answers into semantic equivalence classes.
+4. Store cluster IDs and sequence log-likelihoods per sample back into `selfcheck_samples.jsonl`.
+
+This single CPU-feasible post-processing step (DeBERTa is ~400M params, no GPU needed for k=20) directly enables: **Semantic Entropy, SEP, Semantic Energy, Hallucination Detection on a Budget, Kernel Language Entropy, and Beyond Semantic Entropy** — all from the same already-generated samples.
+
+### 3.1) Additional candidate methods — updated viability assessment
+
+| Method / Paper | Bucket | Viability update | Notes | Link |
 |---|---|---|---|---|
-| Layer-wise Information Deficiency (title in repo README) | (TBD) | NA | Need to check setting + datasets | https://arxiv.org/html/2412.10246v1 |
-| Kernel Language Entropy (Nikitin et al., 2024) | Logits/uncertainty-based | NA | Semantic-similarity-based entropy variants | https://arxiv.org/abs/2405.20003 |
-| Hallucination Detection on a Budget (Ciosek et al., 2025) | Logits/uncertainty-based | NA | Efficient estimation of semantic entropy from fewer samples | https://arxiv.org/abs/2504.03579 |
-| Beyond Semantic Entropy (Nguyen et al., 2025) | Logits/uncertainty-based | NA | Pairwise semantic similarity to improve UQ | https://arxiv.org/abs/2506.00245 |
-| Semantic Reformulation Entropy (Tong et al., 2025) | Logits/uncertainty-based | not viable | Reformulation-based semantic entropy for QA hallucination detection | https://arxiv.org/abs/2509.17445 |
-| Real-Time Detection of Hallucinated Entities (Obeso et al., 2025) | Activations / Logits | out of scope | **Out of scope:** focuses on token/span localization, while our target is **binary response-level classification**. Public code: https://github.com/obalcells/hallucination_probes. | https://arxiv.org/abs/2509.03531 |
-| Map of Misbelief (Hajji et al., 2025) | Activations / Logits | not viable | Traces intrinsic/extrinsic hallucinations using attention patterns | https://arxiv.org/abs/2511.10837 |
-| Two Pathways to Truthfulness (Luo et al., 2026) | Activations / Logits | not viable| Mechanistic framing of internal truthfulness signals (intrinsic encoding) | https://arxiv.org/abs/2601.07422 |
-| Can LLMs Predict Their Own Failures? (Ghasemabadi & Niu, 2025) | Activations / Logits | hard | “Self-awareness via internal circuits” framing (needs setting verification) | https://arxiv.org/abs/2512.20578 |
-| Neural Probe-Based Hallucination Detection (Liang & Wang, 2025) | Activations / Logits | not viable | Probe-based detector trained on internal representations. **Status (2026-01-20):** no public code repository found via GitHub search; exclude from comparator set for now. | https://arxiv.org/abs/2512.20949 |
+| Hallucination Detection on a Budget (Ciosek et al., 2025) | Logits/uncertainty-based | **Now viable** | Efficient SE estimation from fewer samples. With k=20 already generated, can run full SE and study the sample-efficiency curve at no extra inference cost. Same DeBERTa clustering step required. | https://arxiv.org/abs/2504.03579 |
+| Beyond Semantic Entropy (Nguyen et al., 2025) | Logits/uncertainty-based | **Now viable** | Pairwise semantic similarity between samples to improve UQ. Needs k samples ✓, pairwise similarity (BERTScore or sentence embeddings — can reuse BERTScore from SelfCheckGPT-BERTScore variant). No new inference. | https://arxiv.org/abs/2506.00245 |
+| Kernel Language Entropy (Nikitin et al., 2024) | Logits/uncertainty-based | **Likely viable** | Kernel-based entropy over sample distribution. Needs k samples ✓, logprobs for weighting ✓, semantic similarity kernel (BERTScore or embedding). Shares tooling with Beyond-SE. Need to verify exact inputs. | https://arxiv.org/abs/2405.20003 |
+| Layer-wise Information Deficiency | (TBD) | Unchanged — needs investigation | Need to check whether multi-sampling or logprobs are required | https://arxiv.org/html/2412.10246v1 |
+| Semantic Reformulation Entropy (Tong et al., 2025) | Logits/uncertainty-based | Not viable | Requires reformulating questions (different model calls), not just sampling answers to the same question | https://arxiv.org/abs/2509.17445 |
+| Real-Time Detection of Hallucinated Entities (Obeso et al., 2025) | Activations / Logits | Out of scope | Focuses on token/span localization; our scope is binary response-level classification. | https://arxiv.org/abs/2509.03531 |
+| Map of Misbelief (Hajji et al., 2025) | Activations / Logits | Not viable | Traces hallucinations using attention patterns; no public code compatible with our setup | https://arxiv.org/abs/2511.10837 |
+| Two Pathways to Truthfulness (Luo et al., 2026) | Activations / Logits | Not viable | Mechanistic/intrinsic framing; not directly a detector | https://arxiv.org/abs/2601.07422 |
+| Can LLMs Predict Their Own Failures? (Ghasemabadi & Niu, 2025) | Activations / Logits | Hard — unchanged | Internal circuits framing; setting verification still needed | https://arxiv.org/abs/2512.20578 |
+| Neural Probe-Based Hallucination Detection (Liang & Wang, 2025) | Activations / Logits | Not viable | No public code found | https://arxiv.org/abs/2512.20949 |
 
 **TODO (web search):** add the latest best-performing hallucination detectors for QA and long-form factuality. Track whether they require retrieval/verifiers/multi-sampling.
 
