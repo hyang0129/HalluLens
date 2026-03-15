@@ -1157,6 +1157,7 @@ class CompletionRequest(BaseModel):
     sample_group_id: Optional[str] = None  # Optional group ID to link samples
     sample_index: Optional[int] = None  # Optional index within the group
     request_id: Optional[str] = None  # Optional request ID for unique sample keys
+    skip_activation_logging: bool = False  # Per-request opt-out of activation logging
 
 
 class Choice(BaseModel):
@@ -1195,6 +1196,7 @@ class ChatCompletionRequest(BaseModel):
     sample_group_id: Optional[str] = None  # Optional group ID to link samples
     sample_index: Optional[int] = None  # Optional index within the group
     request_id: Optional[str] = None  # Optional request ID for unique sample keys
+    skip_activation_logging: bool = False  # Per-request opt-out of activation logging
 
 
 class ChatCompletionChoice(BaseModel):
@@ -1782,10 +1784,10 @@ def completions(request: CompletionRequest, http_request: Request):
     )
     sample_group_id = request.sample_group_id or prompt_key
     
-    if not model_name.endswith('.gguf') and model_outputs is not None:
+    if not model_name.endswith('.gguf') and model_outputs is not None and not request.skip_activation_logging:
         # Get appropriate logger based on parameters with overwrites
         logger_to_use, _, _ = get_logger_for_request(params)
-        
+
         try:
             # Pass the model outputs directly to the logger
             activation_start = time.time()
@@ -1927,7 +1929,7 @@ def chat_completions(request: ChatCompletionRequest, http_request: Request):
             response_text = shrunk
 
         # Log activation logging
-        if not model_name.endswith('.gguf') and model_outputs is not None:
+        if not model_name.endswith('.gguf') and model_outputs is not None and not request.skip_activation_logging:
             logger.info(f"[{request_id}] Starting activation logging")
             activation_start = time.time()
 
