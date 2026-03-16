@@ -9,6 +9,7 @@ import time
 import uuid
 import psutil
 import threading
+import queue as _queue_module
 import gc
 import glob
 import faulthandler
@@ -555,6 +556,93 @@ request_lock = threading.Lock()
 
 # Serialize inference to avoid thread-safety issues while keeping the event loop responsive.
 inference_lock = threading.Lock()
+
+# Persistent logger and async writer (initialized at startup for Zarr stores)
+_persistent_logger: Optional[ActivationsLogger] = None
+_async_writer: Optional["AsyncActivationWriter"] = None
+
+
+class AsyncActivationWriter:
+    """Background thread that drains activation write requests into Zarr.
+
+    Entries are self-contained (key + all data for log_entry/log_metadata),
+    so write ordering does not affect correctness.
+    """
+
+    def __init__(self, logger_instance: ActivationsLogger, max_queue_size: int = 256):
+        self._queue: _queue_module.Queue = _queue_module.Queue(maxsize=max_queue_size)
+        self._logger = logger_instance
+        self._shutdown = threading.Event()
+        self._thread = threading.Thread(
+            target=self._drain, name="async-activation-writer", daemon=False
+        )
+        self._counter_lock = threading.Lock()
+        self._errors: int = 0
+        self._written: int = 0
+        self._thread.start()
+
+    def enqueue(self, key: str, entry: dict, metadata_only: bool = False) -> None:
+        """Enqueue a write request. Blocks if the queue is full until space is available.
+
+        This intentionally applies back-pressure to the request handler: if the
+        writer can't keep up, new requests will stall here rather than unboundedly
+        accumulating writes in memory.
+        """
+        if self._queue.full():
+            logger.warning(
+                f"AsyncActivationWriter queue full ({self._queue.qsize()}/{self._queue.maxsize})"
+                f" — request handler blocking until space is available"
+            )
+        self._queue.put((key, entry, metadata_only))  # blocks until space available
+
+    def _drain(self) -> None:
+        while not self._shutdown.is_set() or not self._queue.empty():
+            try:
+                key, entry, metadata_only = self._queue.get(timeout=0.1)
+            except _queue_module.Empty:
+                continue
+            try:
+                if metadata_only:
+                    self._logger.log_metadata(key, entry)
+                else:
+                    self._logger.log_entry(key, entry)
+                with self._counter_lock:
+                    self._written += 1
+            except Exception as e:
+                with self._counter_lock:
+                    self._errors += 1
+                logger.error(
+                    f"AsyncActivationWriter failed for key {key}: {e}", exc_info=True
+                )
+
+    def shutdown(self, timeout: float = 30.0) -> None:
+        """Signal shutdown and wait for queue to drain."""
+        self._shutdown.set()
+        self._thread.join(timeout=timeout)
+        remaining = self._queue.qsize()
+        if remaining > 0:
+            logger.warning(
+                f"AsyncActivationWriter shutdown with {remaining} entries still in queue"
+            )
+        logger.info(
+            f"AsyncActivationWriter stats: {self._written} written, {self._errors} errors"
+        )
+
+    @property
+    def pending(self) -> int:
+        """Number of entries currently waiting to be written."""
+        return self._queue.qsize()
+
+    @property
+    def written(self) -> int:
+        with self._counter_lock:
+            return self._written
+
+    @property
+    def errors(self) -> int:
+        with self._counter_lock:
+            return self._errors
+
 
 # Optional: dump stacks automatically when a request exceeds this duration.
 # Default ON (3 minutes) so hangs are diagnosable without manual intervention.
@@ -1381,71 +1469,42 @@ def apply_overwrites(request_params):
     return params
 
 
-def get_logger_for_request(request_params):
-    """
-    Create a new logger instance for each request to avoid LMDB assertion errors.
+def _resolve_writer_for_request(params: dict) -> "AsyncActivationWriter":
+    """Return the async writer for this request, or raise HTTPException.
 
-    Args:
-        request_params: Dictionary containing request parameters (with overwrites applied)
+    Validates that:
+    1. The async writer was successfully created at startup.
+    2. The client's requested activations_path matches the server's configured path.
 
-    Returns:
-        Tuple of (logger_to_use, custom_logger, used_custom_path)
-        - logger_to_use: Logger to use for this request
-        - custom_logger: Custom logger instance if created (to be closed after use)
-        - used_custom_path: Boolean indicating if a custom path was used
+    Raises:
+        HTTPException(500): writer not initialised (server misconfigured).
+        HTTPException(400): client path does not match server path.
     """
-    activations_path = request_params.get('activations_path', request_params.get('lmdb_path'))
-    logger_type = request_params.get('logger_type', DEFAULT_LOGGER_TYPE)
-    if str(logger_type).strip().lower() != "zarr":
-        raise ValueError(
-            f"Unsupported logger_type='{logger_type}'. "
-            "Only Zarr activation logging is supported."
-        )
-    if not str(activations_path or "").strip().endswith(".zarr"):
-        raise ValueError(
-            f"Unsupported activations_path='{activations_path}'. "
-            "Only .zarr activation stores are supported."
+    requested_path = str(params.get("activations_path", "")).strip()
+
+    if _async_writer is None:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "AsyncActivationWriter is not initialised. "
+                "Start the server with ACTIVATION_STORAGE_PATH pointing to a .zarr store."
+            ),
         )
 
-    # Get target layers and sequence mode from environment variables
-    target_layers = os.environ.get("ACTIVATION_TARGET_LAYERS", "all")
-    sequence_mode = os.environ.get("ACTIVATION_SEQUENCE_MODE", "all")
+    # Normalise both paths for comparison (resolve symlinks / trailing slashes)
+    server_path = str(_persistent_logger.lmdb_path).rstrip("/\\")
+    client_path = requested_path.rstrip("/\\")
+    if client_path and client_path != server_path:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"activations_path '{requested_path}' does not match the server's "
+                f"configured store '{server_path}'. "
+                "Only one Zarr store is open per server process."
+            ),
+        )
 
-    logger.info(f"Creating activation logger - Type: {logger_type}, Path: {activations_path}, "
-               f"Target layers: {target_layers}, Sequence mode: {sequence_mode}")
-
-    try:
-        # Always create a new logger instance to avoid assertion errors
-        if activations_path and activations_path.strip():
-            # Create and use a custom logger with the specified path and type
-            logger.info(f"Using custom activations path: {activations_path}")
-            custom_logger = ActivationsLogger(
-                lmdb_path=activations_path,
-                map_size=DEFAULT_MAP_SIZE,
-                target_layers=target_layers,
-                sequence_mode=sequence_mode
-            )
-            logger.info(f"Created Zarr ActivationsLogger for {activations_path}")
-
-            return custom_logger, custom_logger, True
-        else:
-            # Create a new logger with the default path from environment
-            default_path = DEFAULT_ACTIVATIONS_PATH
-            logger.info(f"Using default activations path: {default_path}")
-            new_logger = ActivationsLogger(
-                lmdb_path=default_path,
-                map_size=DEFAULT_MAP_SIZE,
-                target_layers=target_layers,
-                sequence_mode=sequence_mode
-            )
-            logger.info("Created default Zarr ActivationsLogger")
-
-            return new_logger, new_logger, False
-
-    except Exception as e:
-        logger.error(f"Failed to create activation logger: {e}")
-        logger.error(f"Logger type: {logger_type}, Path: {activations_path}")
-        raise
+    return _async_writer
 
 
 @app.get("/health")
@@ -1783,29 +1842,22 @@ def completions(request: CompletionRequest, http_request: Request):
     sample_group_id = request.sample_group_id or prompt_key
     
     if not model_name.endswith('.gguf') and model_outputs is not None:
-        # Get appropriate logger based on parameters with overwrites
-        logger_to_use, _, _ = get_logger_for_request(params)
-        
-        try:
-            # Pass the model outputs directly to the logger
-            activation_start = time.time()
-            logger_to_use.log_entry(entry_key, {
-                "prompt": request.prompt,
-                "response": response_text,
-                "model_outputs": model_outputs,  # Pass the full model outputs
-                "input_length": input_length,    # Pass the input length for reference
-                "model": model_name,
-                "trim_position": trim_pos,       # Pass the trim position
-                "prompt_hash": prompt_key,
-                "multi_sample": multi_sample,
-                "sample_group_id": sample_group_id,
-                "sample_index": request.sample_index,
-                "request_id": resolved_request_id,
-            })
-            logger.info(f"[{req_id}] Activation logging time: {time.time() - activation_start:.2f}s")
-        finally:
-            # Always close the logger to free up resources
-            logger_to_use.close()
+        writer = _resolve_writer_for_request(params)
+        log_entry_data = {
+            "prompt": request.prompt,
+            "response": response_text,
+            "model_outputs": model_outputs,
+            "input_length": input_length,
+            "model": model_name,
+            "trim_position": trim_pos,
+            "prompt_hash": prompt_key,
+            "multi_sample": multi_sample,
+            "sample_group_id": sample_group_id,
+            "sample_index": request.sample_index,
+            "request_id": resolved_request_id,
+        }
+        logger.info(f"[{req_id}] Enqueuing activation log (async)")
+        writer.enqueue(entry_key, log_entry_data)
     else:
         logger.info(f"Skipping activation logging for GGUF model: {model_name}")
     
@@ -1926,37 +1978,25 @@ def chat_completions(request: ChatCompletionRequest, http_request: Request):
             )
             response_text = shrunk
 
-        # Log activation logging
+        # Log activations (async writer, validated against client's requested path)
         if not model_name.endswith('.gguf') and model_outputs is not None:
-            logger.info(f"[{request_id}] Starting activation logging")
-            activation_start = time.time()
-
-            # Get appropriate logger based on parameters with overwrites
-            logger_to_use, _, _ = get_logger_for_request(params)
-
-            try:
-                # Pass the model outputs directly to the logger
-                logger_to_use.log_entry(entry_key, {
-                    "prompt": prompt,
-                    "response": response_text,
-                    "model_outputs": model_outputs,  # Pass the full model outputs
-                    "input_length": input_length,    # Pass the input length for reference
-                    "model": model_name,
-                    "messages": [msg.model_dump() for msg in request.messages],
-                    "trim_position": trim_pos,       # Pass the trim position
-                    "prompt_hash": prompt_key,
-                    "multi_sample": multi_sample,
-                    "sample_group_id": sample_group_id,
-                    "sample_index": request.sample_index,
-                    "request_id": resolved_request_id,
-                })
-
-                activation_time = time.time() - activation_start
-                logger.info(f"[{request_id}] Activation logging completed in {activation_time:.2f} seconds")
-
-            finally:
-                # Always close the logger to free up resources
-                logger_to_use.close()
+            writer = _resolve_writer_for_request(params)
+            log_entry_data = {
+                "prompt": prompt,
+                "response": response_text,
+                "model_outputs": model_outputs,
+                "input_length": input_length,
+                "model": model_name,
+                "messages": [msg.model_dump() for msg in request.messages],
+                "trim_position": trim_pos,
+                "prompt_hash": prompt_key,
+                "multi_sample": multi_sample,
+                "sample_group_id": sample_group_id,
+                "sample_index": request.sample_index,
+                "request_id": resolved_request_id,
+            }
+            logger.info(f"[{request_id}] Enqueuing activation log (async)")
+            writer.enqueue(entry_key, log_entry_data)
         else:
             logger.info(f"[{request_id}] Skipping activation logging for GGUF model: {model_name}")
 
@@ -1992,6 +2032,8 @@ def chat_completions(request: ChatCompletionRequest, http_request: Request):
 @app.on_event("startup")
 async def startup_event():
     """Log system information on startup and start monitoring."""
+    global _persistent_logger, _async_writer
+
     logger.info("=" * 80)
     logger.info("ACTIVATION LOGGING SERVER STARTUP")
     logger.info("=" * 80)
@@ -2087,15 +2129,45 @@ async def startup_event():
     except Exception as e:
         logger.warning(f"Could not enable faulthandler: {type(e).__name__}: {e}")
 
+    # Create persistent Zarr logger + async writer for activation logging
+    if DEFAULT_ACTIVATIONS_PATH and str(DEFAULT_ACTIVATIONS_PATH).strip().endswith(".zarr"):
+        target_layers = os.environ.get("ACTIVATION_TARGET_LAYERS", "all")
+        sequence_mode = os.environ.get("ACTIVATION_SEQUENCE_MODE", "all")
+        try:
+            _persistent_logger = ActivationsLogger(
+                lmdb_path=DEFAULT_ACTIVATIONS_PATH,
+                map_size=DEFAULT_MAP_SIZE,
+                target_layers=target_layers,
+                sequence_mode=sequence_mode,
+            )
+            _async_writer = AsyncActivationWriter(_persistent_logger)
+            logger.info(
+                f"Persistent Zarr logger + AsyncActivationWriter created at {DEFAULT_ACTIVATIONS_PATH}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to create persistent logger: {e}")
+
     logger.info("Server startup completed")
     logger.info("=" * 80)
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Log shutdown information."""
+    global _async_writer, _persistent_logger
+
     logger.info("=" * 80)
     logger.info("ACTIVATION LOGGING SERVER SHUTDOWN")
     logger.info("=" * 80)
+
+    if _async_writer is not None:
+        _async_writer.shutdown(timeout=30.0)
+        _async_writer = None
+        logger.info("AsyncActivationWriter drained and stopped")
+
+    if _persistent_logger is not None:
+        _persistent_logger.close()
+        _persistent_logger = None
+        logger.info("Persistent logger closed")
 
     # Log any remaining active requests
     with request_lock:

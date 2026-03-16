@@ -92,12 +92,6 @@ bash scripts/download_data.sh
 - **Master notebooks** live in `notebooks/` — these are git-tracked reference copies. Do not run them.
 - **Working notebooks** are copies in the repo root for active execution. Root-level `*.ipynb` files are gitignored.
 
-Key notebooks in `notebooks/`:
-- `b_contrastive_training_with_new_trainer.ipynb` — contrastive model training
-- `c_layeraware_training_with_new_trainer.ipynb` — layer-aware training
-- `k_view_loader_profile.ipynb` — K-view loader profiling
-
-Prototype notebooks are migrated to `scripts/train_activation_model.py` for reproducible CLI runs.
 
 ## Compute Contexts
 

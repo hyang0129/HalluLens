@@ -258,6 +258,22 @@ class ZarrActivationsLogger:
         self._meta_dir.mkdir(parents=True, exist_ok=True)
         self._text_dir.mkdir(parents=True, exist_ok=True)
 
+    def _append_array_row(self, idx: int, num_layers: int, hidden_size: int) -> None:
+        """Resize all Zarr arrays to accommodate a new row at `idx`."""
+        self._prompt_activations.resize((idx + 1, num_layers, self.prompt_max_tokens, hidden_size))
+        self._response_activations.resize((idx + 1, num_layers, self.response_max_tokens, hidden_size))
+        self._prompt_len.resize((idx + 1,))
+        self._response_len.resize((idx + 1,))
+        self._sample_key.resize((idx + 1,))
+        if self._response_token_ids is not None:
+            self._response_token_ids.resize((idx + 1, self.response_max_tokens))
+        if self._response_token_logprobs is not None:
+            self._response_token_logprobs.resize((idx + 1, self.response_max_tokens))
+        if self._response_topk_token_ids is not None:
+            self._response_topk_token_ids.resize((idx + 1, self.response_max_tokens, self.response_logprobs_top_k))
+        if self._response_topk_logprobs is not None:
+            self._response_topk_logprobs.resize((idx + 1, self.response_max_tokens, self.response_logprobs_top_k))
+
     def _ensure_arrays(self, num_layers: int, hidden_size: int):
         if self._prompt_activations is not None:
             self._ensure_logprob_arrays()
@@ -621,20 +637,21 @@ class ZarrActivationsLogger:
 
         self._ensure_arrays(num_layers, hidden_size)
 
-        idx = self._prompt_activations.shape[0]
-        self._prompt_activations.resize((idx + 1, num_layers, self.prompt_max_tokens, hidden_size))
-        self._response_activations.resize((idx + 1, num_layers, self.response_max_tokens, hidden_size))
-        self._prompt_len.resize((idx + 1,))
-        self._response_len.resize((idx + 1,))
-        self._sample_key.resize((idx + 1,))
-        if self._response_token_ids is not None:
-            self._response_token_ids.resize((idx + 1, self.response_max_tokens))
-        if self._response_token_logprobs is not None:
-            self._response_token_logprobs.resize((idx + 1, self.response_max_tokens))
-        if self._response_topk_token_ids is not None:
-            self._response_topk_token_ids.resize((idx + 1, self.response_max_tokens, self.response_logprobs_top_k))
-        if self._response_topk_logprobs is not None:
-            self._response_topk_logprobs.resize((idx + 1, self.response_max_tokens, self.response_logprobs_top_k))
+        # Check if key already exists — overwrite existing row to prevent orphaned rows
+        if key in self._index:
+            existing_meta = self._index[key]
+            existing_idx = existing_meta.get("sample_index")
+            if existing_idx is not None:
+                # Reuse existing Zarr array row
+                idx = existing_idx
+                logger.info(f"Overwriting existing entry {key} at Zarr row {idx}")
+            else:
+                # Upgrading metadata-only entry to full entry — append new row
+                idx = self._prompt_activations.shape[0]
+                self._append_array_row(idx, num_layers, hidden_size)
+        else:
+            idx = self._prompt_activations.shape[0]
+            self._append_array_row(idx, num_layers, hidden_size)
 
         stored_prompt_len = int(min(prompt_len or 0, self.prompt_max_tokens))
         stored_response_len = int(min(response_len or 0, self.response_max_tokens))
@@ -726,6 +743,33 @@ class ZarrActivationsLogger:
         self._index[key] = metadata_entry
         logger.debug(f"Logged entry {key} to Zarr store at index {idx}.")
 
+    def log_metadata(self, key: str, metadata: Dict[str, Any]):
+        """Write an index-only entry with no activation arrays.
+
+        Use for text-only selfcheck samples or any record where activations
+        are not available/needed. The entry is visible to list_entries(),
+        get_entry(metadata_only=True), and _build_group_index().
+        """
+        if self.read_only:
+            raise ValueError("Cannot log entries in read-only mode")
+        self._ensure_dirs()
+
+        metadata_entry = {
+            k: v for k, v in metadata.items()
+            if k not in {
+                "model_outputs", "all_layers_activations",
+                "response_token_ids", "response_token_logprobs",
+                "response_topk_token_ids", "response_topk_logprobs",
+            }
+        }
+        metadata_entry["key"] = key
+        metadata_entry["sample_index"] = None
+        metadata_entry["has_activations"] = False
+
+        with open(self._index_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(metadata_entry, ensure_ascii=False) + "\n")
+        self._index[key] = metadata_entry
+
     def get_entry(self, key: str, metadata_only: bool = False) -> Dict[str, Any]:
         """
         Retrieve an entry from the Zarr store.
@@ -739,10 +783,9 @@ class ZarrActivationsLogger:
 
         meta = dict(self._index[key])
         idx = meta.get("sample_index")
-        if idx is None:
-            raise KeyError(f"Missing sample_index for key {key}")
 
-        if metadata_only:
+        # Return early for metadata-only requests or entries without activations
+        if metadata_only or idx is None:
             return meta
 
         prompt_len = int(self._prompt_len[idx]) if self._prompt_len is not None else 0
