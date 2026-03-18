@@ -82,6 +82,41 @@ Current SupCon treats inter-layer differences as nuisance to be discarded (same-
 4. **Unordered baseline:** Shuffle layer positional encodings at train time.
 5. **Learning curve analysis:** N = {100, 250, 500, 1000}.
 
+### Experimental Results
+
+Ablation sweep run on H200 GPU (alphagpu24). Dataset: PreciseWikiQA with Llama-3.1-8B-Instruct, 16617 training samples, layers 14–29 (K=16). Training: 50 epochs, SupConLoss, batch size 64.
+
+**Results (Mahalanobis / Cosine / kNN AUROC):**
+
+| Run | Config | Mahal | Cos | kNN |
+|-----|--------|-------|-----|-----|
+| single_layer_oracle | Best individual layer, Mahalanobis | **0.6096** | — | — |
+| main_d128_t020_s050 | τ=0.20, d=128, 50% layers | 0.5400 | 0.5009 | 0.5178 |
+| concat_d128 | Concat 16×128→linear, d=128 | 0.5311 | 0.4970 | 0.5046 |
+| unordered_d128 | No positional encoding, d=128 | 0.5253 | 0.5121 | 0.4984 |
+| main_d128_t007_s050 | τ=0.07, d=128, 50% layers (default) | 0.5248 | 0.5072 | 0.4993 |
+| main_d128_t007_s100 | τ=0.07, d=128, 100% layers | 0.5052 | 0.5021 | 0.4938 |
+| main_d256_t007_s050 | τ=0.07, d=256, 50% layers | 0.5003 | 0.5025 | 0.4778 |
+| pairwise_mlp_d128 | 120 pairwise cosines → MLP | 0.4802 | 0.5124 | 0.4817 |
+
+**Key findings:**
+
+1. **Single-layer oracle dominates all trained models by ~6 AUROC points.** The cross-layer transformer (0.52–0.54) consistently underperforms the best individual layer (0.61). Cross-layer relationships provide no measurable lift over the best single layer at this scale.
+
+2. **Warmer temperature (τ=0.20) is slightly better than τ=0.07** (0.54 vs. 0.52 Mahal AUROC). The standard τ=0.07 may over-concentrate representations.
+
+3. **Removing positional encoding (unordered) matches the default model** (0.5253 vs. 0.5248). Positional structure across layers is not exploited — the transformer degrades to a set encoder.
+
+4. **Layer subset augmentation (50%) slightly outperforms using all layers (100%)** (0.5248 vs. 0.5052). Consistent with augmentation providing useful regularization, not with the cross-layer hypothesis.
+
+5. **Larger d=256 is worse than d=128** (0.5003 vs. 0.5248 Mahal). Overfitting, or the useful signal is genuinely low-dimensional.
+
+6. **Pairwise cosine MLP failed to train**: loss stuck at 4.84 across all 50 epochs (gate=0.499, near-random). The MLP receives vanishing gradients through the cosine similarity bottleneck. Result (0.48 Mahal) is near chance.
+
+7. **Cosine/kNN scoring is uninformative**: cosine and kNN AUROC hover at 0.49–0.51 for all trained models. Only Mahalanobis extracts any signal from the learned embeddings.
+
+**Conclusion:** Method 1 as designed does not work. The single-layer oracle result (0.61) confirms hallucination signal exists in individual layer activations; the trained cross-layer model fails to find it and likely learns degenerate representations under SupCon at this scale. The method should not be developed further without addressing the oracle gap first.
+
 ---
 
 ## Method 2: Cross-Layer Feature Profiles for Hallucination Detection

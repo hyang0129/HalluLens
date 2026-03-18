@@ -27,7 +27,27 @@ from typing import Optional
 import requests
 import websocket  # pip install websocket-client
 
-DEFAULT_BASE_URL = "http://alphagpu24:8889"
+def _default_base_url() -> str:
+    """Read GPUNODE and GPUNODEPORT from .env in the repo root."""
+    import os
+    from pathlib import Path
+
+    env_path = Path(__file__).parent.parent / ".env"
+    node, port = "alphagpu24", "8889"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("GPUNODE="):
+                node = line.split("=", 1)[1].strip()
+            elif line.startswith("GPUNODEPORT="):
+                port = line.split("=", 1)[1].strip()
+    # Environment variables take precedence over .env
+    node = os.environ.get("GPUNODE", node)
+    port = os.environ.get("GPUNODEPORT", port)
+    return f"http://{node}:{port}"
+
+
+DEFAULT_BASE_URL = _default_base_url()
 DEFAULT_PASSWORD = "123"
 DEFAULT_TIMEOUT = 60  # seconds
 
@@ -87,27 +107,22 @@ class JupyterExecutor:
     # Kernel management
     # ------------------------------------------------------------------
 
-    def list_kernels(self) -> list[dict]:
-        resp = self.session.get(f"{self.base_url}/api/kernels")
+    def start_kernel(self, name: str = "p311") -> str:
+        """Start a new kernel and return its ID."""
+        resp = self.session.post(
+            f"{self.base_url}/api/kernels",
+            json={"name": name},
+            headers={"X-XSRFToken": self._xsrf_token},
+        )
         resp.raise_for_status()
-        return resp.json()
+        return resp.json()["id"]
 
-    def get_idle_kernel(self, preferred_name: str = "p311") -> str:
-        """Return kernel_id of an idle p311 kernel (micromamba venv), or fallback."""
-        kernels = self.list_kernels()
-        if not kernels:
-            raise RuntimeError("No kernels running on Jupyter server.")
-        # Prefer idle kernels with the right name
-        named = [k for k in kernels if k["name"] == preferred_name]
-        idle_named = [k for k in named if k["execution_state"] == "idle"]
-        if idle_named:
-            return idle_named[0]["id"]
-        # Fall back to any idle kernel
-        idle = [k for k in kernels if k["execution_state"] == "idle"]
-        if idle:
-            return idle[0]["id"]
-        # Last resort: least-recently-used
-        return sorted(kernels, key=lambda k: k["last_activity"])[0]["id"]
+    def stop_kernel(self, kernel_id: str):
+        """Shut down a kernel by ID."""
+        self.session.delete(
+            f"{self.base_url}/api/kernels/{kernel_id}",
+            headers={"X-XSRFToken": self._xsrf_token},
+        )
 
     # ------------------------------------------------------------------
     # Code execution
@@ -119,12 +134,17 @@ class JupyterExecutor:
         kernel_id: Optional[str] = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> ExecResult:
-        """Execute *code* on the remote kernel and return collected outputs."""
+        """Execute *code* on the remote kernel and return collected outputs.
+
+        If kernel_id is None a fresh p311 kernel is started and stopped automatically.
+        Pass an existing kernel_id to reuse a long-running kernel (caller manages lifecycle).
+        """
         if not self._cookie_str:
             self.login()
 
-        if kernel_id is None:
-            kernel_id = self.get_idle_kernel()
+        owned = kernel_id is None
+        if owned:
+            kernel_id = self.start_kernel("p311")
 
         ws = websocket.create_connection(
             f"{self.ws_base}/api/kernels/{kernel_id}/channels",
@@ -137,6 +157,8 @@ class JupyterExecutor:
             return self._execute_on_ws(ws, code, timeout)
         finally:
             ws.close()
+            if owned:
+                self.stop_kernel(kernel_id)
 
     def _execute_on_ws(self, ws, code: str, timeout: float) -> ExecResult:
         msg_id = str(uuid.uuid4())

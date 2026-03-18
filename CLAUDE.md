@@ -132,7 +132,7 @@ with JupyterExecutor() as jup:
 
 **How it works:**
 1. Password-login to `http://alphagpu24:8889` → session cookie
-2. `GET /api/kernels` → pick an idle `p311` kernel (micromamba venv for this project); falls back to any idle kernel, then least-recently-used
+2. `POST /api/kernels` → start a fresh `p311` kernel (micromamba venv); auto-deleted after `run()` returns
 3. WebSocket to `/api/kernels/{id}/channels` → send `execute_request`, stream back `stream`/`display_data`/`execute_reply` messages
 
 **Dependency:** `websocket-client` (install with `pip install websocket-client` on alphacpu if missing).

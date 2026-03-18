@@ -70,3 +70,6 @@ nq_logprob_recon_contrastive_training.ipynb
 
 # Memmap preload cache (generated alongside zarr stores)
 _memmap_cache/
+
+# Exploratory work (scratch notebooks, experiments)
+exploratory_work/
