@@ -579,6 +579,7 @@ class AsyncActivationWriter:
         self._counter_lock = threading.Lock()
         self._errors: int = 0
         self._written: int = 0
+        self._backpressure_events: int = 0
         self._thread.start()
 
     def enqueue(self, key: str, entry: dict, metadata_only: bool = False) -> None:
@@ -589,10 +590,16 @@ class AsyncActivationWriter:
         accumulating writes in memory.
         """
         if self._queue.full():
-            logger.warning(
-                f"AsyncActivationWriter queue full ({self._queue.qsize()}/{self._queue.maxsize})"
-                f" — request handler blocking until space is available"
-            )
+            with self._counter_lock:
+                self._backpressure_events += 1
+                bp = self._backpressure_events
+            # Log every 50th backpressure event to avoid spam in batched mode
+            if bp == 1 or bp % 50 == 0:
+                logger.info(
+                    f"AsyncActivationWriter backpressure: queue full "
+                    f"({self._queue.qsize()}/{self._queue.maxsize}), "
+                    f"total stalls so far: {bp}"
+                )
         self._queue.put((key, entry, metadata_only))  # blocks until space available
 
     def _drain(self) -> None:
@@ -625,7 +632,8 @@ class AsyncActivationWriter:
                 f"AsyncActivationWriter shutdown with {remaining} entries still in queue"
             )
         logger.info(
-            f"AsyncActivationWriter stats: {self._written} written, {self._errors} errors"
+            f"AsyncActivationWriter stats: {self._written} written, "
+            f"{self._errors} errors, {self._backpressure_events} backpressure stalls"
         )
 
     @property
@@ -1492,7 +1500,7 @@ def _resolve_writer_for_request(params: dict) -> "AsyncActivationWriter":
         )
 
     # Normalise both paths for comparison (resolve symlinks / trailing slashes)
-    server_path = str(_persistent_logger.lmdb_path).rstrip("/\\")
+    server_path = str(_persistent_logger.zarr_path).rstrip("/\\")
     client_path = requested_path.rstrip("/\\")
     if client_path and client_path != server_path:
         raise HTTPException(

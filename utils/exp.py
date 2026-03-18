@@ -7,6 +7,7 @@
 
 from pathlib import Path
 from tqdm import tqdm
+import hashlib
 import json
 
 from utils import lm
@@ -259,3 +260,43 @@ def run_exp(
             server_manager.stop_server()
             lm.set_server_manager(None)
             print(" Server stopped")
+
+
+def export_generation_jsonl(zarr_path: str, qa_df, output_path: str):
+    """Export generation results from a Zarr activation store to JSONL.
+
+    Matches prompts in *qa_df* to entries stored in the Zarr index by
+    prompt hash, then writes one JSON line per matched prompt containing
+    the original DataFrame columns plus a ``generation`` field with the
+    model response retrieved from the store.
+
+    Args:
+        zarr_path: Path to the ``.zarr`` activation store.
+        qa_df: DataFrame with at least a ``prompt`` column.
+        output_path: Destination path for the JSONL file.
+    """
+    from activation_logging.zarr_activations_logger import ZarrActivationsLogger
+
+    reader = ZarrActivationsLogger(zarr_path=zarr_path, read_only=True, verbose=False)
+
+    # Build a lookup: prompt_hash -> response
+    hash_to_response = {}
+    for _key, meta in reader._index.items():
+        ph = meta.get("prompt_hash")
+        if ph:
+            hash_to_response[ph] = meta.get("response", "")
+    reader.close()
+
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(out, "w", encoding="utf-8") as f:
+        for _, row in qa_df.iterrows():
+            prompt = row["prompt"]
+            ph = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            response = hash_to_response.get(ph)
+            if response is None:
+                continue
+            record = row.to_dict()
+            record["generation"] = response
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")

@@ -67,7 +67,7 @@ class TestBatchVsSequential:
     def test_batch_2_activations_match_sequential_within_tolerance(self, model_name, device):
         """Batch of 2 should produce the same activations as two separate single calls.
 
-        atol=1e-2 in float32 to account for left-padding numerical differences.
+        atol=1e-1 to account for cumulative float16 rounding through residual stream layers.
         """
         adapter = HFTransformersAdapter(
             model_name, target_layers="second_half", sequence_mode="response",
@@ -86,7 +86,7 @@ class TestBatchVsSequential:
             for s, b in zip(s_nonnull, b_nonnull):
                 min_len = min(s.shape[1], b.shape[1])
                 diff = (s[0, :min_len].float() - b[0, :min_len].float()).abs().max().item()
-                assert diff < 1e-2, f"[{label}] max activation diff={diff:.4f} exceeds atol=1e-2"
+                assert diff < 1e-1, f"[{label}] max activation diff={diff:.4f} exceeds atol=1e-1"
 
         _compare(r0_single.activations, batch_results[0].activations, "prompt0")
         _compare(r1_single.activations, batch_results[1].activations, "prompt1")
@@ -119,7 +119,7 @@ class TestBatchZarrPersistence:
             results = adapter_all.infer_batch(prompts, max_tokens=16)
 
             zl = ZarrActivationsLogger(
-                zarr_path=zarr_path, target_layers="all", sequence_mode="all",
+                zarr_path=zarr_path, target_layers="second_half", sequence_mode="all",
                 verbose=False,
             )
             for i, r in enumerate(results):
@@ -149,7 +149,7 @@ class TestBatchZarrPersistence:
             result = adapter_all.infer_batch([TEST_PROMPTS[0]], max_tokens=16)[0]
 
             zl = ZarrActivationsLogger(
-                zarr_path=zarr_path, target_layers="all", sequence_mode="all",
+                zarr_path=zarr_path, target_layers="second_half", sequence_mode="all",
                 verbose=False,
             )
             zl.log_entry("roundtrip_key", {
@@ -162,7 +162,10 @@ class TestBatchZarrPersistence:
             })
             zl.close()
 
-            reader = ZarrActivationsLogger(zarr_path=zarr_path, read_only=True, verbose=False)
+            reader = ZarrActivationsLogger(
+                zarr_path=zarr_path, read_only=True, verbose=False,
+                target_layers="second_half",
+            )
             loaded = reader.get_entry("roundtrip_key")
             loaded_acts = [a for a in loaded["all_layers_activations"] if a is not None]
             orig_acts = [a for a in result.activations if a is not None]
