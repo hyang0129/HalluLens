@@ -34,6 +34,7 @@ class ZarrActivationsLogger:
         response_logprobs_top_k: Optional[int] = None,
         dtype: str = "float16",
         verbose: bool = True,
+        expected_samples: Optional[int] = None,
     ):
         """
         Initialize the Zarr-based activations logger.
@@ -54,6 +55,8 @@ class ZarrActivationsLogger:
             response_logprobs_top_k: Number of top logprobs to persist per response token
             dtype: Numpy dtype for stored activations
             verbose: Whether to log detailed initialization
+            expected_samples: Pre-allocate arrays for this many samples to avoid
+                repeated O(n) resizes during sequential appends.
         """
         if target_layers not in ['all', 'first_half', 'second_half']:
             raise ValueError("target_layers must be one of: 'all', 'first_half', 'second_half'")
@@ -73,6 +76,7 @@ class ZarrActivationsLogger:
         self.read_only = read_only
         self.dtype = np.dtype(dtype)
         self.compressor = self._get_compressor(compression)
+        self.expected_samples = expected_samples
 
         if prompt_max_tokens is None:
             prompt_max_tokens = int(os.environ.get("ACTIVATION_PROMPT_MAX_TOKENS", 512))
@@ -183,6 +187,20 @@ class ZarrActivationsLogger:
         self._load_index()
         self._load_existing_arrays()
 
+        # _next_idx tracks the next write position, separate from array shape
+        # (which may be pre-allocated larger than the number of written samples).
+        # The index is the source of truth — array shape may be larger due to
+        # pre-allocation via expected_samples.
+        if self._index:
+            # Find the highest sample_index in the index + 1
+            max_idx = max(
+                (meta.get("sample_index") or -1 for meta in self._index.values()),
+                default=-1,
+            )
+            self._next_idx = max_idx + 1 if max_idx >= 0 else len(self._index)
+        else:
+            self._next_idx = 0
+
         logger.info(f"ZarrActivationsLogger initialized at {zarr_path}")
 
     def _get_compressor(self, compression: Union[str, BaseCompressor, None]) -> BaseCompressor:
@@ -252,11 +270,63 @@ class ZarrActivationsLogger:
                 if key:
                     self._index[key] = {"key": key, "sample_index": idx}
 
+        # On resume: if expected_samples exceeds current capacity, do one
+        # upfront resize so the rest of the run is resize-free.
+        if (
+            not self.read_only
+            and self.expected_samples is not None
+            and self._prompt_activations is not None
+            and self._prompt_activations.shape[0] < self.expected_samples
+        ):
+            n = self.expected_samples
+            L = self._layer_count
+            H = self._hidden_size
+            logger.warning(
+                f"Zarr store has {self._prompt_activations.shape[0]} rows allocated but "
+                f"{n} expected — resizing upfront to avoid incremental resizes"
+            )
+            self._prompt_activations.resize((n, L, self.prompt_max_tokens, H))
+            self._response_activations.resize((n, L, self.response_max_tokens, H))
+            self._prompt_len.resize((n,))
+            self._response_len.resize((n,))
+            self._sample_key.resize((n,))
+            if self._response_token_ids is not None:
+                self._response_token_ids.resize((n, self.response_max_tokens))
+            if self._response_token_logprobs is not None:
+                self._response_token_logprobs.resize((n, self.response_max_tokens))
+            if self._response_topk_token_ids is not None:
+                self._response_topk_token_ids.resize((n, self.response_max_tokens, self.response_logprobs_top_k))
+            if self._response_topk_logprobs is not None:
+                self._response_topk_logprobs.resize((n, self.response_max_tokens, self.response_logprobs_top_k))
+
     def _ensure_dirs(self):
         if self.read_only:
             return
         self._meta_dir.mkdir(parents=True, exist_ok=True)
         self._text_dir.mkdir(parents=True, exist_ok=True)
+
+    def _append_array_row(self, idx: int, num_layers: int, hidden_size: int) -> None:
+        """Ensure Zarr arrays can accommodate a row at `idx`.
+
+        If arrays were pre-allocated with ``expected_samples``, this is a
+        no-op until the index exceeds the pre-allocated capacity.
+        """
+        needed = idx + 1
+        if self._prompt_activations.shape[0] >= needed:
+            return  # already have capacity — no resize needed
+        self._prompt_activations.resize((needed, num_layers, self.prompt_max_tokens, hidden_size))
+        self._response_activations.resize((needed, num_layers, self.response_max_tokens, hidden_size))
+        self._prompt_len.resize((needed,))
+        self._response_len.resize((needed,))
+        self._sample_key.resize((needed,))
+        if self._response_token_ids is not None:
+            self._response_token_ids.resize((needed, self.response_max_tokens))
+        if self._response_token_logprobs is not None:
+            self._response_token_logprobs.resize((needed, self.response_max_tokens))
+        if self._response_topk_token_ids is not None:
+            self._response_topk_token_ids.resize((needed, self.response_max_tokens, self.response_logprobs_top_k))
+        if self._response_topk_logprobs is not None:
+            self._response_topk_logprobs.resize((needed, self.response_max_tokens, self.response_logprobs_top_k))
 
     def _ensure_arrays(self, num_layers: int, hidden_size: int):
         if self._prompt_activations is not None:
@@ -276,9 +346,12 @@ class ZarrActivationsLogger:
 
         activation_chunk_shape = self._resolve_activation_chunk_shape(num_layers, hidden_size)
 
+        # Pre-allocate to expected_samples if provided, otherwise start at 0
+        init_samples = self.expected_samples or 0
+
         self._prompt_activations = self.arrays_group.require_dataset(
             "prompt_activations",
-            shape=(0, num_layers, self.prompt_max_tokens, hidden_size),
+            shape=(init_samples, num_layers, self.prompt_max_tokens, hidden_size),
             chunks=activation_chunk_shape,
             dtype=self.dtype,
             fill_value=0,
@@ -288,7 +361,7 @@ class ZarrActivationsLogger:
 
         self._response_activations = self.arrays_group.require_dataset(
             "response_activations",
-            shape=(0, num_layers, self.response_max_tokens, hidden_size),
+            shape=(init_samples, num_layers, self.response_max_tokens, hidden_size),
             chunks=activation_chunk_shape,
             dtype=self.dtype,
             fill_value=0,
@@ -298,7 +371,7 @@ class ZarrActivationsLogger:
 
         self._prompt_len = self.arrays_group.require_dataset(
             "prompt_len",
-            shape=(0,),
+            shape=(init_samples,),
             chunks=(max(1, min(self.chunk_size, 4096)),),
             dtype=np.int32,
             fill_value=0,
@@ -308,7 +381,7 @@ class ZarrActivationsLogger:
 
         self._response_len = self.arrays_group.require_dataset(
             "response_len",
-            shape=(0,),
+            shape=(init_samples,),
             chunks=(max(1, min(self.chunk_size, 4096)),),
             dtype=np.int32,
             fill_value=0,
@@ -318,7 +391,7 @@ class ZarrActivationsLogger:
 
         self._sample_key = self.arrays_group.require_dataset(
             "sample_key",
-            shape=(0,),
+            shape=(init_samples,),
             chunks=(max(1, min(self.chunk_size, 4096)),),
             dtype=str,
             fill_value="",
@@ -350,11 +423,12 @@ class ZarrActivationsLogger:
         sample_chunk = max(1, min(self.chunk_size, 4096))
         token_chunk = max(1, min(self.response_chunk_tokens, self.response_max_tokens))
         top_k = int(self.response_logprobs_top_k)
+        init_samples = self.expected_samples or 0
 
         if self._response_token_ids is None:
             self._response_token_ids = self.arrays_group.require_dataset(
                 "response_token_ids",
-                shape=(0, self.response_max_tokens),
+                shape=(init_samples, self.response_max_tokens),
                 chunks=(sample_chunk, token_chunk),
                 dtype=np.int32,
                 fill_value=-1,
@@ -365,7 +439,7 @@ class ZarrActivationsLogger:
         if self._response_token_logprobs is None:
             self._response_token_logprobs = self.arrays_group.require_dataset(
                 "response_token_logprobs",
-                shape=(0, self.response_max_tokens),
+                shape=(init_samples, self.response_max_tokens),
                 chunks=(sample_chunk, token_chunk),
                 dtype=np.float32,
                 fill_value=np.nan,
@@ -376,7 +450,7 @@ class ZarrActivationsLogger:
         if self._response_topk_token_ids is None:
             self._response_topk_token_ids = self.arrays_group.require_dataset(
                 "response_topk_token_ids",
-                shape=(0, self.response_max_tokens, top_k),
+                shape=(init_samples, self.response_max_tokens, top_k),
                 chunks=(sample_chunk, token_chunk, top_k),
                 dtype=np.int32,
                 fill_value=-1,
@@ -387,7 +461,7 @@ class ZarrActivationsLogger:
         if self._response_topk_logprobs is None:
             self._response_topk_logprobs = self.arrays_group.require_dataset(
                 "response_topk_logprobs",
-                shape=(0, self.response_max_tokens, top_k),
+                shape=(init_samples, self.response_max_tokens, top_k),
                 chunks=(sample_chunk, token_chunk, top_k),
                 dtype=np.float32,
                 fill_value=np.nan,
@@ -621,20 +695,23 @@ class ZarrActivationsLogger:
 
         self._ensure_arrays(num_layers, hidden_size)
 
-        idx = self._prompt_activations.shape[0]
-        self._prompt_activations.resize((idx + 1, num_layers, self.prompt_max_tokens, hidden_size))
-        self._response_activations.resize((idx + 1, num_layers, self.response_max_tokens, hidden_size))
-        self._prompt_len.resize((idx + 1,))
-        self._response_len.resize((idx + 1,))
-        self._sample_key.resize((idx + 1,))
-        if self._response_token_ids is not None:
-            self._response_token_ids.resize((idx + 1, self.response_max_tokens))
-        if self._response_token_logprobs is not None:
-            self._response_token_logprobs.resize((idx + 1, self.response_max_tokens))
-        if self._response_topk_token_ids is not None:
-            self._response_topk_token_ids.resize((idx + 1, self.response_max_tokens, self.response_logprobs_top_k))
-        if self._response_topk_logprobs is not None:
-            self._response_topk_logprobs.resize((idx + 1, self.response_max_tokens, self.response_logprobs_top_k))
+        # Check if key already exists — overwrite existing row to prevent orphaned rows
+        if key in self._index:
+            existing_meta = self._index[key]
+            existing_idx = existing_meta.get("sample_index")
+            if existing_idx is not None:
+                # Reuse existing Zarr array row
+                idx = existing_idx
+                logger.info(f"Overwriting existing entry {key} at Zarr row {idx}")
+            else:
+                # Upgrading metadata-only entry to full entry — append new row
+                idx = self._next_idx
+                self._append_array_row(idx, num_layers, hidden_size)
+                self._next_idx = idx + 1
+        else:
+            idx = self._next_idx
+            self._append_array_row(idx, num_layers, hidden_size)
+            self._next_idx = idx + 1
 
         stored_prompt_len = int(min(prompt_len or 0, self.prompt_max_tokens))
         stored_response_len = int(min(response_len or 0, self.response_max_tokens))
@@ -726,6 +803,33 @@ class ZarrActivationsLogger:
         self._index[key] = metadata_entry
         logger.debug(f"Logged entry {key} to Zarr store at index {idx}.")
 
+    def log_metadata(self, key: str, metadata: Dict[str, Any]):
+        """Write an index-only entry with no activation arrays.
+
+        Use for text-only selfcheck samples or any record where activations
+        are not available/needed. The entry is visible to list_entries(),
+        get_entry(metadata_only=True), and _build_group_index().
+        """
+        if self.read_only:
+            raise ValueError("Cannot log entries in read-only mode")
+        self._ensure_dirs()
+
+        metadata_entry = {
+            k: v for k, v in metadata.items()
+            if k not in {
+                "model_outputs", "all_layers_activations",
+                "response_token_ids", "response_token_logprobs",
+                "response_topk_token_ids", "response_topk_logprobs",
+            }
+        }
+        metadata_entry["key"] = key
+        metadata_entry["sample_index"] = None
+        metadata_entry["has_activations"] = False
+
+        with open(self._index_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(metadata_entry, ensure_ascii=False) + "\n")
+        self._index[key] = metadata_entry
+
     def get_entry(self, key: str, metadata_only: bool = False) -> Dict[str, Any]:
         """
         Retrieve an entry from the Zarr store.
@@ -739,10 +843,9 @@ class ZarrActivationsLogger:
 
         meta = dict(self._index[key])
         idx = meta.get("sample_index")
-        if idx is None:
-            raise KeyError(f"Missing sample_index for key {key}")
 
-        if metadata_only:
+        # Return early for metadata-only requests or entries without activations
+        if metadata_only or idx is None:
             return meta
 
         prompt_len = int(self._prompt_len[idx]) if self._prompt_len is not None else 0

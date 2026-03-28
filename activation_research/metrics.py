@@ -41,14 +41,20 @@ def _record_embedding(record: dict) -> torch.Tensor:
 
     Preferred schema is `z_views: (K, D)`, reduced by view-mean.
     Legacy schemas (`z1`) are still supported for compatibility.
+    Accepts both torch.Tensor and numpy.ndarray values.
     """
+    def _to_tensor(x):
+        if isinstance(x, torch.Tensor):
+            return x
+        return torch.from_numpy(np.asarray(x, dtype=np.float32))
+
     if "z_views" in record:
-        z_views = record["z_views"]
+        z_views = _to_tensor(record["z_views"])
         if z_views.dim() != 2:
             raise ValueError("Expected record['z_views'] to have shape (K, D)")
         return z_views.mean(dim=0)
     if "z1" in record:
-        return record["z1"]
+        return _to_tensor(record["z1"])
     raise KeyError("Record must contain either 'z_views' or 'z1'")
 
 

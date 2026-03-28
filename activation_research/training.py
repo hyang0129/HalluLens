@@ -723,6 +723,10 @@ def train_contrastive_logprob_recon(
     same_class_weight=1.0,
     balanced_sampling=False,
     recon_lambda: float = None,
+    use_infinite_index_stream: bool = False,
+    infinite_stream_shuffle: bool = True,
+    infinite_stream_seed: int = 0,
+    steps_per_epoch_override: int = None,
 ):
     """Train a ``LogprobReconProgressiveCompressor`` with auxiliary logprob reconstruction.
 
@@ -743,12 +747,27 @@ def train_contrastive_logprob_recon(
     checkpoint_dir, save_every, resume_from, persistent_workers,
     cleanup_legacy_checkpoints, snapshot_every, snapshot_keep_last,
     use_labels, ignore_label, same_sample_weight, same_class_weight,
-    balanced_sampling :
+    balanced_sampling, use_infinite_index_stream, infinite_stream_shuffle,
+    infinite_stream_seed :
         Same semantics as ``train_contrastive``.
     recon_lambda : float or None
         Override ``model.recon_lambda``.  Pass ``None`` to use the model default.
+    steps_per_epoch_override : int or None
+        When set, use this fixed step count per epoch instead of
+        ``ceil(dataset_len / batch_size)``.  Requires
+        ``use_infinite_index_stream=True``.
     """
     _lambda = float(recon_lambda) if recon_lambda is not None else model.recon_lambda
+
+    if steps_per_epoch_override is not None and not use_infinite_index_stream:
+        raise ValueError("steps_per_epoch_override requires use_infinite_index_stream=True")
+
+    base_dataset_len = None
+    if use_infinite_index_stream:
+        if not hasattr(train_dataset, "__len__"):
+            raise TypeError("use_infinite_index_stream=True requires train_dataset to have __len__")
+        base_dataset_len = len(train_dataset)
+        sub_batch_size = batch_size
 
     def _call_model(m, x, layer_idx=None):
         if layer_idx is None:
@@ -791,6 +810,15 @@ def train_contrastive_logprob_recon(
         logger.info(f"Resumed training from epoch {start_epoch}")
 
     is_iterable = isinstance(train_dataset, IterableDataset)
+    if use_infinite_index_stream and not is_iterable:
+        train_dataset = InfiniteIndexStream(
+            train_dataset,
+            shuffle=bool(infinite_stream_shuffle),
+            seed=int(infinite_stream_seed),
+        )
+        is_iterable = True
+    if is_iterable and balanced_sampling and use_labels:
+        logger.warning("Balanced sampling is not supported for iterable datasets; disabling sampler.")
     sampler = (
         _build_balanced_sampler(train_dataset)
         if balanced_sampling and use_labels and not is_iterable
@@ -807,6 +835,13 @@ def train_contrastive_logprob_recon(
         persistent_workers=use_persistent_workers,
         collate_fn=_contrastive_collate_with_logprob,
     )
+
+    steps_per_epoch = None
+    train_iter = None
+    if use_infinite_index_stream:
+        inferred = int(math.ceil(base_dataset_len / float(batch_size)))
+        steps_per_epoch = int(steps_per_epoch_override) if steps_per_epoch_override is not None else inferred
+        train_iter = iter(train_loader)
 
     test_loader = None
     if test_dataset is not None:
@@ -830,10 +865,15 @@ def train_contrastive_logprob_recon(
         total_intra_cos = total_intra_inter = 0.0
         n_batches = 0
 
-        try:
-            total_steps = len(train_loader)
-        except TypeError:
-            total_steps = None
+        if use_infinite_index_stream:
+            total_steps = steps_per_epoch
+            loop = _tqdm(range(total_steps), desc=f"Epoch {epoch + 1}/{epochs}", leave=False)
+        else:
+            try:
+                total_steps = len(train_loader)
+            except TypeError:
+                total_steps = None
+            loop = _tqdm(train_loader, desc=f"Epoch {epoch + 1}/{epochs}", leave=False)
 
         buffer_views = []
         buffer_view_indices = []
@@ -842,9 +882,9 @@ def train_contrastive_logprob_recon(
         buffer_sample_ids = [] if use_labels else None
 
         i = 0
-        loop = _tqdm(train_loader, desc=f"Epoch {epoch + 1}/{epochs}", leave=False)
-        for batch in loop:
+        for _loop_item in loop:
             i += 1
+            batch = next(train_iter) if use_infinite_index_stream else _loop_item
 
             views = batch["views_activations"].to(device, non_blocking=True)
             buffer_views.append(views)

@@ -92,12 +92,6 @@ bash scripts/download_data.sh
 - **Master notebooks** live in `notebooks/` — these are git-tracked reference copies. Do not run them.
 - **Working notebooks** are copies in the repo root for active execution. Root-level `*.ipynb` files are gitignored.
 
-Key notebooks in `notebooks/`:
-- `b_contrastive_training_with_new_trainer.ipynb` — contrastive model training
-- `c_layeraware_training_with_new_trainer.ipynb` — layer-aware training
-- `k_view_loader_profile.ipynb` — K-view loader profiling
-
-Prototype notebooks are migrated to `scripts/train_activation_model.py` for reproducible CLI runs.
 
 ## Compute Contexts
 
@@ -113,9 +107,37 @@ COMPUTE_CONTEXT=LOCAL_CPU   # or REMOTE_GPU
 - GPU tasks must be deferred or routed through the Jupyter server
 
 ### Context: REMOTE_GPU
-- H100 GPU accessible via Jupyter notebook server at `http://localhost:8889`
+- H200 GPU accessible via Jupyter notebook server at `http://alphagpu23:8889` (password: `123`)
 - GPU-intensive work (inference, activation logging, model training) can run here via notebooks or CLI
 - Preferred workflow: use notebooks for interactive GPU work, CLI scripts for batch jobs
+
+### Claude Code GPU execution (REMOTE_GPU only)
+
+Claude Code can execute code directly on the GPU node without user intervention using `utils/jupyter_exec.py`, which connects via the Jupyter REST + WebSocket API.
+
+**Quick CLI check:**
+```bash
+python utils/jupyter_exec.py "import torch; print(torch.cuda.get_device_name(0))"
+```
+
+**In Python / agent scripts:**
+```python
+from utils.jupyter_exec import JupyterExecutor
+
+with JupyterExecutor() as jup:
+    result = jup.run("import torch; print(torch.cuda.is_available())")
+    print(result.stdout)   # stdout text
+    print(result.status)   # "ok" | "error" | "timeout"
+```
+
+**How it works:**
+1. Password-login to `http://alphagpu23:8889` → session cookie
+2. `POST /api/kernels` → start a fresh `p311` kernel (micromamba venv); auto-deleted after `run()` returns
+3. WebSocket to `/api/kernels/{id}/channels` → send `execute_request`, stream back `stream`/`display_data`/`execute_reply` messages
+
+**Dependency:** `websocket-client` (install with `pip install websocket-client` on alphacpu if missing).
+
+**When to use:** Any time `COMPUTE_CONTEXT=REMOTE_GPU` and code needs to run on GPU (model inference, training, activation logging). Prefer this over asking the user to manually run notebook cells.
 
 ## Development Notes
 

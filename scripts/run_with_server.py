@@ -497,7 +497,7 @@ def run_task_step(step, task, model, **kwargs):
                 output_dir=kwargs.get("output_dir", "output"),
                 split=kwargs.get("split", "validation"),
                 inference_method=kwargs.get("inference_method", "vllm"),
-                max_tokens=kwargs.get("max_tokens", 128),
+                max_tokens=kwargs.get("max_inference_tokens") or kwargs.get("max_tokens", 128),
                 temperature=kwargs.get("temperature", 0.0),
                 N=kwargs.get("N"),
                 generations_file_path=kwargs.get("generations_file_path"),
@@ -508,6 +508,7 @@ def run_task_step(step, task, model, **kwargs):
                 quick_debug_mode=kwargs.get("quick_debug_mode", False),
                 resume=kwargs.get("resume", True),
                 llm_evaluator=kwargs.get("llm_evaluator"),
+                batch_size=kwargs.get("batch_size"),
             )
 
         else:
@@ -567,6 +568,7 @@ def run_experiment(
     resume=True,
     resume_eval=True,
     llm_evaluator=None,
+    batch_size=None,
 ):
     """Run a HalluLens experiment with automatic server management.
 
@@ -607,8 +609,11 @@ def run_experiment(
     logger.info("=" * 80)
 
     # Determine which model needs the server
+    # When batch_size is set, inference runs directly via ModelAdapter — no server needed.
     server_model = None
-    if step in ["generate", "all"]:
+    if batch_size and step in ["inference", "all"]:
+        logger.info("batch_size is set — skipping server startup (using ModelAdapter directly)")
+    elif step in ["generate", "all"]:
         server_model = q_generator or model
     elif step == "inference":
         server_model = model
@@ -748,6 +753,8 @@ def run_experiment(
             temperature=temperature,
             # HotpotQA LLM eval specific
             llm_evaluator=llm_evaluator,
+            # Batched inference (HotpotQA adapter path)
+            batch_size=batch_size,
         )
 
         if step == "all":

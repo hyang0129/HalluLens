@@ -35,6 +35,7 @@ Output eval_results.json schema (ActivationParser-compatible):
   }
 """
 
+import hashlib
 import json
 import os
 import argparse
@@ -123,9 +124,8 @@ class HotpotQAInference:
 
         self.data = load_hotpotqa(split=split, n_samples=n_samples)
 
-    def run_inference(self, inference_method="vllm", max_tokens=128, temperature=0.0,
-                      logger_type="lmdb", activations_path=None, log_file=None,
-                      resume=True, max_retries=3, base_delay=1.0):
+    def _build_prompts_df(self):
+        """Build a DataFrame of prompts from the loaded dataset."""
         rows = []
         for item in self.data:
             rows.append({
@@ -136,7 +136,12 @@ class HotpotQAInference:
                 "level": item["level"],
                 "prompt": format_prompt(item["question"]),
             })
-        prompts_df = pd.DataFrame(rows)
+        return pd.DataFrame(rows)
+
+    def run_inference(self, inference_method="vllm", max_tokens=128, temperature=0.0,
+                      logger_type="lmdb", activations_path=None, log_file=None,
+                      resume=True, max_retries=3, base_delay=1.0):
+        prompts_df = self._build_prompts_df()
 
         print(f"Starting HotpotQA inference | model={self.model_path} | split={self.split} | N={len(prompts_df)}")
 
@@ -156,6 +161,121 @@ class HotpotQAInference:
             resume=resume,
         )
         print(f"Inference complete → {self.generations_file_path}")
+
+    def run_inference_batched(self, batch_size=8, max_tokens=128, temperature=0.0,
+                              activations_path=None, resume=True):
+        """Run batched inference using HFTransformersAdapter directly.
+
+        Bypasses the HTTP server and calls model.generate() on batches of
+        prompts for higher throughput.  Activations are written to Zarr via
+        AsyncActivationWriter, matching the server's storage format.
+
+        Args:
+            batch_size: Number of prompts per model.generate() call.
+            max_tokens: Maximum new tokens per response.
+            temperature: Sampling temperature (0.0 = greedy).
+            activations_path: Path to .zarr store for activations.
+            resume: Skip prompts already present in the generations file.
+        """
+        from activation_logging.model_adapter import HFTransformersAdapter
+        from activation_logging.zarr_activations_logger import ZarrActivationsLogger
+        from activation_logging.server import AsyncActivationWriter
+
+        prompts_df = self._build_prompts_df()
+        total = len(prompts_df)
+
+        # --- Resume: skip already-processed prompts ---
+        already_done = 0
+        if resume and os.path.exists(self.generations_file_path):
+            try:
+                existing = pd.read_json(self.generations_file_path, lines=True)
+                existing_prompts = set(existing["prompt"].tolist())
+                mask = ~prompts_df["prompt"].isin(existing_prompts)
+                prompts_df = prompts_df[mask].reset_index(drop=True)
+                already_done = total - len(prompts_df)
+                if len(prompts_df) == 0:
+                    print(f"All {total} prompts already processed — nothing to do.")
+                    return
+                print(f"Resuming: {already_done}/{total} done, {len(prompts_df)} remaining")
+            except Exception as e:
+                print(f"Warning: could not load existing generations ({e}), starting fresh.")
+                already_done = 0
+
+        print(f"Starting batched HotpotQA inference | model={self.model_path} | "
+              f"split={self.split} | remaining={len(prompts_df)} | batch_size={batch_size}")
+
+        # --- Set up adapter and activation logging ---
+        adapter = HFTransformersAdapter(
+            model_name=self.model_path,
+            target_layers="all",
+            sequence_mode="all",
+            enable_logprobs=True,
+        )
+
+        writer = None
+        zarr_logger = None
+        if activations_path:
+            zarr_logger = ZarrActivationsLogger(
+                zarr_path=activations_path, read_only=False,
+                expected_samples=total,
+            )
+            writer = AsyncActivationWriter(zarr_logger)
+
+        file_mode = "a" if already_done > 0 else "w"
+        prompts = prompts_df["prompt"].tolist()
+        n_batches = (len(prompts) + batch_size - 1) // batch_size
+
+        try:
+            with open(self.generations_file_path, file_mode, encoding="utf-8") as f:
+                pbar = tqdm(total=len(prompts), desc="Batched inference")
+                for batch_idx in range(n_batches):
+                    start = batch_idx * batch_size
+                    end = min(start + batch_size, len(prompts))
+                    batch_prompts = prompts[start:end]
+
+                    results = adapter.infer_batch(
+                        batch_prompts,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    )
+
+                    for i, result in enumerate(results):
+                        row_idx = start + i
+                        record = prompts_df.iloc[row_idx].to_dict()
+                        record["generation"] = result.response_text
+                        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        f.flush()
+
+                        # Log activations to Zarr
+                        if writer is not None and result.activations is not None:
+                            prompt_key = hashlib.sha256(
+                                result.prompt.encode("utf-8")
+                            ).hexdigest()
+                            log_entry = {
+                                "all_layers_activations": result.activations,
+                                "input_length": result.input_length,
+                                "prompt": result.prompt,
+                                "response": result.response_text,
+                                "model": self.model_path,
+                                "prompt_hash": prompt_key,
+                                "trim_position": result.trim_position,
+                            }
+                            if result.logprobs is not None:
+                                log_entry.update(result.logprobs)
+                            writer.enqueue(prompt_key, log_entry)
+
+                    pbar.update(len(batch_prompts))
+                pbar.close()
+        finally:
+            if writer is not None:
+                print("Draining activation writer...")
+                writer.shutdown(timeout=60.0)
+            if zarr_logger is not None:
+                zarr_logger.close()
+
+        print(f"Batched inference complete → {self.generations_file_path}")
+        if activations_path:
+            print(f"Activations saved → {activations_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -449,8 +569,13 @@ def run_step(step, model, output_dir="output", split="validation",
              generations_file_path=None, eval_results_path=None, log_file=None,
              logger_type="lmdb", activations_path=None,
              quick_debug_mode=False, resume=True, max_retries=3, base_delay=1.0,
-             llm_evaluator=None):
-    """Run a single step of the HotpotQA task. Callable from Python directly."""
+             llm_evaluator=None, batch_size=None):
+    """Run a single step of the HotpotQA task. Callable from Python directly.
+
+    Args:
+        batch_size: If set, use direct batched inference via HFTransformersAdapter
+                    instead of the HTTP server path.  Recommended for throughput.
+    """
 
     if step == "inference":
         runner = HotpotQAInference(
@@ -460,17 +585,26 @@ def run_step(step, model, output_dir="output", split="validation",
             n_samples=N,
             generations_file_path=generations_file_path,
         )
-        runner.run_inference(
-            inference_method=inference_method,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            logger_type=logger_type,
-            activations_path=activations_path,
-            log_file=log_file,
-            resume=resume,
-            max_retries=max_retries,
-            base_delay=base_delay,
-        )
+        if batch_size:
+            runner.run_inference_batched(
+                batch_size=batch_size,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                activations_path=activations_path,
+                resume=resume,
+            )
+        else:
+            runner.run_inference(
+                inference_method=inference_method,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                logger_type=logger_type,
+                activations_path=activations_path,
+                log_file=log_file,
+                resume=resume,
+                max_retries=max_retries,
+                base_delay=base_delay,
+            )
 
     elif step == "eval":
         evaluator = HotpotQAEval(

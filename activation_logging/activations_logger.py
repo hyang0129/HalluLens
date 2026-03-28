@@ -264,10 +264,16 @@ class ActivationsLogger:
 
         return full_hidden_states
 
+    def log_metadata(self, key: str, metadata: Dict[str, Any]):
+        """Write an index-only entry with no activation arrays (Zarr backend only)."""
+        if self._backend is not None:
+            return self._backend.log_metadata(key, metadata)
+        raise NotImplementedError("log_metadata only supported for Zarr backend")
+
     def log_entry(self, key: str, entry: Dict[str, Any]):
         """
         Log an entry to the LMDB.
-        
+
         Args:
             key: Unique identifier for the entry (typically a hash of the prompt)
             entry: Dictionary containing the data to log (prompt, response, model_outputs, etc.)
