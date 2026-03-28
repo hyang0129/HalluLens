@@ -107,7 +107,7 @@ COMPUTE_CONTEXT=LOCAL_CPU   # or REMOTE_GPU
 - GPU tasks must be deferred or routed through the Jupyter server
 
 ### Context: REMOTE_GPU
-- H200 GPU accessible via Jupyter notebook server at `http://alphagpu24:8889` (password: `123`)
+- H200 GPU accessible via Jupyter notebook server at `http://alphagpu23:8889` (password: `123`)
 - GPU-intensive work (inference, activation logging, model training) can run here via notebooks or CLI
 - Preferred workflow: use notebooks for interactive GPU work, CLI scripts for batch jobs
 
@@ -131,7 +131,7 @@ with JupyterExecutor() as jup:
 ```
 
 **How it works:**
-1. Password-login to `http://alphagpu24:8889` → session cookie
+1. Password-login to `http://alphagpu23:8889` → session cookie
 2. `POST /api/kernels` → start a fresh `p311` kernel (micromamba venv); auto-deleted after `run()` returns
 3. WebSocket to `/api/kernels/{id}/channels` → send `execute_request`, stream back `stream`/`display_data`/`execute_reply` messages
 

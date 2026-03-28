@@ -652,6 +652,100 @@ class PreloadedActivationDataset(Dataset):
         }
 
 
+class TokenTrajectoryDataset(Dataset):
+    """Token-trajectory contrastive dataset.
+
+    Wraps a :class:`PreloadedActivationDataset` (cache shape ``(N, L, T, H)``).
+    Instead of sampling K layers per sample (the existing approach), each call to
+    ``__getitem__`` samples K token positions from the response and returns their
+    full layer-stack trajectory.
+
+    Each view has shape ``(L, H)`` — the residual stream across all L layers for
+    one response token.  ``views_activations`` has shape ``(num_views, L, H)``.
+
+    The shape contract is identical to :class:`PreloadedActivationDataset`, so
+    ``_contrastive_collate_kview`` and ``train_contrastive`` work unchanged:
+    the ``seq_len`` dimension is now ``L`` (layer count) rather than ``T`` (token
+    count padded to ``pad_length``).
+
+    Args:
+        preloaded: A :class:`PreloadedActivationDataset` whose ``.cache`` array
+            has shape ``(N, L, T, H)``.  The dataset's labels, prompt_hashes, and
+            optional ``_row_indices`` are reused directly.
+        response_lengths: Integer array of shape ``(N,)`` giving the number of
+            real (non-padded) response tokens for each cache row.  Obtain from
+            the zarr store: ``zarr.open(path)["response_len"][:]``.
+        num_views: Number of token positions to sample per example.
+        min_response_len: Samples whose actual response length is shorter than
+            this are skipped during dataset construction (filtered out of the
+            index).  Must be >= ``num_views``.
+    """
+
+    def __init__(
+        self,
+        preloaded: "PreloadedActivationDataset",
+        response_lengths: np.ndarray,
+        num_views: int = 2,
+        min_response_len: Optional[int] = None,
+    ):
+        self.preloaded = preloaded
+        self.response_lengths = np.asarray(response_lengths, dtype=np.int32)
+        self.num_views = int(num_views)
+        min_len = int(min_response_len) if min_response_len is not None else self.num_views
+
+        # Build a valid-index list: logical indices into the preloaded dataset
+        # where the actual response is long enough to sample num_views tokens.
+        valid = []
+        for logical_idx in range(len(preloaded)):
+            cache_idx = (
+                int(preloaded._row_indices[logical_idx])
+                if preloaded._row_indices is not None
+                else logical_idx
+            )
+            actual_len = min(
+                int(self.response_lengths[cache_idx]),
+                preloaded.cache.shape[2],  # T dimension cap
+            )
+            if actual_len >= min_len:
+                valid.append(logical_idx)
+
+        self._valid_indices = np.array(valid, dtype=np.int64)
+
+    def __len__(self) -> int:
+        return len(self._valid_indices)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        logical_idx = int(self._valid_indices[idx])
+        cache_idx = (
+            int(self.preloaded._row_indices[logical_idx])
+            if self.preloaded._row_indices is not None
+            else logical_idx
+        )
+
+        acts = torch.from_numpy(
+            np.array(self.preloaded.cache[cache_idx], dtype=np.float32)
+        )  # (L, T, H)
+
+        actual_len = min(
+            int(self.response_lengths[cache_idx]),
+            acts.shape[1],
+        )
+
+        token_positions = random.sample(range(actual_len), self.num_views)
+
+        # acts[:, pos, :] → (L, H); stack K of them → (K, L, H)
+        trajectories = acts[:, token_positions, :].permute(1, 0, 2).contiguous()
+
+        return {
+            "views_activations": trajectories,
+            "view_indices": torch.tensor(token_positions, dtype=torch.long),
+            "halu": torch.tensor(
+                float(self.preloaded.labels[logical_idx]), dtype=torch.float32
+            ),
+            "hashkey": self.preloaded.prompt_hashes[logical_idx],
+        }
+
+
 class ActivationParser:
     def __init__(self, inference_json: str, eval_json: str, activations_path: str,
                  df: Optional[pd.DataFrame] = None, logger_type: str = "zarr",

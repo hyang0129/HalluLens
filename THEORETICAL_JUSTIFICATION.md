@@ -316,3 +316,127 @@ The head $g$ minimizes $\mathcal{L}_g = \|g(z) - \bar{\ell}\|^2$ (predicting mea
 | 5J. Adversarial Logprob Decoupling | Gradient reversal enforces MI(z, logprob) ≈ 0 | AUROC gain from combining z + logprob approaches theoretical maximum | Adversarial instability; requires careful learning rate and α scheduling |
 
 **Relationship between Justifications 4 and 5.** Justification 4 mechanisms require logprob at inference time (they are forward-pass modifications or auxiliary inputs). Justification 5 mechanisms require logprob only at training time — the inference-time compressor is architecturally identical to the baseline `ProgressiveCompressor`. This makes J5 mechanisms deployable in any white-box setting where activations are accessible, even if the inference server does not return logprobs. The two families are compatible and composable: a compressor trained with J5 mechanisms (uncertainty-aware projection) can additionally be combined at inference with J4 mechanisms (uncertainty-weighted pooling, entropy conditioning) for maximum performance.
+
+---
+
+## Justification 6: Token-Trajectory Contrastive Learning
+
+### The Concept
+
+The existing contrastive training approach takes a **layer-first** view: for a given layer, aggregate all token activations via mean pooling to produce a `[hidden_dim]` summary vector. Different layers of the same response are treated as different "views" for contrastive learning. The compressor learns to align representations that are consistent across processing depth.
+
+This section proposes inverting that axis: take a **token-first** view. For a given token, collect its activation across all layers to produce a `[n_layers, hidden_dim]` residual stream trajectory. Different tokens from the same response are treated as different "views." The compressor learns to align representations that are consistent across token positions.
+
+**Concretely:**
+- Current: input shape `[seq_len, hidden_dim]` at one layer → mean pool → compress → view
+- Proposed: input shape `[n_layers, hidden_dim]` for one token → compress → view (no pooling needed; layer count is fixed)
+
+Positive pairs: two randomly sampled tokens from the same response. Negative pairs: tokens from responses with different hallucination labels. The contrastive objective and SupConLoss are otherwise unchanged.
+
+---
+
+### Theoretical Justification
+
+#### The residual stream trajectory as a processing fingerprint
+
+In a transformer, each layer adds to a token's residual stream via attention and MLP sublayers. The full trajectory `[n_layers, hidden_dim]` is therefore a record of the complete computational history of that token: where it started (the input embedding), how much each layer transformed it, and in what direction. This is sometimes called the residual stream "path" in mechanistic interpretability.
+
+The trajectory encodes two distinct types of information:
+1. **Token-local information**: the token's own identity, syntactic role, and positional context — established in early layers and carried forward.
+2. **Global context information**: information routed into this token from other tokens via attention — accumulated across layers, growing richer in later layers as cross-token interactions compound.
+
+Crucially, the second type of information is response-global. By mid-to-late layers, every token's residual stream is heavily contaminated by what every other token is doing, via multi-head attention. A hallucinated response generates content that is "off-distribution" relative to the model's parametric knowledge, and this propagates backwards through attention into every token's residual stream — including semantically neutral tokens like "the", "a", or punctuation.
+
+#### Why the contrastive objective forces the compressor to find response-level signal
+
+The contrastive objective requires the compressor to produce similar embeddings for two randomly sampled tokens from the same response. These tokens have *completely different* semantics, syntax, and positions. The only property they share is that they were both generated in the same response, under the same model state.
+
+By the same logic as vision contrastive learning (where random crops from the same image must share a global image representation), the contrastive objective here will be forced to **discard all token-specific content** — semantics, syntax, position — and find only what is shared across the full token population of the response. That shared property is the *global generative state of the model during that response*: whether it was in a confident knowledge-retrieval mode or a confabulation mode.
+
+The contrastive objective does the filtering implicitly. Unlike the current mean-pooling approach, which explicitly averages out token variation before compression, the token-trajectory approach lets individual tokens retain their full trajectory, and relies on the contrastive training pressure to learn which dimensions of that trajectory are response-global and which are token-specific.
+
+#### Common tokens as controlled probes
+
+Function words and punctuation ("the", "a", "of", commas) appear in virtually every response, regardless of whether the response hallucinates. This means they are present as positive-pair candidates in both hallucinated and grounded responses, and as negative-pair candidates across responses of different labels.
+
+This creates a natural controlled experiment: the token identity is held constant (same word type), and only the response-level state varies. Any systematic difference in "the"'s residual stream trajectory in hallucinated vs. grounded responses must come from the global context encoded via attention, not from the token's identity. These common tokens are therefore not noise — they are the *cleanest* signal carriers, because they control for token content while varying only the response-level epistemic state.
+
+Semantically charged tokens (proper nouns, numbers, specific entities) conflate token-level and response-level signal in a way that common tokens do not. A contrastive learning setup that treats all tokens uniformly will disproportionately benefit from the common-token controlled experiments built into every response.
+
+#### Where in the trajectory the signal appears
+
+The hallucination signal should be concentrated in later layers of the trajectory. Early layers encode primarily the token's own identity (the input embedding dominates the residual stream when little has been added). Later layers reflect the accumulated effect of cross-token attention, including information from all surrounding tokens. The compressor, trained to find response-global features, should implicitly learn to weight later-layer deltas more heavily than early-layer information.
+
+This is an empirically testable prediction: if the compressor's attention (or learned projection weights) are visualized, they should concentrate on the latter portion of the `[n_layers, hidden_dim]` trajectory rather than the early portion. This would additionally confirm at which layer depth the response-level hallucination signal becomes "visible" in the residual stream — a finding of independent mechanistic interpretability interest.
+
+---
+
+### Comparison to Existing Approaches
+
+| Property | Current (layer views) | Proposed (token views) |
+|---|---|---|
+| Input shape | `[seq_len, hidden_dim]` per layer | `[n_layers, hidden_dim]` per token |
+| Aggregation required | Mean pool over sequence dim | None (layer count is fixed) |
+| What varies between views | Which layer | Which token |
+| What contrastive objective aligns | Cross-layer consistency | Cross-token consistency |
+| What gets discarded | Layer-specific variation | Token-specific content |
+| What survives in embedding | Stable across processing depth | Stable across token positions |
+| Layer selection hyperparameter | Required (which layers to use) | Not required (all layers used) |
+| Implicit hypothesis about hallucination | Signal is consistent across layers | Signal is consistent across tokens |
+
+These hypotheses are orthogonal. Current layer views test "does hallucination leave a consistent signature across the network's depth?" Token views test "does hallucination leave a consistent signature across the response's breadth?" Both could be true simultaneously.
+
+---
+
+### Why It Might Work
+
+1. **Attention distributes response-level state to all tokens.** Multi-head attention in late layers mixes global context into every token's representation. If the model is in a hallucination-generating state, this state is detectable in every token's trajectory, not just the answer-span tokens. The compressor learns to read this globally distributed signal.
+
+2. **No layer hyperparameter.** The current approach requires selecting which layer(s) to use as views — a non-trivial choice that varies across model architectures and may require per-model sweep calibration. Token-trajectory views use all layers by construction, potentially achieving better coverage of the residual stream without hyperparameter tuning.
+
+3. **Common tokens provide structure the current approach discards.** Mean pooling across the full sequence gives common tokens equal weight to content tokens, potentially diluting signal. The token-trajectory view treats common tokens as first-class positive pairs, leveraging their controlled-probe property.
+
+4. **Complementary to layer views.** The two approaches make different inductive bets. If both are valid, a combined approach (using both layer views and token views in a joint contrastive training setup) could capture more signal than either alone.
+
+5. **Per-token compression may capture dynamics that aggregation erases.** Mean pooling collapses the within-sequence variation in residual stream processing. Token-trajectory compression preserves that variation and lets the compressor find signal in the *pattern* of how tokens are processed, not just the aggregate state.
+
+---
+
+### Why It Might Fail
+
+1. **Token-specific content may dominate the trajectory.** The first few layers of a token's trajectory are dominated by its identity embedding. If the compressor cannot learn to downweight early layers sufficiently, token-specific content will dominate the compressed embedding, making positive pairs (different tokens, same response) hard to align. The contrastive objective provides gradient pressure against this but may not fully overcome it, particularly for semantically very different token pairs.
+
+2. **Hallucination signal may be position-sparse, not position-dense.** If hallucination is primarily detectable at the answer-span tokens — specific content tokens where the model "commits" to a wrong fact — then the majority of random token samples will be from context/question tokens that carry minimal hallucination signal. Positive pairs would then be two nearly-uninformative tokens, and the contrastive objective would learn very slowly or collapse to a trivial solution.
+
+3. **The signal in later layers is also noisier.** While later layers carry more cross-token information, they also carry more response-specific compositional structure (discourse coherence, coreference, syntactic agreement) that is independent of hallucination status. The compressor has more to ignore, not just more to use.
+
+4. **Common tokens may have degenerate trajectories.** High-frequency function words may have nearly identical trajectories across all responses, hallucinated or not, because they serve stable syntactic roles regardless of the model's factual state. If the compressor cannot find discriminative signal in these trajectories, it will be forced to rely on rare, content-bearing tokens — which partially defeats the controlled-probe advantage.
+
+5. **Computational cost.** The current approach compresses `[seq_len, hidden_dim]` → scalar. The proposed approach compresses `[n_layers, hidden_dim]` → scalar. For Llama-3.1 with 32 layers and a sequence length of ~100 tokens, the proposed approach processes 100 individual `[32, 4096]` tensors per response instead of one `[100, 4096]` tensor per layer. This is roughly equivalent in total FLOPs but creates a different batching structure that may be less efficient in practice.
+
+---
+
+### Key Empirical Questions
+
+The experiment is itself a diagnostic of hallucination's spatial structure in the residual stream:
+
+- **If token views work comparably to layer views:** hallucination leaves a dense, distributed signature across all token trajectories — response-global and not concentrated at answer-span positions.
+- **If token views work better than layer views:** the hallucination signal is more consistent across token positions than across layer depths — the residual stream dynamics at individual token level carry richer signal than the aggregate cross-layer picture.
+- **If token views fail:** the hallucination signal is sparse in token space, concentrated at a few positions that random token sampling rarely hits. This would suggest that token-selective approaches (specifically sampling answer-span tokens, not random tokens) would be needed to recover signal.
+- **If token views but with answer-span tokens only work:** hallucination is sparse but not distributed — the answer tokens are privileged sites of signal, consistent with mechanistic interpretability evidence for last-token dominance in factual recall tasks.
+
+Any of these outcomes is informative about the geometry of hallucination in transformer activation space.
+
+---
+
+### Relationship to Existing Justifications
+
+This justification is architecturally independent of Justifications 1–5 but theoretically complementary:
+
+- **Justification 2 (Cross-Layer Consistency)** tests whether the same sequence aggregate is consistent across layers. Token-trajectory views test the dual question: whether the same layer stack is consistent across tokens. Both are measuring consistency, but along different axes of the `[seq_len, n_layers, hidden_dim]` activation tensor.
+- **Justification 3 (Intrinsic Epistemic Encoding)** argues that epistemic state is encoded in the residual stream and lost in the output projection. Token-trajectory compression is a different read-out mechanism for the same epistemic signal — instead of reading it from a single layer's aggregate state, it reads it from the full trajectory of individual tokens.
+- **Justification 4A (Uncertainty-Weighted Pooling)** and **4D (Residualization)** could both be applied to the token sampling distribution rather than the pooling weights: sample tokens with probability inversely proportional to their logprob, biasing the positive pairs toward high-uncertainty positions. This would combine the token-trajectory approach with the logprob-guidance intuition from Justification 4.
+
+| Justification | Core mechanism | Key prediction | Primary failure mode |
+|---|---|---|---|
+| 6. Token-Trajectory Contrastive | Compress per-token layer stack; align random tokens from same response | Works iff hallucination signal is dense across token positions | Signal is position-sparse; random token sampling is uninformative |

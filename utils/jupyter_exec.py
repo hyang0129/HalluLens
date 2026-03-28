@@ -2,7 +2,7 @@
 Remote Jupyter kernel executor.
 
 Allows Claude Code (running on alphacpu) to execute Python code on the
-GPU-enabled alphagpu24 node via the Jupyter REST + WebSocket API.
+GPU-enabled node (configured via GPUNODE in .env) via the Jupyter REST + WebSocket API.
 
 Usage:
     from utils.jupyter_exec import JupyterExecutor
@@ -28,12 +28,12 @@ import requests
 import websocket  # pip install websocket-client
 
 def _default_base_url() -> str:
-    """Read GPUNODE and GPUNODEPORT from .env in the repo root."""
+    """Read GPUNODE and GPUNODEPORT from .env in the repo root or environment."""
     import os
     from pathlib import Path
 
     env_path = Path(__file__).parent.parent / ".env"
-    node, port = "alphagpu24", "8889"
+    node, port = None, "8889"
     if env_path.exists():
         for line in env_path.read_text().splitlines():
             line = line.strip()
@@ -44,6 +44,8 @@ def _default_base_url() -> str:
     # Environment variables take precedence over .env
     node = os.environ.get("GPUNODE", node)
     port = os.environ.get("GPUNODEPORT", port)
+    if not node:
+        raise RuntimeError("GPUNODE is not set. Add GPUNODE=<hostname> to .env or set the environment variable.")
     return f"http://{node}:{port}"
 
 
