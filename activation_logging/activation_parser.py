@@ -885,7 +885,7 @@ class ActivationParser:
         if self.split_strategy == "three_way":
             train_only_df, val_df = train_test_split(
                 train_df, test_size=0.125,  # 0.125 of 80% = 10% of total
-                stratify=train_df['halu'], random_state=self.random_seed
+                stratify=train_df['halu'], random_state=self.random_seed + 1
             )
             gendf.loc[val_df.index, 'split'] = 'val'
             if self.verbose:
@@ -1461,7 +1461,8 @@ class ActivationParser:
         Get a PyTorch Dataset for the specified split.
 
         Args:
-            split: Which split to use ('train', 'val', or 'test')
+            split: Which split to use ('train', 'val', or 'test').
+                   'val' requires ``split_strategy='three_way'``.
             relevant_layers: List of layer indices to use (default: layers 16-29)
             fixed_layer: If specified, one activation will always be from this layer (index in relevant_layers)
             num_views: Number of views to sample per example
@@ -1482,6 +1483,12 @@ class ActivationParser:
             raise ValueError(
                 "backend must be one of: 'auto', 'zarr'. "
                 "WDS backend is deprecated and no longer supported."
+            )
+
+        if split == "val" and self.split_strategy != "three_way":
+            raise ValueError(
+                "val split requires split_strategy='three_way'. "
+                "Current strategy is '{}'.".format(self.split_strategy)
             )
 
         _relevant_layers = relevant_layers if relevant_layers is not None else list(range(16, 30))

@@ -46,7 +46,12 @@ from loguru import logger
 
 
 def parse_layer_range(spec: str) -> list[int]:
-    """Parse a layer range string like '14-29' into a list of ints."""
+    """Parse a layer range string like '14-29' into a list of ints.
+
+    Also accepts a single integer string like '22'.
+    """
+    if "-" not in spec:
+        return [int(spec)]
     start, end = spec.split("-")
     return list(range(int(start), int(end) + 1))
 
@@ -104,27 +109,24 @@ def run_contrastive(
     relevant_layers = parse_layer_range(data_cfg["relevant_layers"])
     target_layers = data_cfg["target_layers"]
 
+    # Common dataset kwargs
+    ds_kwargs = dict(
+        relevant_layers=relevant_layers,
+        num_views=data_cfg.get("num_views", 2),
+        pad_length=data_cfg.get("pad_length", 63),
+        preload=data_cfg.get("preload", True),
+        include_response_logprobs=data_cfg.get("include_response_logprobs", False),
+        response_logprobs_top_k=data_cfg.get("response_logprobs_top_k", 20),
+        check_ram=False,
+    )
+
     # Build datasets
-    train_ds = ap.get_dataset(
-        "train",
-        relevant_layers=relevant_layers,
-        num_views=data_cfg.get("num_views", 2),
-        pad_length=data_cfg.get("pad_length", 63),
-        preload=data_cfg.get("preload", True),
-        include_response_logprobs=data_cfg.get("include_response_logprobs", False),
-        response_logprobs_top_k=data_cfg.get("response_logprobs_top_k", 20),
-        check_ram=False,
-    )
-    test_ds = ap.get_dataset(
-        "test",
-        relevant_layers=relevant_layers,
-        num_views=data_cfg.get("num_views", 2),
-        pad_length=data_cfg.get("pad_length", 63),
-        preload=data_cfg.get("preload", True),
-        include_response_logprobs=data_cfg.get("include_response_logprobs", False),
-        response_logprobs_top_k=data_cfg.get("response_logprobs_top_k", 20),
-        check_ram=False,
-    )
+    train_ds = ap.get_dataset("train", **ds_kwargs)
+    test_ds = ap.get_dataset("test", **ds_kwargs)
+
+    # Use val split for training validation when available (avoids data leakage)
+    has_val = ap.split_strategy == "three_way"
+    val_ds = ap.get_dataset("val", **ds_kwargs) if has_val else test_ds
 
     # Build model
     from activation_research.model import ProgressiveCompressor
@@ -165,7 +167,7 @@ def run_contrastive(
     )
 
     trainer = ContrastiveTrainer(model, config=config)
-    trainer.fit(train_dataset=train_ds, val_dataset=test_ds)
+    trainer.fit(train_dataset=train_ds, val_dataset=val_ds)
 
     # Save final weights
     torch.save(
@@ -252,27 +254,28 @@ def run_linear_probe(
     )
     probe_layer = data_cfg["probe_layer"]
 
-    # Build full dataset
-    train_ds = ap.get_dataset(
-        "train",
+    # Common dataset kwargs
+    ds_kwargs = dict(
         relevant_layers=relevant_layers,
         num_views=2,
         preload=data_cfg.get("preload", True),
         include_response_logprobs=data_cfg.get("include_response_logprobs", False),
+        response_logprobs_top_k=data_cfg.get("response_logprobs_top_k", 20),
         check_ram=False,
     )
-    test_ds = ap.get_dataset(
-        "test",
-        relevant_layers=relevant_layers,
-        num_views=2,
-        preload=data_cfg.get("preload", True),
-        include_response_logprobs=data_cfg.get("include_response_logprobs", False),
-        check_ram=False,
-    )
+
+    # Build full datasets
+    train_ds = ap.get_dataset("train", **ds_kwargs)
+    test_ds = ap.get_dataset("test", **ds_kwargs)
+
+    # Use val split for training validation when available (avoids data leakage)
+    has_val = ap.split_strategy == "three_way"
+    val_ds = ap.get_dataset("val", **ds_kwargs) if has_val else test_ds
 
     # Get single-layer datasets
     probe_train = train_ds.get_single_layer_dataset(probe_layer)
     probe_test = test_ds.get_single_layer_dataset(probe_layer)
+    probe_val = val_ds.get_single_layer_dataset(probe_layer) if has_val else probe_test
 
     from activation_research.model import LinearProbe
     from activation_research.trainer import LinearProbeTrainer, LinearProbeTrainerConfig
@@ -298,7 +301,7 @@ def run_linear_probe(
     )
 
     trainer = LinearProbeTrainer(model, config=config)
-    trainer.fit(train_dataset=probe_train, val_dataset=probe_test)
+    trainer.fit(train_dataset=probe_train, val_dataset=probe_val)
 
     # Save final weights
     torch.save(
@@ -523,12 +526,19 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    # Pre-loaded config lookups (populated in single-run mode)
+    _preloaded_dataset_cfgs: dict = {}
+    _preloaded_method_cfgs: dict = {}
+
     # ---- Load configs ----
     if args.experiment:
         with open(args.experiment) as f:
             experiment_cfg = json.load(f)
 
         dataset_value = experiment_cfg.get("dataset") or experiment_cfg.get("datasets")
+        if dataset_value is None:
+            logger.error("Experiment config must have 'dataset' or 'datasets' key")
+            sys.exit(1)
         if isinstance(dataset_value, str):
             datasets = [dataset_value]
         else:
@@ -551,8 +561,8 @@ def main() -> None:
         training_seeds = [args.seed] if args.seed is not None else [42]
 
         # Store pre-loaded configs so the main loop doesn't re-load from hardcoded paths
-        _preloaded_dataset_cfgs = {single_dataset_cfg["name"]: single_dataset_cfg}
-        _preloaded_method_cfgs = {single_method_cfg["name"]: single_method_cfg}
+        _preloaded_dataset_cfgs[single_dataset_cfg["name"]] = single_dataset_cfg
+        _preloaded_method_cfgs[single_method_cfg["name"]] = single_method_cfg
 
         experiment_cfg = {
             "experiment_name": f"{single_dataset_cfg['name']}_{single_method_cfg['name']}",
@@ -570,10 +580,6 @@ def main() -> None:
         sys.exit(1)
 
     max_epochs_override = args.max_epochs
-
-    # Pre-loaded config lookup (populated in single-run mode)
-    _preloaded_dataset_cfgs: dict = locals().get("_preloaded_dataset_cfgs", {})
-    _preloaded_method_cfgs: dict = locals().get("_preloaded_method_cfgs", {})
 
     # ---- Resolve device ----
     device = args.device or experiment_cfg.get("device", "auto")
