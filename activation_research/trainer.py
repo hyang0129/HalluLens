@@ -134,6 +134,11 @@ class TrainerConfig:
     # If set, training uses this step count regardless of dataset length.
     steps_per_epoch_override: Optional[int] = None
 
+    # Number of full passes over the dataset per epoch.
+    # When set, steps_per_epoch = ceil(dataset_len / batch_size) * num_passes.
+    # Ignored when steps_per_epoch_override is set.
+    num_passes: Optional[int] = None
+
     # Gradient clipping (max L2 norm).  Set to 0.0 or None to disable.
     grad_clip_norm: Optional[float] = None
 
@@ -467,6 +472,21 @@ class Trainer:
             if steps_override <= 0:
                 raise ValueError("steps_per_epoch_override must be a positive integer when provided")
 
+        num_passes = getattr(self.config, "num_passes", None)
+        if num_passes is not None:
+            num_passes = int(num_passes)
+            if num_passes <= 0:
+                raise ValueError("num_passes must be a positive integer when provided")
+
+        def _resolve_steps(dataset_len):
+            """Resolve steps_per_epoch using priority: override > num_passes > 1 pass."""
+            if steps_override is not None:
+                return steps_override
+            inferred_steps = int(math.ceil(dataset_len / float(self.config.batch_size)))
+            if num_passes is not None:
+                return inferred_steps * num_passes
+            return inferred_steps
+
         if needs_rebuild:
             train_loader = self.train_dataloader(train_dataset)
             self._cached_train_loader = train_loader
@@ -476,8 +496,7 @@ class Trainer:
             if bool(getattr(self.config, "use_infinite_index_stream", False)):
                 if not hasattr(train_dataset, "__len__"):
                     raise TypeError("use_infinite_index_stream=True requires train_dataset to have __len__")
-                inferred_steps = int(math.ceil(len(train_dataset) / float(self.config.batch_size)))
-                self._cached_train_steps_per_epoch = int(steps_override if steps_override is not None else inferred_steps)
+                self._cached_train_steps_per_epoch = _resolve_steps(len(train_dataset))
             else:
                 self._cached_train_steps_per_epoch = None
 
@@ -493,6 +512,12 @@ class Trainer:
             if self._cached_train_infinite_iter is None:
                 self._cached_train_infinite_iter = iter(train_loader)
             return train_loader, int(steps_override), self._cached_train_infinite_iter
+
+        if num_passes is not None and hasattr(train_dataset, "__len__"):
+            resolved = _resolve_steps(len(train_dataset))
+            if self._cached_train_infinite_iter is None:
+                self._cached_train_infinite_iter = iter(train_loader)
+            return train_loader, resolved, self._cached_train_infinite_iter
 
         if isinstance(train_dataset, IterableDataset):
             # Iterable datasets may be infinite; default to iterating the loader directly.

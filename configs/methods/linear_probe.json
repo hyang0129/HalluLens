@@ -9,7 +9,6 @@
     "max_epochs": 30,
     "batch_size": 512,
     "lr": 1e-3,
-    "steps_per_epoch_override": 100,
     "balanced_sampling": true
   },
   "data": {
