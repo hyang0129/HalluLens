@@ -25,7 +25,7 @@ class ActivationDataset(Dataset):
         self,
         df: pd.DataFrame,
         activations_path: str,
-        split: Literal['train', 'test'],
+        split: Literal['train', 'val', 'test'],
         relevant_layers: Optional[List[int]] = None,
         logger_type: str = "zarr",
         fixed_layer: Optional[int] = None,
@@ -45,7 +45,7 @@ class ActivationDataset(Dataset):
         Args:
             df: DataFrame containing the metadata
             activations_path: Path to the activations storage (.zarr store)
-            split: Which split to use ('train' or 'test')
+            split: Which split to use ('train', 'val', or 'test')
             relevant_layers: List of layer indices to use (default: layers 16-29)
             logger_type: Activation storage type. Only 'zarr' is supported.
             fixed_layer: If specified, one activation will always be from this layer (index in relevant_layers)
@@ -749,7 +749,8 @@ class TokenTrajectoryDataset(Dataset):
 class ActivationParser:
     def __init__(self, inference_json: str, eval_json: str, activations_path: str,
                  df: Optional[pd.DataFrame] = None, logger_type: str = "zarr",
-                 random_seed: int = 42, verbose: bool = True):
+                 random_seed: int = 42, verbose: bool = True,
+                 split_strategy: Literal["two_way", "three_way"] = "two_way"):
         """
         Initialize the ActivationParser.
 
@@ -761,6 +762,8 @@ class ActivationParser:
             logger_type: Activation storage type. Only 'zarr' is supported.
             random_seed: Random seed for train/test split (default: 42)
             verbose: Whether to log initialization and metadata loading messages (default: True)
+            split_strategy: Split strategy - "two_way" (train/test 80/20) or
+                "three_way" (train/val/test ~70/10/20). Default: "two_way".
         """
         self.inference_json = Path(inference_json)
         if not self.inference_json.exists():
@@ -787,6 +790,11 @@ class ActivationParser:
         self.logger_type = normalized_logger_type
         self.random_seed = random_seed
         self.verbose = verbose
+        if split_strategy not in ("two_way", "three_way"):
+            raise ValueError(
+                f"split_strategy must be 'two_way' or 'three_way', got '{split_strategy}'"
+            )
+        self.split_strategy = split_strategy
         self._activation_logger = None
         self._group_index = None
         self._wds_shards = None
@@ -873,12 +881,22 @@ class ActivationParser:
         gendf.loc[train_df.index, 'split'] = 'train'
         gendf.loc[test_df.index, 'split'] = 'test'
 
+        # Further split train into train+val if three_way
+        if self.split_strategy == "three_way":
+            train_only_df, val_df = train_test_split(
+                train_df, test_size=0.125,  # 0.125 of 80% = 10% of total
+                stratify=train_df['halu'], random_state=self.random_seed + 1
+            )
+            gendf.loc[val_df.index, 'split'] = 'val'
+            if self.verbose:
+                logger.info(f"Val set size: {len(val_df)}")
+
         if self.verbose:
             logger.info(f"Found {len(gendf)} prompts with activations")
             logger.info(f"Found {len(gendf[gendf['halu']])} hallucinations")
             logger.info(f"Found {len(gendf[~gendf['halu']])} non-hallucinations")
             logger.info(f"Found {gendf['halu'].sum()/len(gendf)}% hallucinations")
-            logger.info(f"Train set size: {len(train_df)}, Test set size: {len(test_df)}")
+            logger.info(f"Train set size: {len(gendf[gendf['split'] == 'train'])}, Test set size: {len(test_df)}")
 
         # gen df contains these columns ['index', 'title', 'h_score_cat', 'pageid', 'revid', 'description',
         # 'categories', 'reference', 'prompt', 'answer', 'generation', 'abstain',
@@ -1056,7 +1074,9 @@ class ActivationParser:
         """Deterministic cache key for a set of preload parameters."""
         zarr_path_resolved = str(Path(self.activations_path).resolve())
         zarr_count = int(self.activation_logger._response_activations.shape[0])
-        key_parts = (
+        # Base key parts match the original (pre-three_way) fingerprint so
+        # existing two_way memmap caches remain valid.
+        key_parts: list = [
             zarr_path_resolved,
             sorted(relevant_layers),
             pad_length,
@@ -1064,7 +1084,12 @@ class ActivationParser:
             self.random_seed,
             include_logprobs,
             response_logprobs_top_k,
-        )
+        ]
+        # Only extend the key for non-default split strategies so that
+        # two_way caches are byte-identical to pre-existing caches.
+        if self.split_strategy != "two_way":
+            key_parts.append(self.split_strategy)
+        key_parts = tuple(key_parts)
         return hashlib.sha256(repr(key_parts).encode()).hexdigest()[:16]
 
     def _memmap_cache_dir(self, fingerprint: str) -> Path:
@@ -1083,6 +1108,7 @@ class ActivationParser:
         response_logprobs_top_k: int,
         train_indices: np.ndarray,
         test_indices: np.ndarray,
+        val_indices: Optional[np.ndarray] = None,
     ) -> None:
         """Write preloaded arrays as .npy files for subsequent memmap loading."""
         import shutil
@@ -1096,6 +1122,8 @@ class ActivationParser:
                     np.array(data['prompt_hashes'], dtype='U64'))
             np.save(tmp_dir / "train_indices.npy", train_indices)
             np.save(tmp_dir / "test_indices.npy", test_indices)
+            if val_indices is not None:
+                np.save(tmp_dir / "val_indices.npy", val_indices)
 
             if include_logprobs:
                 for key in ('logprob_token_ids', 'logprob_token_logprobs',
@@ -1113,10 +1141,12 @@ class ActivationParser:
                 "activation_dtype": str(data['cache'].dtype),
                 "n_train": int(len(train_indices)),
                 "n_test": int(len(test_indices)),
+                "n_val": int(len(val_indices)) if val_indices is not None else 0,
                 "n_total": int(data['cache'].shape[0]),
                 "zarr_sample_count": int(
                     self.activation_logger._response_activations.shape[0]
                 ),
+                "split_strategy": self.split_strategy,
             }
             (tmp_dir / "manifest.json").write_text(
                 json.dumps(manifest, indent=2), encoding="utf-8"
@@ -1169,6 +1199,10 @@ class ActivationParser:
             'test_indices': np.load(cache_dir / "test_indices.npy"),
         }
 
+        val_indices_path = cache_dir / "val_indices.npy"
+        if val_indices_path.exists():
+            data['val_indices'] = np.load(val_indices_path)
+
         if include_logprobs and manifest.get("include_logprobs"):
             for key in ('logprob_token_ids', 'logprob_token_logprobs',
                         'logprob_topk_ids', 'logprob_topk_logprobs'):
@@ -1184,6 +1218,7 @@ class ActivationParser:
         train_indices: np.ndarray,
         test_indices: np.ndarray,
         is_memmap: bool = False,
+        val_indices: Optional[np.ndarray] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """Split the full preloaded data into per-split dicts.
 
@@ -1191,8 +1226,11 @@ class ActivationParser:
         full memmap and a ``_row_indices`` array is attached for indirection in
         ``__getitem__``.  This avoids materialising a copy of the large array.
         """
+        split_pairs = [('train', train_indices), ('test', test_indices)]
+        if val_indices is not None:
+            split_pairs.append(('val', val_indices))
         result: Dict[str, Dict[str, Any]] = {}
-        for split_name, indices in [('train', train_indices), ('test', test_indices)]:
+        for split_name, indices in split_pairs:
             if is_memmap:
                 split_data: Dict[str, Any] = {
                     'cache': data['cache'],               # full memmap
@@ -1240,11 +1278,13 @@ class ActivationParser:
         if cached is not None:
             train_idx = cached.pop('train_indices')
             test_idx = cached.pop('test_indices')
+            val_idx = cached.pop('val_indices', None)
             logger.info(
                 f"Loaded memmap cache from {cache_dir} "
-                f"(train={len(train_idx)}, test={len(test_idx)})"
+                f"(train={len(train_idx)}, test={len(test_idx)}"
+                f"{f', val={len(val_idx)}' if val_idx is not None else ''})"
             )
-            return self._split_cached_data(cached, train_idx, test_idx, is_memmap=True)
+            return self._split_cached_data(cached, train_idx, test_idx, is_memmap=True, val_indices=val_idx)
 
         # Cache miss — full preload from zarr
         logger.info("Memmap cache miss; preloading all samples from zarr ...")
@@ -1279,19 +1319,25 @@ class ActivationParser:
         train_indices = np.where(train_mask)[0].astype(np.int64)
         test_indices = np.where(test_mask)[0].astype(np.int64)
 
+        val_indices = None
+        if self.split_strategy == "three_way":
+            val_mask = (self.df['split'] == 'val').values
+            val_indices = np.where(val_mask)[0].astype(np.int64)
+
         # Write cache (best-effort)
         try:
             self._save_memmap_cache(
                 cache_dir, data, fingerprint, relevant_layers,
                 pad_length, include_logprobs, response_logprobs_top_k,
-                train_indices, test_indices,
+                train_indices, test_indices, val_indices=val_indices,
             )
             logger.info(f"Saved memmap cache to {cache_dir}")
         except Exception as e:
             logger.warning(f"Failed to save memmap cache: {e}")
 
         return self._split_cached_data(
-            data, train_indices, test_indices, is_memmap=False
+            data, train_indices, test_indices, is_memmap=False,
+            val_indices=val_indices,
         )
 
     def _preload_from_zarr(
@@ -1397,7 +1443,7 @@ class ActivationParser:
 
     def get_dataset(
         self,
-        split: Literal['train', 'test'],
+        split: Literal['train', 'val', 'test'],
         relevant_layers: Optional[List[int]] = None,
         fixed_layer: Optional[int] = None,
         pad_length: int = 63,
@@ -1415,7 +1461,8 @@ class ActivationParser:
         Get a PyTorch Dataset for the specified split.
 
         Args:
-            split: Which split to use ('train' or 'test')
+            split: Which split to use ('train', 'val', or 'test').
+                   'val' requires ``split_strategy='three_way'``.
             relevant_layers: List of layer indices to use (default: layers 16-29)
             fixed_layer: If specified, one activation will always be from this layer (index in relevant_layers)
             num_views: Number of views to sample per example
@@ -1436,6 +1483,12 @@ class ActivationParser:
             raise ValueError(
                 "backend must be one of: 'auto', 'zarr'. "
                 "WDS backend is deprecated and no longer supported."
+            )
+
+        if split == "val" and self.split_strategy != "three_way":
+            raise ValueError(
+                "val split requires split_strategy='three_way'. "
+                "Current strategy is '{}'.".format(self.split_strategy)
             )
 
         _relevant_layers = relevant_layers if relevant_layers is not None else list(range(16, 30))

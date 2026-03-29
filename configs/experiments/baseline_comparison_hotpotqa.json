@@ -1,0 +1,11 @@
+{
+  "experiment_name": "baseline_comparison_hotpotqa",
+  "dataset": "hotpotqa_train",
+  "methods": ["contrastive", "linear_probe", "token_entropy", "logprob_baseline"],
+  "split_seed": 42,
+  "training_seeds": [0, 5, 26, 42, 63],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs"
+}
