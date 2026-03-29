@@ -24,7 +24,8 @@
     "num_views": 2,
     "pad_length": 63,
     "preload": true,
-    "include_response_logprobs": false
+    "include_response_logprobs": true,
+    "response_logprobs_top_k": 20
   },
   "evaluation": {
     "metrics": ["cosine", "mds", "knn"],
