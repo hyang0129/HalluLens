@@ -1074,7 +1074,9 @@ class ActivationParser:
         """Deterministic cache key for a set of preload parameters."""
         zarr_path_resolved = str(Path(self.activations_path).resolve())
         zarr_count = int(self.activation_logger._response_activations.shape[0])
-        key_parts = (
+        # Base key parts match the original (pre-three_way) fingerprint so
+        # existing two_way memmap caches remain valid.
+        key_parts: list = [
             zarr_path_resolved,
             sorted(relevant_layers),
             pad_length,
@@ -1082,8 +1084,12 @@ class ActivationParser:
             self.random_seed,
             include_logprobs,
             response_logprobs_top_k,
-            self.split_strategy,
-        )
+        ]
+        # Only extend the key for non-default split strategies so that
+        # two_way caches are byte-identical to pre-existing caches.
+        if self.split_strategy != "two_way":
+            key_parts.append(self.split_strategy)
+        key_parts = tuple(key_parts)
         return hashlib.sha256(repr(key_parts).encode()).hexdigest()[:16]
 
     def _memmap_cache_dir(self, fingerprint: str) -> Path:
