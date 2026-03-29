@@ -1,0 +1,23 @@
+{
+  "name": "linear_probe",
+  "routine": "linear_probe",
+  "model_class": "linear_probe",
+  "model_params": {
+    "pooling": "mean"
+  },
+  "training": {
+    "max_epochs": 30,
+    "batch_size": 512,
+    "lr": 1e-3,
+    "steps_per_epoch_override": 100,
+    "balanced_sampling": true
+  },
+  "data": {
+    "probe_layer": 22,
+    "preload": true,
+    "include_response_logprobs": false
+  },
+  "evaluation": {
+    "metrics": ["auroc"]
+  }
+}
