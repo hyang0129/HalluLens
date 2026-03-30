@@ -15,7 +15,8 @@
     "ignore_label": 1,
     "use_infinite_index_stream": true,
     "use_infinite_index_stream_eval": true,
-    "balanced_sampling": false
+    "balanced_sampling": false,
+    "grad_clip_norm": 1.0
   },
   "data": {
     "relevant_layers": "14-29",
