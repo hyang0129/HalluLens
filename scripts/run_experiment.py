@@ -147,7 +147,6 @@ def run_contrastive(
         lr=train_cfg["lr"],
         temperature=train_cfg["temperature"],
         steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
-        num_passes=experiment_cfg.get("num_passes"),
         use_labels=train_cfg.get("use_labels", False),
         ignore_label=train_cfg.get("ignore_label", -1),
         use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", True),
@@ -292,7 +291,6 @@ def run_linear_probe(
         batch_size=train_cfg["batch_size"],
         lr=train_cfg["lr"],
         steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
-        num_passes=experiment_cfg.get("num_passes"),
         balanced_sampling=train_cfg.get("balanced_sampling", True),
         pooling=method_cfg["model_params"].get("pooling", "mean"),
         device=device,
@@ -522,14 +520,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print the run plan (expected/complete/failed/pending) and exit without executing",
     )
-    parser.add_argument(
-        "--num-passes",
-        type=int,
-        default=None,
-        help="Number of full passes over the dataset for learned methods. "
-             "When omitted, uses steps_per_epoch_override from method config or 1 pass. "
-             "Ignored when steps_per_epoch_override is set in method config.",
-    )
     return parser.parse_args()
 
 
@@ -602,9 +592,6 @@ def main() -> None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Device: {device}")
 
-    # ---- Thread num_passes into experiment config ----
-    if args.num_passes is not None:
-        experiment_cfg["num_passes"] = args.num_passes
 
     output_base = experiment_cfg.get("output_dir", "runs")
     exp_name = experiment_cfg.get("experiment_name", "default")

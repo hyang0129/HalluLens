@@ -371,7 +371,7 @@ def train_contrastive(model, train_dataset, test_dataset=None,
                       use_infinite_index_stream_eval: bool = False,
                       infinite_eval_shuffle: bool = False,
                       infinite_eval_seed: int = 0,
-                      num_passes=None):
+):
 
     def _call_model_with_optional_layer_idx(m, x, layer_idx=None):
         if layer_idx is None:
@@ -479,7 +479,7 @@ def train_contrastive(model, train_dataset, test_dataset=None,
     train_iter = None
     if use_infinite_index_stream:
         inferred_steps = int(math.ceil(base_dataset_len / float(batch_size)))
-        steps_per_epoch = inferred_steps * int(num_passes) if num_passes is not None else inferred_steps
+        steps_per_epoch = inferred_steps
         train_iter = iter(train_loader)
 
     for epoch in tqdm(range(start_epoch, epochs), desc="Epochs"):
@@ -729,7 +729,6 @@ def train_contrastive_logprob_recon(
     infinite_stream_shuffle: bool = True,
     infinite_stream_seed: int = 0,
     steps_per_epoch_override: int = None,
-    num_passes=None,
 ):
     """Train a ``LogprobReconProgressiveCompressor`` with auxiliary logprob reconstruction.
 
@@ -845,8 +844,6 @@ def train_contrastive_logprob_recon(
         inferred = int(math.ceil(base_dataset_len / float(batch_size)))
         if steps_per_epoch_override is not None:
             steps_per_epoch = int(steps_per_epoch_override)
-        elif num_passes is not None:
-            steps_per_epoch = inferred * int(num_passes)
         else:
             steps_per_epoch = inferred
         train_iter = iter(train_loader)
