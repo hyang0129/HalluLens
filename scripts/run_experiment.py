@@ -147,6 +147,7 @@ def run_contrastive(
         lr=train_cfg["lr"],
         temperature=train_cfg["temperature"],
         steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+        grad_clip_norm=train_cfg.get("grad_clip_norm"),
         use_labels=train_cfg.get("use_labels", False),
         ignore_label=train_cfg.get("ignore_label", -1),
         use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", True),
@@ -291,6 +292,7 @@ def run_linear_probe(
         batch_size=train_cfg["batch_size"],
         lr=train_cfg["lr"],
         steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+        grad_clip_norm=train_cfg.get("grad_clip_norm"),
         balanced_sampling=train_cfg.get("balanced_sampling", True),
         pooling=method_cfg["model_params"].get("pooling", "mean"),
         device=device,
@@ -515,6 +517,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override device (cuda, cpu, auto)",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the run plan (expected/complete/failed/pending) and exit without executing",
+    )
     return parser.parse_args()
 
 
@@ -587,9 +594,76 @@ def main() -> None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Device: {device}")
 
+
     output_base = experiment_cfg.get("output_dir", "runs")
     exp_name = experiment_cfg.get("experiment_name", "default")
     split_strategy = experiment_cfg.get("split_strategy", "two_way")
+
+    # ---- Dry-run mode: show plan and exit ----
+    if args.dry_run:
+        from scripts.experiment_utils import (
+            RunStatus,
+            classify_run,
+            enumerate_runs,
+            load_experiment_config,
+        )
+
+        if args.experiment:
+            exp_cfg_loaded = load_experiment_config(
+                args.experiment, project_root=str(project_root)
+            )
+        else:
+            # Single-run mode: build a minimal config for enumerate_runs
+            exp_cfg_loaded = dict(experiment_cfg)
+            exp_cfg_loaded["datasets"] = datasets
+            exp_cfg_loaded["methods"] = methods
+            exp_cfg_loaded["training_seeds"] = training_seeds
+            # Load method configs for is_learned detection
+            method_configs = {}
+            for m in methods:
+                if m in _preloaded_method_cfgs:
+                    method_configs[m] = _preloaded_method_cfgs[m]
+                else:
+                    mcfg_path = os.path.join(
+                        str(project_root), "configs", "methods", f"{m}.json"
+                    )
+                    if os.path.exists(mcfg_path):
+                        with open(mcfg_path) as f:
+                            method_configs[m] = json.load(f)
+            exp_cfg_loaded["method_configs"] = method_configs
+
+        run_specs = enumerate_runs(
+            exp_cfg_loaded,
+            output_base=output_base,
+            project_root=str(project_root),
+        )
+
+        complete = failed = running = pending = 0
+        for spec in run_specs:
+            status = classify_run(spec.run_dir)
+            seed_str = f"seed={spec.seed}" if spec.seed is not None else "no-seed"
+            symbol = {
+                RunStatus.COMPLETE: "✓",
+                RunStatus.FAILED: "✗",
+                RunStatus.RUNNING: "~",
+                RunStatus.PENDING: "·",
+            }[status]
+            logger.info(f"  {symbol} {spec.dataset_name}/{spec.method_name}/{seed_str} -> {status.value}")
+            if status == RunStatus.COMPLETE:
+                complete += 1
+            elif status == RunStatus.FAILED:
+                failed += 1
+            elif status == RunStatus.RUNNING:
+                running += 1
+            else:
+                pending += 1
+
+        total = len(run_specs)
+        logger.info(
+            f"\nOverall: {complete}/{total} complete, {failed} failed, "
+            f"{running} running, {pending} pending"
+        )
+        sys.exit(0)
 
     # ---- Lazy import heavy deps ----
     from activation_logging.activation_parser import ActivationParser

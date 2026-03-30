@@ -370,7 +370,8 @@ def train_contrastive(model, train_dataset, test_dataset=None,
                       infinite_stream_seed: int = 0,
                       use_infinite_index_stream_eval: bool = False,
                       infinite_eval_shuffle: bool = False,
-                      infinite_eval_seed: int = 0):
+                      infinite_eval_seed: int = 0,
+):
 
     def _call_model_with_optional_layer_idx(m, x, layer_idx=None):
         if layer_idx is None:
@@ -477,7 +478,8 @@ def train_contrastive(model, train_dataset, test_dataset=None,
     steps_per_epoch = None
     train_iter = None
     if use_infinite_index_stream:
-        steps_per_epoch = int(math.ceil(base_dataset_len / float(batch_size)))
+        inferred_steps = int(math.ceil(base_dataset_len / float(batch_size)))
+        steps_per_epoch = inferred_steps
         train_iter = iter(train_loader)
 
     for epoch in tqdm(range(start_epoch, epochs), desc="Epochs"):
@@ -840,7 +842,10 @@ def train_contrastive_logprob_recon(
     train_iter = None
     if use_infinite_index_stream:
         inferred = int(math.ceil(base_dataset_len / float(batch_size)))
-        steps_per_epoch = int(steps_per_epoch_override) if steps_per_epoch_override is not None else inferred
+        if steps_per_epoch_override is not None:
+            steps_per_epoch = int(steps_per_epoch_override)
+        else:
+            steps_per_epoch = inferred
         train_iter = iter(train_loader)
 
     test_loader = None

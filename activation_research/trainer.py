@@ -467,6 +467,12 @@ class Trainer:
             if steps_override <= 0:
                 raise ValueError("steps_per_epoch_override must be a positive integer when provided")
 
+        def _resolve_steps(dataset_len):
+            """Resolve steps_per_epoch: override if set, else one natural pass."""
+            if steps_override is not None:
+                return steps_override
+            return int(math.ceil(dataset_len / float(self.config.batch_size)))
+
         if needs_rebuild:
             train_loader = self.train_dataloader(train_dataset)
             self._cached_train_loader = train_loader
@@ -476,8 +482,7 @@ class Trainer:
             if bool(getattr(self.config, "use_infinite_index_stream", False)):
                 if not hasattr(train_dataset, "__len__"):
                     raise TypeError("use_infinite_index_stream=True requires train_dataset to have __len__")
-                inferred_steps = int(math.ceil(len(train_dataset) / float(self.config.batch_size)))
-                self._cached_train_steps_per_epoch = int(steps_override if steps_override is not None else inferred_steps)
+                self._cached_train_steps_per_epoch = _resolve_steps(len(train_dataset))
             else:
                 self._cached_train_steps_per_epoch = None
 
