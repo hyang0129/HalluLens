@@ -2,7 +2,7 @@
   "name": "nq_test_hallu_cor",
   "inference_json": "shared/natural_questions_logprob/natural_questions/Llama-3.1-8B-Instruct/generation.jsonl",
   "activations_path": "shared/natural_questions_logprob/activations.zarr",
-  "eval_json": "shared/natural_questions_logprob/natural_questions/Llama-3.1-8B-Instruct/eval_results.json",
+  "eval_json": "shared/natural_questions_logprob/natural_questions/Llama-3.1-8B-Instruct/eval_results_for_training.json",
   "raw_eval_jsonl": "shared/natural_questions_logprob/natural_questions/Llama-3.1-8B-Instruct/raw_eval_res.jsonl",
   "model_name": "Llama-3.1-8B-Instruct",
   "input_dim": 4096,
