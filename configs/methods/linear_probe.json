@@ -6,7 +6,7 @@
     "pooling": "mean"
   },
   "training": {
-    "max_epochs": 30,
+    "max_epochs": 20,
     "batch_size": 512,
     "lr": 1e-3,
     "balanced_sampling": true

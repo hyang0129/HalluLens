@@ -7,7 +7,7 @@
     "input_dropout": 0.3
   },
   "training": {
-    "max_epochs": 50,
+    "max_epochs": 100,
     "batch_size": 512,
     "lr": 1e-5,
     "temperature": 0.25,
