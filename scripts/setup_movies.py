@@ -11,6 +11,7 @@ Usage:
 import argparse
 import os
 import sys
+import io
 from pathlib import Path
 
 # Ensure repo root is on sys.path
@@ -45,8 +46,32 @@ def main():
                         help="Skip inference step (only run eval)")
     parser.add_argument("--skip-eval", action="store_true",
                         help="Skip eval step (only run inference)")
+    parser.add_argument("--progress-log", type=str, default=None,
+                        help="Path to progress log file (tee stdout+stderr for monitoring)")
 
     args = parser.parse_args()
+
+    # --- Tee stdout/stderr to progress log file if requested ---
+    if args.progress_log:
+        Path(args.progress_log).parent.mkdir(parents=True, exist_ok=True)
+        log_fh = open(args.progress_log, "a", encoding="utf-8")
+
+        class Tee(io.TextIOBase):
+            """Write to both the original stream and a log file."""
+            def __init__(self, stream, log_file):
+                self._stream = stream
+                self._log = log_file
+            def write(self, data):
+                self._stream.write(data)
+                self._log.write(data)
+                self._log.flush()
+                return len(data)
+            def flush(self):
+                self._stream.flush()
+                self._log.flush()
+
+        sys.stdout = Tee(sys.stdout, log_fh)
+        sys.stderr = Tee(sys.stderr, log_fh)
 
     model_name = args.model.split("/")[-1]
     task_dir = Path(args.output_dir) / "movies" / model_name

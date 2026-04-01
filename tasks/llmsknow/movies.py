@@ -38,6 +38,7 @@ Output eval_results.json schema (ActivationParser-compatible):
 import hashlib
 import json
 import os
+import time
 import argparse
 from pathlib import Path
 
@@ -224,6 +225,8 @@ class MoviesInference:
         file_mode = "a" if already_done > 0 else "w"
         prompts = prompts_df["prompt"].tolist()
         n_batches = (len(prompts) + batch_size - 1) // batch_size
+        t0 = time.time()
+        completed = 0
 
         try:
             with open(self.generations_file_path, file_mode, encoding="utf-8") as f:
@@ -264,6 +267,11 @@ class MoviesInference:
                                 log_entry.update(result.logprobs)
                             writer.enqueue(prompt_key, log_entry)
 
+                    completed += len(batch_prompts)
+                    elapsed = time.time() - t0
+                    rate = completed / elapsed if elapsed > 0 else 0
+                    remaining = (len(prompts) - completed) / rate if rate > 0 else 0
+                    pbar.set_postfix_str(f"{rate:.1f} samples/s | ETA {remaining/60:.1f}m")
                     pbar.update(len(batch_prompts))
                 pbar.close()
         finally:
