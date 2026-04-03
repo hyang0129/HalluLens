@@ -2,7 +2,7 @@
   "name": "popqa",
   "inference_json": "output/popqa/Llama-3.1-8B-Instruct/generation.jsonl",
   "activations_path": "shared/popqa/activations.zarr",
-  "eval_json": "output/popqa/Llama-3.1-8B-Instruct/eval_results.json",
+  "eval_json": "output/popqa/Llama-3.1-8B-Instruct/eval_results_for_training.json",
   "raw_eval_jsonl": "output/popqa/Llama-3.1-8B-Instruct/raw_eval_res.jsonl",
   "model_name": "Llama-3.1-8B-Instruct",
   "input_dim": 4096,
