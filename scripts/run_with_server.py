@@ -229,6 +229,8 @@ def get_task_name(task, **kwargs):
         return "popqa"
     elif task == "searchqa":
         return "searchqa"
+    elif task == "sciq":
+        return "sciq"
     else:
         return task
 
@@ -636,6 +638,31 @@ def run_task_step(step, task, model, **kwargs):
                 batch_size=kwargs.get("batch_size"),
             )
 
+        elif task == "sciq":
+            if step == "generate":
+                logger.info("SciQ doesn't have a generate step — loaded directly from HuggingFace")
+                return None
+            from tasks.llmsknow.sciq import run_step as _run
+            _run(
+                step=step,
+                model=model,
+                output_dir=kwargs.get("output_dir", "output"),
+                split=kwargs.get("split", "test"),
+                inference_method=kwargs.get("inference_method", "vllm"),
+                max_tokens=kwargs.get("max_inference_tokens") or kwargs.get("max_tokens", 128),
+                temperature=kwargs.get("temperature", 0.0),
+                N=kwargs.get("N"),
+                generations_file_path=kwargs.get("generations_file_path"),
+                eval_results_path=kwargs.get("eval_results_path"),
+                log_file=kwargs.get("log_file"),
+                logger_type=kwargs.get("logger_type", "lmdb"),
+                activations_path=kwargs.get("activations_path"),
+                quick_debug_mode=kwargs.get("quick_debug_mode", False),
+                resume=kwargs.get("resume", True),
+                llm_evaluator=kwargs.get("llm_evaluator"),
+                batch_size=kwargs.get("batch_size"),
+            )
+
         else:
             raise ValueError(f"Unknown task: {task}")
 
@@ -883,7 +910,7 @@ def run_experiment(
         )
 
         if step == "all":
-            no_generate_tasks = {"triviaqa", "naturalquestions", "truthfulqa", "hotpotqa", "movies", "mmlu", "popqa", "searchqa"}
+            no_generate_tasks = {"triviaqa", "naturalquestions", "truthfulqa", "hotpotqa", "movies", "mmlu", "popqa", "searchqa", "sciq"}
             steps = ["inference", "eval"] if task in no_generate_tasks else ["generate", "inference", "eval"]
             for s in steps:
                 logger.info(f"Running step {s}...")
@@ -914,7 +941,7 @@ def main():
     # Required arguments
     parser.add_argument("--step", required=True, choices=["generate", "inference", "eval", "all"],
                        help="Which step to run (or 'all' for all steps)")
-    parser.add_argument("--task", required=True, choices=["precisewikiqa", "longwiki", "mixedentities", "triviaqa", "naturalquestions", "truthfulqa", "hotpotqa", "movies", "mmlu", "popqa", "searchqa"],
+    parser.add_argument("--task", required=True, choices=["precisewikiqa", "longwiki", "mixedentities", "triviaqa", "naturalquestions", "truthfulqa", "hotpotqa", "movies", "mmlu", "popqa", "searchqa", "sciq"],
                        help="Which task to run")
     parser.add_argument("--model", required=True, help="Model to use")
 
