@@ -1,0 +1,12 @@
+{
+  "name": "searchqa",
+  "inference_json": "output/searchqa/Llama-3.1-8B-Instruct/generation.jsonl",
+  "activations_path": "shared/searchqa/activations.zarr",
+  "eval_json": "output/searchqa/Llama-3.1-8B-Instruct/eval_results_for_training.json",
+  "raw_eval_jsonl": "output/searchqa/Llama-3.1-8B-Instruct/raw_eval_res.jsonl",
+  "model_name": "Llama-3.1-8B-Instruct",
+  "input_dim": 4096,
+  "backend": "zarr",
+  "label_source": "eval_json",
+  "outlier_class": 1
+}
