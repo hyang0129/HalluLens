@@ -60,25 +60,44 @@ def load_searchqa_data(split="train", n_samples=None):
     """
     Load SearchQA from HuggingFace (closed-book: search snippets are stripped).
 
+    Downloads the zip archive for the requested split from the HuggingFace Hub
+    and parses the JSON files within. The ``datasets`` library no longer supports
+    script-based datasets (``kyunghyuncho/search_qa`` uses one), so we fetch the
+    raw data directly via ``huggingface_hub``.
+
     Args:
-        split: "train" (~99,820), "validation" (~13,893), or "test" (~27,247)
+        split: "train" (~99,820), "val"/"validation" (~13,893), or "test" (~27,247)
         n_samples: cap on number of samples; None = entire split
 
     Returns:
         List of dicts with keys: id, question, answer
     """
-    from datasets import load_dataset
+    import json
+    import zipfile
+    from huggingface_hub import hf_hub_download
+
+    # Map split names to zip file paths in the repo
+    split_key = "val" if split == "validation" else split
+    zip_path = f"data/train_test_val/{split_key}.zip"
 
     print(f"Loading SearchQA ({split}) from HuggingFace...")
-    dataset = load_dataset("kyunghyuncho/search_qa", trust_remote_code=True)[split]
+    local_zip = hf_hub_download(
+        repo_id="kyunghyuncho/search_qa",
+        filename=zip_path,
+        repo_type="dataset",
+    )
 
     data = []
-    for idx, item in enumerate(dataset):
-        data.append({
-            "id": str(idx),
-            "question": item["question"],
-            "answer": item["answer"],
-        })
+    with zipfile.ZipFile(local_zip, "r") as zf:
+        json_files = sorted(f for f in zf.namelist() if f.endswith(".json"))
+        for idx, fname in enumerate(json_files):
+            with zf.open(fname) as fp:
+                item = json.load(fp)
+            data.append({
+                "id": str(idx),
+                "question": item["question"],
+                "answer": item["answer"],
+            })
 
     if n_samples is not None and n_samples < len(data):
         data = data[:n_samples]
