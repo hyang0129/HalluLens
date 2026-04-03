@@ -235,6 +235,147 @@ def run_contrastive(
     return eval_metrics, predictions
 
 
+def run_contrastive_logprob_recon(
+    ap,
+    dataset_cfg: dict,
+    method_cfg: dict,
+    experiment_cfg: dict,
+    output_dir: str,
+    device: str,
+    training_seed: int,
+) -> tuple[dict, list[dict]]:
+    """Train and evaluate a LogprobReconProgressiveCompressor model."""
+    data_cfg = method_cfg["data"]
+    train_cfg = method_cfg["training"]
+    eval_cfg = method_cfg["evaluation"]
+
+    relevant_layers = parse_layer_range(data_cfg["relevant_layers"])
+    target_layers = data_cfg["target_layers"]
+
+    ds_kwargs = dict(
+        relevant_layers=relevant_layers,
+        num_views=data_cfg.get("num_views", 2),
+        pad_length=data_cfg.get("pad_length", 63),
+        preload=data_cfg.get("preload", True),
+        include_response_logprobs=True,
+        response_logprobs_top_k=data_cfg.get("response_logprobs_top_k", 20),
+        check_ram=False,
+    )
+
+    train_ds = ap.get_dataset("train", **ds_kwargs)
+    test_ds = ap.get_dataset("test", **ds_kwargs)
+
+    has_val = ap.split_strategy == "three_way"
+    val_ds = ap.get_dataset("val", **ds_kwargs) if has_val else test_ds
+
+    from activation_research.model import LogprobReconProgressiveCompressor
+
+    model_params = method_cfg.get("model_params", {})
+    model = LogprobReconProgressiveCompressor(
+        input_dim=dataset_cfg["input_dim"],
+        final_dim=model_params.get("final_dim", 512),
+        input_dropout=model_params.get("input_dropout", 0.3),
+        recon_seq_len=model_params.get("recon_seq_len", 64),
+        recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+        recon_lambda=model_params.get("recon_lambda", 1.0),
+        logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
+    )
+
+    train_device = device if device != "auto" else (
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+
+    from activation_research.training import train_contrastive_logprob_recon
+
+    checkpoint_dir = os.path.join(output_dir, "artifacts")
+    train_contrastive_logprob_recon(
+        model=model,
+        train_dataset=train_ds,
+        test_dataset=val_ds,
+        epochs=train_cfg["max_epochs"],
+        batch_size=train_cfg["batch_size"],
+        lr=train_cfg["lr"],
+        temperature=train_cfg["temperature"],
+        device=train_device,
+        num_workers=experiment_cfg.get("num_workers", 4),
+        sub_batch_size=train_cfg.get("sub_batch_size", 64),
+        checkpoint_dir=checkpoint_dir,
+        save_every=1,
+        snapshot_every=10,
+        snapshot_keep_last=3,
+        use_labels=train_cfg.get("use_labels", False),
+        ignore_label=train_cfg.get("ignore_label", -1),
+        persistent_workers=experiment_cfg.get("persistent_workers", True),
+        recon_lambda=model_params.get("recon_lambda", 1.0),
+        use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", True),
+        infinite_stream_shuffle=True,
+        infinite_stream_seed=training_seed,
+        steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+        balanced_sampling=train_cfg.get("balanced_sampling", False),
+        grad_clip_norm=train_cfg.get("grad_clip_norm"),
+    )
+
+    torch.save(
+        {"model_state_dict": model.state_dict()},
+        os.path.join(output_dir, "artifacts", "final_weights.pt"),
+    )
+
+    # OOD evaluation on target layers
+    from torch.utils.data import DataLoader
+
+    from activation_research.metric_evaluator import MultiMetricHallucinationEvaluator
+
+    train_ds_target = train_ds.slice_layers(target_layers)
+    test_ds_target = test_ds.slice_layers(target_layers)
+
+    train_loader = DataLoader(train_ds_target, batch_size=64, shuffle=False)
+    eval_loader = DataLoader(test_ds_target, batch_size=64, shuffle=False)
+
+    model.eval()
+
+    metrics_list: list = []
+    for m in eval_cfg["metrics"]:
+        if m == "knn":
+            knn_params = dict(eval_cfg.get("knn_params", {}))
+            knn_params["sample_seed"] = training_seed
+            metrics_list.append(
+                {
+                    "metric": "knn",
+                    "kwargs": knn_params,
+                    "train_selection": "all",
+                }
+            )
+        else:
+            metrics_list.append(m)
+
+    evaluator = MultiMetricHallucinationEvaluator(
+        activation_parser_df=ap.df,
+        train_data_loader=train_loader,
+        metrics=metrics_list,
+        batch_size=eval_cfg.get("eval_batch_size", 256),
+        sub_batch_size=eval_cfg.get("sub_batch_size", 64),
+        device=train_device,
+        num_workers=experiment_cfg.get("num_workers", 4),
+        persistent_workers=False,
+        outlier_class=dataset_cfg.get("outlier_class", 1),
+    )
+
+    ood_stats = evaluator.compute(eval_loader, model)
+
+    eval_metrics: dict = {
+        "method": method_cfg["name"],
+        "dataset": dataset_cfg["name"],
+        "seed": training_seed,
+        "split_seed": experiment_cfg.get("split_seed", 42),
+        "n_train": len(train_ds),
+        "n_test": len(test_ds),
+    }
+    eval_metrics.update(ood_stats)
+
+    predictions: list[dict] = []
+    return eval_metrics, predictions
+
+
 def run_linear_probe(
     ap,
     dataset_cfg: dict,
@@ -779,6 +920,10 @@ def main() -> None:
                     routine = method_cfg.get("routine", method_cfg["name"])
                     if routine == "contrastive":
                         eval_metrics, predictions = run_contrastive(
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, seed
+                        )
+                    elif routine == "contrastive_logprob_recon":
+                        eval_metrics, predictions = run_contrastive_logprob_recon(
                             ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, seed
                         )
                     elif routine == "linear_probe":

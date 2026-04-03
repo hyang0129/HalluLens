@@ -729,6 +729,7 @@ def train_contrastive_logprob_recon(
     infinite_stream_shuffle: bool = True,
     infinite_stream_seed: int = 0,
     steps_per_epoch_override: int = None,
+    grad_clip_norm: float = None,
 ):
     """Train a ``LogprobReconProgressiveCompressor`` with auxiliary logprob reconstruction.
 
@@ -963,6 +964,10 @@ def train_contrastive_logprob_recon(
 
                 optimizer.zero_grad()
                 loss.backward()
+                if grad_clip_norm is not None and float(grad_clip_norm) > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), max_norm=float(grad_clip_norm)
+                    )
                 optimizer.step()
 
                 total_loss += loss.item()
