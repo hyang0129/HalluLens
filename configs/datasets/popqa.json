@@ -1,12 +1,20 @@
 {
   "name": "popqa",
-  "inference_json": "output/popqa/Llama-3.1-8B-Instruct/generation.jsonl",
-  "activations_path": "shared/popqa/activations.zarr",
-  "eval_json": "output/popqa/Llama-3.1-8B-Instruct/eval_results_for_training.json",
-  "raw_eval_jsonl": "output/popqa/Llama-3.1-8B-Instruct/raw_eval_res.jsonl",
   "model_name": "Llama-3.1-8B-Instruct",
   "input_dim": 4096,
   "backend": "zarr",
   "label_source": "eval_json",
-  "outlier_class": 1
+  "outlier_class": 1,
+  "train": {
+    "inference_json": "output/popqa_train/Llama-3.1-8B-Instruct/generation.jsonl",
+    "activations_path": "shared/popqa_train/activations.zarr",
+    "eval_json": "output/popqa_train/Llama-3.1-8B-Instruct/eval_results_for_training.json",
+    "raw_eval_jsonl": "output/popqa_train/Llama-3.1-8B-Instruct/raw_eval_res.jsonl"
+  },
+  "test": {
+    "inference_json": "output/popqa/Llama-3.1-8B-Instruct/generation.jsonl",
+    "activations_path": "shared/popqa/activations.zarr",
+    "eval_json": "output/popqa/Llama-3.1-8B-Instruct/eval_results_for_training.json",
+    "raw_eval_jsonl": "output/popqa/Llama-3.1-8B-Instruct/raw_eval_res.jsonl"
+  }
 }

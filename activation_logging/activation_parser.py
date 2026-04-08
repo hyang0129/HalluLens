@@ -750,7 +750,7 @@ class ActivationParser:
     def __init__(self, inference_json: str, eval_json: str, activations_path: str,
                  df: Optional[pd.DataFrame] = None, logger_type: str = "zarr",
                  random_seed: int = 42, verbose: bool = True,
-                 split_strategy: Literal["two_way", "three_way"] = "two_way"):
+                 split_strategy: Literal["two_way", "three_way", "none"] = "two_way"):
         """
         Initialize the ActivationParser.
 
@@ -762,8 +762,10 @@ class ActivationParser:
             logger_type: Activation storage type. Only 'zarr' is supported.
             random_seed: Random seed for train/test split (default: 42)
             verbose: Whether to log initialization and metadata loading messages (default: True)
-            split_strategy: Split strategy - "two_way" (train/test 80/20) or
-                "three_way" (train/val/test ~70/10/20). Default: "two_way".
+            split_strategy: Split strategy - "two_way" (train/test 80/20),
+                "three_way" (train/val/test ~70/10/20), or
+                "none" (all data assigned to 'test', for held-out evaluation).
+                Default: "two_way".
         """
         self.inference_json = Path(inference_json)
         if not self.inference_json.exists():
@@ -790,9 +792,9 @@ class ActivationParser:
         self.logger_type = normalized_logger_type
         self.random_seed = random_seed
         self.verbose = verbose
-        if split_strategy not in ("two_way", "three_way"):
+        if split_strategy not in ("two_way", "three_way", "none"):
             raise ValueError(
-                f"split_strategy must be 'two_way' or 'three_way', got '{split_strategy}'"
+                f"split_strategy must be 'two_way', 'three_way', or 'none', got '{split_strategy}'"
             )
         self.split_strategy = split_strategy
         self._activation_logger = None
@@ -873,30 +875,39 @@ class ActivationParser:
 
         gendf = gendf[~gendf['abstain']]
 
-        # Apply train/test split
-        train_df, test_df = train_test_split(gendf, test_size=0.2,
-                                           stratify=gendf['halu'], random_state=self.random_seed)
-
-        gendf['split'] = 'unassigned'
-        gendf.loc[train_df.index, 'split'] = 'train'
-        gendf.loc[test_df.index, 'split'] = 'test'
-
-        # Further split train into train+val if three_way
-        if self.split_strategy == "three_way":
-            train_only_df, val_df = train_test_split(
-                train_df, test_size=0.125,  # 0.125 of 80% = 10% of total
-                stratify=train_df['halu'], random_state=self.random_seed + 1
-            )
-            gendf.loc[val_df.index, 'split'] = 'val'
+        if self.split_strategy == "none":
+            # No splitting — assign all data to 'test' (for held-out evaluation)
+            gendf['split'] = 'test'
             if self.verbose:
-                logger.info(f"Val set size: {len(val_df)}")
+                logger.info(f"Found {len(gendf)} prompts with activations (no split, all assigned to test)")
+                logger.info(f"Found {len(gendf[gendf['halu']])} hallucinations")
+                logger.info(f"Found {len(gendf[~gendf['halu']])} non-hallucinations")
+                logger.info(f"Found {gendf['halu'].sum()/len(gendf)}% hallucinations")
+        else:
+            # Apply train/test split
+            train_df, test_df = train_test_split(gendf, test_size=0.2,
+                                               stratify=gendf['halu'], random_state=self.random_seed)
 
-        if self.verbose:
-            logger.info(f"Found {len(gendf)} prompts with activations")
-            logger.info(f"Found {len(gendf[gendf['halu']])} hallucinations")
-            logger.info(f"Found {len(gendf[~gendf['halu']])} non-hallucinations")
-            logger.info(f"Found {gendf['halu'].sum()/len(gendf)}% hallucinations")
-            logger.info(f"Train set size: {len(gendf[gendf['split'] == 'train'])}, Test set size: {len(test_df)}")
+            gendf['split'] = 'unassigned'
+            gendf.loc[train_df.index, 'split'] = 'train'
+            gendf.loc[test_df.index, 'split'] = 'test'
+
+            # Further split train into train+val if three_way
+            if self.split_strategy == "three_way":
+                train_only_df, val_df = train_test_split(
+                    train_df, test_size=0.125,  # 0.125 of 80% = 10% of total
+                    stratify=train_df['halu'], random_state=self.random_seed + 1
+                )
+                gendf.loc[val_df.index, 'split'] = 'val'
+                if self.verbose:
+                    logger.info(f"Val set size: {len(val_df)}")
+
+            if self.verbose:
+                logger.info(f"Found {len(gendf)} prompts with activations")
+                logger.info(f"Found {len(gendf[gendf['halu']])} hallucinations")
+                logger.info(f"Found {len(gendf[~gendf['halu']])} non-hallucinations")
+                logger.info(f"Found {gendf['halu'].sum()/len(gendf)}% hallucinations")
+                logger.info(f"Train set size: {len(gendf[gendf['split'] == 'train'])}, Test set size: {len(test_df)}")
 
         # gen df contains these columns ['index', 'title', 'h_score_cat', 'pageid', 'revid', 'description',
         # 'categories', 'reference', 'prompt', 'answer', 'generation', 'abstain',
