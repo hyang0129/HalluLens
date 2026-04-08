@@ -139,6 +139,57 @@ with JupyterExecutor() as jup:
 
 **When to use:** Any time `COMPUTE_CONTEXT=REMOTE_GPU` and code needs to run on GPU (model inference, training, activation logging). Prefer this over asking the user to manually run notebook cells.
 
+## Dataset & Experiment Status
+
+### Checking inference/data generation status
+
+Each dataset has train and test splits. Data lives at:
+- Generations: `output/{dataset}[_train]/Llama-3.1-8B-Instruct/generation.jsonl`
+- Eval results: `output/{dataset}[_train]/Llama-3.1-8B-Instruct/eval_results.json`
+- Activations: `shared/{dataset}[_train]/activations.zarr/`
+
+To check what data exists, scan these paths and compare line counts against expected sizes. A dataset split is **complete** when generation.jsonl line count matches the expected split size AND eval_results.json exists.
+
+### Checking experiment/training status
+
+Use the existing `scripts/experiment_status.py` to check training run progress:
+```bash
+# Check all runs for an experiment config
+python scripts/experiment_status.py --experiment configs/experiments/baseline_comparison_mmlu.json
+
+# Scan a runs directory directly
+python scripts/experiment_status.py --runs-dir runs/baseline_comparison_mmlu
+
+# Machine-readable JSON
+python scripts/experiment_status.py --experiment configs/experiments/baseline_comparison_mmlu.json --json
+
+# Verbose: list every run
+python scripts/experiment_status.py --experiment configs/experiments/baseline_comparison_mmlu.json --verbose
+```
+
+Related utilities in `scripts/experiment_utils.py` provide `RunStatus`, `RunSpec`, and `load_experiment_config()` for programmatic access to run enumeration and classification.
+
+### Dataset configs convention
+
+Each dataset has separate configs for train and test splits:
+- `configs/datasets/{name}_test.json` — test split (used for evaluation)
+- `configs/datasets/{name}_train.json` — train split (used for training)
+- `configs/datasets/{name}.json` — legacy single-split config (points to test)
+
+Experiment configs live at `configs/experiments/baseline_comparison_{name}.json`.
+
+### Running on GPU nodes
+
+For batched inference on GPU, use SSH directly (not jupyter_exec):
+```bash
+ssh $GPUNODE bash /path/to/run_script.sh
+```
+
+The GPU node and Python env are:
+- GPU node: check `.env` for `GPUNODE` (changes between sessions)
+- Python: `/mnt/home/hyang1/.local/share/mamba/envs/p311/bin/python`
+- Always `cd` to project root in scripts and use `resume=True` for long jobs
+
 ## Development Notes
 
 - Remote GPU development: see `REMOTE_DEV_SETUP.md` and `./connect_gpu.sh`
