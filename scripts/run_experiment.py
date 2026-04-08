@@ -100,6 +100,7 @@ def run_contrastive(
     output_dir: str,
     device: str,
     training_seed: int,
+    test_ap=None,
 ) -> tuple[dict, list[dict]]:
     """Train and evaluate a contrastive (ProgressiveCompressor) model."""
     data_cfg = method_cfg["data"]
@@ -122,7 +123,8 @@ def run_contrastive(
 
     # Build datasets
     train_ds = ap.get_dataset("train", **ds_kwargs)
-    test_ds = ap.get_dataset("test", **ds_kwargs)
+    eval_ap = test_ap if test_ap is not None else ap
+    test_ds = eval_ap.get_dataset("test", **ds_kwargs)
 
     # Use val split for training validation when available (avoids data leakage)
     has_val = ap.split_strategy == "three_way"
@@ -206,7 +208,7 @@ def run_contrastive(
             metrics_list.append(m)
 
     evaluator = MultiMetricHallucinationEvaluator(
-        activation_parser_df=ap.df,
+        activation_parser_df=eval_ap.df,
         train_data_loader=train_loader,
         metrics=metrics_list,
         batch_size=eval_cfg.get("eval_batch_size", 256),
@@ -243,6 +245,7 @@ def run_contrastive_logprob_recon(
     output_dir: str,
     device: str,
     training_seed: int,
+    test_ap=None,
 ) -> tuple[dict, list[dict]]:
     """Train and evaluate a LogprobReconProgressiveCompressor model."""
     data_cfg = method_cfg["data"]
@@ -263,7 +266,8 @@ def run_contrastive_logprob_recon(
     )
 
     train_ds = ap.get_dataset("train", **ds_kwargs)
-    test_ds = ap.get_dataset("test", **ds_kwargs)
+    eval_ap = test_ap if test_ap is not None else ap
+    test_ds = eval_ap.get_dataset("test", **ds_kwargs)
 
     has_val = ap.split_strategy == "three_way"
     val_ds = ap.get_dataset("val", **ds_kwargs) if has_val else test_ds
@@ -349,7 +353,7 @@ def run_contrastive_logprob_recon(
             metrics_list.append(m)
 
     evaluator = MultiMetricHallucinationEvaluator(
-        activation_parser_df=ap.df,
+        activation_parser_df=eval_ap.df,
         train_data_loader=train_loader,
         metrics=metrics_list,
         batch_size=eval_cfg.get("eval_batch_size", 256),
@@ -384,6 +388,7 @@ def run_linear_probe(
     output_dir: str,
     device: str,
     training_seed: int,
+    test_ap=None,
 ) -> tuple[dict, list[dict]]:
     """Train and evaluate a linear probe on a single layer."""
     data_cfg = method_cfg["data"]
@@ -408,7 +413,8 @@ def run_linear_probe(
 
     # Build full datasets
     train_ds = ap.get_dataset("train", **ds_kwargs)
-    test_ds = ap.get_dataset("test", **ds_kwargs)
+    eval_ap = test_ap if test_ap is not None else ap
+    test_ds = eval_ap.get_dataset("test", **ds_kwargs)
 
     # Use val split for training validation when available (avoids data leakage)
     has_val = ap.split_strategy == "three_way"
@@ -508,12 +514,14 @@ def run_token_entropy(
     experiment_cfg: dict,
     output_dir: str,
     device: str,
+    test_ap=None,
 ) -> tuple[dict, list[dict]]:
     """Run token-entropy baseline (no training)."""
     data_cfg = method_cfg["data"]
     relevant_layers = parse_layer_range(data_cfg["relevant_layers"])
 
-    test_ds = ap.get_dataset(
+    eval_ap = test_ap if test_ap is not None else ap
+    test_ds = eval_ap.get_dataset(
         "test",
         relevant_layers=relevant_layers,
         num_views=data_cfg.get("num_views", 2),
@@ -553,12 +561,14 @@ def run_logprob_baseline(
     experiment_cfg: dict,
     output_dir: str,
     device: str,
+    test_ap=None,
 ) -> tuple[dict, list[dict]]:
     """Run logprob baseline (no training)."""
     data_cfg = method_cfg["data"]
     relevant_layers = parse_layer_range(data_cfg["relevant_layers"])
 
-    test_ds = ap.get_dataset(
+    eval_ap = test_ap if test_ap is not None else ap
+    test_ds = eval_ap.get_dataset(
         "test",
         relevant_layers=relevant_layers,
         num_views=data_cfg.get("num_views", 2),
@@ -821,35 +831,75 @@ def main() -> None:
             with open(dataset_cfg_path) as f:
                 dataset_cfg = json.load(f)
 
-        # Resolve paths relative to project root
-        for path_key in ("inference_json", "activations_path", "eval_json", "raw_eval_jsonl"):
-            if path_key in dataset_cfg and not os.path.isabs(dataset_cfg[path_key]):
-                dataset_cfg[path_key] = os.path.join(
-                    str(project_root), dataset_cfg[path_key]
+        def _resolve_paths(cfg, root):
+            """Resolve relative paths in a dataset config dict."""
+            for path_key in ("inference_json", "activations_path", "eval_json", "raw_eval_jsonl"):
+                if path_key in cfg and not os.path.isabs(cfg[path_key]):
+                    cfg[path_key] = os.path.join(str(root), cfg[path_key])
+
+        def _build_eval_json(cfg):
+            """Build eval JSON for ActivationParser if it doesn't exist."""
+            eval_json_path = cfg["eval_json"]
+            if not os.path.exists(eval_json_path):
+                from utils.eval_builder import build_eval_for_activation_parser
+                build_eval_for_activation_parser(
+                    cfg["inference_json"],
+                    cfg.get("eval_json", ""),
+                    cfg.get("raw_eval_jsonl", ""),
+                    eval_json_path,
                 )
+            return eval_json_path
 
-        # Build eval JSON if it doesn't exist
-        eval_json_path = dataset_cfg["eval_json"]
-        if not os.path.exists(eval_json_path):
-            from utils.eval_builder import build_eval_for_activation_parser
+        # Detect unified config format (has "train" and/or "test" sub-keys)
+        has_train_test = "train" in dataset_cfg and isinstance(dataset_cfg["train"], dict)
 
-            build_eval_for_activation_parser(
-                dataset_cfg["inference_json"],
-                dataset_cfg.get("eval_json", ""),
-                dataset_cfg.get("raw_eval_jsonl", ""),
-                eval_json_path,
+        test_ap = None
+        if has_train_test:
+            # Unified config: separate train and test ActivationParsers
+            train_cfg = {**dataset_cfg, **dataset_cfg["train"]}
+            _resolve_paths(train_cfg, project_root)
+            train_eval_json = _build_eval_json(train_cfg)
+
+            logger.info(f"Loading train ActivationParser from: {train_cfg['activations_path']}")
+            ap = ActivationParser(
+                inference_json=train_cfg["inference_json"],
+                eval_json=train_eval_json,
+                activations_path=train_cfg["activations_path"],
+                logger_type=dataset_cfg.get("backend", "zarr"),
+                random_seed=experiment_cfg.get("split_seed", 42),
+                split_strategy=split_strategy,
+                verbose=True,
             )
 
-        # Create ActivationParser
-        ap = ActivationParser(
-            inference_json=dataset_cfg["inference_json"],
-            eval_json=eval_json_path,
-            activations_path=dataset_cfg["activations_path"],
-            logger_type=dataset_cfg.get("backend", "zarr"),
-            random_seed=experiment_cfg.get("split_seed", 42),
-            split_strategy=split_strategy,
-            verbose=True,
-        )
+            if "test" in dataset_cfg and isinstance(dataset_cfg["test"], dict):
+                test_cfg = {**dataset_cfg, **dataset_cfg["test"]}
+                _resolve_paths(test_cfg, project_root)
+                test_eval_json = _build_eval_json(test_cfg)
+
+                logger.info(f"Loading test ActivationParser from: {test_cfg['activations_path']}")
+                test_ap = ActivationParser(
+                    inference_json=test_cfg["inference_json"],
+                    eval_json=test_eval_json,
+                    activations_path=test_cfg["activations_path"],
+                    logger_type=dataset_cfg.get("backend", "zarr"),
+                    random_seed=experiment_cfg.get("split_seed", 42),
+                    split_strategy="none",
+                    verbose=True,
+                )
+        else:
+            # Legacy flat config: single ActivationParser with internal splitting
+            _resolve_paths(dataset_cfg, project_root)
+            eval_json_path = _build_eval_json(dataset_cfg)
+
+            ap = ActivationParser(
+                inference_json=dataset_cfg["inference_json"],
+                eval_json=eval_json_path,
+                activations_path=dataset_cfg["activations_path"],
+                logger_type=dataset_cfg.get("backend", "zarr"),
+                random_seed=experiment_cfg.get("split_seed", 42),
+                split_strategy=split_strategy,
+                verbose=True,
+            )
 
         for method_name in methods:
             # Load method config (use pre-loaded if available)
@@ -920,23 +970,28 @@ def main() -> None:
                     routine = method_cfg.get("routine", method_cfg["name"])
                     if routine == "contrastive":
                         eval_metrics, predictions = run_contrastive(
-                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, seed
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, seed,
+                            test_ap=test_ap,
                         )
                     elif routine == "contrastive_logprob_recon":
                         eval_metrics, predictions = run_contrastive_logprob_recon(
-                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, seed
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, seed,
+                            test_ap=test_ap,
                         )
                     elif routine == "linear_probe":
                         eval_metrics, predictions = run_linear_probe(
-                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, seed
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, seed,
+                            test_ap=test_ap,
                         )
                     elif routine == "token_entropy":
                         eval_metrics, predictions = run_token_entropy(
-                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device,
+                            test_ap=test_ap,
                         )
                     elif routine == "logprob_baseline":
                         eval_metrics, predictions = run_logprob_baseline(
-                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device,
+                            test_ap=test_ap,
                         )
                     else:
                         logger.warning(f"Unknown routine: {routine}, skipping")
