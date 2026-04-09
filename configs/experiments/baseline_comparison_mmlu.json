@@ -1,7 +1,7 @@
 {
   "experiment_name": "baseline_comparison_mmlu",
   "dataset": "mmlu",
-  "methods": ["contrastive", "linear_probe", "token_entropy", "logprob_baseline"],
+  "methods": ["contrastive", "linear_probe", "multi_layer_linear_probe", "token_entropy", "logprob_baseline"],
   "split_seed": 42,
   "training_seeds": [0, 5, 26, 42, 63],
   "device": "auto",

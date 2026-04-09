@@ -1,7 +1,7 @@
 {
   "experiment_name": "baseline_comparison_hotpotqa",
   "dataset": "hotpotqa_train",
-  "methods": ["contrastive", "contrastive_logprob_recon", "linear_probe", "token_entropy", "logprob_baseline"],
+  "methods": ["contrastive", "contrastive_logprob_recon", "linear_probe", "multi_layer_linear_probe", "token_entropy", "logprob_baseline"],
   "split_seed": 42,
   "training_seeds": [0, 5, 26, 42, 63],
   "device": "auto",

@@ -383,6 +383,47 @@ class LinearProbe(nn.Module):
         return torch.sigmoid(self.linear(pooled))
 
 
+class MultiLayerLinearProbe(nn.Module):
+    """Multi-layer linear probe for hallucination detection.
+
+    Pools each layer independently over the sequence dimension, concatenates
+    across layers, then applies a single linear classifier.  Controls for
+    multi-layer information access vs. single-layer linear probe.
+
+    Parameters
+    ----------
+    input_dim : int
+        Per-layer activation dimension (e.g. 4096).
+    num_layers : int
+        Number of layers whose activations are concatenated.
+    pooling : str
+        ``"mean"`` pools over the sequence dimension, ``"last"`` takes
+        the last token only.
+    """
+
+    def __init__(self, input_dim: int = 4096, num_layers: int = 16, pooling: str = "mean"):
+        super().__init__()
+        pooling = pooling.lower().strip()
+        if pooling not in ("mean", "last"):
+            raise ValueError(f"pooling must be 'mean' or 'last', got '{pooling}'")
+        self.pooling = pooling
+        self.num_layers = num_layers
+        self.linear = nn.Linear(num_layers * input_dim, 1)
+
+    def forward(self, x):
+        """
+        x: (B, num_layers, T, D)
+        returns: (B, 1) sigmoid probability
+        """
+        x = x.float()
+        if self.pooling == "mean":
+            pooled = x.mean(dim=2)       # (B, num_layers, D)
+        else:
+            pooled = x[:, :, -1, :]      # (B, num_layers, D)
+        flat = pooled.reshape(pooled.size(0), -1)  # (B, num_layers * D)
+        return torch.sigmoid(self.linear(flat))
+
+
 class FiLMConditioner(nn.Module):
     """Feature-wise Linear Modulation (FiLM) conditioner.
 

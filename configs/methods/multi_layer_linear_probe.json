@@ -1,0 +1,24 @@
+{
+  "name": "multi_layer_linear_probe",
+  "routine": "multi_layer_linear_probe",
+  "model_class": "multi_layer_linear_probe",
+  "model_params": {
+    "pooling": "mean"
+  },
+  "training": {
+    "max_epochs": 30,
+    "batch_size": 512,
+    "lr": 1e-3,
+    "balanced_sampling": true
+  },
+  "data": {
+    "relevant_layers": "14-29",
+    "pad_length": 63,
+    "preload": true,
+    "include_response_logprobs": true,
+    "response_logprobs_top_k": 20
+  },
+  "evaluation": {
+    "metrics": ["auroc"]
+  }
+}

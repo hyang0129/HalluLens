@@ -432,6 +432,46 @@ class SingleLayerDataset(Dataset):
         }
 
 
+class MultiLayerDeterministicDataset(Dataset):
+    """Deterministic multi-layer dataset for multi-layer linear probing.
+
+    Returns activations for all specified layers in a fixed order — no view
+    sampling, no randomness.  ``__getitem__`` returns ``views_activations``
+    with shape ``(num_layers, T, H)``.
+    """
+
+    def __init__(
+        self,
+        cache: np.ndarray,
+        labels: np.ndarray,
+        prompt_hashes: List[str],
+        layer_positions: List[int],
+        layer_ids: List[int],
+        _row_indices: Optional[np.ndarray] = None,
+    ):
+        self.cache = cache                    # (N, L, T, H)
+        self.labels = labels
+        self.prompt_hashes = prompt_hashes
+        self.layer_positions = layer_positions  # positional indices into dim-1
+        self.layer_ids = layer_ids              # model layer numbers
+        self._row_indices = _row_indices
+
+    def __len__(self) -> int:
+        return len(self.labels)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        cache_idx = int(self._row_indices[idx]) if self._row_indices is not None else idx
+        act = torch.from_numpy(
+            np.array(self.cache[cache_idx, self.layer_positions])
+        )  # (num_layers, T, H)
+        return {
+            'hashkey': self.prompt_hashes[idx],
+            'halu': torch.tensor(float(self.labels[idx]), dtype=torch.float32),
+            'views_activations': act,  # (num_layers, T, H)
+            'view_indices': torch.tensor(self.layer_ids, dtype=torch.long),
+        }
+
+
 class PreloadedActivationDataset(Dataset):
     """RAM-resident activation dataset.
 
@@ -553,6 +593,32 @@ class PreloadedActivationDataset(Dataset):
             prompt_hashes=self.prompt_hashes,
             layer_pos=layer_pos,
             layer_id=layer,
+            _row_indices=self._row_indices,
+        )
+
+    def get_multi_layer_dataset(self, layers: List[int]) -> "MultiLayerDeterministicDataset":
+        """Return a deterministic multi-layer dataset for multi-layer probing.
+
+        Returns a ``MultiLayerDeterministicDataset`` that always yields
+        activations for all specified layers in a fixed order — no view
+        sampling.
+
+        Args:
+            layers: Model layer indices (must all be in ``self.relevant_layers``).
+        """
+        layer_positions = []
+        for layer in layers:
+            if layer not in self.relevant_layers:
+                raise ValueError(
+                    f"Layer {layer} not in preloaded relevant_layers {self.relevant_layers}"
+                )
+            layer_positions.append(self.relevant_layers.index(layer))
+        return MultiLayerDeterministicDataset(
+            cache=self.cache,
+            labels=self.labels,
+            prompt_hashes=self.prompt_hashes,
+            layer_positions=layer_positions,
+            layer_ids=list(layers),
             _row_indices=self._row_indices,
         )
 
