@@ -507,6 +507,131 @@ def run_linear_probe(
     return eval_metrics, predictions
 
 
+def run_multi_layer_linear_probe(
+    ap,
+    dataset_cfg: dict,
+    method_cfg: dict,
+    experiment_cfg: dict,
+    output_dir: str,
+    device: str,
+    training_seed: int,
+    test_ap=None,
+) -> tuple[dict, list[dict]]:
+    """Train and evaluate a multi-layer linear probe on all relevant layers."""
+    data_cfg = method_cfg["data"]
+    train_cfg = method_cfg["training"]
+
+    relevant_layers = (
+        parse_layer_range(data_cfg["relevant_layers"])
+        if "relevant_layers" in data_cfg
+        else list(range(14, 30))
+    )
+
+    # Common dataset kwargs
+    ds_kwargs = dict(
+        relevant_layers=relevant_layers,
+        num_views=2,
+        preload=data_cfg.get("preload", True),
+        include_response_logprobs=data_cfg.get("include_response_logprobs", False),
+        response_logprobs_top_k=data_cfg.get("response_logprobs_top_k", 20),
+        check_ram=False,
+    )
+
+    # Build full datasets
+    train_ds = ap.get_dataset("train", **ds_kwargs)
+    eval_ap = test_ap if test_ap is not None else ap
+    test_ds = eval_ap.get_dataset("test", **ds_kwargs)
+
+    # Use val split for training validation when available (avoids data leakage)
+    has_val = ap.split_strategy == "three_way"
+    val_ds = ap.get_dataset("val", **ds_kwargs) if has_val else test_ds
+
+    # Get deterministic multi-layer datasets
+    ml_train = train_ds.get_multi_layer_dataset(relevant_layers)
+    ml_test = test_ds.get_multi_layer_dataset(relevant_layers)
+    ml_val = val_ds.get_multi_layer_dataset(relevant_layers) if has_val else ml_test
+
+    from activation_research.model import MultiLayerLinearProbe
+    from activation_research.trainer import LinearProbeTrainer, LinearProbeTrainerConfig
+
+    model = MultiLayerLinearProbe(
+        input_dim=dataset_cfg["input_dim"],
+        num_layers=len(relevant_layers),
+        pooling=method_cfg["model_params"].get("pooling", "mean"),
+    )
+
+    checkpoint_dir = os.path.join(output_dir, "artifacts")
+    config = LinearProbeTrainerConfig(
+        max_epochs=train_cfg["max_epochs"],
+        batch_size=train_cfg["batch_size"],
+        lr=train_cfg["lr"],
+        steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+        grad_clip_norm=train_cfg.get("grad_clip_norm"),
+        balanced_sampling=train_cfg.get("balanced_sampling", True),
+        pooling=method_cfg["model_params"].get("pooling", "mean"),
+        device=device,
+        num_workers=experiment_cfg.get("num_workers", 4),
+        persistent_workers=experiment_cfg.get("persistent_workers", True),
+        checkpoint_dir=checkpoint_dir,
+        save_every=1,
+    )
+
+    trainer = LinearProbeTrainer(model, config=config)
+    trainer.fit(train_dataset=ml_train, val_dataset=ml_val)
+
+    # Save final weights
+    torch.save(
+        {"model_state_dict": model.state_dict()},
+        os.path.join(output_dir, "artifacts", "final_weights.pt"),
+    )
+
+    # Evaluate
+    from sklearn.metrics import roc_auc_score
+    from torch.utils.data import DataLoader
+
+    model.eval()
+    eval_device = torch.device(
+        device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    model.to(eval_device)
+
+    eval_loader = DataLoader(
+        ml_test, batch_size=train_cfg["batch_size"], shuffle=False
+    )
+    all_preds, all_labels = [], []
+    with torch.no_grad():
+        for batch in eval_loader:
+            x = batch["views_activations"].to(eval_device)
+            preds = model(x)
+            all_preds.append(preds.cpu())
+            all_labels.append(batch["halu"].cpu())
+
+    all_preds_np = torch.cat(all_preds).squeeze().numpy()
+    all_labels_np = torch.cat(all_labels).numpy()
+    if len(set(all_labels_np)) < 2:
+        auroc = float("nan")
+    else:
+        auroc = roc_auc_score(all_labels_np, all_preds_np)
+
+    eval_metrics = {
+        "method": method_cfg["name"],
+        "dataset": dataset_cfg["name"],
+        "seed": training_seed,
+        "split_seed": experiment_cfg.get("split_seed", 42),
+        "n_train": len(ml_train),
+        "n_test": len(ml_test),
+        "auroc": float(auroc),
+        "relevant_layers": relevant_layers,
+    }
+
+    predictions = [
+        {"example_id": i, "score_halu": float(s), "label_halu": int(l)}
+        for i, (s, l) in enumerate(zip(all_preds_np, all_labels_np))
+    ]
+
+    return eval_metrics, predictions
+
+
 def run_token_entropy(
     ap,
     dataset_cfg: dict,
@@ -980,6 +1105,11 @@ def main() -> None:
                         )
                     elif routine == "linear_probe":
                         eval_metrics, predictions = run_linear_probe(
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, seed,
+                            test_ap=test_ap,
+                        )
+                    elif routine == "multi_layer_linear_probe":
+                        eval_metrics, predictions = run_multi_layer_linear_probe(
                             ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, seed,
                             test_ap=test_ap,
                         )
