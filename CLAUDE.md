@@ -180,15 +180,38 @@ Experiment configs live at `configs/experiments/baseline_comparison_{name}.json`
 
 ### Running on GPU nodes
 
-For batched inference on GPU, use SSH directly (not jupyter_exec):
+For GPU job dispatch, use `scripts/gpu_dispatch.py` instead of raw SSH:
+
 ```bash
-ssh $GPUNODE bash /path/to/run_script.sh
+# Check which nodes are available and their GPU utilization
+python scripts/gpu_dispatch.py status
+
+# Run a training script on the best available node
+python scripts/gpu_dispatch.py run bash run_training.sh
+
+# Run on a specific node
+python scripts/gpu_dispatch.py run --node alphagpu04 bash run_training.sh
+
+# Run with minimum VRAM requirement
+python scripts/gpu_dispatch.py run --min-vram 30 bash run_training.sh
+
+# Check running jobs
+python scripts/gpu_dispatch.py jobs
+
+# Show all jobs (including completed/killed)
+python scripts/gpu_dispatch.py jobs --all
+
+# Kill a job
+python scripts/gpu_dispatch.py kill JOB_ID
 ```
 
-The GPU node and Python env are:
-- GPU node: check `.env` for `GPUNODE` (changes between sessions)
-- Python: `/mnt/home/hyang1/.local/share/mamba/envs/p311/bin/python`
-- Always `cd` to project root in scripts and use `resume=True` for long jobs
+Node registry is in `configs/nodes.json`. Job manifest is at `shared/gpu_jobs.json`.
+
+The GPU Python env is: `/mnt/home/hyang1/.local/share/mamba/envs/p311/bin/python`
+
+> **Note:** `.env` `GPUNODE` is still used by `utils/jupyter_exec.py` for interactive notebook work. `gpu_dispatch.py` is preferred for batch job dispatch.
+
+Always use `resume=True` for long jobs in case of node reclamation.
 
 ## Development Notes
 
