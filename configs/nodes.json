@@ -1,0 +1,24 @@
+{
+  "nodes": [
+    {
+      "hostname": "alphagpu04",
+      "python": "/mnt/home/hyang1/.local/share/mamba/envs/p311/bin/python",
+      "project_root": "/mnt/home/hyang1/LLM_research/HalluLens",
+      "max_concurrent_jobs": 1,
+      "tags": ["training", "inference"]
+    },
+    {
+      "hostname": "alphagpu08",
+      "python": "/mnt/home/hyang1/.local/share/mamba/envs/p311/bin/python",
+      "project_root": "/mnt/home/hyang1/LLM_research/HalluLens",
+      "max_concurrent_jobs": 1,
+      "tags": ["training", "inference"]
+    }
+  ],
+  "defaults": {
+    "python": "/mnt/home/hyang1/.local/share/mamba/envs/p311/bin/python",
+    "project_root": "/mnt/home/hyang1/LLM_research/HalluLens",
+    "ssh_timeout": 10,
+    "job_manifest": "shared/gpu_jobs.json"
+  }
+}
