@@ -57,7 +57,7 @@ class JobRecord:
     command: str
     pid: Optional[int]
     started_at: str
-    status: str  # "running", "completed", "failed", "killed", "unknown"
+    status: str  # "running", "finished", "killed", "unknown"
     log_file: str
     description: str = ""
 
