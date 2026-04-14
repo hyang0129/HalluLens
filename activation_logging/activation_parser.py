@@ -981,7 +981,46 @@ class ActivationParser:
 
         return gendf
 
-            
+    def resplit(self, random_seed: int) -> None:
+        """Re-apply the train/val split with a new random seed.
+
+        This allows different training seeds to operate on different
+        train/val partitions, producing meaningful variance across runs.
+
+        Args:
+            random_seed: New seed for the train/val split.
+        """
+        if self.split_strategy == "none":
+            return
+
+        logger.info(f"Resplitting train/val with random_seed={random_seed}")
+        self.random_seed = random_seed
+
+        # Reset split column
+        self.gendf['split'] = 'unassigned'
+
+        train_df, test_df = train_test_split(
+            self.gendf, test_size=0.2,
+            stratify=self.gendf['halu'], random_state=self.random_seed,
+        )
+        self.gendf.loc[train_df.index, 'split'] = 'train'
+        self.gendf.loc[test_df.index, 'split'] = 'test'
+
+        if self.split_strategy == "three_way":
+            train_only_df, val_df = train_test_split(
+                train_df, test_size=0.125,
+                stratify=train_df['halu'], random_state=self.random_seed + 1,
+            )
+            self.gendf.loc[val_df.index, 'split'] = 'val'
+            if self.verbose:
+                logger.info(f"Val set size: {len(val_df)}")
+
+        if self.verbose:
+            logger.info(
+                f"Resplit complete: train={len(self.gendf[self.gendf['split'] == 'train'])}, "
+                f"test={len(test_df)}"
+            )
+
     def _hash_prompt(self, prompt: str) -> str:
         """
         Hash a prompt string to match the format used in ActivationsLogger.
