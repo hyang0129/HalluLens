@@ -2095,10 +2095,6 @@ class SimCLRCotrainedTrainer(Trainer):
         self.start_epoch = int(checkpoint.get("epoch", 0)) + 1
         self.best_loss = float(checkpoint.get("best_loss", float("inf")))
         logger.info(f"Resumed SimCLR co-trained training from epoch {self.start_epoch}")
-                "Checkpoint timing: "
-                f"epoch={epoch + 1}, path={last_path}, elapsed={elapsed:.2f}s"
-            )
-        return elapsed
 
     def load_checkpoint(self, resume_from: str) -> None:
         checkpoint_path = resume_from
