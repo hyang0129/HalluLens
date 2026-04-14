@@ -7,7 +7,7 @@
     "input_dropout": 0.3
   },
   "training": {
-    "max_epochs": 50,
+    "max_epochs": 100,
     "batch_size": 512,
     "lr": 1e-5,
     "temperature": 0.25,
@@ -16,7 +16,8 @@
     "use_infinite_index_stream": true,
     "use_infinite_index_stream_eval": true,
     "balanced_sampling": false,
-    "grad_clip_norm": 1.0
+    "grad_clip_norm": 1.0,
+    "min_total_steps": 3000
   },
   "data": {
     "relevant_layers": "14-29",
