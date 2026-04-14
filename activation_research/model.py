@@ -841,29 +841,6 @@ class LayerAwareProgressiveCompressor(nn.Module):
             z = F.normalize(z, dim=-1)
 
         return z
-            emb = self.layer_embedding.weight  # (num_layers, final_dim)
-            row_norms = emb.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-            self.layer_embedding.weight.copy_(emb * (target_norm / row_norms))
-            # Bake scale into weights; reset alpha to 1.0
-            self.positional_alpha.fill_(1.0)
-
-        elif self.conditioning in ("film_in", "film_both"):
-            beta = self.film_in.beta.weight
-            beta_norms = beta.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-            self.film_in.beta.weight.copy_(beta * (target_norm / beta_norms))
-
-        if self.conditioning == "concatenate":
-            emb = self.layer_embedding.weight
-            row_norms = emb.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-            self.layer_embedding.weight.copy_(emb * (target_norm / row_norms))
-
-        stats = {
-            "input_mean_norm": input_mean_norm,
-            "input_elem_mean": input_elem_mean,
-            "input_elem_std": input_elem_std,
-            "embedding_target_norm": target_norm,
-        }
-        return stats
 
     # ------------------------------------------------------------------ #
     #  Forward
