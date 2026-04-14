@@ -1648,6 +1648,7 @@ def main() -> None:
                         from utils.seeding import seed_everything
 
                         seed_everything(seed)
+                        ap.resplit(seed)
 
                     # Write merged config
                     merged_config = {
@@ -1655,7 +1656,7 @@ def main() -> None:
                         "method": method_cfg,
                         "experiment": {k: v for k, v in experiment_cfg.items()},
                         "training_seed": seed,
-                        "split_seed": experiment_cfg.get("split_seed", 42),
+                        "split_seed": seed if seed is not None else experiment_cfg.get("split_seed", 42),
                     }
                     with open(os.path.join(run_dir, "config.json"), "w") as f:
                         json.dump(merged_config, f, indent=2)
