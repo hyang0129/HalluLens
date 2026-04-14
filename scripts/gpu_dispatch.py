@@ -313,7 +313,7 @@ def dispatch_job(
         f"nohup bash -c {quoted_cmd} > {shlex.quote(abs_log)} 2>&1 & echo $!"
     )
 
-    result = ssh_run(node.hostname, dispatch_cmd, timeout=15)
+    result = ssh_run(node.hostname, dispatch_cmd, timeout=30)
 
     pid = None
     pid_str = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""

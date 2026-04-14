@@ -134,6 +134,11 @@ class TrainerConfig:
     # If set, training uses this step count regardless of dataset length.
     steps_per_epoch_override: Optional[int] = None
 
+    # Minimum total training steps across all epochs.  When set, max_epochs
+    # is increased so that  steps_per_epoch * max_epochs >= min_total_steps.
+    # Has no effect when the dataset is large enough to already exceed this.
+    min_total_steps: Optional[int] = None
+
     # Gradient clipping (max L2 norm).  Set to 0.0 or None to disable.
     grad_clip_norm: Optional[float] = None
 
@@ -208,6 +213,23 @@ class Trainer:
         """Run the training loop."""
         if self.config.resume_from is not None:
             self.load_checkpoint(self.config.resume_from)
+
+        # Increase steps_per_epoch if min_total_steps would not be reached.
+        min_total_steps = getattr(self.config, "min_total_steps", None)
+        if min_total_steps is not None and hasattr(train_dataset, "__len__"):
+            natural_spe = int(math.ceil(len(train_dataset) / float(self.config.batch_size)))
+            if natural_spe > 0:
+                total_steps = natural_spe * self.config.max_epochs
+                if total_steps < min_total_steps:
+                    needed_spe = int(math.ceil(min_total_steps / self.config.max_epochs))
+                    logger.info(
+                        f"min_total_steps={min_total_steps}: bumping steps_per_epoch "
+                        f"from {natural_spe} to {needed_spe} "
+                        f"(max_epochs={self.config.max_epochs}, "
+                        f"total: {natural_spe * self.config.max_epochs} -> "
+                        f"{needed_spe * self.config.max_epochs} steps)"
+                    )
+                    self.config.steps_per_epoch_override = needed_spe
 
         for epoch in tqdm(range(self.start_epoch, int(self.config.max_epochs)), desc="Epochs"):
             logger.info(f"Starting epoch {epoch + 1}/{self.config.max_epochs}")
@@ -793,6 +815,9 @@ class LinearProbeTrainerConfig(TrainerConfig):
 
     pooling: str = "mean"
     balanced_sampling: bool = True
+    use_infinite_index_stream: bool = False
+    infinite_stream_shuffle: bool = True
+    infinite_stream_seed: int = 0
 
 
 class LinearProbeTrainer(Trainer):
@@ -918,6 +943,16 @@ class LinearProbeTrainer(Trainer):
     def train_dataloader(self, train_dataset) -> DataLoader:
         dataset = train_dataset
         is_iterable = isinstance(dataset, IterableDataset)
+
+        if bool(self.probe_config.use_infinite_index_stream) and not is_iterable:
+            if not hasattr(dataset, "__len__"):
+                raise TypeError("use_infinite_index_stream=True requires train_dataset to have __len__")
+            dataset = InfiniteIndexStream(
+                dataset,
+                shuffle=bool(self.probe_config.infinite_stream_shuffle),
+                seed=int(self.probe_config.infinite_stream_seed),
+            )
+            is_iterable = True
 
         sampler = None
         if bool(self.probe_config.balanced_sampling) and not is_iterable:

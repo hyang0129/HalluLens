@@ -6,10 +6,12 @@
     "pooling": "mean"
   },
   "training": {
-    "max_epochs": 30,
+    "max_epochs": 100,
     "batch_size": 512,
     "lr": 1e-3,
-    "balanced_sampling": true
+    "balanced_sampling": true,
+    "use_infinite_index_stream": true,
+    "min_total_steps": 3000
   },
   "data": {
     "relevant_layers": "14-29",

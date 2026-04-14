@@ -20,7 +20,8 @@
     "ignore_label": 1,
     "use_infinite_index_stream": true,
     "balanced_sampling": false,
-    "grad_clip_norm": 1.0
+    "grad_clip_norm": 1.0,
+    "min_total_steps": 3000
   },
   "data": {
     "relevant_layers": "14-29",
