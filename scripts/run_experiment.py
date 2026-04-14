@@ -639,6 +639,571 @@ def run_multi_layer_linear_probe(
     return eval_metrics, predictions
 
 
+
+def run_simclr_linear(
+    ap,
+    dataset_cfg: dict,
+    method_cfg: dict,
+    experiment_cfg: dict,
+    output_dir: str,
+    device: str,
+    training_seed: int,
+    test_ap=None,
+) -> tuple[dict, list[dict]]:
+    """Train and evaluate a two-phase SimCLR + linear probe model.
+
+    Phase 1: Unsupervised contrastive (SimCLR) on the ProgressiveCompressor.
+    Phase 2: Linear probe on frozen encoder embeddings (BCE, AUROC).
+    """
+    data_cfg = method_cfg["data"]
+    train_cfg = method_cfg["training"]
+    eval_cfg = method_cfg["evaluation"]
+
+    relevant_layers = parse_layer_range(data_cfg["relevant_layers"])
+    target_layers = data_cfg["target_layers"]
+
+    # Common dataset kwargs
+    ds_kwargs = dict(
+        relevant_layers=relevant_layers,
+        num_views=data_cfg.get("num_views", 2),
+        pad_length=data_cfg.get("pad_length", 63),
+        preload=data_cfg.get("preload", True),
+        include_response_logprobs=data_cfg.get("include_response_logprobs", False),
+        response_logprobs_top_k=data_cfg.get("response_logprobs_top_k", 20),
+        check_ram=False,
+    )
+
+    # Build datasets for Phase 1 (contrastive, multi-view)
+    train_ds = ap.get_dataset("train", **ds_kwargs)
+    eval_ap = test_ap if test_ap is not None else ap
+    test_ds = eval_ap.get_dataset("test", **ds_kwargs)
+
+    has_val = ap.split_strategy == "three_way"
+    val_ds = ap.get_dataset("val", **ds_kwargs) if has_val else test_ds
+
+    # Build single-layer datasets for Phase 2 (linear probe on target layers)
+    train_ds_target = train_ds.slice_layers(target_layers)
+    test_ds_target = test_ds.slice_layers(target_layers)
+    val_ds_target = val_ds.slice_layers(target_layers) if has_val else test_ds_target
+
+    # Build model
+    from activation_research.model import ProgressiveCompressor
+
+    model = ProgressiveCompressor(
+        input_dim=dataset_cfg["input_dim"],
+        final_dim=method_cfg["model_params"].get("final_dim", 512),
+        input_dropout=method_cfg["model_params"].get("input_dropout", 0.3),
+    )
+
+    # Build trainer
+    from activation_research.trainer import SimCLRLinearTrainer, SimCLRLinearTrainerConfig
+
+    checkpoint_dir = os.path.join(output_dir, "artifacts")
+    config = SimCLRLinearTrainerConfig(
+        batch_size=train_cfg["batch_size"],
+        temperature=train_cfg.get("temperature", 0.25),
+        contrastive_epochs=train_cfg.get("contrastive_epochs", 50),
+        contrastive_lr=train_cfg.get("contrastive_lr", 1e-5),
+        probe_epochs=train_cfg.get("probe_epochs", 100),
+        probe_lr=train_cfg.get("probe_lr", 1e-3),
+        probe_balanced_sampling=train_cfg.get("probe_balanced_sampling", True),
+        probe_min_total_steps=train_cfg.get("probe_min_total_steps", 3000),
+        grad_clip_norm=train_cfg.get("grad_clip_norm"),
+        use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", True),
+        use_infinite_index_stream_eval=train_cfg.get(
+            "use_infinite_index_stream_eval", True
+        ),
+        infinite_stream_seed=training_seed,
+        infinite_eval_seed=training_seed,
+        num_views=data_cfg.get("num_views", 2),
+        device=device,
+        num_workers=experiment_cfg.get("num_workers", 4),
+        persistent_workers=experiment_cfg.get("persistent_workers", True),
+        checkpoint_dir=checkpoint_dir,
+        save_every=1,
+        snapshot_every=10,
+        snapshot_keep_last=3,
+    )
+
+    trainer = SimCLRLinearTrainer(model, config=config)
+    trainer.fit(
+        train_dataset=train_ds,
+        val_dataset=val_ds,
+        probe_train_dataset=train_ds_target,
+        probe_val_dataset=val_ds_target,
+    )
+
+    # Save final encoder weights
+    torch.save(
+        {"model_state_dict": model.state_dict()},
+        os.path.join(output_dir, "artifacts", "final_weights.pt"),
+    )
+
+    # Save linear head weights
+    if trainer.linear_head is not None:
+        torch.save(
+            {"linear_head_state_dict": trainer.linear_head.state_dict()},
+            os.path.join(output_dir, "artifacts", "final_linear_head.pt"),
+        )
+
+    # --- Evaluation ---
+    # 1) Contrastive embedding quality (cosine, mds, knn) via OOD evaluator
+    from torch.utils.data import DataLoader
+
+    from activation_research.metric_evaluator import MultiMetricHallucinationEvaluator
+
+    train_loader = DataLoader(train_ds_target, batch_size=64, shuffle=False)
+    eval_loader = DataLoader(test_ds_target, batch_size=64, shuffle=False)
+
+    model.eval()
+
+    # Build metrics list from config (exclude "auroc" since that's probe-based)
+    metrics_list: list = []
+    for m in eval_cfg["metrics"]:
+        if m == "auroc":
+            continue  # handled separately via probe
+        if m == "knn":
+            knn_params = dict(eval_cfg.get("knn_params", {}))
+            knn_params["sample_seed"] = training_seed
+            metrics_list.append(
+                {
+                    "metric": "knn",
+                    "kwargs": knn_params,
+                    "train_selection": "all",
+                }
+            )
+        else:
+            metrics_list.append(m)
+
+    ood_stats = {}
+    if metrics_list:
+        evaluator = MultiMetricHallucinationEvaluator(
+            activation_parser_df=eval_ap.df,
+            train_data_loader=train_loader,
+            metrics=metrics_list,
+            batch_size=eval_cfg.get("eval_batch_size", 256),
+            sub_batch_size=eval_cfg.get("sub_batch_size", 64),
+            device=device,
+            num_workers=experiment_cfg.get("num_workers", 4),
+            persistent_workers=False,
+            outlier_class=dataset_cfg.get("outlier_class", 1),
+        )
+        ood_stats = evaluator.compute(eval_loader, model)
+
+    # 2) Linear probe AUROC on test set
+    from sklearn.metrics import roc_auc_score
+
+    probe_auroc = float("nan")
+    predictions: list[dict] = []
+    if trainer.linear_head is not None:
+        trainer.linear_head.eval()
+        probe_eval_loader = DataLoader(
+            test_ds_target, batch_size=train_cfg["batch_size"], shuffle=False
+        )
+        all_preds, all_labels = [], []
+        with torch.no_grad():
+            for batch in probe_eval_loader:
+                x = batch["views_activations"].to(
+                    torch.device(device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")),
+                    non_blocking=True,
+                )
+                if x.dim() == 4:
+                    x = x[:, 0]  # take first view
+                z = model(x)
+                preds = trainer.linear_head(z)
+                all_preds.append(preds.cpu())
+                all_labels.append(batch["halu"].cpu())
+
+        all_preds_np = torch.cat(all_preds).squeeze().numpy()
+        all_labels_np = torch.cat(all_labels).numpy()
+        if len(set(all_labels_np)) >= 2:
+            probe_auroc = float(roc_auc_score(all_labels_np, all_preds_np))
+
+        predictions = [
+            {"example_id": i, "score_halu": float(s), "label_halu": int(l)}
+            for i, (s, l) in enumerate(zip(all_preds_np, all_labels_np))
+        ]
+
+    # Combine metrics
+    eval_metrics: dict = {
+        "method": method_cfg["name"],
+        "dataset": dataset_cfg["name"],
+        "seed": training_seed,
+        "split_seed": experiment_cfg.get("split_seed", 42),
+        "n_train": len(train_ds),
+        "n_test": len(test_ds),
+        "auroc": probe_auroc,
+        "target_layers": target_layers,
+    }
+    eval_metrics.update(ood_stats)
+
+    return eval_metrics, predictions
+
+
+
+def run_simclr_cotrained(
+    ap,
+    dataset_cfg: dict,
+    method_cfg: dict,
+    experiment_cfg: dict,
+    output_dir: str,
+    device: str,
+    training_seed: int,
+    test_ap=None,
+) -> tuple[dict, list[dict]]:
+    """Train and evaluate a SimCLR co-trained (joint contrastive + BCE) model."""
+    data_cfg = method_cfg["data"]
+    train_cfg = method_cfg["training"]
+    eval_cfg = method_cfg["evaluation"]
+
+    relevant_layers = parse_layer_range(data_cfg["relevant_layers"])
+    target_layers = data_cfg["target_layers"]
+
+    # Common dataset kwargs
+    ds_kwargs = dict(
+        relevant_layers=relevant_layers,
+        num_views=data_cfg.get("num_views", 2),
+        pad_length=data_cfg.get("pad_length", 63),
+        preload=data_cfg.get("preload", True),
+        include_response_logprobs=data_cfg.get("include_response_logprobs", False),
+        response_logprobs_top_k=data_cfg.get("response_logprobs_top_k", 20),
+        check_ram=False,
+    )
+
+    # Build datasets
+    train_ds = ap.get_dataset("train", **ds_kwargs)
+    eval_ap = test_ap if test_ap is not None else ap
+    test_ds = eval_ap.get_dataset("test", **ds_kwargs)
+
+    # Use val split for training validation when available (avoids data leakage)
+    has_val = ap.split_strategy == "three_way"
+    val_ds = ap.get_dataset("val", **ds_kwargs) if has_val else test_ds
+
+    # Build model
+    from activation_research.model import SimCLRCotrainedModel
+
+    model = SimCLRCotrainedModel(
+        input_dim=dataset_cfg["input_dim"],
+        final_dim=method_cfg["model_params"].get("final_dim", 512),
+        input_dropout=method_cfg["model_params"].get("input_dropout", 0.3),
+    )
+
+    # Build trainer
+    from activation_research.trainer import (
+        SimCLRCotrainedTrainer,
+        SimCLRCotrainedTrainerConfig,
+    )
+
+    checkpoint_dir = os.path.join(output_dir, "artifacts")
+    config = SimCLRCotrainedTrainerConfig(
+        max_epochs=train_cfg["max_epochs"],
+        batch_size=train_cfg["batch_size"],
+        lr=train_cfg["lr"],
+        temperature=train_cfg.get("temperature", 0.25),
+        simclr_weight=train_cfg.get("simclr_weight", 1.0),
+        bce_weight=train_cfg.get("bce_weight", 1.0),
+        steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+        min_total_steps=train_cfg.get("min_total_steps"),
+        grad_clip_norm=train_cfg.get("grad_clip_norm"),
+        use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", True),
+        use_infinite_index_stream_eval=train_cfg.get(
+            "use_infinite_index_stream_eval", True
+        ),
+        infinite_stream_seed=training_seed,
+        infinite_eval_seed=training_seed,
+        balanced_sampling=train_cfg.get("balanced_sampling", False),
+        num_views=data_cfg.get("num_views", 2),
+        device=device,
+        num_workers=experiment_cfg.get("num_workers", 4),
+        persistent_workers=experiment_cfg.get("persistent_workers", True),
+        checkpoint_dir=checkpoint_dir,
+        save_every=1,
+        snapshot_every=10,
+        snapshot_keep_last=3,
+    )
+
+    trainer = SimCLRCotrainedTrainer(model, config=config)
+    trainer.fit(train_dataset=train_ds, val_dataset=val_ds)
+
+    # Save final weights
+    torch.save(
+        {"model_state_dict": model.state_dict()},
+        os.path.join(output_dir, "artifacts", "final_weights.pt"),
+    )
+
+    # OOD evaluation on target layers (contrastive embedding quality)
+    from torch.utils.data import DataLoader
+
+    from activation_research.metric_evaluator import MultiMetricHallucinationEvaluator
+
+    train_ds_target = train_ds.slice_layers(target_layers)
+    test_ds_target = test_ds.slice_layers(target_layers)
+
+    train_loader = DataLoader(train_ds_target, batch_size=64, shuffle=False)
+    eval_loader = DataLoader(test_ds_target, batch_size=64, shuffle=False)
+
+    model.eval()
+
+    # Build metrics list from config
+    metrics_list: list = []
+    for m in eval_cfg["metrics"]:
+        if m == "knn":
+            knn_params = dict(eval_cfg.get("knn_params", {}))
+            knn_params["sample_seed"] = training_seed
+            metrics_list.append(
+                {
+                    "metric": "knn",
+                    "kwargs": knn_params,
+                    "train_selection": "all",
+                }
+            )
+        else:
+            metrics_list.append(m)
+
+    evaluator = MultiMetricHallucinationEvaluator(
+        activation_parser_df=eval_ap.df,
+        train_data_loader=train_loader,
+        metrics=metrics_list,
+        batch_size=eval_cfg.get("eval_batch_size", 256),
+        sub_batch_size=eval_cfg.get("sub_batch_size", 64),
+        device=device,
+        num_workers=experiment_cfg.get("num_workers", 4),
+        persistent_workers=False,
+        outlier_class=dataset_cfg.get("outlier_class", 1),
+    )
+
+    ood_stats = evaluator.compute(eval_loader, model)
+
+    # Also compute classification AUROC from the head on test set
+    from sklearn.metrics import roc_auc_score
+
+    eval_device = torch.device(
+        device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    model.to(eval_device)
+
+    head_eval_loader = DataLoader(test_ds_target, batch_size=256, shuffle=False)
+    all_preds, all_labels = [], []
+    with torch.no_grad():
+        for batch in head_eval_loader:
+            x = batch["views_activations"].to(eval_device)
+            if x.dim() == 4:
+                x = x[:, 0]  # take first view
+            _, pred = model.forward_with_head(x)
+            all_preds.append(pred.cpu())
+            all_labels.append(batch["halu"].cpu())
+
+    all_preds_np = torch.cat(all_preds).squeeze().numpy()
+    all_labels_np = torch.cat(all_labels).numpy()
+    if len(set(all_labels_np)) < 2:
+        head_auroc = float("nan")
+    else:
+        head_auroc = roc_auc_score(all_labels_np, all_preds_np)
+
+    # Build eval_metrics
+    eval_metrics: dict = {
+        "method": method_cfg["name"],
+        "dataset": dataset_cfg["name"],
+        "seed": training_seed,
+        "split_seed": experiment_cfg.get("split_seed", 42),
+        "n_train": len(train_ds),
+        "n_test": len(test_ds),
+        "auroc": float(head_auroc),
+    }
+    eval_metrics.update(ood_stats)
+
+    predictions: list[dict] = []
+    return eval_metrics, predictions
+
+
+
+def run_simclr_projection(
+    ap,
+    dataset_cfg: dict,
+    method_cfg: dict,
+    experiment_cfg: dict,
+    output_dir: str,
+    device: str,
+    training_seed: int,
+    test_ap=None,
+) -> tuple[dict, list[dict]]:
+    """Train and evaluate a SimCLR projection head model.
+
+    The contrastive loss operates on the projected embeddings p (after MLP
+    projection head), while the classification head and downstream evaluation
+    operate on the representation z (before the projection head).
+    """
+    data_cfg = method_cfg["data"]
+    train_cfg = method_cfg["training"]
+    eval_cfg = method_cfg["evaluation"]
+
+    relevant_layers = parse_layer_range(data_cfg["relevant_layers"])
+    target_layers = data_cfg["target_layers"]
+
+    # Common dataset kwargs
+    ds_kwargs = dict(
+        relevant_layers=relevant_layers,
+        num_views=data_cfg.get("num_views", 2),
+        pad_length=data_cfg.get("pad_length", 63),
+        preload=data_cfg.get("preload", True),
+        include_response_logprobs=data_cfg.get("include_response_logprobs", False),
+        response_logprobs_top_k=data_cfg.get("response_logprobs_top_k", 20),
+        check_ram=False,
+    )
+
+    # Build datasets
+    train_ds = ap.get_dataset("train", **ds_kwargs)
+    eval_ap = test_ap if test_ap is not None else ap
+    test_ds = eval_ap.get_dataset("test", **ds_kwargs)
+
+    # Use val split for training validation when available (avoids data leakage)
+    has_val = ap.split_strategy == "three_way"
+    val_ds = ap.get_dataset("val", **ds_kwargs) if has_val else test_ds
+
+    # Build model
+    from activation_research.model import SimCLRProjectionModel
+
+    model_params = method_cfg.get("model_params", {})
+    model = SimCLRProjectionModel(
+        input_dim=dataset_cfg["input_dim"],
+        final_dim=model_params.get("final_dim", 512),
+        projection_dim=model_params.get("projection_dim", 128),
+        input_dropout=model_params.get("input_dropout", 0.3),
+    )
+
+    # Build trainer
+    from activation_research.trainer import (
+        SimCLRProjectionTrainer,
+        SimCLRProjectionTrainerConfig,
+    )
+
+    checkpoint_dir = os.path.join(output_dir, "artifacts")
+    config = SimCLRProjectionTrainerConfig(
+        max_epochs=train_cfg["max_epochs"],
+        batch_size=train_cfg["batch_size"],
+        lr=train_cfg["lr"],
+        temperature=train_cfg["temperature"],
+        simclr_weight=train_cfg.get("simclr_weight", 1.0),
+        bce_weight=train_cfg.get("bce_weight", 1.0),
+        projection_dim=model_params.get("projection_dim", 128),
+        steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+        min_total_steps=train_cfg.get("min_total_steps"),
+        grad_clip_norm=train_cfg.get("grad_clip_norm"),
+        use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", True),
+        use_infinite_index_stream_eval=train_cfg.get(
+            "use_infinite_index_stream_eval", True
+        ),
+        infinite_stream_seed=training_seed,
+        infinite_eval_seed=training_seed,
+        balanced_sampling=train_cfg.get("balanced_sampling", False),
+        num_views=data_cfg.get("num_views", 2),
+        device=device,
+        num_workers=experiment_cfg.get("num_workers", 4),
+        persistent_workers=experiment_cfg.get("persistent_workers", True),
+        checkpoint_dir=checkpoint_dir,
+        save_every=1,
+        snapshot_every=10,
+        snapshot_keep_last=3,
+    )
+
+    trainer = SimCLRProjectionTrainer(model, config=config)
+    trainer.fit(train_dataset=train_ds, val_dataset=val_ds)
+
+    # Save final weights
+    torch.save(
+        {"model_state_dict": model.state_dict()},
+        os.path.join(output_dir, "artifacts", "final_weights.pt"),
+    )
+
+    # OOD evaluation on target layers using z (encoder output, model.forward)
+    from torch.utils.data import DataLoader
+
+    from activation_research.metric_evaluator import MultiMetricHallucinationEvaluator
+
+    train_ds_target = train_ds.slice_layers(target_layers)
+    test_ds_target = test_ds.slice_layers(target_layers)
+
+    train_loader = DataLoader(train_ds_target, batch_size=64, shuffle=False)
+    eval_loader = DataLoader(test_ds_target, batch_size=64, shuffle=False)
+
+    model.eval()
+
+    # Build metrics list from config
+    metrics_list: list = []
+    for m in eval_cfg["metrics"]:
+        if m == "knn":
+            knn_params = dict(eval_cfg.get("knn_params", {}))
+            knn_params["sample_seed"] = training_seed
+            metrics_list.append(
+                {
+                    "metric": "knn",
+                    "kwargs": knn_params,
+                    "train_selection": "all",
+                }
+            )
+        elif m == "auroc":
+            # AUROC from classification head -- compute separately below
+            pass
+        else:
+            metrics_list.append(m)
+
+    evaluator = MultiMetricHallucinationEvaluator(
+        activation_parser_df=eval_ap.df,
+        train_data_loader=train_loader,
+        metrics=metrics_list,
+        batch_size=eval_cfg.get("eval_batch_size", 256),
+        sub_batch_size=eval_cfg.get("sub_batch_size", 64),
+        device=device,
+        num_workers=experiment_cfg.get("num_workers", 4),
+        persistent_workers=False,
+        outlier_class=dataset_cfg.get("outlier_class", 1),
+    )
+
+    ood_stats = evaluator.compute(eval_loader, model)
+
+    # Compute AUROC from classification head on test set
+    eval_device = torch.device(
+        device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    model.to(eval_device)
+
+    all_preds, all_labels = [], []
+    with torch.no_grad():
+        for batch in eval_loader:
+            x = batch["views_activations"].to(eval_device)
+            if x.dim() == 4:
+                x = x[:, 0]  # first view
+            z = model(x)  # encoder output
+            pred = torch.sigmoid(model.head(z))
+            all_preds.append(pred.cpu())
+            all_labels.append(batch["halu"].cpu())
+
+    from sklearn.metrics import roc_auc_score
+
+    all_preds_np = torch.cat(all_preds).squeeze().numpy()
+    all_labels_np = torch.cat(all_labels).numpy()
+    if len(set(all_labels_np)) < 2:
+        head_auroc = float("nan")
+    else:
+        head_auroc = float(roc_auc_score(all_labels_np, all_preds_np))
+
+    # Build eval_metrics
+    eval_metrics: dict = {
+        "method": method_cfg["name"],
+        "dataset": dataset_cfg["name"],
+        "seed": training_seed,
+        "split_seed": experiment_cfg.get("split_seed", 42),
+        "n_train": len(train_ds),
+        "n_test": len(test_ds),
+        "auroc": head_auroc,
+    }
+    eval_metrics.update(ood_stats)
+
+    predictions: list[dict] = []
+    return eval_metrics, predictions
+
+
+
 def run_token_entropy(
     ap,
     dataset_cfg: dict,
@@ -1117,6 +1682,21 @@ def main() -> None:
                         )
                     elif routine == "multi_layer_linear_probe":
                         eval_metrics, predictions = run_multi_layer_linear_probe(
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, seed,
+                            test_ap=test_ap,
+                        )
+                    elif routine == "simclr_linear":
+                        eval_metrics, predictions = run_simclr_linear(
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, seed,
+                            test_ap=test_ap,
+                        )
+                    elif routine == "simclr_cotrained":
+                        eval_metrics, predictions = run_simclr_cotrained(
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, seed,
+                            test_ap=test_ap,
+                        )
+                    elif routine == "simclr_projection":
+                        eval_metrics, predictions = run_simclr_projection(
                             ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, seed,
                             test_ap=test_ap,
                         )

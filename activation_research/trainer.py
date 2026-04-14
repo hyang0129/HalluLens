@@ -1283,3 +1283,1086 @@ class LayerAwareContrastiveTrainer(Trainer):
         self.start_epoch = int(checkpoint.get("epoch", 0)) + 1
         self.best_loss = float(checkpoint.get("best_loss", float("inf")))
         logger.info(f"Resumed training from epoch {self.start_epoch}")
+    """Configuration for `LinearProbeTrainer`."""
+
+    pooling: str = "mean"
+    balanced_sampling: bool = True
+    use_infinite_index_stream: bool = False
+    infinite_stream_shuffle: bool = True
+    infinite_stream_seed: int = 0
+
+
+class LinearProbeTrainer(Trainer):
+    """Trainer for per-layer linear probe hallucination detection.
+
+    Trains a single ``LinearProbe`` on the activations provided by the
+    dataset.  The dataset should be configured with ``num_views=1`` and
+    ``min_target_layers=1`` so that ``views_activations`` is ``(1, L, D)``.
+
+    The training loop uses BCE loss and reports AUROC on the validation
+    split each epoch.
+    """
+
+    def __init__(self, model: torch.nn.Module, *, config: LinearProbeTrainerConfig):
+        self.probe_config = config
+        super().__init__(model, config=config)
+        self.loss_fn = torch.nn.BCELoss()
+        self.best_auroc: float = 0.0
+
+    def training_step(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, Dict[str, float]]:
+        # views_activations: (B, 1, seq_len, D) → squeeze view dim
+        x = batch["views_activations"].to(self.device, non_blocking=True)
+        if x.dim() == 4:
+            x = x.squeeze(1)  # (B, seq_len, D)
+        labels = batch["halu"].to(self.device, non_blocking=True).float().view(-1, 1)
+
+        preds = self.model(x)  # (B, 1)
+        loss = self.loss_fn(preds, labels)
+
+        acc = float(((preds > 0.5).float() == labels).float().mean().item())
+        return loss, {"acc": acc}
+
+    def train_epoch(self, *, epoch: int, train_dataset) -> Dict[str, float]:
+        self.model.train()
+        train_loader, steps_per_epoch, train_iter = self._build_train_iterator(train_dataset)
+
+        total_loss = 0.0
+        total_acc = 0.0
+        n_steps = 0
+
+        if steps_per_epoch is not None:
+            loop = tqdm(range(steps_per_epoch), desc=f"Epoch {epoch+1}/{self.config.max_epochs}", leave=False)
+        else:
+            loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{self.config.max_epochs}", leave=False)
+
+        for i, _ in enumerate(loop, start=1):
+            if train_iter is not None:
+                try:
+                    batch = next(train_iter)
+                except StopIteration:
+                    train_iter = iter(train_loader)
+                    batch = next(train_iter)
+            else:
+                batch = _
+
+            loss, metrics = self.training_step(batch)
+
+            self.optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            if self.config.grad_clip_norm is not None and float(self.config.grad_clip_norm) > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), max_norm=float(self.config.grad_clip_norm)
+                )
+            self.optimizer.step()
+
+            total_loss += float(loss.detach().cpu().item())
+            total_acc += float(metrics.get("acc", 0.0))
+            n_steps += 1
+            loop.set_postfix(loss=total_loss / n_steps, acc=total_acc / n_steps)
+
+        out = {
+            "train_loss": total_loss / max(1, n_steps),
+            "train_acc": total_acc / max(1, n_steps),
+        }
+        logger.info(f"Train: loss={out['train_loss']:.4f}, acc={out['train_acc']:.4f}")
+        return out
+
+    def validate(self, *, epoch: int, val_dataset) -> Dict[str, float]:
+        self.model.eval()
+        val_loader, eval_max_batches, _ = self._build_val_loader(val_dataset)
+
+        all_preds = []
+        all_labels = []
+        total_loss = 0.0
+        n_batches = 0
+
+        with torch.no_grad():
+            for i, batch in enumerate(val_loader):
+                if eval_max_batches is not None and i >= eval_max_batches:
+                    break
+                x = batch["views_activations"].to(self.device, non_blocking=True)
+                if x.dim() == 4:
+                    x = x.squeeze(1)
+                labels = batch["halu"].to(self.device, non_blocking=True).float().view(-1, 1)
+
+                preds = self.model(x)
+                loss = self.loss_fn(preds, labels)
+                total_loss += float(loss.item())
+                n_batches += 1
+
+                all_preds.append(preds.cpu())
+                all_labels.append(labels.cpu())
+
+        all_preds = torch.cat(all_preds).numpy()
+        all_labels = torch.cat(all_labels).numpy()
+
+        from sklearn.metrics import roc_auc_score
+        try:
+            auroc = float(roc_auc_score(all_labels, all_preds))
+        except ValueError:
+            auroc = float("nan")
+
+        self.best_auroc = max(self.best_auroc, auroc)
+
+        out = {
+            "val_loss": total_loss / max(1, n_batches),
+            "val_auroc": auroc,
+            "best_auroc": self.best_auroc,
+        }
+        logger.info(f"Val: loss={out['val_loss']:.4f}, auroc={out['val_auroc']:.4f}")
+        return out
+
+    def train_dataloader(self, train_dataset) -> DataLoader:
+        dataset = train_dataset
+        is_iterable = isinstance(dataset, IterableDataset)
+
+        if bool(self.probe_config.use_infinite_index_stream) and not is_iterable:
+            if not hasattr(dataset, "__len__"):
+                raise TypeError("use_infinite_index_stream=True requires train_dataset to have __len__")
+            dataset = InfiniteIndexStream(
+                dataset,
+                shuffle=bool(self.probe_config.infinite_stream_shuffle),
+                seed=int(self.probe_config.infinite_stream_seed),
+            )
+            is_iterable = True
+
+        sampler = None
+        if bool(self.probe_config.balanced_sampling) and not is_iterable:
+            sampler = _build_balanced_sampler(dataset)
+
+        return DataLoader(
+            dataset,
+            batch_size=int(self.config.batch_size),
+            shuffle=(sampler is None and not is_iterable),
+            sampler=sampler,
+            num_workers=int(self.config.num_workers),
+            pin_memory=True,
+            persistent_workers=bool(
+                self.config.persistent_workers and int(self.config.num_workers) > 0
+            ),
+        )
+
+    def maybe_save_checkpoint(
+        self,
+        *,
+        epoch: int,
+        train_metrics: Dict[str, float],
+        val_metrics: Dict[str, float],
+        is_last_epoch: bool,
+    ) -> float:
+        checkpoint_start = time.perf_counter()
+
+        if int(self.config.save_every) <= 0:
+            return 0.0
+
+        should_save = ((epoch + 1) % int(self.config.save_every) == 0) or bool(is_last_epoch)
+        if not should_save:
+            return 0.0
+
+        checkpoint = {
+            "epoch": int(epoch),
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "lr": float(self.config.lr),
+            **train_metrics,
+            **val_metrics,
+        }
+
+        last_path = os.path.join(self.config.checkpoint_dir, "linear_probe_last.pt")
+        _atomic_torch_save(checkpoint, last_path)
+
+        _save_and_prune_snapshots(
+            checkpoint_dir=self.resolve_snapshot_dir(),
+            snapshot_prefix="linear_probe",
+            epoch_one_indexed=epoch + 1,
+            checkpoint=checkpoint,
+            snapshot_every=int(self.config.snapshot_every),
+            snapshot_keep_last=int(self.config.snapshot_keep_last),
+            is_last_epoch=bool(is_last_epoch),
+        )
+
+        if bool(self.config.cleanup_legacy_checkpoints):
+            _cleanup_legacy_checkpoints(
+                self.config.checkpoint_dir,
+                keep_filenames={"linear_probe_last.pt"},
+            )
+
+        elapsed = float(time.perf_counter() - checkpoint_start)
+        return elapsed
+
+    def load_checkpoint(self, resume_from: str) -> None:
+        checkpoint_path = resume_from
+        if not os.path.isabs(checkpoint_path):
+            checkpoint_path = os.path.join(self.config.checkpoint_dir, resume_from)
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Resume checkpoint not found: {checkpoint_path}")
+
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.start_epoch = int(checkpoint.get("epoch", 0)) + 1
+        self.best_auroc = float(checkpoint.get("best_auroc", 0.0))
+        logger.info(f"Resumed linear probe training from epoch {self.start_epoch}")
+
+
+class LayerAwareContrastiveTrainer(Trainer):
+    """Trainer for contrastive learning with layer-aware encoders.
+
+    Diff vs `ContrastiveTrainer`:
+    - Calls the model with kwargs (`layer_idx=...`) for each view.
+    - Writes distinct checkpoint files.
+    """
+
+    def __init__(self, model: torch.nn.Module, *, config: LayerAwareContrastiveTrainerConfig):
+        self.contrastive_config = config
+        if int(self.contrastive_config.num_views) < 2:
+            raise ValueError("LayerAwareContrastiveTrainerConfig.num_views must be >= 2")
+        super().__init__(model, config=config)
+
+        self.loss_fn = SupConLoss(
+            temperature=float(config.temperature),
+            ignore_label=int(config.ignore_label),
+            same_sample_weight=float(config.same_sample_weight),
+            same_class_weight=float(config.same_class_weight),
+        )
+
+        self.best_loss: float = float("inf")
+        self._calibrated: bool = False
+
+    def fit(self, train_dataset, val_dataset=None) -> None:
+        """Run the training loop, with optional pre-training calibration."""
+        # Check model attribute first, fall back to config for backward compat.
+        needs_calibration = getattr(self.model, "requires_calibration", False)
+        if not needs_calibration:
+            needs_calibration = bool(self.contrastive_config.calibrate)
+
+        if (
+            needs_calibration
+            and not self._calibrated
+            and hasattr(self.model, "calibrate")
+        ):
+            logger.info("Running embedding calibration...")
+            # Build the train loader (this caches it for later reuse)
+            train_loader, _, train_iter = self._build_train_iterator(train_dataset)
+            # Use the iterator if available (infinite stream), otherwise the loader directly
+            calib_iter = train_iter if train_iter is not None else iter(train_loader)
+
+            max_batches = getattr(self.model, "calibrate_max_batches", 50)
+            target_ratio = getattr(self.model, "calibrate_target_ratio", 0.01)
+            # Config overrides if explicitly set
+            if bool(self.contrastive_config.calibrate):
+                max_batches = int(self.contrastive_config.calibrate_max_batches)
+                target_ratio = float(self.contrastive_config.calibrate_target_ratio)
+
+            stats = self.model.calibrate(
+                calib_iter,
+                max_batches=int(max_batches),
+                target_ratio=float(target_ratio),
+            )
+            self._calibrated = True
+            logger.info(f"Calibration complete: {stats}")
+
+        super().fit(train_dataset, val_dataset=val_dataset)
+
+    def training_step(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, Dict[str, float]]:
+        views = batch["views_activations"].to(self.device, non_blocking=True)
+        view_indices = batch.get("view_indices")
+        if not isinstance(view_indices, torch.Tensor):
+            raise ValueError("LayerAwareContrastiveTrainer requires `view_indices` in each batch")
+
+        view_indices = view_indices.to(self.device, non_blocking=True)
+        batch_size, num_views, seq_len, hidden_dim = views.shape
+        x_flat = views.reshape(batch_size * num_views, seq_len, hidden_dim)
+        layer_idx_flat = view_indices.reshape(batch_size * num_views)
+
+        z_flat = self.model(x_flat, layer_idx=layer_idx_flat)
+        z_views = z_flat.reshape(batch_size, num_views, -1)
+
+        if bool(self.contrastive_config.use_labels):
+            labels = batch["halu"].to(self.device, non_blocking=True)
+            if labels.dim() == 0:
+                labels = labels.unsqueeze(0)
+            elif labels.dim() > 1:
+                labels = labels.view(-1)
+
+            hashkeys = batch.get("hashkey")
+            if isinstance(hashkeys, str):
+                hashkeys = [hashkeys]
+            if hashkeys is None:
+                sample_ids = torch.arange(labels.shape[0], device=self.device, dtype=torch.long)
+            else:
+                sample_ids = torch.tensor(
+                    [hash(hk) % 1000000 for hk in hashkeys],
+                    dtype=torch.long,
+                    device=self.device,
+                )
+
+            loss = self.loss_fn(z_views, labels=labels, sample_ids=sample_ids)
+        else:
+            loss = self.loss_fn(z_views)
+
+        intra_cos = intra_sample_cosine_mean(z_views)
+        intra_inter = intra_inter_margin(z_views)
+        return loss, {"intra_cos": float(intra_cos), "intra_inter_margin": float(intra_inter)}
+
+    def train_dataloader(self, train_dataset) -> DataLoader:
+        dataset = train_dataset
+
+        is_iterable = isinstance(dataset, IterableDataset)
+        if bool(self.contrastive_config.use_infinite_index_stream) and not is_iterable:
+            if not hasattr(dataset, "__len__"):
+                raise TypeError("use_infinite_index_stream=True requires train_dataset to have __len__")
+            dataset = InfiniteIndexStream(
+                dataset,
+                shuffle=bool(self.contrastive_config.infinite_stream_shuffle),
+                seed=int(self.contrastive_config.infinite_stream_seed),
+            )
+            is_iterable = True
+
+        sampler = None
+        if (
+            bool(self.contrastive_config.balanced_sampling)
+            and bool(self.contrastive_config.use_labels)
+            and not is_iterable
+        ):
+            sampler = _build_balanced_sampler(dataset)
+
+        return DataLoader(
+            dataset,
+            batch_size=int(self.contrastive_config.batch_size),
+            shuffle=(sampler is None and not is_iterable),
+            sampler=sampler,
+            num_workers=int(self.contrastive_config.num_workers),
+            pin_memory=True,
+            persistent_workers=bool(
+                self.contrastive_config.persistent_workers and int(self.contrastive_config.num_workers) > 0
+            ),
+            collate_fn=_contrastive_collate_kview,
+        )
+
+    def val_dataloader(self, val_dataset, *, batch_size: Optional[int] = None) -> DataLoader:
+        resolved_batch_size = int(self.contrastive_config.batch_size if batch_size is None else batch_size)
+        return DataLoader(
+            val_dataset,
+            batch_size=resolved_batch_size,
+            shuffle=False,
+            num_workers=int(self.contrastive_config.num_workers),
+            pin_memory=True,
+            persistent_workers=bool(
+                self.contrastive_config.persistent_workers and int(self.contrastive_config.num_workers) > 0
+            ),
+            collate_fn=_contrastive_collate_kview,
+        )
+
+    def validate(self, *, epoch: int, val_dataset) -> Dict[str, float]:
+        _ = epoch
+        val_loader, eval_max_batches, eval_sub_batch_size = self._build_val_loader(val_dataset)
+
+        test_loss, test_intra_cos, test_intra_inter_margin = evaluate(
+            self.model,
+            val_loader,
+            batch_size=int(self.contrastive_config.batch_size),
+            sub_batch_size=int(eval_sub_batch_size),
+            loss_fn=self.loss_fn,
+            device=str(self.device),
+            use_labels=bool(self.contrastive_config.use_labels),
+            ignore_label=int(self.contrastive_config.ignore_label),
+            max_batches=eval_max_batches,
+        )
+
+        self.best_loss = min(float(self.best_loss), float(test_loss))
+
+        out = {
+            "test_loss": float(test_loss),
+            "test_intra_cos": float(test_intra_cos),
+            "test_intra_inter_margin": float(test_intra_inter_margin),
+            "best_loss": float(self.best_loss),
+        }
+
+        logger.info(
+            "Val metrics: "
+            f"loss={out['test_loss']:.4f}, "
+            f"intra_cos={out['test_intra_cos']:.4f}, "
+            f"intra_inter_margin={out['test_intra_inter_margin']:.4f}"
+        )
+        return out
+
+    def maybe_save_checkpoint(
+        self,
+        *,
+        epoch: int,
+        train_metrics: Dict[str, float],
+        val_metrics: Dict[str, float],
+        is_last_epoch: bool,
+    ) -> float:
+        checkpoint_start = time.perf_counter()
+
+        if int(self.contrastive_config.save_every) <= 0:
+            return 0.0
+
+        should_save = ((epoch + 1) % int(self.contrastive_config.save_every) == 0) or bool(is_last_epoch)
+        if not should_save:
+            return 0.0
+
+        checkpoint = {
+            "epoch": int(epoch),
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "temperature": float(self.contrastive_config.temperature),
+            "lr": float(self.contrastive_config.lr),
+            **train_metrics,
+            **val_metrics,
+        }
+
+        last_path = os.path.join(self.contrastive_config.checkpoint_dir, "layer_aware_contrastive_last.pt")
+        _atomic_torch_save(checkpoint, last_path)
+
+        _save_and_prune_snapshots(
+            checkpoint_dir=self.resolve_snapshot_dir(),
+            snapshot_prefix="layer_aware_contrastive",
+            epoch_one_indexed=epoch + 1,
+            checkpoint=checkpoint,
+            snapshot_every=int(self.contrastive_config.snapshot_every),
+            snapshot_keep_last=int(self.contrastive_config.snapshot_keep_last),
+            is_last_epoch=bool(is_last_epoch),
+        )
+
+        if bool(self.contrastive_config.cleanup_legacy_checkpoints):
+            _cleanup_legacy_checkpoints(
+                self.contrastive_config.checkpoint_dir,
+                keep_filenames={"layer_aware_contrastive_last.pt"},
+            )
+
+        elapsed = float(time.perf_counter() - checkpoint_start)
+        if bool(getattr(self.contrastive_config, "log_timing", True)):
+            logger.info(
+                "Checkpoint timing: "
+                f"epoch={epoch + 1}, path={last_path}, elapsed={elapsed:.2f}s"
+            )
+        return elapsed
+
+    def load_checkpoint(self, resume_from: str) -> None:
+        checkpoint_path = resume_from
+        if not os.path.isabs(checkpoint_path):
+            checkpoint_path = os.path.join(self.contrastive_config.checkpoint_dir, resume_from)
+
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Resume checkpoint not found: {checkpoint_path}")
+
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.start_epoch = int(checkpoint.get("epoch", 0)) + 1
+        self.best_loss = float(checkpoint.get("best_loss", float("inf")))
+        logger.info(f"Resumed training from epoch {self.start_epoch}")
+
+
+@dataclass
+class SimCLRCotrainedTrainerConfig(TrainerConfig):
+    """Configuration for `SimCLRCotrainedTrainer`.
+
+    Combines unsupervised SimCLR contrastive loss with supervised BCE
+    classification loss in a joint objective with full gradient flow.
+    """
+
+    # Contrastive settings
+    temperature: float = 0.07
+    num_views: int = 2
+    use_infinite_index_stream: bool = True
+    infinite_stream_shuffle: bool = True
+    infinite_stream_seed: int = 0
+    use_infinite_index_stream_eval: bool = True
+    infinite_eval_shuffle: bool = False
+    infinite_eval_seed: int = 0
+    balanced_sampling: bool = False
+
+    # Loss weights
+    simclr_weight: float = 1.0  # alpha
+    bce_weight: float = 1.0     # beta
+
+
+class SimCLRCotrainedTrainer(Trainer):
+    """Trainer for co-trained SimCLR + BCE classification.
+
+    Trains a single encoder with both an unsupervised SimCLR loss and a
+    supervised BCE classification loss simultaneously, with full gradient
+    flow through both objectives.
+
+    Combined loss: L = alpha * L_SimCLR + beta * L_BCE
+    """
+
+    def __init__(self, model: torch.nn.Module, *, config: SimCLRCotrainedTrainerConfig):
+        self.cotrained_config = config
+        if int(self.cotrained_config.num_views) < 2:
+            raise ValueError("SimCLRCotrainedTrainerConfig.num_views must be >= 2")
+        super().__init__(model, config=config)
+
+        self.simclr_loss_fn = SupConLoss(
+            temperature=float(config.temperature),
+        )
+        self.bce_loss_fn = torch.nn.BCELoss()
+
+        self.best_loss: float = float("inf")
+
+    def training_step(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, Dict[str, float]]:
+        views = batch["views_activations"].to(self.device, non_blocking=True)
+        batch_size, num_views, seq_len, hidden_dim = views.shape
+        x_flat = views.reshape(batch_size * num_views, seq_len, hidden_dim)
+
+        # Forward with head to get both embeddings and predictions
+        z_flat, pred_flat = self.model.forward_with_head(x_flat)
+        z_views = z_flat.reshape(batch_size, num_views, -1)
+
+        # SimCLR loss (unsupervised, no labels)
+        simclr_loss = self.simclr_loss_fn(z_views)
+
+        # BCE loss: use predictions from the first view of each sample
+        pred_first_view = pred_flat[:batch_size]  # (B, 1)
+        labels = batch["halu"].to(self.device, non_blocking=True).float().view(-1, 1)
+        bce_loss = self.bce_loss_fn(pred_first_view, labels)
+
+        # Combined loss
+        alpha = float(self.cotrained_config.simclr_weight)
+        beta = float(self.cotrained_config.bce_weight)
+        combined_loss = alpha * simclr_loss + beta * bce_loss
+
+        # Contrastive metrics for monitoring
+        intra_cos = intra_sample_cosine_mean(z_views)
+        intra_inter = intra_inter_margin(z_views)
+
+        return combined_loss, {
+            "simclr_loss": float(simclr_loss.detach().cpu().item()),
+            "bce_loss": float(bce_loss.detach().cpu().item()),
+            "intra_cos": float(intra_cos),
+            "intra_inter_margin": float(intra_inter),
+        }
+
+    def train_epoch(self, *, epoch: int, train_dataset) -> Dict[str, float]:
+        self.model.train()
+        train_loader, steps_per_epoch, train_iter = self._build_train_iterator(train_dataset)
+
+        total_loss = 0.0
+        total_simclr = 0.0
+        total_bce = 0.0
+        total_intra_cos = 0.0
+        total_intra_inter_margin = 0.0
+        n_steps = 0
+
+        if steps_per_epoch is not None:
+            loop = tqdm(range(steps_per_epoch), desc=f"Epoch {epoch+1}/{self.config.max_epochs}", leave=False)
+        else:
+            loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{self.config.max_epochs}", leave=False)
+
+        for i, _ in enumerate(loop, start=1):
+            if train_iter is not None:
+                try:
+                    batch = next(train_iter)
+                except StopIteration:
+                    train_iter = iter(train_loader)
+                    batch = next(train_iter)
+            else:
+                batch = _
+
+            loss, metrics = self.training_step(batch)
+
+            self.optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            if self.config.grad_clip_norm is not None and float(self.config.grad_clip_norm) > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), max_norm=float(self.config.grad_clip_norm)
+                )
+            self.optimizer.step()
+
+            total_loss += float(loss.detach().cpu().item())
+            total_simclr += float(metrics.get("simclr_loss", 0.0))
+            total_bce += float(metrics.get("bce_loss", 0.0))
+            total_intra_cos += float(metrics.get("intra_cos", 0.0))
+            total_intra_inter_margin += float(metrics.get("intra_inter_margin", 0.0))
+            n_steps += 1
+
+            loop.set_postfix(
+                loss=total_loss / n_steps,
+                simclr=total_simclr / n_steps,
+                bce=total_bce / n_steps,
+            )
+
+        out = {
+            "train_loss": total_loss / max(1, n_steps),
+            "train_simclr_loss": total_simclr / max(1, n_steps),
+            "train_bce_loss": total_bce / max(1, n_steps),
+            "train_intra_cos": total_intra_cos / max(1, n_steps),
+            "train_intra_inter_margin": total_intra_inter_margin / max(1, n_steps),
+        }
+
+        logger.info(
+            "Train epoch metrics: "
+            f"loss={out['train_loss']:.4f}, "
+            f"simclr={out['train_simclr_loss']:.4f}, "
+            f"bce={out['train_bce_loss']:.4f}, "
+            f"intra_cos={out['train_intra_cos']:.4f}, "
+            f"intra_inter_margin={out['train_intra_inter_margin']:.4f}"
+        )
+        return out
+
+    def validate(self, *, epoch: int, val_dataset) -> Dict[str, float]:
+        _ = epoch
+        val_loader, eval_max_batches, eval_sub_batch_size = self._build_val_loader(val_dataset)
+
+        # Contrastive evaluation
+        evaluator = ContrastiveEvaluator(
+            loss_fn=self.simclr_loss_fn,
+            device=self.device,
+            batch_size=int(self.cotrained_config.batch_size),
+            sub_batch_size=int(eval_sub_batch_size),
+            use_labels=False,
+        )
+        val_stats = evaluator.run(
+            self.model,
+            val_loader,
+            max_batches=eval_max_batches,
+        )
+        contrastive_loss = float(val_stats["loss"])
+        intra_cos = float(val_stats["intra_cos"])
+        intra_inter_margin_val = float(val_stats["intra_inter_margin"])
+
+        # Classification AUROC from the head
+        self.model.eval()
+        all_preds = []
+        all_labels = []
+        total_bce = 0.0
+        n_batches = 0
+
+        with torch.no_grad():
+            for i, batch in enumerate(val_loader):
+                if eval_max_batches is not None and i >= eval_max_batches:
+                    break
+                x = batch["views_activations"].to(self.device, non_blocking=True)
+                if x.dim() == 4:
+                    # Use first view for classification eval
+                    x = x[:, 0, :, :]  # (B, seq_len, D)
+                labels = batch["halu"].to(self.device, non_blocking=True).float().view(-1, 1)
+
+                _, pred = self.model.forward_with_head(x)
+                bce = self.bce_loss_fn(pred, labels)
+                total_bce += float(bce.item())
+                n_batches += 1
+
+                all_preds.append(pred.cpu())
+                all_labels.append(labels.cpu())
+
+        all_preds_cat = torch.cat(all_preds).numpy()
+        all_labels_cat = torch.cat(all_labels).numpy()
+
+        from sklearn.metrics import roc_auc_score
+        try:
+            auroc = float(roc_auc_score(all_labels_cat, all_preds_cat))
+        except ValueError:
+            auroc = float("nan")
+
+        self.best_loss = min(float(self.best_loss), contrastive_loss)
+
+        out = {
+            "test_loss": contrastive_loss,
+            "test_intra_cos": intra_cos,
+            "test_intra_inter_margin": intra_inter_margin_val,
+            "test_bce_loss": total_bce / max(1, n_batches),
+            "test_auroc": auroc,
+            "best_loss": self.best_loss,
+        }
+
+        logger.info(
+            "Val metrics: "
+            f"contrastive_loss={out['test_loss']:.4f}, "
+            f"bce_loss={out['test_bce_loss']:.4f}, "
+            f"auroc={out['test_auroc']:.4f}, "
+            f"intra_cos={out['test_intra_cos']:.4f}, "
+            f"intra_inter_margin={out['test_intra_inter_margin']:.4f}"
+        )
+        return out
+
+    def train_dataloader(self, train_dataset) -> DataLoader:
+        dataset = train_dataset
+        is_iterable = isinstance(dataset, IterableDataset)
+
+        if bool(self.cotrained_config.use_infinite_index_stream) and not is_iterable:
+            if not hasattr(dataset, "__len__"):
+                raise TypeError("use_infinite_index_stream=True requires train_dataset to have __len__")
+            dataset = InfiniteIndexStream(
+                dataset,
+                shuffle=bool(self.cotrained_config.infinite_stream_shuffle),
+                seed=int(self.cotrained_config.infinite_stream_seed),
+            )
+            is_iterable = True
+
+        sampler = None
+        if bool(self.cotrained_config.balanced_sampling) and not is_iterable:
+            sampler = _build_balanced_sampler(dataset)
+
+        return DataLoader(
+            dataset,
+            batch_size=int(self.cotrained_config.batch_size),
+            shuffle=(sampler is None and not is_iterable),
+            sampler=sampler,
+            num_workers=int(self.cotrained_config.num_workers),
+            pin_memory=True,
+            persistent_workers=bool(
+                self.cotrained_config.persistent_workers and int(self.cotrained_config.num_workers) > 0
+            ),
+            collate_fn=_contrastive_collate_kview,
+        )
+
+    def val_dataloader(self, val_dataset, *, batch_size: Optional[int] = None) -> DataLoader:
+        resolved_batch_size = int(self.cotrained_config.batch_size if batch_size is None else batch_size)
+        return DataLoader(
+            val_dataset,
+            batch_size=resolved_batch_size,
+            shuffle=False,
+            num_workers=int(self.cotrained_config.num_workers),
+            pin_memory=True,
+            persistent_workers=bool(
+                self.cotrained_config.persistent_workers and int(self.cotrained_config.num_workers) > 0
+            ),
+            collate_fn=_contrastive_collate_kview,
+        )
+
+    def maybe_save_checkpoint(
+        self,
+        *,
+        epoch: int,
+        train_metrics: Dict[str, float],
+        val_metrics: Dict[str, float],
+        is_last_epoch: bool,
+    ) -> float:
+        checkpoint_start = time.perf_counter()
+
+        if int(self.cotrained_config.save_every) <= 0:
+            return 0.0
+
+        should_save = ((epoch + 1) % int(self.cotrained_config.save_every) == 0) or bool(is_last_epoch)
+        if not should_save:
+            return 0.0
+
+        checkpoint = {
+            "epoch": int(epoch),
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "temperature": float(self.cotrained_config.temperature),
+            "simclr_weight": float(self.cotrained_config.simclr_weight),
+            "bce_weight": float(self.cotrained_config.bce_weight),
+            "lr": float(self.cotrained_config.lr),
+            **train_metrics,
+            **val_metrics,
+        }
+
+        last_path = os.path.join(self.cotrained_config.checkpoint_dir, "simclr_cotrained_last.pt")
+        _atomic_torch_save(checkpoint, last_path)
+
+        _save_and_prune_snapshots(
+            checkpoint_dir=self.resolve_snapshot_dir(),
+            snapshot_prefix="simclr_cotrained",
+            epoch_one_indexed=epoch + 1,
+            checkpoint=checkpoint,
+            snapshot_every=int(self.cotrained_config.snapshot_every),
+            snapshot_keep_last=int(self.cotrained_config.snapshot_keep_last),
+            is_last_epoch=bool(is_last_epoch),
+        )
+
+        if bool(self.cotrained_config.cleanup_legacy_checkpoints):
+            _cleanup_legacy_checkpoints(
+                self.cotrained_config.checkpoint_dir,
+                keep_filenames={"simclr_cotrained_last.pt"},
+            )
+
+        elapsed = float(time.perf_counter() - checkpoint_start)
+        if bool(getattr(self.cotrained_config, "log_timing", True)):
+            logger.info(
+                "Checkpoint timing: "
+                f"epoch={epoch + 1}, path={last_path}, elapsed={elapsed:.2f}s"
+            )
+        return elapsed
+
+    def load_checkpoint(self, resume_from: str) -> None:
+        checkpoint_path = resume_from
+        if not os.path.isabs(checkpoint_path):
+            checkpoint_path = os.path.join(self.cotrained_config.checkpoint_dir, resume_from)
+
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Resume checkpoint not found: {checkpoint_path}")
+
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.start_epoch = int(checkpoint.get("epoch", 0)) + 1
+        self.best_loss = float(checkpoint.get("best_loss", float("inf")))
+        logger.info(f"Resumed SimCLR co-trained training from epoch {self.start_epoch}")
+                "Checkpoint timing: "
+                f"epoch={epoch + 1}, path={last_path}, elapsed={elapsed:.2f}s"
+            )
+        return elapsed
+
+    def load_checkpoint(self, resume_from: str) -> None:
+        checkpoint_path = resume_from
+        if not os.path.isabs(checkpoint_path):
+            checkpoint_path = os.path.join(self.simclr_config.checkpoint_dir, resume_from)
+
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Resume checkpoint not found: {checkpoint_path}")
+
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.start_epoch = int(checkpoint.get("epoch", 0)) + 1
+        self.best_loss = float(checkpoint.get("best_loss", float("inf")))
+        logger.info(f"Resumed SimCLR projection training from epoch {self.start_epoch}")
+
+
+class LayerAwareContrastiveTrainer(Trainer):
+    """Trainer for contrastive learning with layer-aware encoders.
+
+    Diff vs `ContrastiveTrainer`:
+    - Calls the model with kwargs (`layer_idx=...`) for each view.
+    - Writes distinct checkpoint files.
+    """
+
+    def __init__(self, model: torch.nn.Module, *, config: LayerAwareContrastiveTrainerConfig):
+        self.contrastive_config = config
+        if int(self.contrastive_config.num_views) < 2:
+            raise ValueError("LayerAwareContrastiveTrainerConfig.num_views must be >= 2")
+        super().__init__(model, config=config)
+
+        self.loss_fn = SupConLoss(
+            temperature=float(config.temperature),
+            ignore_label=int(config.ignore_label),
+            same_sample_weight=float(config.same_sample_weight),
+            same_class_weight=float(config.same_class_weight),
+        )
+
+        self.best_loss: float = float("inf")
+        self._calibrated: bool = False
+
+    def fit(self, train_dataset, val_dataset=None) -> None:
+        """Run the training loop, with optional pre-training calibration."""
+        # Check model attribute first, fall back to config for backward compat.
+        needs_calibration = getattr(self.model, "requires_calibration", False)
+        if not needs_calibration:
+            needs_calibration = bool(self.contrastive_config.calibrate)
+
+        if (
+            needs_calibration
+            and not self._calibrated
+            and hasattr(self.model, "calibrate")
+        ):
+            logger.info("Running embedding calibration...")
+            # Build the train loader (this caches it for later reuse)
+            train_loader, _, train_iter = self._build_train_iterator(train_dataset)
+            # Use the iterator if available (infinite stream), otherwise the loader directly
+            calib_iter = train_iter if train_iter is not None else iter(train_loader)
+
+            max_batches = getattr(self.model, "calibrate_max_batches", 50)
+            target_ratio = getattr(self.model, "calibrate_target_ratio", 0.01)
+            # Config overrides if explicitly set
+            if bool(self.contrastive_config.calibrate):
+                max_batches = int(self.contrastive_config.calibrate_max_batches)
+                target_ratio = float(self.contrastive_config.calibrate_target_ratio)
+
+            stats = self.model.calibrate(
+                calib_iter,
+                max_batches=int(max_batches),
+                target_ratio=float(target_ratio),
+            )
+            self._calibrated = True
+            logger.info(f"Calibration complete: {stats}")
+
+        super().fit(train_dataset, val_dataset=val_dataset)
+
+    def training_step(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, Dict[str, float]]:
+        views = batch["views_activations"].to(self.device, non_blocking=True)
+        view_indices = batch.get("view_indices")
+        if not isinstance(view_indices, torch.Tensor):
+            raise ValueError("LayerAwareContrastiveTrainer requires `view_indices` in each batch")
+
+        view_indices = view_indices.to(self.device, non_blocking=True)
+        batch_size, num_views, seq_len, hidden_dim = views.shape
+        x_flat = views.reshape(batch_size * num_views, seq_len, hidden_dim)
+        layer_idx_flat = view_indices.reshape(batch_size * num_views)
+
+        z_flat = self.model(x_flat, layer_idx=layer_idx_flat)
+        z_views = z_flat.reshape(batch_size, num_views, -1)
+
+        if bool(self.contrastive_config.use_labels):
+            labels = batch["halu"].to(self.device, non_blocking=True)
+            if labels.dim() == 0:
+                labels = labels.unsqueeze(0)
+            elif labels.dim() > 1:
+                labels = labels.view(-1)
+
+            hashkeys = batch.get("hashkey")
+            if isinstance(hashkeys, str):
+                hashkeys = [hashkeys]
+            if hashkeys is None:
+                sample_ids = torch.arange(labels.shape[0], device=self.device, dtype=torch.long)
+            else:
+                sample_ids = torch.tensor(
+                    [hash(hk) % 1000000 for hk in hashkeys],
+                    dtype=torch.long,
+                    device=self.device,
+                )
+
+            loss = self.loss_fn(z_views, labels=labels, sample_ids=sample_ids)
+        else:
+            loss = self.loss_fn(z_views)
+
+        intra_cos = intra_sample_cosine_mean(z_views)
+        intra_inter = intra_inter_margin(z_views)
+        return loss, {"intra_cos": float(intra_cos), "intra_inter_margin": float(intra_inter)}
+
+    def train_dataloader(self, train_dataset) -> DataLoader:
+        dataset = train_dataset
+
+        is_iterable = isinstance(dataset, IterableDataset)
+        if bool(self.contrastive_config.use_infinite_index_stream) and not is_iterable:
+            if not hasattr(dataset, "__len__"):
+                raise TypeError("use_infinite_index_stream=True requires train_dataset to have __len__")
+            dataset = InfiniteIndexStream(
+                dataset,
+                shuffle=bool(self.contrastive_config.infinite_stream_shuffle),
+                seed=int(self.contrastive_config.infinite_stream_seed),
+            )
+            is_iterable = True
+
+        sampler = None
+        if (
+            bool(self.contrastive_config.balanced_sampling)
+            and bool(self.contrastive_config.use_labels)
+            and not is_iterable
+        ):
+            sampler = _build_balanced_sampler(dataset)
+
+        return DataLoader(
+            dataset,
+            batch_size=int(self.contrastive_config.batch_size),
+            shuffle=(sampler is None and not is_iterable),
+            sampler=sampler,
+            num_workers=int(self.contrastive_config.num_workers),
+            pin_memory=True,
+            persistent_workers=bool(
+                self.contrastive_config.persistent_workers and int(self.contrastive_config.num_workers) > 0
+            ),
+            collate_fn=_contrastive_collate_kview,
+        )
+
+    def val_dataloader(self, val_dataset, *, batch_size: Optional[int] = None) -> DataLoader:
+        resolved_batch_size = int(self.contrastive_config.batch_size if batch_size is None else batch_size)
+        return DataLoader(
+            val_dataset,
+            batch_size=resolved_batch_size,
+            shuffle=False,
+            num_workers=int(self.contrastive_config.num_workers),
+            pin_memory=True,
+            persistent_workers=bool(
+                self.contrastive_config.persistent_workers and int(self.contrastive_config.num_workers) > 0
+            ),
+            collate_fn=_contrastive_collate_kview,
+        )
+
+    def validate(self, *, epoch: int, val_dataset) -> Dict[str, float]:
+        _ = epoch
+        val_loader, eval_max_batches, eval_sub_batch_size = self._build_val_loader(val_dataset)
+
+        test_loss, test_intra_cos, test_intra_inter_margin = evaluate(
+            self.model,
+            val_loader,
+            batch_size=int(self.contrastive_config.batch_size),
+            sub_batch_size=int(eval_sub_batch_size),
+            loss_fn=self.loss_fn,
+            device=str(self.device),
+            use_labels=bool(self.contrastive_config.use_labels),
+            ignore_label=int(self.contrastive_config.ignore_label),
+            max_batches=eval_max_batches,
+        )
+
+        self.best_loss = min(float(self.best_loss), float(test_loss))
+
+        out = {
+            "test_loss": float(test_loss),
+            "test_intra_cos": float(test_intra_cos),
+            "test_intra_inter_margin": float(test_intra_inter_margin),
+            "best_loss": float(self.best_loss),
+        }
+
+        logger.info(
+            "Val metrics: "
+            f"loss={out['test_loss']:.4f}, "
+            f"intra_cos={out['test_intra_cos']:.4f}, "
+            f"intra_inter_margin={out['test_intra_inter_margin']:.4f}"
+        )
+        return out
+
+    def maybe_save_checkpoint(
+        self,
+        *,
+        epoch: int,
+        train_metrics: Dict[str, float],
+        val_metrics: Dict[str, float],
+        is_last_epoch: bool,
+    ) -> float:
+        checkpoint_start = time.perf_counter()
+
+        if int(self.contrastive_config.save_every) <= 0:
+            return 0.0
+
+        should_save = ((epoch + 1) % int(self.contrastive_config.save_every) == 0) or bool(is_last_epoch)
+        if not should_save:
+            return 0.0
+
+        checkpoint = {
+            "epoch": int(epoch),
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "temperature": float(self.contrastive_config.temperature),
+            "lr": float(self.contrastive_config.lr),
+            **train_metrics,
+            **val_metrics,
+        }
+
+        last_path = os.path.join(self.contrastive_config.checkpoint_dir, "layer_aware_contrastive_last.pt")
+        _atomic_torch_save(checkpoint, last_path)
+
+        _save_and_prune_snapshots(
+            checkpoint_dir=self.resolve_snapshot_dir(),
+            snapshot_prefix="layer_aware_contrastive",
+            epoch_one_indexed=epoch + 1,
+            checkpoint=checkpoint,
+            snapshot_every=int(self.contrastive_config.snapshot_every),
+            snapshot_keep_last=int(self.contrastive_config.snapshot_keep_last),
+            is_last_epoch=bool(is_last_epoch),
+        )
+
+        if bool(self.contrastive_config.cleanup_legacy_checkpoints):
+            _cleanup_legacy_checkpoints(
+                self.contrastive_config.checkpoint_dir,
+                keep_filenames={"layer_aware_contrastive_last.pt"},
+            )
+
+        elapsed = float(time.perf_counter() - checkpoint_start)
+        if bool(getattr(self.contrastive_config, "log_timing", True)):
+            logger.info(
+                "Checkpoint timing: "
+                f"epoch={epoch + 1}, path={last_path}, elapsed={elapsed:.2f}s"
+            )
+        return elapsed
+
+    def load_checkpoint(self, resume_from: str) -> None:
+        checkpoint_path = resume_from
+        if not os.path.isabs(checkpoint_path):
+            checkpoint_path = os.path.join(self.contrastive_config.checkpoint_dir, resume_from)
+
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Resume checkpoint not found: {checkpoint_path}")
+
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.start_epoch = int(checkpoint.get("epoch", 0)) + 1
+        self.best_loss = float(checkpoint.get("best_loss", float("inf")))
+        logger.info(f"Resumed training from epoch {self.start_epoch}")

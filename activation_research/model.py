@@ -795,3 +795,123 @@ class LayerAwareProgressiveCompressor(nn.Module):
             z = F.normalize(z, dim=-1)
 
         return z
+        _ = kwargs
+
+        # Pure-encoder mode (conditioning=None): behave exactly like
+        # ProgressiveCompressor – ignore layer_idx entirely.
+        if self.conditioning is None:
+            z = self.encoder(x)
+            if self.normalize_output:
+                z = F.normalize(z, dim=-1)
+            return z
+
+        if layer_idx is None:
+            z = self.encoder(x)
+            if self.normalize_output:
+                z = F.normalize(z, dim=-1)
+            return z
+
+        idx = self._coerce_layer_idx(layer_idx, x.shape[0], x.device)
+
+        # --- input-side FiLM ---
+        if self.conditioning in ("film_in", "film_both"):
+            x = self.film_in(x, idx)  # (B, L, D) → (B, L, D)
+
+        z = self.encoder(x)  # (B, final_dim)
+
+        # --- output-side conditioning ---
+        if self.conditioning in ("film_out", "film_both"):
+            z = self.film_out(z, idx)  # (B, final_dim) → (B, final_dim)
+
+        elif self.conditioning == "positional":
+            e = self.layer_embedding(idx)  # (B, final_dim)
+            z = z + self.positional_alpha * e
+
+        elif self.conditioning == "concatenate":
+            e = self.layer_embedding(idx)
+            e = self.layer_proj(e)
+            z = self.fuse(torch.cat([z, e], dim=-1))
+
+        # conditioning == "none": no-op, z passes through unchanged
+
+        if hasattr(self, 'norm'):
+            z = self.norm(z)
+
+        if self.normalize_output:
+            z = F.normalize(z, dim=-1)
+
+        return z
+            emb = self.layer_embedding.weight  # (num_layers, final_dim)
+            row_norms = emb.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+            self.layer_embedding.weight.copy_(emb * (target_norm / row_norms))
+            # Bake scale into weights; reset alpha to 1.0
+            self.positional_alpha.fill_(1.0)
+
+        elif self.conditioning in ("film_in", "film_both"):
+            beta = self.film_in.beta.weight
+            beta_norms = beta.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+            self.film_in.beta.weight.copy_(beta * (target_norm / beta_norms))
+
+        if self.conditioning == "concatenate":
+            emb = self.layer_embedding.weight
+            row_norms = emb.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+            self.layer_embedding.weight.copy_(emb * (target_norm / row_norms))
+
+        stats = {
+            "input_mean_norm": input_mean_norm,
+            "input_elem_mean": input_elem_mean,
+            "input_elem_std": input_elem_std,
+            "embedding_target_norm": target_norm,
+        }
+        return stats
+
+    # ------------------------------------------------------------------ #
+    #  Forward
+    # ------------------------------------------------------------------ #
+    def forward(self, x: torch.Tensor, *, layer_idx=None, **kwargs) -> torch.Tensor:
+        _ = kwargs
+
+        # Pure-encoder mode (conditioning=None): behave exactly like
+        # ProgressiveCompressor – ignore layer_idx entirely.
+        if self.conditioning is None:
+            z = self.encoder(x)
+            if self.normalize_output:
+                z = F.normalize(z, dim=-1)
+            return z
+
+        if layer_idx is None:
+            z = self.encoder(x)
+            if self.normalize_output:
+                z = F.normalize(z, dim=-1)
+            return z
+
+        idx = self._coerce_layer_idx(layer_idx, x.shape[0], x.device)
+
+        # --- input-side FiLM ---
+        if self.conditioning in ("film_in", "film_both"):
+            x = self.film_in(x, idx)  # (B, L, D) → (B, L, D)
+
+        z = self.encoder(x)  # (B, final_dim)
+
+        # --- output-side conditioning ---
+        if self.conditioning in ("film_out", "film_both"):
+            z = self.film_out(z, idx)  # (B, final_dim) → (B, final_dim)
+
+        elif self.conditioning == "positional":
+            e = self.layer_embedding(idx)  # (B, final_dim)
+            z = z + self.positional_alpha * e
+
+        elif self.conditioning == "concatenate":
+            e = self.layer_embedding(idx)
+            e = self.layer_proj(e)
+            z = self.fuse(torch.cat([z, e], dim=-1))
+
+        # conditioning == "none": no-op, z passes through unchanged
+
+        if hasattr(self, 'norm'):
+            z = self.norm(z)
+
+        if self.normalize_output:
+            z = F.normalize(z, dim=-1)
+
+        return z

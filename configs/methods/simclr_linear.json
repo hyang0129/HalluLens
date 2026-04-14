@@ -1,0 +1,43 @@
+{
+  "name": "simclr_linear",
+  "routine": "simclr_linear",
+  "model_class": "progressive_compressor",
+  "model_params": {
+    "final_dim": 512,
+    "input_dropout": 0.3
+  },
+  "training": {
+    "contrastive_epochs": 50,
+    "contrastive_lr": 1e-5,
+    "probe_epochs": 100,
+    "probe_lr": 1e-3,
+    "batch_size": 512,
+    "temperature": 0.25,
+    "use_infinite_index_stream": true,
+    "use_infinite_index_stream_eval": true,
+    "grad_clip_norm": 1.0,
+    "probe_balanced_sampling": true,
+    "probe_min_total_steps": 3000
+  },
+  "data": {
+    "relevant_layers": "14-29",
+    "target_layers": [22, 26],
+    "num_views": 2,
+    "pad_length": 63,
+    "preload": true,
+    "include_response_logprobs": true,
+    "response_logprobs_top_k": 20
+  },
+  "evaluation": {
+    "metrics": ["auroc", "cosine", "mds", "knn"],
+    "knn_params": {
+      "k": 50,
+      "metric": "euclidean",
+      "calibrate_k": true,
+      "k_candidates": [50, 100, 200, 500, 1000],
+      "max_train_size": 200000
+    },
+    "eval_batch_size": 256,
+    "sub_batch_size": 64
+  }
+}
