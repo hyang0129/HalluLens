@@ -6,7 +6,11 @@ computed directly from token-level logprobs stored alongside activations.
 
 import numpy as np
 import torch
+from loguru import logger
 from sklearn.metrics import roc_auc_score
+
+# Maximum fraction of NaN values allowed in logprob data before raising.
+NAN_TOLERANCE = 0.03
 
 
 def _safe_auroc(binary_labels, scores):
@@ -16,7 +20,7 @@ def _safe_auroc(binary_labels, scores):
     return float(roc_auc_score(binary_labels, scores))
 
 
-def logprob_baseline_scores(records):
+def logprob_baseline_scores(records, nan_tolerance=NAN_TOLERANCE):
     """Compute per-sample logprob baseline scores.
 
     Parameters
@@ -25,6 +29,10 @@ def logprob_baseline_scores(records):
         Each record must contain:
         - ``response_token_logprobs`` : Tensor or ndarray of shape (T,)
         - ``response_logprob_mask`` : Tensor or ndarray of shape (T,) bool
+    nan_tolerance : float
+        Maximum fraction of NaN values in unmasked logprobs before raising.
+        NaN values below this threshold are replaced with 0.0 (treated as
+        padding). Default: 0.03 (3%).
 
     Returns
     -------
@@ -47,7 +55,27 @@ def logprob_baseline_scores(records):
     token_logprobs = np.stack(token_logprobs_list)  # (N, T)
     masks = np.stack(masks_list)                     # (N, T)
 
-    # Replace padding with 0 for summation
+    # Check for NaN in unmasked positions
+    nan_mask = np.isnan(token_logprobs) & masks
+    n_nan = int(nan_mask.sum())
+    n_unmasked = int(masks.sum())
+    if n_nan > 0:
+        nan_frac = n_nan / max(1, n_unmasked)
+        if nan_frac > nan_tolerance:
+            raise ValueError(
+                f"Logprob data has {n_nan}/{n_unmasked} NaN values in unmasked "
+                f"positions ({nan_frac:.1%}), exceeding tolerance of "
+                f"{nan_tolerance:.0%}. This indicates a data quality issue."
+            )
+        n_nan_rows = int(nan_mask.any(axis=1).sum())
+        logger.warning(
+            f"Logprob baseline: replacing {n_nan} NaN values in "
+            f"{n_nan_rows} rows ({nan_frac:.2%} of unmasked tokens)"
+        )
+        # Exclude NaN positions from the mask so they are treated as padding
+        masks = masks & ~nan_mask
+
+    # Replace padding (and NaN positions) with 0 for summation
     masked_lp = np.where(masks, token_logprobs, 0.0)
     counts = masks.sum(axis=-1).clip(min=1)
 
