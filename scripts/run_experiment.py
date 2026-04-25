@@ -1535,25 +1535,9 @@ def main() -> None:
                     cfg[path_key] = os.path.join(str(root), cfg[path_key])
 
         def _build_eval_json(cfg):
-            """Build eval JSON for ActivationParser if it doesn't exist or has wrong length."""
+            """Build eval JSON for ActivationParser if it doesn't exist."""
             eval_json_path = cfg["eval_json"]
-            needs_rebuild = not os.path.exists(eval_json_path)
-            if not needs_rebuild:
-                # Rebuild if length doesn't match generation file
-                try:
-                    import pandas as _pd
-                    gen_n = len(_pd.read_json(cfg["inference_json"], lines=True))
-                    with open(eval_json_path) as _f:
-                        _payload = json.load(_f)
-                    if len(_payload.get("halu_test_res", [])) != gen_n:
-                        logger.warning(
-                            f"Eval JSON {eval_json_path} has {len(_payload.get('halu_test_res', []))} entries "
-                            f"but inference has {gen_n} rows — rebuilding."
-                        )
-                        needs_rebuild = True
-                except Exception:
-                    pass
-            if needs_rebuild:
+            if not os.path.exists(eval_json_path):
                 from utils.eval_builder import build_eval_for_activation_parser
                 build_eval_for_activation_parser(
                     cfg["inference_json"],
