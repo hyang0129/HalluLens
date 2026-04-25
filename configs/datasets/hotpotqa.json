@@ -1,0 +1,20 @@
+{
+  "name": "hotpotqa",
+  "model_name": "Llama-3.1-8B-Instruct",
+  "input_dim": 4096,
+  "backend": "zarr",
+  "label_source": "eval_json",
+  "outlier_class": 1,
+  "train": {
+    "inference_json": "output/hotpotqa_train/Llama-3.1-8B-Instruct/generation.jsonl",
+    "activations_path": "shared/hotpotqa_train/activations.zarr",
+    "eval_json": "output/hotpotqa_train/Llama-3.1-8B-Instruct/eval_results_for_training.json",
+    "raw_eval_jsonl": "output/hotpotqa_train/Llama-3.1-8B-Instruct/raw_eval_res.jsonl"
+  },
+  "test": {
+    "inference_json": "output/hotpotqa/Llama-3.1-8B-Instruct/generation.jsonl",
+    "activations_path": "shared/hotpotqa/activations.zarr",
+    "eval_json": "output/hotpotqa/Llama-3.1-8B-Instruct/eval_results_for_training.json",
+    "raw_eval_jsonl": "output/hotpotqa/Llama-3.1-8B-Instruct/raw_eval_res.jsonl"
+  }
+}

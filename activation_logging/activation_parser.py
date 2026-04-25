@@ -926,6 +926,13 @@ class ActivationParser:
         with open(self.eval_json, 'r') as f:
             data = json.loads(f.read())
             
+        eval_len = len(data['abstantion'])
+        if eval_len != len(gendf):
+            logger.warning(
+                f"Eval arrays have {eval_len} entries but generation has {len(gendf)} rows. "
+                f"Truncating generation to {eval_len} rows to align."
+            )
+            gendf = gendf.iloc[:eval_len].reset_index(drop=True)
         gendf['abstain'] = data['abstantion']
         gendf['halu'] = data['halu_test_res']
 
