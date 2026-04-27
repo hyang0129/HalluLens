@@ -180,6 +180,8 @@ Experiment configs live at `configs/experiments/baseline_comparison_{name}.json`
 
 ### Running on GPU nodes
 
+**Never submit or kill SLURM jobs** without explicit user instruction. Do not run `sbatch`, `srun`, `scancel`, `gpu_dispatch.py run/kill`, or kill remote processes via SSH. Always ask the user before starting or stopping any job — killing a job loses its GPU allocation, and re-queuing can take a long time.
+
 For GPU job dispatch, use `scripts/gpu_dispatch.py` instead of raw SSH:
 
 ```bash
