@@ -1,0 +1,12 @@
+{
+  "name": "nq_train_qwen3",
+  "inference_json": "output/natural_questions_train/Qwen3-8B/generation.jsonl",
+  "activations_path": "shared/natural_questions_train_qwen3_8b/activations.zarr",
+  "eval_json": "output/natural_questions_train/Qwen3-8B/eval_results_for_training.json",
+  "raw_eval_jsonl": "output/natural_questions_train/Qwen3-8B/raw_eval_res.jsonl",
+  "model_name": "Qwen3-8B",
+  "input_dim": 4096,
+  "backend": "zarr",
+  "label_source": "eval_json",
+  "outlier_class": 1
+}

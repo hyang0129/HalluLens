@@ -730,7 +730,7 @@ HalluLens/
 
 ## Related Documentation
 
-- **[PAPER_ROADMAP.md](PAPER_ROADMAP.md)**: Overall research roadmap and experiment planning
+- **[../../PAPER_ROADMAP.md](../../PAPER_ROADMAP.md)**: Active EMNLP roadmap ([PAPER_ROADMAP_LEGACY.md](PAPER_ROADMAP_LEGACY.md) is the prior broader ideas pool)
 - **[SOTA_TRACKER.md](SOTA_TRACKER.md)**: Tracking state-of-the-art methods and comparisons
 - **[RESULTS_SCHEMA.md](RESULTS_SCHEMA.md)**: Output format and results structure
 - **[activation_logging/README.md](activation_logging/README.md)**: Activation logging infrastructure

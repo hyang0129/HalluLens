@@ -216,7 +216,8 @@ def get_task_name(task, **kwargs):
         split = kwargs.get("split", "dev")
         return f"triviaqa_{dataset_variant}_{split}"
     elif task == "naturalquestions":
-        return "natural_questions"
+        split = kwargs.get("split", "test")
+        return "natural_questions_train" if split == "train" else "natural_questions"
     elif task == "truthfulqa":
         return "truthfulqa"
     elif task == "hotpotqa":
@@ -465,21 +466,23 @@ def run_task_step(step, task, model, **kwargs):
                 return None
             from tasks.llmsknow.natural_questions import run_step as _run
 
+            nq_split = kwargs.get("split", "test")
+            nq_taskname = "natural_questions_train" if nq_split == "train" else "natural_questions"
             generations_file_path = kwargs.get("generations_file_path")
             if step == "eval":
                 if not generations_file_path:
                     model_name = model.split("/")[-1]
                     output_base_dir = kwargs.get("output_dir") or "output"
                     generations_file_path = (
-                        f"{output_base_dir}/natural_questions/{model_name}/generation.jsonl"
+                        f"{output_base_dir}/{nq_taskname}/{model_name}/generation.jsonl"
                     )
                 generations_file_path = sanitize_naturalquestions_eval_input(generations_file_path)
 
             _run(
                 step=step,
                 model=model,
-                data_dir=kwargs.get("data_dir", "external/LLMsKnow/data"),
-                output_dir=kwargs.get("output_dir", "output"),
+                data_dir=kwargs.get("data_dir") or "external/LLMsKnow/data",
+                output_dir=kwargs.get("output_dir") or "output",
                 inference_method=kwargs.get("inference_method", "vllm"),
                 max_tokens=kwargs.get("max_tokens", 64),
                 temperature=kwargs.get("temperature", 0.0),
@@ -488,6 +491,11 @@ def run_task_step(step, task, model, **kwargs):
                 eval_results_path=kwargs.get("eval_results_path"),
                 log_file=kwargs.get("log_file"),
                 quick_debug_mode=kwargs.get("quick_debug_mode", False),
+                split=nq_split,
+                logger_type=kwargs.get("logger_type") or "zarr",
+                activations_path=kwargs.get("activations_path"),
+                resume=kwargs.get("resume", True),
+                batch_size=kwargs.get("batch_size"),
             )
 
         elif task == "truthfulqa":
@@ -964,6 +972,7 @@ def main():
 
     # Task-specific arguments
     parser.add_argument("--N", type=int, default=1, help="Number of samples")
+    parser.add_argument("--batch-size", type=int, default=None, dest="batch_size", help="Batch size for direct HFTransformersAdapter inference (skips server)")
     parser.add_argument("--wiki_src", default="goodwiki", help="Wiki source for precisewikiqa")
     parser.add_argument("--mode", default="dynamic", help="Mode for precisewikiqa")
     parser.add_argument("--inference_method", default="vllm", help="Inference method")
@@ -1076,6 +1085,7 @@ def main():
             temperature=args.temperature,
             resume=not args.no_resume,
             resume_eval=not args.no_resume_eval,
+            batch_size=args.batch_size,
         )
     except Exception as e:
         logger.error(f"Error: {e}")
