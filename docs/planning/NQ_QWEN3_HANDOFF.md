@@ -165,14 +165,20 @@ Key observations:
 
 Tested chunk shape `(BS, N_LAYERS, SEQ, HIDDEN)` — collapsing all layers into one chunk to reduce writes from 74 to 2 per batch.
 
-| BS | Strategy | Time(s) | Samp/s | MB/s | Chunk size | Writes/batch |
-|----|----------|---------|--------|------|------------|--------------|
-| 8 | zarr_block (BS,L,T,H) | 0.781 | **10.25** | 398 | 155 MB | 2 |
-| 8 | zarr_batch_slice (BS,1,T,H) | 0.383 | **20.89** | 810 | 0.5 MB | 74 |
+Full results across batch sizes (`scripts/profile_disk_throughput.py`, 20 trials, alphagpu19):
 
-`zarr_block` is **2× slower** despite 37× fewer NFS operations. Root cause: zarr must allocate, encode, and serialize a 155 MB contiguous buffer per chunk before writing; at that size the codec pipeline stalls and memory allocation overhead dominates. Small 4 MB chunks in `zarr_batch_slice` pipeline through the encoder efficiently.
+| BS | zarr_per_sample | zarr_batch_slice | zarr_block | npy_batch |
+|----|----------------|-----------------|------------|-----------|
+| 8  | 16.1 samp/s | 21.9 samp/s | 10.6 samp/s | 38.7 samp/s |
+| 16 | 16.1 samp/s | 22.0 samp/s | 10.5 samp/s | 42.7 samp/s |
+| 32 | 16.4 samp/s | **23.8 samp/s** | 11.3 samp/s | 40.4 samp/s |
+| 64 | 16.3 samp/s | 22.6 samp/s | 11.2 samp/s | 41.3 samp/s |
 
-**Chunk shape should remain `(BS, 1, T, H)`.** Higher BS does not help here — the zarr bandwidth ceiling is ~900 MB/s (~24 samp/s at 38 MB/sample) regardless of chunk count once you're in the batch-slice regime.
+`zarr_block` is consistently **~2× slower** than `zarr_batch_slice` at every batch size and the gap does not close as chunk size grows from 155 MB → 1.2 GB. Root cause: zarr must allocate, encode, and serialize the full chunk as one unit; at 600+ MB the codec pipeline stalls and memory allocation overhead dominates. Small 4 MB chunks in `zarr_batch_slice` pipeline through the encoder efficiently.
+
+`zarr_batch_slice` peaks at **BS=32 (23.8 samp/s)** — aligns with our target batch size.
+
+**Chunk shape should remain `(BS, 1, T, H)`.** Higher BS does not help — the zarr NFS bandwidth ceiling is ~900 MB/s (~24 samp/s at 38 MB/sample) regardless.
 
 Note: float16 activations are near-random bits — compression (zstd etc.) saves <5% and is not worth the CPU overhead.
 
