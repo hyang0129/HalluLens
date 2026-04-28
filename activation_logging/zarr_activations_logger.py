@@ -97,14 +97,16 @@ class ZarrActivationsLogger:
                 prompt_max_tokens = token_chunk
             if not response_max_tokens_provided:
                 response_max_tokens = token_chunk
-            if prompt_max_tokens != token_chunk:
+            # Allow token_chunk <= max_tokens so callers can use large sample chunks
+            # (e.g. chunk_shape=(32, 1, 64, H)) with a wider token dimension (512).
+            if prompt_max_tokens < token_chunk:
                 raise ValueError(
-                    "prompt_max_tokens must match activation_chunk_shape token dimension "
+                    "prompt_max_tokens must be >= activation_chunk_shape token dimension "
                     f"({token_chunk}), got {prompt_max_tokens}"
                 )
-            if response_max_tokens != token_chunk:
+            if response_max_tokens < token_chunk:
                 raise ValueError(
-                    "response_max_tokens must match activation_chunk_shape token dimension "
+                    "response_max_tokens must be >= activation_chunk_shape token dimension "
                     f"({token_chunk}), got {response_max_tokens}"
                 )
 
@@ -304,6 +306,28 @@ class ZarrActivationsLogger:
             return
         self._meta_dir.mkdir(parents=True, exist_ok=True)
         self._text_dir.mkdir(parents=True, exist_ok=True)
+
+    def _append_array_rows_batch(self, end: int, num_layers: int, hidden_size: int) -> None:
+        """Ensure Zarr arrays have capacity for indices [0, end).
+
+        Resizes all arrays in one call instead of BS individual resizes.
+        No-op when pre-allocated capacity already covers `end`.
+        """
+        if self._prompt_activations.shape[0] >= end:
+            return
+        self._prompt_activations.resize((end, num_layers, self.prompt_max_tokens, hidden_size))
+        self._response_activations.resize((end, num_layers, self.response_max_tokens, hidden_size))
+        self._prompt_len.resize((end,))
+        self._response_len.resize((end,))
+        self._sample_key.resize((end,))
+        if self._response_token_ids is not None:
+            self._response_token_ids.resize((end, self.response_max_tokens))
+        if self._response_token_logprobs is not None:
+            self._response_token_logprobs.resize((end, self.response_max_tokens))
+        if self._response_topk_token_ids is not None:
+            self._response_topk_token_ids.resize((end, self.response_max_tokens, self.response_logprobs_top_k))
+        if self._response_topk_logprobs is not None:
+            self._response_topk_logprobs.resize((end, self.response_max_tokens, self.response_logprobs_top_k))
 
     def _append_array_row(self, idx: int, num_layers: int, hidden_size: int) -> None:
         """Ensure Zarr arrays can accommodate a row at `idx`.
@@ -802,6 +826,190 @@ class ZarrActivationsLogger:
 
         self._index[key] = metadata_entry
         logger.debug(f"Logged entry {key} to Zarr store at index {idx}.")
+
+    def log_batch(self, entries: List[Tuple[str, Dict[str, Any]]]) -> None:
+        """Write a batch of entries as a single Zarr slice for efficient IO.
+
+        All-new entries are written as a single contiguous slice, reducing
+        Zarr chunk writes from 74 × BS down to 74 (37 layers × 2 arrays).
+        Entries whose keys already exist in the store are delegated to
+        log_entry() individually (overwrite path).
+
+        Args:
+            entries: List of (key, entry_dict) pairs matching log_entry() format.
+        """
+        if not entries:
+            return
+        if self.read_only:
+            raise ValueError("Cannot log entries in read-only mode")
+
+        self._ensure_dirs()
+
+        # Separate new vs. overwrite entries
+        new_entries = []
+        for key, entry in entries:
+            if key in self._index and self._index[key].get("sample_index") is not None:
+                self.log_entry(key, entry)  # overwrite: delegate to per-entry path
+            else:
+                new_entries.append((key, entry))
+
+        if not new_entries:
+            return
+
+        # Extract activations for all new entries
+        extracted = []
+        num_layers = hidden_size = None
+
+        for key, entry in new_entries:
+            if "model_outputs" in entry and "input_length" in entry:
+                model_outputs = entry["model_outputs"]
+                input_length = entry["input_length"]
+                if "trim_position" in entry:
+                    model_outputs.trim_position = entry["trim_position"]
+                pa, ra, pl, rl = self._extract_prompt_response(model_outputs, input_length)
+            elif "all_layers_activations" in entry:
+                all_layers = entry.get("all_layers_activations")
+                pl = entry.get("input_length") or entry.get("prompt_len")
+                if pl is None:
+                    logger.warning("Missing input_length for key %s; storing all tokens as prompt", key)
+                    pl = all_layers[0].shape[1]
+                pa, ra = [], []
+                for layer_act in all_layers:
+                    if layer_act is None:
+                        pa.append(None)
+                        ra.append(None)
+                        continue
+                    lt = torch.from_numpy(layer_act) if isinstance(layer_act, np.ndarray) else layer_act
+                    if lt.ndim == 2:
+                        lt = lt.unsqueeze(0)
+                    pa.append(lt[:, :pl, :])
+                    ra.append(lt[:, pl:, :])
+                rl = next((lr.shape[1] for lr in ra if lr is not None), 0)
+            else:
+                raise ValueError(f"No model_outputs or all_layers_activations in entry for key {key}")
+
+            if pa is None:
+                raise ValueError(f"No activations extracted for key {key}")
+
+            if num_layers is None:
+                num_layers = len(pa)
+            if hidden_size is None:
+                hidden_size = next((la.shape[-1] for la in pa if la is not None), None)
+
+            logprob_payload = self._extract_response_logprob_payload(entry)
+            extracted.append((key, entry, pa, ra, int(pl or 0), int(rl or 0), logprob_payload))
+
+        if num_layers is None or hidden_size is None:
+            raise ValueError("Could not infer num_layers or hidden_size from batch")
+
+        self._ensure_arrays(num_layers, hidden_size)
+
+        bs = len(extracted)
+        start = self._next_idx
+        end = start + bs
+        self._append_array_rows_batch(end, num_layers, hidden_size)
+        self._next_idx = end
+
+        P = self.prompt_max_tokens
+        R = self.response_max_tokens
+        K = self.response_logprobs_top_k
+
+        batch_prompt = np.zeros((bs, num_layers, P, hidden_size), dtype=self.dtype)
+        batch_response = np.zeros((bs, num_layers, R, hidden_size), dtype=self.dtype)
+        prompt_lens = np.zeros(bs, dtype=np.int32)
+        response_lens = np.zeros(bs, dtype=np.int32)
+        sample_keys = np.empty(bs, dtype=object)
+
+        batch_token_ids = np.full((bs, R), -1, dtype=np.int32)
+        batch_token_logprobs = np.full((bs, R), np.nan, dtype=np.float32)
+        batch_topk_ids = np.full((bs, R, K), -1, dtype=np.int32)
+        batch_topk_logprobs_arr = np.full((bs, R, K), np.nan, dtype=np.float32)
+        has_any_logprobs = False
+
+        metadata_entries = []
+
+        for i, (key, entry, pa, ra, pl, rl, logprob_payload) in enumerate(extracted):
+            stored_pl = int(min(pl, P))
+            stored_rl = int(min(rl, R))
+            prompt_lens[i] = stored_pl
+            response_lens[i] = stored_rl
+            sample_keys[i] = str(key)
+
+            for layer_idx in range(num_layers):
+                if layer_idx not in self._target_layer_indices:
+                    continue
+                layer_prompt = pa[layer_idx]
+                if layer_prompt is not None and stored_pl > 0:
+                    arr = layer_prompt.squeeze(0)[:stored_pl].to(dtype=torch.float16)
+                    batch_prompt[i, layer_idx, :stored_pl, :] = arr.cpu().numpy()
+                layer_resp = ra[layer_idx]
+                if layer_resp is not None and stored_rl > 0:
+                    arr = layer_resp.squeeze(0)[:stored_rl].to(dtype=torch.float16)
+                    batch_response[i, layer_idx, :stored_rl, :] = arr.cpu().numpy()
+
+            stored_logprob_len = 0
+            stored_logprob_top_k = 0
+            if (
+                logprob_payload is not None
+                and stored_rl > 0
+                and self._response_token_ids is not None
+            ):
+                token_ids = logprob_payload["token_ids"]
+                token_logprobs = logprob_payload["token_logprobs"]
+                topk_ids = logprob_payload["topk_token_ids"]
+                topk_lps = logprob_payload["topk_logprobs"]
+                avail = min(stored_rl, len(token_ids), len(token_logprobs), len(topk_ids), len(topk_lps))
+                incoming_k = min(int(topk_ids.shape[1]), int(topk_lps.shape[1]))
+                stored_logprob_top_k = min(K, incoming_k)
+                if avail > 0 and stored_logprob_top_k > 0:
+                    batch_token_ids[i, :avail] = token_ids[:avail]
+                    batch_token_logprobs[i, :avail] = token_logprobs[:avail]
+                    batch_topk_ids[i, :avail, :stored_logprob_top_k] = topk_ids[:avail, :stored_logprob_top_k]
+                    batch_topk_logprobs_arr[i, :avail, :stored_logprob_top_k] = topk_lps[:avail, :stored_logprob_top_k]
+                    stored_logprob_len = int(avail)
+                    has_any_logprobs = True
+
+            meta = {
+                k: v for k, v in entry.items()
+                if k not in {
+                    "model_outputs", "all_layers_activations",
+                    "response_token_ids", "response_token_logprobs",
+                    "response_topk_token_ids", "response_topk_logprobs",
+                }
+            }
+            meta["key"] = key
+            meta["sample_index"] = start + i
+            meta["prompt_len"] = stored_pl
+            meta["response_len"] = stored_rl
+            meta["has_response_logprobs"] = bool(stored_logprob_len > 0)
+            meta["response_logprobs_len"] = int(stored_logprob_len)
+            if stored_logprob_len > 0:
+                meta["response_logprobs_top_k"] = int(stored_logprob_top_k)
+            meta["logging_config"] = {
+                "target_layers": self.target_layers,
+                "sequence_mode": self.sequence_mode,
+            }
+            metadata_entries.append((key, meta))
+
+        # Single contiguous slice writes — the key perf gain
+        self._prompt_activations[start:end] = batch_prompt
+        self._response_activations[start:end] = batch_response
+        self._prompt_len[start:end] = prompt_lens
+        self._response_len[start:end] = response_lens
+        self._sample_key[start:end] = sample_keys
+
+        if has_any_logprobs and self._response_token_ids is not None:
+            self._response_token_ids[start:end] = batch_token_ids
+            self._response_token_logprobs[start:end] = batch_token_logprobs
+            self._response_topk_token_ids[start:end] = batch_topk_ids
+            self._response_topk_logprobs[start:end] = batch_topk_logprobs_arr
+
+        with open(self._index_path, "a", encoding="utf-8") as f:
+            for key, meta in metadata_entries:
+                f.write(json.dumps(meta) + "\n")
+                self._index[key] = meta
+
+        logger.debug("Logged batch of %d entries to Zarr rows [%d:%d].", bs, start, end)
 
     def log_metadata(self, key: str, metadata: Dict[str, Any]):
         """Write an index-only entry with no activation arrays.

@@ -404,6 +404,8 @@ class NaturalQuestionsInference:
             zarr_logger = ZarrActivationsLogger(
                 zarr_path=activations_path, read_only=False,
                 expected_samples=total,
+                activation_chunk_shape=(batch_size, 1, max_tokens, -1),
+                response_max_tokens=max_tokens,
             )
             writer = AsyncActivationWriter(zarr_logger)
 
@@ -432,7 +434,11 @@ class NaturalQuestionsInference:
                         f.write(json.dumps(record, ensure_ascii=False) + "\n")
                         f.flush()
 
-                        if writer is not None and result.activations is not None:
+                    if writer is not None:
+                        batch_entries = []
+                        for result in results:
+                            if result.activations is None:
+                                continue
                             prompt_key = hashlib.sha256(
                                 result.prompt.encode("utf-8")
                             ).hexdigest()
@@ -447,7 +453,8 @@ class NaturalQuestionsInference:
                             }
                             if result.logprobs is not None:
                                 log_entry.update(result.logprobs)
-                            writer.enqueue(prompt_key, log_entry)
+                            batch_entries.append((prompt_key, log_entry))
+                        writer.enqueue_batch(batch_entries)
 
                     pbar.update(len(batch_prompts))
                 pbar.close()

@@ -565,6 +565,14 @@ _persistent_logger: Optional[ActivationsLogger] = None
 _async_writer: Optional["AsyncActivationWriter"] = None
 
 
+class _BatchWriteRequest:
+    """Sentinel queue item representing a batch of entries for log_batch()."""
+    __slots__ = ("entries",)
+
+    def __init__(self, entries: list) -> None:
+        self.entries = entries  # list of (key, entry_dict) tuples
+
+
 class AsyncActivationWriter:
     """Background thread that drains activation write requests into Zarr.
 
@@ -605,24 +613,54 @@ class AsyncActivationWriter:
                 )
         self._queue.put((key, entry, metadata_only))  # blocks until space available
 
+    def enqueue_batch(self, entries: list) -> None:
+        """Enqueue a whole batch as a single queue item for log_batch().
+
+        The drain thread calls log_batch() instead of BS individual log_entry()
+        calls, reducing Zarr chunk writes from 74 × BS to 74 per batch.
+
+        Args:
+            entries: List of (key, entry_dict) tuples.
+        """
+        if not entries:
+            return
+        if self._queue.full():
+            with self._counter_lock:
+                self._backpressure_events += 1
+                bp = self._backpressure_events
+            if bp == 1 or bp % 50 == 0:
+                logger.info(
+                    f"AsyncActivationWriter backpressure: queue full "
+                    f"({self._queue.qsize()}/{self._queue.maxsize}), "
+                    f"total stalls so far: {bp}"
+                )
+        self._queue.put(_BatchWriteRequest(entries))  # blocks until space available
+
     def _drain(self) -> None:
         while not self._shutdown.is_set() or not self._queue.empty():
             try:
-                key, entry, metadata_only = self._queue.get(timeout=0.1)
+                item = self._queue.get(timeout=0.1)
             except _queue_module.Empty:
                 continue
             try:
-                if metadata_only:
-                    self._logger.log_metadata(key, entry)
+                if isinstance(item, _BatchWriteRequest):
+                    self._logger.log_batch(item.entries)
+                    with self._counter_lock:
+                        self._written += len(item.entries)
                 else:
-                    self._logger.log_entry(key, entry)
-                with self._counter_lock:
-                    self._written += 1
+                    key, entry, metadata_only = item
+                    if metadata_only:
+                        self._logger.log_metadata(key, entry)
+                    else:
+                        self._logger.log_entry(key, entry)
+                    with self._counter_lock:
+                        self._written += 1
             except Exception as e:
                 with self._counter_lock:
                     self._errors += 1
+                item_repr = f"batch({len(item.entries)})" if isinstance(item, _BatchWriteRequest) else f"key={item[0]}"
                 logger.error(
-                    f"AsyncActivationWriter failed for key {key}: {e}", exc_info=True
+                    f"AsyncActivationWriter failed for {item_repr}: {e}", exc_info=True
                 )
 
     def shutdown(self, timeout: float = 30.0) -> None:
