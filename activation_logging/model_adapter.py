@@ -175,17 +175,21 @@ class HFTransformersAdapter(ModelAdapter):
             len(tokenizer.encode(p, add_special_tokens=True)) for p in prompts
         ]
 
+        generate_kwargs = dict(
+            **inputs,
+            max_new_tokens=max_tokens,
+            temperature=temperature if temperature > 0 else 1.0,
+            do_sample=temperature > 0,
+            output_hidden_states=True,
+            output_scores=self._enable_logprobs,
+            return_dict_in_generate=True,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+        if "qwen3" in self._model_name.lower():
+            generate_kwargs["enable_thinking"] = False
+
         with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=max_tokens,
-                temperature=temperature if temperature > 0 else 1.0,
-                do_sample=temperature > 0,
-                output_hidden_states=True,
-                output_scores=self._enable_logprobs,
-                return_dict_in_generate=True,
-                pad_token_id=tokenizer.pad_token_id,
-            )
+            outputs = model.generate(**generate_kwargs)
 
         # Split results per request
         results: List[InferenceResult] = []
