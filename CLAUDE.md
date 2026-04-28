@@ -42,9 +42,39 @@ utils/                  # Shared utilities
 external/LLMsKnow/      # External benchmark suite (extension target)
 ```
 
+## Supported Models
+
+| Model | HuggingFace ID | Notes |
+|-------|---------------|-------|
+| Llama 3.1 8B | `meta-llama/Llama-3.1-8B-Instruct` | Primary baseline |
+| Qwen3 8B | `Qwen/Qwen3-8B` | Thinking mode disabled automatically |
+
+Both models work with all LLMsKnow tasks via the default batch inference path.
+
 ## Key Commands
 
-### Run inference + activation logging
+### LLMsKnow batch inference (default — no server needed)
+
+Tasks: `hotpotqa`, `mmlu`, `natural_questions`, `movies`, `popqa`, `sciq`, `searchqa`
+
+```bash
+python scripts/run_with_server.py \
+    --step inference \
+    --task hotpotqa \
+    --model Qwen/Qwen3-8B \
+    --activations-path shared/hotpotqa_qwen3/activations.zarr
+```
+
+- `--batch-size` defaults to 32 — no need to pass it explicitly
+- No server is started; inference runs via `HFTransformersAdapter` directly
+- Expected throughput: **~16 samp/s** after model load (steady-state, H200)
+- For eval after inference: `--step eval` (same command, replace `inference` with `eval`)
+- For both in one go: `--step all`
+
+To use Llama instead, swap `--model meta-llama/Llama-3.1-8B-Instruct`.
+To override batch size: `--batch-size 16`. To force vLLM server: `--batch-size 0`.
+
+### PreciseWikiQA (requires vLLM server + question generator)
 ```bash
 python scripts/run_with_server.py \
     --step all \
@@ -143,9 +173,11 @@ with JupyterExecutor() as jup:
 
 ### Checking inference/data generation status
 
-Each dataset has train and test splits. Data lives at:
-- Generations: `output/{dataset}[_train]/Llama-3.1-8B-Instruct/generation.jsonl`
-- Eval results: `output/{dataset}[_train]/Llama-3.1-8B-Instruct/eval_results.json`
+Each dataset has train and test splits. The model name in output paths is the **last component of the HuggingFace model ID** (e.g., `Llama-3.1-8B-Instruct` for `meta-llama/Llama-3.1-8B-Instruct`, `Qwen3-8B` for `Qwen/Qwen3-8B`).
+
+Data lives at:
+- Generations: `output/{dataset}[_train]/{model_name}/generation.jsonl`
+- Eval results: `output/{dataset}[_train]/{model_name}/eval_results.json`
 - Activations: `shared/{dataset}[_train]/activations.zarr/`
 
 To check what data exists, scan these paths and compare line counts against expected sizes. A dataset split is **complete** when generation.jsonl line count matches the expected split size AND eval_results.json exists.
