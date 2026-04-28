@@ -1,4 +1,10 @@
-# Roadmap: From Notebook to Publishable Paper Results
+# Roadmap: From Notebook to Publishable Paper Results (LEGACY)
+
+> **Status: archived 2026-04-27.** Superseded by the active [`PAPER_ROADMAP.md`](../../PAPER_ROADMAP.md) at the repo root, which is scoped to the EMNLP submission.
+>
+> This document is kept for its breadth: the IDEAS_TO_TEST pool (§A–D), the SOTA-tracker scaffolding (§3C and Appendix), the canonical-artifacts contract (§5D), and the experimental-matrix framing (§7). Treat anything that is *not* in the active roadmap as out-of-scope for the current submission — pull ideas back in only by editing the active roadmap, not by reviving this file.
+
+---
 
 This document is a **practical roadmap** for turning the current HalluLens codebase (activation logging + contrastive training + evaluation) into a **repeatable experiment pipeline** that produces **multi-benchmark, multi-seed, publishable results**.
 

@@ -308,6 +308,8 @@ class MMLUInference:
             zarr_logger = ZarrActivationsLogger(
                 zarr_path=activations_path, read_only=False,
                 expected_samples=total,
+                activation_chunk_shape=(batch_size, 1, max_tokens, -1),
+                response_max_tokens=max_tokens,
             )
             writer = AsyncActivationWriter(zarr_logger)
 
@@ -338,8 +340,11 @@ class MMLUInference:
                         f.write(json.dumps(record, ensure_ascii=False) + "\n")
                         f.flush()
 
-                        # Log activations to Zarr
-                        if writer is not None and result.activations is not None:
+                    if writer is not None:
+                        batch_entries = []
+                        for result in results:
+                            if result.activations is None:
+                                continue
                             prompt_key = hashlib.sha256(
                                 result.prompt.encode("utf-8")
                             ).hexdigest()
@@ -354,7 +359,8 @@ class MMLUInference:
                             }
                             if result.logprobs is not None:
                                 log_entry.update(result.logprobs)
-                            writer.enqueue(prompt_key, log_entry)
+                            batch_entries.append((prompt_key, log_entry))
+                        writer.enqueue_batch(batch_entries)
 
                     completed += len(batch_prompts)
                     elapsed = time.time() - t0
@@ -685,7 +691,7 @@ def run_step(step, model, output_dir="output", split="test",
              generations_file_path=None, eval_results_path=None, log_file=None,
              logger_type="lmdb", activations_path=None,
              quick_debug_mode=False, resume=True, max_retries=3, base_delay=1.0,
-             llm_evaluator=None, batch_size=None, subjects=None):
+             llm_evaluator=None, batch_size=32, subjects=None):
     """Run a single step of the MMLU task. Callable from Python directly.
 
     Args:

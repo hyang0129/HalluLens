@@ -323,7 +323,7 @@ For each new dataset:
 ## 📚 Related Documentation
 
 - **[DATASET_ROADMAP.md](DATASET_ROADMAP.md)** - Comprehensive dataset planning and tracking
-- **[PAPER_ROADMAP.md](PAPER_ROADMAP.md)** - Research roadmap and experiment planning
+- **[../../PAPER_ROADMAP.md](../../PAPER_ROADMAP.md)** - Active EMNLP roadmap (see also [PAPER_ROADMAP_LEGACY.md](PAPER_ROADMAP_LEGACY.md) for the broader ideas pool)
 - **[activation_logging/README.md](activation_logging/README.md)** - Activation logging infrastructure
 - **[external/LLMsKnow/README.md](external/LLMsKnow/README.md)** - LLMsKnow benchmark suite details
 - **[SOTA_TRACKER.md](SOTA_TRACKER.md)** - State-of-the-art methods tracking

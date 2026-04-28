@@ -404,8 +404,6 @@ class NaturalQuestionsInference:
             zarr_logger = ZarrActivationsLogger(
                 zarr_path=activations_path, read_only=False,
                 expected_samples=total,
-                activation_chunk_shape=(batch_size, 1, max_tokens, -1),
-                response_max_tokens=max_tokens,
             )
             writer = AsyncActivationWriter(zarr_logger)
 
@@ -434,11 +432,7 @@ class NaturalQuestionsInference:
                         f.write(json.dumps(record, ensure_ascii=False) + "\n")
                         f.flush()
 
-                    if writer is not None:
-                        batch_entries = []
-                        for result in results:
-                            if result.activations is None:
-                                continue
+                        if writer is not None and result.activations is not None:
                             prompt_key = hashlib.sha256(
                                 result.prompt.encode("utf-8")
                             ).hexdigest()
@@ -453,8 +447,7 @@ class NaturalQuestionsInference:
                             }
                             if result.logprobs is not None:
                                 log_entry.update(result.logprobs)
-                            batch_entries.append((prompt_key, log_entry))
-                        writer.enqueue_batch(batch_entries)
+                            writer.enqueue(prompt_key, log_entry)
 
                     pbar.update(len(batch_prompts))
                 pbar.close()
@@ -474,7 +467,7 @@ def run_step(step, model, data_dir="external/LLMsKnow/data", output_dir="output"
              inference_method="vllm", max_tokens=64, temperature=0.0, N=None,
              generations_file_path=None, eval_results_path=None, log_file=None,
              quick_debug_mode=False, split="test", split_seed=42,
-             logger_type="zarr", activations_path=None, resume=True, batch_size=32):
+             logger_type="zarr", activations_path=None, resume=True, batch_size=None):
     """Run a single step of the Natural Questions task. Callable from Python directly."""
     TASKNAME = "natural_questions_train" if split == "train" else "natural_questions"
 
