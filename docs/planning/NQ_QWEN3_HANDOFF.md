@@ -169,10 +169,11 @@ Full results across batch sizes (`scripts/profile_disk_throughput.py`, 20 trials
 
 | BS | zarr_per_sample | zarr_batch_slice | zarr_block | npy_batch |
 |----|----------------|-----------------|------------|-----------|
-| 8  | 16.1 samp/s | 21.9 samp/s | 10.6 samp/s | 38.7 samp/s |
-| 16 | 16.1 samp/s | 22.0 samp/s | 10.5 samp/s | 42.7 samp/s |
-| 32 | 16.4 samp/s | **23.8 samp/s** | 11.3 samp/s | 40.4 samp/s |
-| 64 | 16.3 samp/s | 22.6 samp/s | 11.2 samp/s | 41.3 samp/s |
+| 8   | 16.5 samp/s | 22.1 samp/s | 11.1 samp/s | 48.6 samp/s |
+| 16  | 16.4 samp/s | 23.3 samp/s | 10.8 samp/s | 44.0 samp/s |
+| 32  | 16.2 samp/s | **22.1 samp/s** | 11.0 samp/s | 42.0 samp/s |
+| 64  | 16.6 samp/s | **23.8 samp/s** | 11.1 samp/s | 40.9 samp/s |
+| 128 | 16.5 samp/s | 23.6 samp/s | 11.4 samp/s | 44.9 samp/s |
 
 `zarr_block` is consistently **~2× slower** than `zarr_batch_slice` at every batch size and the gap does not close as chunk size grows from 155 MB → 1.2 GB. Root cause: zarr must allocate, encode, and serialize the full chunk as one unit; at 600+ MB the codec pipeline stalls and memory allocation overhead dominates. Small 4 MB chunks in `zarr_batch_slice` pipeline through the encoder efficiently.
 
