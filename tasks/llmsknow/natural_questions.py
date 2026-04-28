@@ -474,7 +474,7 @@ def run_step(step, model, data_dir="external/LLMsKnow/data", output_dir="output"
              inference_method="vllm", max_tokens=64, temperature=0.0, N=None,
              generations_file_path=None, eval_results_path=None, log_file=None,
              quick_debug_mode=False, split="test", split_seed=42,
-             logger_type="zarr", activations_path=None, resume=True, batch_size=None):
+             logger_type="zarr", activations_path=None, resume=True, batch_size=32):
     """Run a single step of the Natural Questions task. Callable from Python directly."""
     TASKNAME = "natural_questions_train" if split == "train" else "natural_questions"
 

@@ -575,7 +575,7 @@ def run_step(step, model, output_dir="output", split="validation",
              generations_file_path=None, eval_results_path=None, log_file=None,
              logger_type="lmdb", activations_path=None,
              quick_debug_mode=False, resume=True, max_retries=3, base_delay=1.0,
-             llm_evaluator=None, batch_size=None):
+             llm_evaluator=None, batch_size=32):
     """Run a single step of the HotpotQA task. Callable from Python directly.
 
     Args:

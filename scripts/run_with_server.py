@@ -728,7 +728,7 @@ def run_experiment(
     resume=True,
     resume_eval=True,
     llm_evaluator=None,
-    batch_size=None,
+    batch_size=32,
 ):
     """Run a HalluLens experiment with automatic server management.
 
@@ -972,7 +972,7 @@ def main():
 
     # Task-specific arguments
     parser.add_argument("--N", type=int, default=1, help="Number of samples")
-    parser.add_argument("--batch-size", type=int, default=None, dest="batch_size", help="Batch size for direct HFTransformersAdapter inference (skips server)")
+    parser.add_argument("--batch-size", type=int, default=32, dest="batch_size", help="Batch size for HFTransformersAdapter inference (default: 32; set 0 to use vLLM server instead)")
     parser.add_argument("--wiki_src", default="goodwiki", help="Wiki source for precisewikiqa")
     parser.add_argument("--mode", default="dynamic", help="Mode for precisewikiqa")
     parser.add_argument("--inference_method", default="vllm", help="Inference method")
