@@ -754,6 +754,9 @@ model_map = {   'meta-llama/Llama-3.1-405B-Instruct-FP8': {'name': 'llama3.1_405
                                                         'server_urls': [f"http://{CUSTOM_SERVER}:8000/v1"],
                                                     },
 
+                # Qwen3 models
+                'Qwen/Qwen3-8B': {'name': 'qwen3_8B',
+                                   'server_urls': [f"http://{CUSTOM_SERVER}:8000/v1"]},
 
             }
 ########################################################################################################

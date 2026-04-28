@@ -1169,19 +1169,23 @@ def run_inference(prompt, max_tokens, temperature, top_p, model_name=DEFAULT_MOD
         logger.info(f"Starting generation with {model_name}")
         generation_start = time.time()
 
+        generate_kwargs = dict(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            return_dict_in_generate=True,
+            output_hidden_states=True,
+            output_scores=DEFAULT_LOGPROBS_ENABLED,
+            do_sample=True if temperature > 0.0 else False,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+        if "qwen3" in model_name.lower():
+            generate_kwargs["enable_thinking"] = False
+
         with torch.no_grad():
-            outputs = model.generate(
-                input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=max_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                return_dict_in_generate=True,
-                output_hidden_states=True,
-                output_scores=DEFAULT_LOGPROBS_ENABLED,
-                do_sample=True if temperature > 0.0 else False,
-                pad_token_id=tokenizer.pad_token_id
-            )
+            outputs = model.generate(**generate_kwargs)
 
         generation_time = time.time() - generation_start
         logger.info(f"Generation completed in {generation_time:.2f} seconds")
