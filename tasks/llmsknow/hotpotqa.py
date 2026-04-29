@@ -35,6 +35,7 @@ Output eval_results.json schema (ActivationParser-compatible):
   }
 """
 
+import fcntl
 import hashlib
 import json
 import os
@@ -184,6 +185,12 @@ class HotpotQAInference:
         prompts_df = self._build_prompts_df()
         total = len(prompts_df)
 
+        # Exclusive lock prevents concurrent processes from racing through the
+        # resume check and writing duplicate records to the same output file.
+        lock_path = self.generations_file_path + ".lock"
+        _lock_f = open(lock_path, "w")
+        fcntl.flock(_lock_f, fcntl.LOCK_EX)
+
         # --- Resume: skip already-processed prompts ---
         already_done = 0
         if resume and os.path.exists(self.generations_file_path):
@@ -195,6 +202,8 @@ class HotpotQAInference:
                 already_done = total - len(prompts_df)
                 if len(prompts_df) == 0:
                     print(f"All {total} prompts already processed — nothing to do.")
+                    fcntl.flock(_lock_f, fcntl.LOCK_UN)
+                    _lock_f.close()
                     return
                 print(f"Resuming: {already_done}/{total} done, {len(prompts_df)} remaining")
             except Exception as e:
@@ -278,6 +287,8 @@ class HotpotQAInference:
                 writer.shutdown(timeout=60.0)
             if zarr_logger is not None:
                 zarr_logger.close()
+            fcntl.flock(_lock_f, fcntl.LOCK_UN)
+            _lock_f.close()
 
         print(f"Batched inference complete → {self.generations_file_path}")
         if activations_path:
