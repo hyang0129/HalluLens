@@ -304,13 +304,17 @@ def dispatch_job(
     # Ensure log directory exists
     ssh_run(node.hostname, f"mkdir -p {shlex.quote(node.project_root + '/shared/logs')}", timeout=10)
 
-    # Build the dispatch command (quote paths and user command to prevent injection)
+    # Build the dispatch command (quote paths and user command to prevent injection).
+    # Use setsid so the child process starts a new session — this detaches it from the
+    # SSH shell's job table, preventing bash from calling wait4() on it before exiting.
+    # Without setsid, bash (non-interactive) waits for all children before exiting, which
+    # keeps the SSH stdout pipe open for the duration of the job and causes TimeoutExpired.
     abs_log = f"{node.project_root}/{log_file}"
     quoted_cmd = shlex.quote(command)
     quoted_root = shlex.quote(node.project_root)
     dispatch_cmd = (
         f"cd {quoted_root} && "
-        f"nohup bash -c {quoted_cmd} > {shlex.quote(abs_log)} 2>&1 & echo $!"
+        f"setsid nohup bash -c {quoted_cmd} > {shlex.quote(abs_log)} 2>&1 & echo $!"
     )
 
     result = ssh_run(node.hostname, dispatch_cmd, timeout=60)

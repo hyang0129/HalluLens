@@ -214,6 +214,12 @@ Experiment configs live at `configs/experiments/baseline_comparison_{name}.json`
 
 **Never submit or kill SLURM jobs** without explicit user instruction. Do not run `sbatch`, `srun`, `scancel`, `gpu_dispatch.py run/kill`, or kill remote processes via SSH. Always ask the user before starting or stopping any job — killing a job loses its GPU allocation, and re-queuing can take a long time.
 
+**Avoid duplicate dispatches.** GPU dispatch via SSH can appear to fail (timeout) while the remote job actually launched successfully. Before re-dispatching:
+1. Check `ps aux | grep <script>` on the target node via SSH to confirm whether the process is running.
+2. Check `python scripts/gpu_dispatch.py jobs --all` for recent job records.
+3. Wait at least **2 minutes** after a failed/uncertain dispatch before concluding it did not start.
+Dispatching duplicates wastes GPU memory and causes jobs to compete for the same output files.
+
 For GPU job dispatch, use `scripts/gpu_dispatch.py` instead of raw SSH:
 
 ```bash
