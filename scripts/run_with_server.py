@@ -698,11 +698,11 @@ def run_experiment(
     log_level=None,
     max_model_len=None,
     gpu_memory_utilization=None,
-    N=1,
+    N=None,
     wiki_src="goodwiki",
     mode="dynamic",
     inference_method="vllm",
-    max_inference_tokens=256,
+    max_inference_tokens=64,
     generations_file_path=None,
     eval_results_path=None,
     q_generator=None,
@@ -916,6 +916,8 @@ def run_experiment(
             # Batched inference (HotpotQA adapter path)
             batch_size=batch_size,
         )
+        # Strip None values so per-task kwargs.get("key", default) fallbacks fire correctly.
+        task_kwargs = {k: v for k, v in task_kwargs.items() if v is not None}
 
         if step == "all":
             no_generate_tasks = {"triviaqa", "naturalquestions", "truthfulqa", "hotpotqa", "movies", "mmlu", "popqa", "searchqa", "sciq"}
@@ -971,12 +973,12 @@ def main():
     parser.add_argument("--log-file", help="Path for server behavior logs (if not specified and step is inference, will be placed in same directory as generations file)")
 
     # Task-specific arguments
-    parser.add_argument("--N", type=int, default=1, help="Number of samples")
+    parser.add_argument("--N", type=int, default=None, help="Number of samples (default: None = all; precisewikiqa defaults to 1)")
     parser.add_argument("--batch-size", type=int, default=32, dest="batch_size", help="Batch size for HFTransformersAdapter inference (default: 32; set 0 to use vLLM server instead)")
     parser.add_argument("--wiki_src", default="goodwiki", help="Wiki source for precisewikiqa")
     parser.add_argument("--mode", default="dynamic", help="Mode for precisewikiqa")
     parser.add_argument("--inference_method", default="vllm", help="Inference method")
-    parser.add_argument("--max_inference_tokens", type=int, default=256, help="Maximum number of tokens to generate per inference")
+    parser.add_argument("--max_inference_tokens", type=int, default=64, help="Maximum number of tokens to generate per inference")
     parser.add_argument("--generations_file_path", help="Path for generations file")
     parser.add_argument("--eval_results_path", help="Path for evaluation results (default: co-located with generations file)")
     parser.add_argument(
@@ -1003,7 +1005,7 @@ def main():
     parser.add_argument("--abstain_evaluator", help="Abstain evaluator model for longwiki")
     parser.add_argument("--verifier", help="Verifier model for longwiki")
     parser.add_argument("--k", type=int, default=32, help="K parameter for longwiki")
-    parser.add_argument("--max_tokens", type=int, default=1024, help="Max tokens for longwiki")
+    parser.add_argument("--max_tokens", type=int, default=None, help="Max tokens per response (default: per-task: longwiki=1024, naturalquestions=64, others=128)")
     parser.add_argument("--max_workers", type=int, default=64, help="Max workers for longwiki")
 
     # Mixed entities specific

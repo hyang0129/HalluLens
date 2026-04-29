@@ -185,8 +185,8 @@ class HFTransformersAdapter(ModelAdapter):
             return_dict_in_generate=True,
             pad_token_id=tokenizer.pad_token_id,
         )
-        if "qwen3" in self._model_name.lower():
-            generate_kwargs["enable_thinking"] = False
+        # Qwen3 thinking mode is suppressed via raw (non-chat-template) prompts;
+        # no generate kwarg is needed and older transformers versions reject it.
 
         with torch.no_grad():
             outputs = model.generate(**generate_kwargs)
@@ -220,6 +220,9 @@ class HFTransformersAdapter(ModelAdapter):
                 )
             )
 
+        # Explicitly free the large outputs object so GPU memory is released
+        # before the caller queues activations (which are now on CPU).
+        del outputs
         return results
 
     # ------------------------------------------------------------------
@@ -310,11 +313,12 @@ class HFTransformersAdapter(ModelAdapter):
                 response_act = prompt_act.new_zeros((1, 0, prompt_act.shape[-1]))
 
             if self._sequence_mode == "prompt":
-                activations.append(prompt_act)
+                act = prompt_act
             elif self._sequence_mode == "response":
-                activations.append(response_act)
+                act = response_act
             else:
-                activations.append(torch.cat([prompt_act, response_act], dim=1))
+                act = torch.cat([prompt_act, response_act], dim=1)
+            activations.append(act.cpu())
 
         return activations
 

@@ -41,6 +41,20 @@
       "project_root": "/mnt/home/hyang1/LLM_research/HalluLens",
       "max_concurrent_jobs": 1,
       "tags": ["training", "inference"]
+    },
+    {
+      "hostname": "alphagpu12",
+      "python": "/mnt/home/hyang1/.local/share/mamba/envs/p311/bin/python",
+      "project_root": "/mnt/home/hyang1/LLM_research/HalluLens",
+      "max_concurrent_jobs": 1,
+      "tags": ["training", "inference"]
+    },
+    {
+      "hostname": "alphagpu22",
+      "python": "/mnt/home/hyang1/.local/share/mamba/envs/p311/bin/python",
+      "project_root": "/mnt/home/hyang1/LLM_research/HalluLens",
+      "max_concurrent_jobs": 1,
+      "tags": ["training", "inference"]
     }
   ],
   "defaults": {

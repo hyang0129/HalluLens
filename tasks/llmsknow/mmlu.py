@@ -228,7 +228,7 @@ class MMLUInference:
             })
         return pd.DataFrame(rows)
 
-    def run_inference(self, inference_method="vllm", max_tokens=128, temperature=0.0,
+    def run_inference(self, inference_method="vllm", max_tokens=64, temperature=0.0,
                       logger_type="lmdb", activations_path=None, log_file=None,
                       resume=True, max_retries=3, base_delay=1.0):
         prompts_df = self._build_prompts_df()
@@ -252,7 +252,7 @@ class MMLUInference:
         )
         print(f"Inference complete -> {self.generations_file_path}")
 
-    def run_inference_batched(self, batch_size=8, max_tokens=128, temperature=0.0,
+    def run_inference_batched(self, batch_size=8, max_tokens=64, temperature=0.0,
                               activations_path=None, resume=True):
         """Run batched inference using HFTransformersAdapter directly.
 
@@ -687,7 +687,7 @@ class MMLULLMEval:
 # ---------------------------------------------------------------------------
 
 def run_step(step, model, output_dir="output", split="test",
-             inference_method="vllm", max_tokens=128, temperature=0.0, N=None,
+             inference_method="vllm", max_tokens=64, temperature=0.0, N=None,
              generations_file_path=None, eval_results_path=None, log_file=None,
              logger_type="lmdb", activations_path=None,
              quick_debug_mode=False, resume=True, max_retries=3, base_delay=1.0,
