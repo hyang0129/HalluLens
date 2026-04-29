@@ -146,6 +146,11 @@ def load_mmlu_data(split="test", n_samples=None, subjects=None):
     print(f"Loading MMLU (all / {split}) from HuggingFace...")
     dataset = load_dataset("cais/mmlu", "all", trust_remote_code=True)[split]
 
+    # auxiliary_train has empty subject strings in the HuggingFace "all" config —
+    # skip subject filtering for that split so all samples are included.
+    if split == "auxiliary_train" and all(item["subject"] == "" for item in dataset.select(range(min(10, len(dataset))))):
+        subject_set = {""}
+
     choice_labels = ["A", "B", "C", "D"]
 
     data = []
