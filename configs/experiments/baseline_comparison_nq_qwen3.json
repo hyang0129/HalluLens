@@ -10,11 +10,7 @@
   ],
   "split_seed": 42,
   "training_seeds": [
-    0,
-    5,
-    26,
-    42,
-    63
+    0
   ],
   "device": "auto",
   "num_workers": 4,

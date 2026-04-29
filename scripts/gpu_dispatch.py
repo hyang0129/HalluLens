@@ -310,11 +310,12 @@ def dispatch_job(
     # Without setsid, bash (non-interactive) waits for all children before exiting, which
     # keeps the SSH stdout pipe open for the duration of the job and causes TimeoutExpired.
     abs_log = f"{node.project_root}/{log_file}"
-    quoted_cmd = shlex.quote(command)
     quoted_root = shlex.quote(node.project_root)
+    # Wrap the user command so cd happens inside the setsid'd child, not in the SSH shell.
+    # This lets the SSH shell exit immediately after echo $!, avoiding slow NFS cd hangs.
+    inner_cmd = shlex.quote(f"cd {node.project_root} && {command}")
     dispatch_cmd = (
-        f"cd {quoted_root} && "
-        f"setsid nohup bash -c {quoted_cmd} > {shlex.quote(abs_log)} 2>&1 & echo $!"
+        f"setsid nohup bash -c {inner_cmd} > {shlex.quote(abs_log)} 2>&1 & echo $!"
     )
 
     result = ssh_run(node.hostname, dispatch_cmd, timeout=60)
