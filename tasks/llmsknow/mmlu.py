@@ -296,8 +296,8 @@ class MMLUInference:
                 already_done = total - len(prompts_df)
                 if len(prompts_df) == 0:
                     print(f"All {total} prompts already processed — nothing to do.")
-                    returnfcntl.flock(_lock_f, fcntl.LOCK_UN)
-                    return_lock_f.close()
+                    fcntl.flock(_lock_f, fcntl.LOCK_UN)
+                    _lock_f.close()
                     return
                 print(f"Resuming: {already_done}/{total} done, {len(prompts_df)} remaining")
             except Exception as e:
@@ -326,19 +326,29 @@ class MMLUInference:
             )
             writer = AsyncActivationWriter(zarr_logger)
 
+        # Dedup for inference: run model.generate() once per unique prompt,
+        # then fan out the response to every original row sharing that prompt.
+        # Preserves gen.jsonl row count + per-row metadata (e.g. MMLU subject)
+        # while avoiding duplicate-prompt zarr writes that would otherwise
+        # trigger partial-chunk read-modify-write.
+        prompt_to_indices = defaultdict(list)
+        for i, p in enumerate(prompts_df["prompt"]):
+            prompt_to_indices[p].append(i)
+        unique_prompts = list(prompt_to_indices.keys())
+
         file_mode = "a" if already_done > 0 else "w"
-        prompts = prompts_df["prompt"].tolist()
-        n_batches = (len(prompts) + batch_size - 1) // batch_size
+        n_unique = len(unique_prompts)
+        n_batches = (n_unique + batch_size - 1) // batch_size
         t0 = time.time()
         completed = 0
 
         try:
             with open(self.generations_file_path, file_mode, encoding="utf-8") as f:
-                pbar = tqdm(total=len(prompts), desc="Batched inference")
+                pbar = tqdm(total=len(prompts_df), desc="Batched inference")
                 for batch_idx in range(n_batches):
                     start = batch_idx * batch_size
-                    end = min(start + batch_size, len(prompts))
-                    batch_prompts = prompts[start:end]
+                    end = min(start + batch_size, n_unique)
+                    batch_prompts = unique_prompts[start:end]
 
                     results = adapter.infer_batch(
                         batch_prompts,
@@ -346,12 +356,14 @@ class MMLUInference:
                         temperature=temperature,
                     )
 
-                    for i, result in enumerate(results):
-                        row_idx = start + i
-                        record = prompts_df.iloc[row_idx].to_dict()
-                        record["generation"] = result.response_text
-                        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-                        f.flush()
+                    rows_written = 0
+                    for result in results:
+                        for orig_idx in prompt_to_indices[result.prompt]:
+                            record = prompts_df.iloc[orig_idx].to_dict()
+                            record["generation"] = result.response_text
+                            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                            rows_written += 1
+                    f.flush()
 
                     if writer is not None:
                         batch_entries = []
@@ -375,12 +387,12 @@ class MMLUInference:
                             batch_entries.append((prompt_key, log_entry))
                         writer.enqueue_batch(batch_entries)
 
-                    completed += len(batch_prompts)
+                    completed += rows_written
                     elapsed = time.time() - t0
                     rate = completed / elapsed if elapsed > 0 else 0
-                    remaining = (len(prompts) - completed) / rate if rate > 0 else 0
+                    remaining = (len(prompts_df) - completed) / rate if rate > 0 else 0
                     pbar.set_postfix_str(f"{rate:.1f} samples/s | ETA {remaining/60:.1f}m")
-                    pbar.update(len(batch_prompts))
+                    pbar.update(rows_written)
                 pbar.close()
         finally:
             if writer is not None:

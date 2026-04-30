@@ -40,6 +40,7 @@ import hashlib
 import json
 import os
 import argparse
+from collections import defaultdict
 from pathlib import Path
 
 import pandas as pd
@@ -232,17 +233,26 @@ class HotpotQAInference:
             )
             writer = AsyncActivationWriter(zarr_logger)
 
+        # Dedup for inference: run model.generate() once per unique prompt,
+        # then fan out the response to every original row sharing that prompt.
+        # Preserves gen.jsonl row count + per-row metadata while avoiding
+        # duplicate-prompt zarr writes that trigger partial-chunk RMW.
+        prompt_to_indices = defaultdict(list)
+        for i, p in enumerate(prompts_df["prompt"]):
+            prompt_to_indices[p].append(i)
+        unique_prompts = list(prompt_to_indices.keys())
+
         file_mode = "a" if already_done > 0 else "w"
-        prompts = prompts_df["prompt"].tolist()
-        n_batches = (len(prompts) + batch_size - 1) // batch_size
+        n_unique = len(unique_prompts)
+        n_batches = (n_unique + batch_size - 1) // batch_size
 
         try:
             with open(self.generations_file_path, file_mode, encoding="utf-8") as f:
-                pbar = tqdm(total=len(prompts), desc="Batched inference")
+                pbar = tqdm(total=len(prompts_df), desc="Batched inference")
                 for batch_idx in range(n_batches):
                     start = batch_idx * batch_size
-                    end = min(start + batch_size, len(prompts))
-                    batch_prompts = prompts[start:end]
+                    end = min(start + batch_size, n_unique)
+                    batch_prompts = unique_prompts[start:end]
 
                     results = adapter.infer_batch(
                         batch_prompts,
@@ -250,12 +260,14 @@ class HotpotQAInference:
                         temperature=temperature,
                     )
 
-                    for i, result in enumerate(results):
-                        row_idx = start + i
-                        record = prompts_df.iloc[row_idx].to_dict()
-                        record["generation"] = result.response_text
-                        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-                        f.flush()
+                    rows_written = 0
+                    for result in results:
+                        for orig_idx in prompt_to_indices[result.prompt]:
+                            record = prompts_df.iloc[orig_idx].to_dict()
+                            record["generation"] = result.response_text
+                            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                            rows_written += 1
+                    f.flush()
 
                     if writer is not None:
                         batch_entries = []
@@ -279,7 +291,7 @@ class HotpotQAInference:
                             batch_entries.append((prompt_key, log_entry))
                         writer.enqueue_batch(batch_entries)
 
-                    pbar.update(len(batch_prompts))
+                    pbar.update(rows_written)
                 pbar.close()
         finally:
             if writer is not None:
