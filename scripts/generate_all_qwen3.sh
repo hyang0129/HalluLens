@@ -94,13 +94,13 @@ run_inference_eval sciq train \
     "$SHARED/sciq_train_qwen3_8b/activations.zarr"
 
 # ── searchqa ──────────────────────────────────────────────────────────────────
-# "test" dataset uses the HF "train" split by searchqa convention (~99,820 samples)
-run_inference_eval searchqa train \
+# eval set: HF "test" split (~43,228 samples)
+run_inference_eval searchqa test \
     "$BASE/searchqa/Qwen3-8B/generation.jsonl" \
     "$SHARED/searchqa_qwen3_8b/activations.zarr"
 
-# train split uses HF "test" split (~27,247 samples)
-run_inference_eval searchqa test \
+# train split: HF "train" split (~151,295 samples)
+run_inference_eval searchqa train \
     "$BASE/searchqa_train/Qwen3-8B/generation.jsonl" \
     "$SHARED/searchqa_train_qwen3_8b/activations.zarr"
 
