@@ -76,3 +76,6 @@ runs/
 
 # Exploratory work (scratch notebooks, experiments)
 exploratory_work/
+
+# Claude Code agent worktrees (temporary git worktrees created by sub-agents)
+.claude/worktrees/
