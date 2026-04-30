@@ -1776,9 +1776,13 @@ class SimCLRCotrainedTrainerConfig(TrainerConfig):
     infinite_eval_seed: int = 0
     balanced_sampling: bool = False
 
-    # Loss weights
-    simclr_weight: float = 1.0  # alpha
-    bce_weight: float = 1.0     # beta
+    # Loss weights / gradient gate
+    simclr_weight: float = 1.0  # alpha — scales SimCLR loss contribution
+    # bce_grad_gate controls how much BCE gradient flows back through the encoder.
+    # 0.0 = head-only updates (contrastive encoder is frozen from BCE's perspective).
+    # 1.0 = full gradient flow (original co-training).
+    # The head always trains regardless of gate value.
+    bce_grad_gate: float = 1.0
 
 
 class SimCLRCotrainedTrainer(Trainer):
@@ -1809,22 +1813,22 @@ class SimCLRCotrainedTrainer(Trainer):
         batch_size, num_views, seq_len, hidden_dim = views.shape
         x_flat = views.reshape(batch_size * num_views, seq_len, hidden_dim)
 
-        # Forward with head to get both embeddings and predictions
-        z_flat, pred_flat = self.model.forward_with_head(x_flat)
+        # Forward with head; gate controls BCE gradient flow through encoder
+        gate = float(self.cotrained_config.bce_grad_gate)
+        z_flat, pred_flat = self.model.forward_with_head(x_flat, bce_grad_gate=gate)
         z_views = z_flat.reshape(batch_size, num_views, -1)
 
         # SimCLR loss (unsupervised, no labels)
         simclr_loss = self.simclr_loss_fn(z_views)
 
-        # BCE loss: use predictions from the first view of each sample
+        # BCE loss: use predictions from the first view of each sample.
+        # Gradient from this loss reaches the encoder scaled by bce_grad_gate.
         pred_first_view = pred_flat[:batch_size]  # (B, 1)
         labels = batch["halu"].to(self.device, non_blocking=True).float().view(-1, 1)
         bce_loss = self.bce_loss_fn(pred_first_view, labels)
 
-        # Combined loss
         alpha = float(self.cotrained_config.simclr_weight)
-        beta = float(self.cotrained_config.bce_weight)
-        combined_loss = alpha * simclr_loss + beta * bce_loss
+        combined_loss = alpha * simclr_loss + bce_loss
 
         # Contrastive metrics for monitoring
         intra_cos = intra_sample_cosine_mean(z_views)
@@ -2048,7 +2052,7 @@ class SimCLRCotrainedTrainer(Trainer):
             "optimizer_state_dict": self.optimizer.state_dict(),
             "temperature": float(self.cotrained_config.temperature),
             "simclr_weight": float(self.cotrained_config.simclr_weight),
-            "bce_weight": float(self.cotrained_config.bce_weight),
+            "bce_grad_gate": float(self.cotrained_config.bce_grad_gate),
             "lr": float(self.cotrained_config.lr),
             **train_metrics,
             **val_metrics,

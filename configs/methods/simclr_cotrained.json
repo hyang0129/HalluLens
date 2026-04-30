@@ -7,12 +7,13 @@
     "input_dropout": 0.3
   },
   "training": {
-    "max_epochs": 50,
+    "max_epochs": 100,
+    "min_total_steps": 3000,
     "batch_size": 512,
     "lr": 1e-5,
     "temperature": 0.25,
     "simclr_weight": 1.0,
-    "bce_weight": 1.0,
+    "bce_grad_gate": 1.0,
     "use_infinite_index_stream": true,
     "use_infinite_index_stream_eval": true,
     "balanced_sampling": false,

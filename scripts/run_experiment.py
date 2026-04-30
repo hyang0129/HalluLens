@@ -901,7 +901,7 @@ def run_simclr_cotrained(
         lr=train_cfg["lr"],
         temperature=train_cfg.get("temperature", 0.25),
         simclr_weight=train_cfg.get("simclr_weight", 1.0),
-        bce_weight=train_cfg.get("bce_weight", 1.0),
+        bce_grad_gate=train_cfg.get("bce_grad_gate", 1.0),
         steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
         min_total_steps=train_cfg.get("min_total_steps"),
         grad_clip_norm=train_cfg.get("grad_clip_norm"),

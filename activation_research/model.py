@@ -900,7 +900,22 @@ class SimCLRCotrainedModel(nn.Module):
     Designed for joint SimCLR + BCE training via SimCLRCotrainedTrainer.
     forward() returns only the embedding (used during OOD evaluation).
     forward_with_head() returns (embedding, hallucination_probability) for
-    training, where pred is a sigmoid probability in [0, 1].
+    training, with a gradient gate controlling how much the BCE loss influences
+    the encoder.
+
+    The gradient gate (bce_grad_gate, 0.0–1.0) works as follows:
+      - gate=0.0: BCE loss trains the head weights only; zero gradient reaches
+                  the encoder. Equivalent to training contrastive first, then
+                  fitting the head on frozen embeddings.
+      - gate=1.0: full gradient from BCE flows through the encoder (original
+                  co-training behaviour).
+      - gate in (0,1): interpolated — the encoder sees a fraction of the BCE
+                       gradient proportional to the gate value.
+
+    Mechanism: z_for_head = gate * z + (1 - gate) * z.detach()
+    In the forward pass this is identical to z. In the backward pass the
+    gradient reaching the encoder from the head is scaled by `gate`.
+    The head always receives its own full gradient regardless of gate value.
     """
 
     def __init__(self, input_dim: int = 4096, final_dim: int = 512,
@@ -921,8 +936,19 @@ class SimCLRCotrainedModel(nn.Module):
         """Return embedding only (B, final_dim). Used during evaluation."""
         return self.encoder(x)
 
-    def forward_with_head(self, x: torch.Tensor):
-        """Return (embedding, hallucination_prob) for joint training."""
+    def forward_with_head(self, x: torch.Tensor, bce_grad_gate: float = 1.0):
+        """Return (embedding, hallucination_prob) for joint training.
+
+        Args:
+            x: (B, L, input_dim) activations.
+            bce_grad_gate: float in [0, 1]. Controls how much gradient from the
+                BCE loss flows back through the encoder. 0 = head-only update,
+                1 = full co-training. Default 1.0 (backward-compatible).
+        """
         z = self.encoder(x)
-        pred = self.head(z)
+        # Gradient gate: scales BCE gradient reaching the encoder.
+        # Forward value is unchanged (z_for_head == z numerically).
+        gate = float(bce_grad_gate)
+        z_for_head = gate * z + (1.0 - gate) * z.detach()
+        pred = self.head(z_for_head)
         return z, pred
