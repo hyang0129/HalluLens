@@ -1,0 +1,19 @@
+{
+  "experiment_name": "baseline_comparison_hotpotqa_qwen3",
+  "dataset": "hotpotqa_qwen3",
+  "methods": [
+    "contrastive_logprob_recon",
+    "linear_probe",
+    "multi_layer_linear_probe",
+    "token_entropy",
+    "logprob_baseline"
+  ],
+  "split_seed": 42,
+  "training_seeds": [
+    0
+  ],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs"
+}
