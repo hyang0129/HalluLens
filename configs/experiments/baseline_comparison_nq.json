@@ -1,6 +1,6 @@
 {
   "experiment_name": "baseline_comparison_nq",
-  "dataset": "nq_test_hallu_cor",
+  "dataset": "nq",
   "methods": [
     "contrastive_logprob_recon",
     "simclr_cotrained",
@@ -12,13 +12,20 @@
   "split_seed": 42,
   "training_seeds": [
     0,
-    5,
-    26,
-    42,
-    63
+    1,
+    2,
+    3,
+    4
   ],
   "device": "auto",
   "num_workers": 4,
   "persistent_workers": true,
-  "output_dir": "runs"
+  "output_dir": "runs",
+  "split_seeds": [
+    42,
+    1,
+    2,
+    3,
+    4
+  ]
 }

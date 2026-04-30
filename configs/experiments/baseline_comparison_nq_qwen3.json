@@ -3,6 +3,9 @@
   "dataset": "nq_qwen3",
   "methods": [
     "contrastive_logprob_recon",
+    "simclr_cotrained_gate0",
+    "simclr_cotrained_gate05",
+    "simclr_cotrained",
     "linear_probe",
     "multi_layer_linear_probe",
     "token_entropy",
@@ -10,10 +13,21 @@
   ],
   "split_seed": 42,
   "training_seeds": [
-    0
+    0,
+    1,
+    2,
+    3,
+    4
   ],
   "device": "auto",
   "num_workers": 4,
   "persistent_workers": true,
-  "output_dir": "runs"
+  "output_dir": "runs",
+  "split_seeds": [
+    42,
+    1,
+    2,
+    3,
+    4
+  ]
 }

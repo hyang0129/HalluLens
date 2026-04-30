@@ -1550,112 +1550,129 @@ def main() -> None:
         # Detect unified config format (has "train" and/or "test" sub-keys)
         has_train_test = "train" in dataset_cfg and isinstance(dataset_cfg["train"], dict)
 
-        test_ap = None
-        if has_train_test:
-            # Unified config: separate train and test ActivationParsers
-            train_cfg = {**dataset_cfg, **dataset_cfg["train"]}
-            _resolve_paths(train_cfg, project_root)
-            train_eval_json = _build_eval_json(train_cfg)
+        # Resolve per-seed split seeds. split_seeds[i] is the split_seed used for
+        # training_seeds[i]. Falls back to the single split_seed field if absent.
+        split_seeds_list = experiment_cfg.get("split_seeds", None)
+        global_split_seed = experiment_cfg.get("split_seed", 42)
 
-            logger.info(f"Loading train ActivationParser from: {train_cfg['activations_path']}")
-            ap = ActivationParser(
-                inference_json=train_cfg["inference_json"],
-                eval_json=train_eval_json,
-                activations_path=train_cfg["activations_path"],
+        # Build the test ActivationParser once — the test set is constant across all
+        # seeds (unified format: separate test zarr with split_strategy="none").
+        test_ap = None
+        if has_train_test and "test" in dataset_cfg and isinstance(dataset_cfg["test"], dict):
+            test_cfg = {**dataset_cfg, **dataset_cfg["test"]}
+            _resolve_paths(test_cfg, project_root)
+            test_eval_json = _build_eval_json(test_cfg)
+            logger.info(f"Loading test ActivationParser from: {test_cfg['activations_path']}")
+            test_ap = ActivationParser(
+                inference_json=test_cfg["inference_json"],
+                eval_json=test_eval_json,
+                activations_path=test_cfg["activations_path"],
                 logger_type=dataset_cfg.get("backend", "zarr"),
-                random_seed=experiment_cfg.get("split_seed", 42),
-                split_strategy=split_strategy,
+                random_seed=global_split_seed,
+                split_strategy="none",
                 verbose=True,
             )
 
-            if "test" in dataset_cfg and isinstance(dataset_cfg["test"], dict):
-                test_cfg = {**dataset_cfg, **dataset_cfg["test"]}
-                _resolve_paths(test_cfg, project_root)
-                test_eval_json = _build_eval_json(test_cfg)
+        # Non-learned methods (token_entropy, logprob_baseline) run once regardless
+        # of how many seeds are in the sweep.
+        completed_nonlearned: set = set()
 
-                logger.info(f"Loading test ActivationParser from: {test_cfg['activations_path']}")
-                test_ap = ActivationParser(
-                    inference_json=test_cfg["inference_json"],
-                    eval_json=test_eval_json,
-                    activations_path=test_cfg["activations_path"],
+        for seed_idx, seed in enumerate(training_seeds):
+            actual_split_seed = (
+                split_seeds_list[seed_idx] if split_seeds_list is not None else global_split_seed
+            )
+
+            # Build a fresh train ActivationParser for this fold's split.
+            if has_train_test:
+                train_cfg = {**dataset_cfg, **dataset_cfg["train"]}
+                _resolve_paths(train_cfg, project_root)
+                train_eval_json = _build_eval_json(train_cfg)
+                logger.info(
+                    f"Loading train ActivationParser (split_seed={actual_split_seed}) "
+                    f"from: {train_cfg['activations_path']}"
+                )
+                ap = ActivationParser(
+                    inference_json=train_cfg["inference_json"],
+                    eval_json=train_eval_json,
+                    activations_path=train_cfg["activations_path"],
                     logger_type=dataset_cfg.get("backend", "zarr"),
-                    random_seed=experiment_cfg.get("split_seed", 42),
-                    split_strategy="none",
+                    random_seed=actual_split_seed,
+                    split_strategy=split_strategy,
                     verbose=True,
                 )
-        else:
-            # Legacy flat config: single ActivationParser with internal splitting
-            _resolve_paths(dataset_cfg, project_root)
-            eval_json_path = _build_eval_json(dataset_cfg)
-
-            ap = ActivationParser(
-                inference_json=dataset_cfg["inference_json"],
-                eval_json=eval_json_path,
-                activations_path=dataset_cfg["activations_path"],
-                logger_type=dataset_cfg.get("backend", "zarr"),
-                random_seed=experiment_cfg.get("split_seed", 42),
-                split_strategy=split_strategy,
-                verbose=True,
-            )
-
-        for method_name in methods:
-            # Load method config (use pre-loaded if available)
-            if method_name in _preloaded_method_cfgs:
-                method_cfg = _preloaded_method_cfgs[method_name]
             else:
-                method_cfg_path = os.path.join(
-                    str(project_root), "configs", "methods", f"{method_name}.json"
+                # Legacy flat config: single zarr, split_seed controls train/test boundary.
+                _resolve_paths(dataset_cfg, project_root)
+                eval_json_path = _build_eval_json(dataset_cfg)
+                ap = ActivationParser(
+                    inference_json=dataset_cfg["inference_json"],
+                    eval_json=eval_json_path,
+                    activations_path=dataset_cfg["activations_path"],
+                    logger_type=dataset_cfg.get("backend", "zarr"),
+                    random_seed=actual_split_seed,
+                    split_strategy=split_strategy,
+                    verbose=True,
                 )
-                with open(method_cfg_path) as f:
-                    method_cfg = json.load(f)
 
-            # Apply max_epochs override
-            if max_epochs_override is not None and method_cfg.get("training"):
-                method_cfg = dict(method_cfg)  # shallow copy to avoid mutating cached
-                method_cfg["training"] = dict(method_cfg["training"])
-                method_cfg["training"]["max_epochs"] = max_epochs_override
+            for method_name in methods:
+                # Load method config (use pre-loaded if available)
+                if method_name in _preloaded_method_cfgs:
+                    method_cfg = _preloaded_method_cfgs[method_name]
+                else:
+                    method_cfg_path = os.path.join(
+                        str(project_root), "configs", "methods", f"{method_name}.json"
+                    )
+                    with open(method_cfg_path) as f:
+                        method_cfg = json.load(f)
 
-            is_learned = method_cfg.get("training") is not None
-            seeds = training_seeds if is_learned else [None]
+                # Apply max_epochs override
+                if max_epochs_override is not None and method_cfg.get("training"):
+                    method_cfg = dict(method_cfg)  # shallow copy to avoid mutating cached
+                    method_cfg["training"] = dict(method_cfg["training"])
+                    method_cfg["training"]["max_epochs"] = max_epochs_override
 
-            for seed in seeds:
-                # Build output directory
-                if seed is not None:
+                is_learned = method_cfg.get("training") is not None
+
+                if not is_learned:
+                    # Non-learned methods run exactly once across the entire seed sweep.
+                    if method_name in completed_nonlearned:
+                        continue
+                    effective_seed = None
+                    run_dir = os.path.join(output_base, exp_name, dataset_name, method_name)
+                else:
+                    effective_seed = seed
                     run_dir = os.path.join(
                         output_base, exp_name, dataset_name, method_name, f"seed_{seed}"
-                    )
-                else:
-                    run_dir = os.path.join(
-                        output_base, exp_name, dataset_name, method_name
                     )
 
                 # Resume check
                 eval_metrics_path = os.path.join(run_dir, "eval_metrics.json")
                 if os.path.exists(eval_metrics_path) and not args.force:
                     logger.info(
-                        f"Skipping {method_name} seed={seed} (already complete)"
+                        f"Skipping {method_name} seed={effective_seed} (already complete)"
                     )
+                    if not is_learned:
+                        completed_nonlearned.add(method_name)
                     continue
 
                 os.makedirs(run_dir, exist_ok=True)
                 os.makedirs(os.path.join(run_dir, "artifacts"), exist_ok=True)
 
-                logger.info(f"Running {method_name} seed={seed} -> {run_dir}")
+                logger.info(f"Running {method_name} seed={effective_seed} -> {run_dir}")
 
                 try:
-                    # Seed
-                    if seed is not None:
+                    if effective_seed is not None:
                         from utils.seeding import seed_everything
 
-                        seed_everything(seed)
+                        seed_everything(effective_seed)
 
                     # Write merged config
                     merged_config = {
                         "dataset": dataset_cfg,
                         "method": method_cfg,
                         "experiment": {k: v for k, v in experiment_cfg.items()},
-                        "training_seed": seed,
-                        "split_seed": experiment_cfg.get("split_seed", 42),
+                        "training_seed": effective_seed,
+                        "split_seed": actual_split_seed,
                     }
                     with open(os.path.join(run_dir, "config.json"), "w") as f:
                         json.dump(merged_config, f, indent=2)
@@ -1667,37 +1684,37 @@ def main() -> None:
                     routine = method_cfg.get("routine", method_cfg["name"])
                     if routine == "contrastive":
                         eval_metrics, predictions = run_contrastive(
-                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, seed,
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
                         )
                     elif routine == "contrastive_logprob_recon":
                         eval_metrics, predictions = run_contrastive_logprob_recon(
-                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, seed,
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
                         )
                     elif routine == "linear_probe":
                         eval_metrics, predictions = run_linear_probe(
-                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, seed,
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
                         )
                     elif routine == "multi_layer_linear_probe":
                         eval_metrics, predictions = run_multi_layer_linear_probe(
-                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, seed,
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
                         )
                     elif routine == "simclr_linear":
                         eval_metrics, predictions = run_simclr_linear(
-                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, seed,
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
                         )
                     elif routine == "simclr_cotrained":
                         eval_metrics, predictions = run_simclr_cotrained(
-                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, seed,
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
                         )
                     elif routine == "simclr_projection":
                         eval_metrics, predictions = run_simclr_projection(
-                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, seed,
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
                         )
                     elif routine == "token_entropy":
@@ -1726,20 +1743,23 @@ def main() -> None:
                             writer.writeheader()
                             writer.writerows(predictions)
 
-                    logger.info(f"Completed {method_name} seed={seed}: {eval_metrics}")
+                    logger.info(f"Completed {method_name} seed={effective_seed}: {eval_metrics}")
+
+                    if not is_learned:
+                        completed_nonlearned.add(method_name)
 
                 except Exception:
                     import traceback
 
                     tb = traceback.format_exc()
                     logger.error(
-                        f"Failed {method_name} seed={seed}: {tb}"
+                        f"Failed {method_name} seed={effective_seed}: {tb}"
                     )
                     # Write error record so we know this run failed
                     error_path = os.path.join(run_dir, "run_error.json")
                     with open(error_path, "w") as f:
                         json.dump(
-                            {"method": method_name, "seed": seed, "error": tb},
+                            {"method": method_name, "seed": effective_seed, "error": tb},
                             f,
                             indent=2,
                         )
