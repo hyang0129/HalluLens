@@ -3,6 +3,7 @@
   "dataset": "nq_test_hallu_cor",
   "methods": [
     "contrastive_logprob_recon",
+    "simclr_cotrained",
     "linear_probe",
     "multi_layer_linear_probe",
     "token_entropy",

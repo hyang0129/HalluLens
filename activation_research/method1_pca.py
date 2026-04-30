@@ -6,6 +6,13 @@ Architecture:
   3. CrossLayerPCATransformer — bidirectional transformer over K PCA-projected layers
   4. PairwiseCosineMLP — ablation: 120 pairwise cosines → MLP
   5. ConcatLinear — ablation: concat K layers → linear
+
+STATUS: Ruled out. PCA is ineffective on LLM intermediate activations because the
+activation distributions are high-entropy: variance is spread across many dimensions
+rather than concentrated in a small number of principal components. PCA therefore
+discards a large fraction of the signal needed for hallucination detection before the
+transformer ever sees it. The contrastive encoder (ProgressiveCompressor) operating
+directly on raw activations consistently outperforms this approach.
 """
 
 from __future__ import annotations

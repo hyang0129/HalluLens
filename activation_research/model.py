@@ -892,3 +892,37 @@ class LayerAwareProgressiveCompressor(nn.Module):
             z = F.normalize(z, dim=-1)
 
         return z
+
+
+class SimCLRCotrainedModel(nn.Module):
+    """ProgressiveCompressor with a binary hallucination classification head.
+
+    Designed for joint SimCLR + BCE training via SimCLRCotrainedTrainer.
+    forward() returns only the embedding (used during OOD evaluation).
+    forward_with_head() returns (embedding, hallucination_probability) for
+    training, where pred is a sigmoid probability in [0, 1].
+    """
+
+    def __init__(self, input_dim: int = 4096, final_dim: int = 512,
+                 input_dropout: float = 0.3):
+        super().__init__()
+        self.encoder = ProgressiveCompressor(
+            input_dim=input_dim,
+            final_dim=final_dim,
+            input_dropout=input_dropout,
+            normalize_input=True,
+        )
+        self.head = nn.Sequential(
+            nn.Linear(final_dim, 1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return embedding only (B, final_dim). Used during evaluation."""
+        return self.encoder(x)
+
+    def forward_with_head(self, x: torch.Tensor):
+        """Return (embedding, hallucination_prob) for joint training."""
+        z = self.encoder(x)
+        pred = self.head(z)
+        return z, pred
