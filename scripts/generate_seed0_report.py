@@ -12,11 +12,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-EXPERIMENTS = sorted(ROOT.glob("configs/experiments/baseline_comparison_*.json"))
-
 DATASET_LABELS = {
     "hotpotqa": "HotpotQA",
     "nq_test_hallu_cor": "NQ",
+    "nq_qwen3": "NQ",
     "mmlu": "MMLU",
     "movies": "Movies",
     "popqa": "PopQA",
@@ -25,7 +24,7 @@ DATASET_LABELS = {
 }
 
 # Display order
-DATASET_ORDER = ["hotpotqa", "nq_test_hallu_cor", "mmlu", "movies", "popqa", "sciq", "searchqa"]
+DATASET_ORDER = ["hotpotqa", "nq_test_hallu_cor", "nq_qwen3", "mmlu", "movies", "popqa", "sciq", "searchqa"]
 
 
 def load_json(path: Path):
@@ -94,7 +93,7 @@ def bold_best(row_vals: list):
     """Given a list of (label, value_or_None), return list with best value bolded."""
     numeric = [(i, v) for i, (_, v) in enumerate(row_vals) if v is not None]
     if not numeric:
-        return [lbl if v is None else f"{v:.3f}" for lbl, v in row_vals]
+        return ["—" for _ in row_vals]
     best_i, best_v = max(numeric, key=lambda x: x[1])
     out = []
     for i, (lbl, v) in enumerate(row_vals):
@@ -111,14 +110,19 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", default="results/seed0_results.md")
+    parser.add_argument("--config-glob", default="configs/experiments/baseline_comparison_*.json",
+                        help="Glob (relative to repo root) for experiment configs to include")
+    parser.add_argument("--model-label", default="Llama-3.1-8B-Instruct",
+                        help="Model name shown in the report header")
     args = parser.parse_args()
 
     seed = args.seed
     out_path = ROOT / args.out
+    experiments = sorted(ROOT.glob(args.config_glob))
 
     # Collect metrics per dataset
     data = {}
-    for exp_path in EXPERIMENTS:
+    for exp_path in experiments:
         cfg = load_json(exp_path)
         if not cfg:
             continue
@@ -143,8 +147,12 @@ def main():
 
     rows = []
     for dataset in DATASET_ORDER:
+        if dataset not in data:
+            continue
         label = DATASET_LABELS.get(dataset, dataset)
         m = data.get(dataset, {})
+        if not m:
+            continue
         n_test = m.get("n_test")
         n_str = f"{n_test:,}" if n_test else "—"
 
@@ -155,7 +163,7 @@ def main():
     lines = [
         f"# Seed {seed} Results — Hallucination Detection AUROC",
         "",
-        "**Model:** Llama-3.1-8B-Instruct  ",
+        f"**Model:** {args.model_label}  ",
         f"**Seed:** {seed} | **Split seed:** 42 | **Evaluation:** held-out test split",
         "",
         "---",
