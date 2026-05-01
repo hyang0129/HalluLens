@@ -332,7 +332,7 @@ def _format_chat_prompt_for_model(model_name: str, messages: List[Dict[str, str]
 
     if hasattr(tokenizer, "apply_chat_template"):
         template_kwargs = dict(add_generation_prompt=True, tokenize=False)
-        if "qwen3" in model_name.lower():
+        if "qwen3" in model_name.lower() or "smollm3" in model_name.lower():
             template_kwargs["enable_thinking"] = False
         return tokenizer.apply_chat_template(messages, **template_kwargs)
 

@@ -4,7 +4,8 @@
 Usage:
     python scripts/audit_datasets.py --model Qwen/Qwen3-8B
     python scripts/audit_datasets.py --model meta-llama/Llama-3.1-8B-Instruct
-    python scripts/audit_datasets.py --model Qwen/Qwen3-8B --zarr
+    python scripts/audit_datasets.py --model Qwen/Qwen3-8B --zarr          # fast: sample count only
+    python scripts/audit_datasets.py --model Qwen/Qwen3-8B --zarr-size     # slow: also runs du on each store
 """
 
 import argparse
@@ -78,12 +79,17 @@ def main():
     parser.add_argument("--root", default=".",
                         help="Repo root (default: current directory)")
     parser.add_argument("--zarr", action="store_true",
-                        help="Inspect zarr stores for sample count + disk size")
+                        help="Show zarr sample count (fast — metadata only)")
+    parser.add_argument("--zarr-size", action="store_true",
+                        help="Also show zarr disk usage via du (slow on large stores)")
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
     model_name = args.model.split("/")[-1]
     slug = model_slug(model_name)
+
+    show_zarr_n    = args.zarr or args.zarr_size
+    show_zarr_size = args.zarr_size
 
     print(f"Model : {model_name}  (zarr slug: {slug})")
     print(f"Root  : {root}")
@@ -91,8 +97,10 @@ def main():
 
     col_w = 26
     header = f"  {'dataset':<{col_w}} {'split':<16}  {'gen':>8}  {'eval':>4}  {'zarr':>4}"
-    if args.zarr:
-        header += f"  {'zarr_n':>8}  {'zarr_mb':>8}"
+    if show_zarr_n:
+        header += f"  {'zarr_n':>8}"
+    if show_zarr_size:
+        header += f"  {'zarr_mb':>8}"
     print(header)
     print("  " + "-" * (len(header) - 2))
 
@@ -133,10 +141,12 @@ def main():
         row = (f"  {icon} {dataset:<{col_w}} {split:<16}  {gen_str:>8}"
                f"  {'✓' if has_eval else '✗':>4}  {'✓' if has_zarr else '✗':>4}")
 
-        if args.zarr:
+        if show_zarr_n:
             zn = zarr_samples(zarr_path) if has_zarr else None
-            zm = dir_size_mb(zarr_path)  if has_zarr else None
-            row += f"  {str(zn) if zn else '—':>8}  {f'{zm:.0f}' if zm else '—':>8}"
+            row += f"  {str(zn) if zn else '—':>8}"
+        if show_zarr_size:
+            zm = dir_size_mb(zarr_path) if has_zarr else None
+            row += f"  {f'{zm:.0f}' if zm else '—':>8}"
 
         print(row)
 

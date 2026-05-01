@@ -2,13 +2,33 @@
 """Multi-node GPU job dispatch and tracking.
 
 A single-file CLI tool for dispatching jobs to GPU nodes, checking node
-health, and tracking running jobs. Uses only Python stdlib.
+health, and tracking running jobs. Uses only Python stdlib (plus utils/
+for Jupyter dispatch).
 
 Usage:
     python scripts/gpu_dispatch.py status
     python scripts/gpu_dispatch.py run [--node HOST] [--desc DESC] [--min-vram GB] COMMAND...
+    python scripts/gpu_dispatch.py run --jupyter --node HOST COMMAND...
     python scripts/gpu_dispatch.py jobs [--all]
     python scripts/gpu_dispatch.py kill JOB_ID
+
+Jupyter dispatch (opt-in, no silent fallback):
+    Some nodes may be SSH-unreachable but accessible via a Jupyter server
+    (e.g. new nodes where NFS/PAM is not yet provisioned). To dispatch to
+    such a node, pass --jupyter to the run subcommand:
+
+        python scripts/gpu_dispatch.py run --jupyter --node alphagpu16 bash scripts/my_job.sh
+
+    --jupyter is REQUIRED to use the Jupyter path. SSH failure does NOT
+    auto-fall back to Jupyter. The node must have `jupyter_url` set in
+    configs/nodes.json for --jupyter to work.
+
+    For `status`, nodes with `jupyter_url` configured are probed via Jupyter
+    when SSH is unreachable (health-check only, no dispatch side effects).
+
+    Job tracking (manifest, jobs, kill) works the same for both dispatch
+    methods. Jupyter-dispatched jobs are marked with dispatch_method=jupyter
+    in the manifest; `kill` routes to Jupyter automatically for those jobs.
 """
 
 import argparse
@@ -24,6 +44,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
+# Add project root to path so utils.jupyter_exec is importable
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -36,6 +59,8 @@ class NodeConfig:
     project_root: str
     max_concurrent_jobs: int = 1
     tags: List[str] = field(default_factory=list)
+    jupyter_url: Optional[str] = None
+    jupyter_password: str = "123"
 
 
 @dataclass
@@ -48,6 +73,7 @@ class NodeStatus:
     gpu_mem_total_mb: Optional[float] = None
     our_procs: List[str] = field(default_factory=list)
     error: Optional[str] = None
+    via_jupyter: bool = False
 
 
 @dataclass
@@ -60,6 +86,7 @@ class JobRecord:
     status: str  # "running", "finished", "killed", "unknown"
     log_file: str
     description: str = ""
+    dispatch_method: str = "ssh"  # "ssh" or "jupyter"
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +116,8 @@ def load_nodes(config: dict) -> List[NodeConfig]:
             project_root=entry.get("project_root", defaults.get("project_root", ".")),
             max_concurrent_jobs=entry.get("max_concurrent_jobs", 1),
             tags=entry.get("tags", []),
+            jupyter_url=entry.get("jupyter_url", defaults.get("jupyter_url")),
+            jupyter_password=entry.get("jupyter_password", defaults.get("jupyter_password", "123")),
         ))
     return nodes
 
@@ -122,7 +151,6 @@ def check_node_health(node: NodeConfig, ssh_timeout: int = 10) -> NodeStatus:
     """SSH to a node, query nvidia-smi and running processes."""
     status = NodeStatus(hostname=node.hostname, reachable=False)
 
-    # nvidia-smi query
     try:
         result = ssh_run(
             node.hostname,
@@ -143,9 +171,46 @@ def check_node_health(node: NodeConfig, ssh_timeout: int = 10) -> NodeStatus:
         return status
 
     status.reachable = True
-    parts = result.stdout.split("---PROCS---")
+    _parse_health_output(status, result.stdout)
+    return status
 
-    # Parse GPU info (take first GPU line)
+
+def check_node_health_jupyter(node: NodeConfig) -> NodeStatus:
+    """Query a node's GPU health via Jupyter API (fallback when SSH is unavailable)."""
+    status = NodeStatus(hostname=node.hostname, reachable=False)
+    if not node.jupyter_url:
+        status.error = "no jupyter_url configured"
+        return status
+    try:
+        from utils.jupyter_exec import JupyterExecutor
+        code = (
+            "import subprocess\n"
+            "smi = subprocess.run(\n"
+            "    ['nvidia-smi', '--query-gpu=name,utilization.gpu,memory.used,memory.total',\n"
+            "     '--format=csv,noheader,nounits'],\n"
+            "    capture_output=True, text=True)\n"
+            "ps = subprocess.run(\n"
+            "    'ps aux | grep -E \"python|bash\" | grep hyang1 | grep -v grep | grep -v sshd',\n"
+            "    shell=True, capture_output=True, text=True)\n"
+            "print('---PROCS---'.join([smi.stdout.strip(), ps.stdout.strip()]))\n"
+        )
+        with JupyterExecutor(base_url=node.jupyter_url, password=node.jupyter_password) as jup:
+            result = jup.run(code)
+        if result.status != "ok":
+            status.error = f"jupyter kernel error: {result.stdout[:200]}"
+            return status
+        status.reachable = True
+        status.via_jupyter = True
+        _parse_health_output(status, result.stdout)
+    except Exception as exc:
+        status.error = str(exc)
+    return status
+
+
+def _parse_health_output(status: NodeStatus, raw: str) -> None:
+    """Parse combined nvidia-smi + ps output into a NodeStatus (mutates in place)."""
+    parts = raw.split("---PROCS---")
+
     gpu_lines = [l.strip() for l in parts[0].strip().splitlines() if l.strip()]
     if gpu_lines:
         fields = [f.strip() for f in gpu_lines[0].split(",")]
@@ -164,12 +229,8 @@ def check_node_health(node: NodeConfig, ssh_timeout: int = 10) -> NodeStatus:
             except ValueError:
                 pass
 
-    # Parse our processes
     if len(parts) > 1:
-        proc_lines = [l.strip() for l in parts[1].strip().splitlines() if l.strip()]
-        status.our_procs = proc_lines
-
-    return status
+        status.our_procs = [l.strip() for l in parts[1].strip().splitlines() if l.strip()]
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +245,12 @@ def _manifest_path(config: dict) -> Path:
     return project_root / manifest_rel
 
 
+def _record_from_dict(rec: dict) -> JobRecord:
+    """Deserialise a JobRecord, back-filling fields absent from older manifests."""
+    rec = {"dispatch_method": "ssh", **rec}
+    return JobRecord(**rec)
+
+
 def load_manifest(manifest_path: Path) -> List[JobRecord]:
     """Load the job manifest, returning an empty list if it doesn't exist."""
     if not manifest_path.exists():
@@ -196,7 +263,7 @@ def load_manifest(manifest_path: Path) -> List[JobRecord]:
             data = []
         finally:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-    return [JobRecord(**rec) for rec in data]
+    return [_record_from_dict(rec) for rec in data]
 
 
 def save_manifest(manifest_path: Path, jobs: List[JobRecord]) -> None:
@@ -205,7 +272,6 @@ def save_manifest(manifest_path: Path, jobs: List[JobRecord]) -> None:
     Acquires lock before truncating to prevent races with concurrent writers.
     """
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    # Open in r+/create mode so we can lock before truncating
     try:
         f = open(manifest_path, "r+")
     except FileNotFoundError:
@@ -236,7 +302,7 @@ def update_manifest(manifest_path: Path, fn) -> List[JobRecord]:
             data = json.loads(content) if content.strip() else []
         except json.JSONDecodeError:
             data = []
-        jobs = [JobRecord(**rec) for rec in data]
+        jobs = [_record_from_dict(rec) for rec in data]
         jobs = fn(jobs)
         f.seek(0)
         f.truncate()
@@ -257,7 +323,6 @@ def select_best_node(
     min_vram_gb: Optional[float] = None,
 ) -> Optional[NodeConfig]:
     """Pick the reachable node with fewest running jobs and most free VRAM."""
-    # Count running jobs per node
     running_counts: dict = {}
     for job in manifest:
         if job.status == "running":
@@ -282,7 +347,6 @@ def select_best_node(
     if not candidates:
         return None
 
-    # Sort: fewest running jobs first, then most free VRAM
     candidates.sort(key=lambda x: (x[1], -x[2]))
     return candidates[0][0]
 
@@ -301,18 +365,9 @@ def dispatch_job(
     job_id = uuid.uuid4().hex[:12]
     log_file = f"shared/logs/{job_id}.log"
 
-    # Ensure log directory exists
     ssh_run(node.hostname, f"mkdir -p {shlex.quote(node.project_root + '/shared/logs')}", timeout=10)
 
-    # Build the dispatch command (quote paths and user command to prevent injection).
-    # Use setsid so the child process starts a new session — this detaches it from the
-    # SSH shell's job table, preventing bash from calling wait4() on it before exiting.
-    # Without setsid, bash (non-interactive) waits for all children before exiting, which
-    # keeps the SSH stdout pipe open for the duration of the job and causes TimeoutExpired.
     abs_log = f"{node.project_root}/{log_file}"
-    quoted_root = shlex.quote(node.project_root)
-    # Wrap the user command so cd happens inside the setsid'd child, not in the SSH shell.
-    # This lets the SSH shell exit immediately after echo $!, avoiding slow NFS cd hangs.
     inner_cmd = shlex.quote(f"cd {node.project_root} && {command}")
     dispatch_cmd = (
         f"setsid nohup bash -c {inner_cmd} > {shlex.quote(abs_log)} 2>&1 & echo $!"
@@ -336,9 +391,76 @@ def dispatch_job(
         status="running" if pid else "unknown",
         log_file=log_file,
         description=description,
+        dispatch_method="ssh",
     )
 
-    # Append to manifest atomically
+    manifest_path = _manifest_path(config)
+    update_manifest(manifest_path, lambda jobs: jobs + [job])
+
+    return job
+
+
+def dispatch_job_jupyter(
+    node: NodeConfig,
+    command: str,
+    description: str,
+    config: dict,
+) -> JobRecord:
+    """Dispatch a command to a node via Jupyter API, record in manifest.
+
+    Requires the node to have jupyter_url configured. This is an explicit
+    opt-in path — it is never called automatically when SSH fails.
+    """
+    if not node.jupyter_url:
+        raise ValueError(
+            f"Node '{node.hostname}' has no jupyter_url configured. "
+            "Add jupyter_url to its entry in configs/nodes.json to use --jupyter."
+        )
+
+    from utils.jupyter_exec import JupyterExecutor
+
+    job_id = uuid.uuid4().hex[:12]
+    log_file = f"shared/logs/{job_id}.log"
+    abs_log = f"{node.project_root}/{log_file}"
+    log_dir = str(Path(abs_log).parent)
+    inner_cmd = f"cd {node.project_root} && {command}"
+
+    code = (
+        f"import subprocess, pathlib\n"
+        f"pathlib.Path({repr(log_dir)}).mkdir(parents=True, exist_ok=True)\n"
+        f"with open({repr(abs_log)}, 'w') as _lf:\n"
+        f"    _p = subprocess.Popen(\n"
+        f"        ['bash', '-c', {repr(inner_cmd)}],\n"
+        f"        stdout=_lf, stderr=_lf, start_new_session=True)\n"
+        f"print(_p.pid)\n"
+    )
+
+    with JupyterExecutor(base_url=node.jupyter_url, password=node.jupyter_password) as jup:
+        result = jup.run(code)
+
+    if result.status != "ok":
+        raise RuntimeError(
+            f"Jupyter dispatch to '{node.hostname}' failed:\n{result.stdout}"
+        )
+
+    pid = None
+    try:
+        pid = int(result.stdout.strip())
+    except ValueError:
+        pass
+
+    job = JobRecord(
+        job_id=job_id,
+        hostname=node.hostname,
+        command=command,
+        pid=pid,
+        started_at=datetime.now(timezone.utc).isoformat(),
+        status="running" if pid else "unknown",
+        log_file=log_file,
+        description=description,
+        dispatch_method="jupyter",
+    )
+
     manifest_path = _manifest_path(config)
     update_manifest(manifest_path, lambda jobs: jobs + [job])
 
@@ -358,18 +480,24 @@ def refresh_job_statuses(
     jobs = load_manifest(manifest_path)
     node_map = {n.hostname: n for n in nodes}
 
-    # Group running jobs by hostname
-    running_by_host: dict = {}
+    # Separate running jobs by dispatch method
+    ssh_by_host: dict = {}
+    jupyter_by_host: dict = {}
     for i, job in enumerate(jobs):
-        if job.status == "running" and job.pid is not None:
-            running_by_host.setdefault(job.hostname, []).append((i, job))
+        if job.status != "running" or job.pid is None:
+            continue
+        if job.dispatch_method == "jupyter":
+            jupyter_by_host.setdefault(job.hostname, []).append((i, job))
+        else:
+            ssh_by_host.setdefault(job.hostname, []).append((i, job))
 
     changed = False
-    for hostname, job_list in running_by_host.items():
+
+    # SSH jobs: check via SSH
+    for hostname, job_list in ssh_by_host.items():
         if hostname not in node_map:
             continue
         pids = [str(j.pid) for _, j in job_list]
-        # Check which PIDs are still alive
         try:
             result = ssh_run(
                 hostname,
@@ -378,9 +506,8 @@ def refresh_job_statuses(
             )
             alive_pids = set()
             for line in result.stdout.strip().splitlines():
-                line = line.strip()
                 try:
-                    alive_pids.add(int(line))
+                    alive_pids.add(int(line.strip()))
                 except ValueError:
                     pass
             for idx, job in job_list:
@@ -388,7 +515,35 @@ def refresh_job_statuses(
                     jobs[idx].status = "finished"
                     changed = True
         except (subprocess.TimeoutExpired, Exception):
-            # Can't reach node -- leave status as-is
+            pass
+
+    # Jupyter jobs: check via Jupyter API
+    for hostname, job_list in jupyter_by_host.items():
+        node = node_map.get(hostname)
+        if node is None or not node.jupyter_url:
+            continue
+        pids = [str(j.pid) for _, j in job_list]
+        try:
+            from utils.jupyter_exec import JupyterExecutor
+            code = (
+                f"import subprocess\n"
+                f"r = subprocess.run(['ps', '-p', {repr(','.join(pids))}, '-o', 'pid='],\n"
+                f"    capture_output=True, text=True)\n"
+                f"print(r.stdout)\n"
+            )
+            with JupyterExecutor(base_url=node.jupyter_url, password=node.jupyter_password) as jup:
+                result = jup.run(code)
+            alive_pids = set()
+            for line in result.stdout.strip().splitlines():
+                try:
+                    alive_pids.add(int(line.strip()))
+                except ValueError:
+                    pass
+            for idx, job in job_list:
+                if job.pid not in alive_pids:
+                    jobs[idx].status = "finished"
+                    changed = True
+        except Exception:
             pass
 
     if changed:
@@ -409,17 +564,13 @@ def cmd_status(args: argparse.Namespace) -> None:
     manifest_path = _manifest_path(config)
     manifest = load_manifest(manifest_path)
 
-    # Count running jobs per node
     running_counts: dict = {}
     for job in manifest:
         if job.status == "running":
             running_counts[job.hostname] = running_counts.get(job.hostname, 0) + 1
 
-    # Check all nodes in parallel
+    # Check all nodes in parallel via SSH; then retry unreachable ones via Jupyter
     statuses: dict = {}
-    if not nodes:
-        print("No nodes configured.")
-        return
     with ThreadPoolExecutor(max_workers=max(1, len(nodes))) as pool:
         futures = {
             pool.submit(check_node_health, node, ssh_timeout): node
@@ -429,7 +580,20 @@ def cmd_status(args: argparse.Namespace) -> None:
             node = futures[future]
             statuses[node.hostname] = future.result()
 
-    # Print table
+    # For SSH-unreachable nodes that have jupyter_url, try Jupyter health check
+    jupyter_nodes = [n for n in nodes if n.jupyter_url and not statuses[n.hostname].reachable]
+    if jupyter_nodes:
+        with ThreadPoolExecutor(max_workers=max(1, len(jupyter_nodes))) as pool:
+            futures = {
+                pool.submit(check_node_health_jupyter, node): node
+                for node in jupyter_nodes
+            }
+            for future in as_completed(futures):
+                node = futures[future]
+                result = future.result()
+                if result.reachable:
+                    statuses[node.hostname] = result
+
     header = f"{'NODE':<15} {'GPU':<18} {'VRAM USED/TOTAL':<18} {'GPU UTIL':<10} {'OUR JOBS':<10} {'STATUS':<12}"
     print(header)
     print("-" * len(header))
@@ -437,7 +601,6 @@ def cmd_status(args: argparse.Namespace) -> None:
     for node in nodes:
         ns = statuses.get(node.hostname)
         if ns is None or not ns.reachable:
-            err = ns.error if ns else "unknown"
             print(f"{node.hostname:<15} {'-':<18} {'-':<18} {'-':<10} {'-':<10} {'unreachable':<12}")
             continue
 
@@ -451,9 +614,10 @@ def cmd_status(args: argparse.Namespace) -> None:
             vram = "-"
 
         util = f"{ns.gpu_util_pct:.0f}%" if ns.gpu_util_pct is not None else "-"
-
         running = running_counts.get(node.hostname, 0)
         node_status = "busy" if running >= node.max_concurrent_jobs else "available"
+        if ns.via_jupyter:
+            node_status += " (jupyter)"
 
         print(f"{node.hostname:<15} {gpu_name:<18} {vram:<18} {util:<10} {running:<10} {node_status:<12}")
 
@@ -464,11 +628,10 @@ def cmd_run(args: argparse.Namespace) -> None:
     nodes = load_nodes(config)
     ssh_timeout = config.get("defaults", {}).get("ssh_timeout", 10)
     manifest_path = _manifest_path(config)
-    manifest = load_manifest(manifest_path)
+    manifest = refresh_job_statuses(manifest_path, nodes, ssh_timeout)
     command = " ".join(args.cmd)
     description = args.desc or ""
 
-    # Health check nodes
     if args.node:
         target_nodes = [n for n in nodes if n.hostname == args.node]
         if not target_nodes:
@@ -477,46 +640,95 @@ def cmd_run(args: argparse.Namespace) -> None:
     else:
         target_nodes = nodes
 
-    statuses: dict = {}
-    with ThreadPoolExecutor(max_workers=max(1, len(target_nodes))) as pool:
-        futures = {
-            pool.submit(check_node_health, node, ssh_timeout): node
-            for node in target_nodes
-        }
-        for future in as_completed(futures):
-            node = futures[future]
-            statuses[node.hostname] = future.result()
-
-    if args.node:
-        # Validate specified node is reachable
-        ns = statuses.get(args.node)
-        if ns is None or not ns.reachable:
-            err = ns.error if ns else "unknown"
-            print(f"Error: node '{args.node}' is unreachable ({err})", file=sys.stderr)
+    if args.jupyter:
+        # Jupyter dispatch: explicit opt-in, no SSH health check, no fallback
+        if not args.node:
+            print("Error: --jupyter requires --node (auto-select not supported for Jupyter dispatch)", file=sys.stderr)
             sys.exit(1)
         selected = target_nodes[0]
-        # Check min-vram
+        if not selected.jupyter_url:
+            print(
+                f"Error: node '{selected.hostname}' has no jupyter_url in configs/nodes.json. "
+                "Add it to use --jupyter.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        # Still enforce the manifest-based busy guard
+        running = sum(1 for j in manifest if j.status == "running" and j.hostname == selected.hostname)
+        if running >= selected.max_concurrent_jobs:
+            print(
+                f"Error: node '{selected.hostname}' is at max_concurrent_jobs "
+                f"({selected.max_concurrent_jobs}). Use 'jobs' to check running jobs.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        # Probe via Jupyter to show current GPU state (informational)
+        ns = check_node_health_jupyter(selected)
+        if not ns.reachable:
+            print(f"Error: Jupyter health check failed for '{selected.hostname}': {ns.error}", file=sys.stderr)
+            sys.exit(1)
+
         if args.min_vram and ns.gpu_mem_total_mb and ns.gpu_mem_used_mb:
             free_gb = (ns.gpu_mem_total_mb - ns.gpu_mem_used_mb) / 1024.0
             if free_gb < args.min_vram:
                 print(
-                    f"Error: node '{args.node}' has {free_gb:.1f} GB free VRAM, "
+                    f"Error: node '{selected.hostname}' has {free_gb:.1f} GB free VRAM, "
                     f"need {args.min_vram:.1f} GB",
                     file=sys.stderr,
                 )
                 sys.exit(1)
-    else:
-        selected = select_best_node(nodes, manifest, statuses, min_vram_gb=args.min_vram)
-        if selected is None:
-            print("Error: no suitable node available", file=sys.stderr)
-            sys.exit(1)
 
-    job = dispatch_job(selected, command, description, config)
+        job = dispatch_job_jupyter(selected, command, description, config)
+
+    else:
+        # SSH dispatch (default)
+        statuses: dict = {}
+        with ThreadPoolExecutor(max_workers=max(1, len(target_nodes))) as pool:
+            futures = {
+                pool.submit(check_node_health, node, ssh_timeout): node
+                for node in target_nodes
+            }
+            for future in as_completed(futures):
+                node = futures[future]
+                statuses[node.hostname] = future.result()
+
+        if args.node:
+            ns = statuses.get(args.node)
+            if ns is None or not ns.reachable:
+                err = ns.error if ns else "unknown"
+                print(f"Error: node '{args.node}' is unreachable ({err})", file=sys.stderr)
+                if target_nodes[0].jupyter_url:
+                    print(
+                        f"Hint: this node has jupyter_url configured. "
+                        f"Use --jupyter to dispatch via Jupyter instead.",
+                        file=sys.stderr,
+                    )
+                sys.exit(1)
+            selected = target_nodes[0]
+            if args.min_vram and ns.gpu_mem_total_mb and ns.gpu_mem_used_mb:
+                free_gb = (ns.gpu_mem_total_mb - ns.gpu_mem_used_mb) / 1024.0
+                if free_gb < args.min_vram:
+                    print(
+                        f"Error: node '{args.node}' has {free_gb:.1f} GB free VRAM, "
+                        f"need {args.min_vram:.1f} GB",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+        else:
+            selected = select_best_node(nodes, manifest, statuses, min_vram_gb=args.min_vram)
+            if selected is None:
+                print("Error: no suitable node available", file=sys.stderr)
+                sys.exit(1)
+
+        job = dispatch_job(selected, command, description, config)
 
     print(f"Job dispatched:")
     print(f"  Job ID:   {job.job_id}")
     print(f"  Node:     {job.hostname}")
     print(f"  PID:      {job.pid}")
+    print(f"  Via:      {job.dispatch_method}")
     print(f"  Log file: {job.log_file}")
     print(f"  Command:  {job.command}")
 
@@ -537,8 +749,7 @@ def cmd_jobs(args: argparse.Namespace) -> None:
         print("No jobs found.")
         return
 
-    # Print table
-    header = f"{'JOB_ID':<14} {'NODE':<15} {'STATUS':<12} {'PID':<8} {'STARTED':<22} {'COMMAND'}"
+    header = f"{'JOB_ID':<14} {'NODE':<15} {'STATUS':<12} {'VIA':<8} {'PID':<8} {'STARTED':<22} {'COMMAND'}"
     print(header)
     print("-" * len(header))
 
@@ -549,13 +760,15 @@ def cmd_jobs(args: argparse.Namespace) -> None:
             cmd_display = cmd_display[:57] + "..."
         print(
             f"{job.job_id:<14} {job.hostname:<15} {job.status:<12} "
-            f"{str(job.pid or '-'):<8} {started:<22} {cmd_display}"
+            f"{job.dispatch_method:<8} {str(job.pid or '-'):<8} {started:<22} {cmd_display}"
         )
 
 
 def cmd_kill(args: argparse.Namespace) -> None:
     """Handle the 'kill' subcommand."""
     config = load_config(args.config)
+    nodes = load_nodes(config)
+    node_map = {n.hostname: n for n in nodes}
     manifest_path = _manifest_path(config)
     jobs = load_manifest(manifest_path)
 
@@ -575,17 +788,34 @@ def cmd_kill(args: argparse.Namespace) -> None:
         print(f"Warning: job '{args.job_id}' status is '{target.status}', not 'running'")
 
     if target.pid:
-        try:
-            result = ssh_run(target.hostname, f"kill {target.pid}", timeout=10)
-            if result.returncode == 0:
-                print(f"Sent kill signal to PID {target.pid} on {target.hostname}")
+        if target.dispatch_method == "jupyter":
+            node = node_map.get(target.hostname)
+            if node and node.jupyter_url:
+                try:
+                    from utils.jupyter_exec import JupyterExecutor
+                    code = f"import os; os.kill({target.pid}, 15)\nprint('ok')\n"
+                    with JupyterExecutor(base_url=node.jupyter_url, password=node.jupyter_password) as jup:
+                        result = jup.run(code)
+                    if "ok" in result.stdout:
+                        print(f"Sent kill signal to PID {target.pid} on {target.hostname} (via Jupyter)")
+                    else:
+                        print(f"Warning: unexpected Jupyter kill response: {result.stdout}")
+                except Exception as exc:
+                    print(f"Warning: Jupyter kill failed: {exc}")
             else:
-                print(
-                    f"Warning: kill command returned code {result.returncode}: "
-                    f"{result.stderr.strip()}"
-                )
-        except subprocess.TimeoutExpired:
-            print(f"Warning: SSH timeout trying to kill PID {target.pid} on {target.hostname}")
+                print(f"Warning: cannot kill jupyter job — node '{target.hostname}' has no jupyter_url")
+        else:
+            try:
+                result = ssh_run(target.hostname, f"kill {target.pid}", timeout=10)
+                if result.returncode == 0:
+                    print(f"Sent kill signal to PID {target.pid} on {target.hostname}")
+                else:
+                    print(
+                        f"Warning: kill command returned code {result.returncode}: "
+                        f"{result.stderr.strip()}"
+                    )
+            except subprocess.TimeoutExpired:
+                print(f"Warning: SSH timeout trying to kill PID {target.pid} on {target.hostname}")
     else:
         print(f"Warning: no PID recorded for job '{args.job_id}'")
 
@@ -616,8 +846,15 @@ def main():
     run_parser = subparsers.add_parser("run", help="Dispatch a job to a GPU node")
     run_parser.add_argument("--node", help="Target specific node")
     run_parser.add_argument("--desc", help="Job description")
+    run_parser.add_argument("--min-vram", type=float, help="Minimum free VRAM in GB")
     run_parser.add_argument(
-        "--min-vram", type=float, help="Minimum free VRAM in GB"
+        "--jupyter",
+        action="store_true",
+        help=(
+            "Dispatch via Jupyter API instead of SSH. "
+            "Requires --node and jupyter_url in configs/nodes.json. "
+            "Never falls back silently — if Jupyter fails, the command fails."
+        ),
     )
     run_parser.add_argument("cmd", nargs="+", help="Command to run")
 

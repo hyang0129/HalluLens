@@ -1551,9 +1551,18 @@ def main() -> None:
         has_train_test = "train" in dataset_cfg and isinstance(dataset_cfg["train"], dict)
 
         # Resolve per-seed split seeds. split_seeds[i] is the split_seed used for
-        # training_seeds[i]. Falls back to the single split_seed field if absent.
+        # training_seeds[i] in the *full* config list. Falls back to the single
+        # split_seed field if absent.
         split_seeds_list = experiment_cfg.get("split_seeds", None)
         global_split_seed = experiment_cfg.get("split_seed", 42)
+        # Build a mapping from seed value → split_seed so that running a subset
+        # of seeds via --seeds still picks the correct fold (not just index 0).
+        full_training_seeds = experiment_cfg.get("training_seeds", list(training_seeds))
+        _split_seed_map: dict = {}
+        if split_seeds_list is not None:
+            for _i, _s in enumerate(full_training_seeds):
+                if _i < len(split_seeds_list):
+                    _split_seed_map[_s] = split_seeds_list[_i]
 
         # Build the test ActivationParser once — the test set is constant across all
         # seeds (unified format: separate test zarr with split_strategy="none").
@@ -1579,7 +1588,7 @@ def main() -> None:
 
         for seed_idx, seed in enumerate(training_seeds):
             actual_split_seed = (
-                split_seeds_list[seed_idx] if split_seeds_list is not None else global_split_seed
+                _split_seed_map.get(seed, global_split_seed) if _split_seed_map else global_split_seed
             )
 
             # Build a fresh train ActivationParser for this fold's split.
