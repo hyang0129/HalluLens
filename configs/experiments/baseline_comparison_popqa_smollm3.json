@@ -1,6 +1,6 @@
 {
-  "experiment_name": "baseline_comparison_movies",
-  "dataset": "movies",
+  "experiment_name": "baseline_comparison_popqa_smollm3",
+  "dataset": "popqa_smollm3",
   "methods": [
     "contrastive_logprob_recon",
     "linear_probe",
@@ -11,13 +11,20 @@
   "split_seed": 42,
   "training_seeds": [
     0,
-    5,
-    26,
-    42,
-    63
+    1,
+    2,
+    3,
+    4
   ],
   "device": "auto",
   "num_workers": 4,
   "persistent_workers": true,
-  "output_dir": "runs"
+  "output_dir": "runs",
+  "split_seeds": [
+    42,
+    1,
+    2,
+    3,
+    4
+  ]
 }

@@ -3,9 +3,6 @@
   "dataset": "nq_qwen3",
   "methods": [
     "contrastive_logprob_recon",
-    "simclr_cotrained_gate0",
-    "simclr_cotrained_gate05",
-    "simclr_cotrained",
     "linear_probe",
     "multi_layer_linear_probe",
     "token_entropy",

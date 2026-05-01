@@ -1,6 +1,6 @@
 {
-  "experiment_name": "baseline_comparison_nq",
-  "dataset": "nq",
+  "experiment_name": "baseline_comparison_searchqa_qwen3",
+  "dataset": "searchqa_qwen3",
   "methods": [
     "contrastive_logprob_recon",
     "linear_probe",

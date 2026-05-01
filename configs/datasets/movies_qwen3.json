@@ -1,0 +1,12 @@
+{
+  "name": "movies_qwen3",
+  "model_name": "Qwen3-8B",
+  "input_dim": 4096,
+  "backend": "zarr",
+  "label_source": "eval_json",
+  "outlier_class": 1,
+  "inference_json": "output/movies/Qwen3-8B/generation.jsonl",
+  "activations_path": "shared/movies_qwen3_8b/activations.zarr",
+  "eval_json": "output/movies/Qwen3-8B/eval_results.json",
+  "raw_eval_jsonl": "output/movies/Qwen3-8B/raw_eval_res.jsonl"
+}

@@ -1,0 +1,20 @@
+{
+  "name": "mmlu_smollm3",
+  "model_name": "SmolLM3-3B",
+  "input_dim": 2048,
+  "backend": "zarr",
+  "label_source": "eval_json",
+  "outlier_class": 1,
+  "train": {
+    "inference_json": "output/mmlu_train/SmolLM3-3B/generation.jsonl",
+    "activations_path": "shared/mmlu_train_smollm3_3b/activations.zarr",
+    "eval_json": "output/mmlu_train/SmolLM3-3B/eval_results.json",
+    "raw_eval_jsonl": "output/mmlu_train/SmolLM3-3B/raw_eval_res.jsonl"
+  },
+  "test": {
+    "inference_json": "output/mmlu/SmolLM3-3B/generation.jsonl",
+    "activations_path": "shared/mmlu_smollm3_3b/activations.zarr",
+    "eval_json": "output/mmlu/SmolLM3-3B/eval_results.json",
+    "raw_eval_jsonl": "output/mmlu/SmolLM3-3B/raw_eval_res.jsonl"
+  }
+}

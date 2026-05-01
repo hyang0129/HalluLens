@@ -1,0 +1,20 @@
+{
+  "name": "sciq_smollm3",
+  "model_name": "SmolLM3-3B",
+  "input_dim": 2048,
+  "backend": "zarr",
+  "label_source": "eval_json",
+  "outlier_class": 1,
+  "train": {
+    "inference_json": "output/sciq_train/SmolLM3-3B/generation.jsonl",
+    "activations_path": "shared/sciq_train_smollm3_3b/activations.zarr",
+    "eval_json": "output/sciq_train/SmolLM3-3B/eval_results.json",
+    "raw_eval_jsonl": "output/sciq_train/SmolLM3-3B/raw_eval_res.jsonl"
+  },
+  "test": {
+    "inference_json": "output/sciq/SmolLM3-3B/generation.jsonl",
+    "activations_path": "shared/sciq_smollm3_3b/activations.zarr",
+    "eval_json": "output/sciq/SmolLM3-3B/eval_results.json",
+    "raw_eval_jsonl": "output/sciq/SmolLM3-3B/raw_eval_res.jsonl"
+  }
+}
