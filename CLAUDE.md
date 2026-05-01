@@ -55,7 +55,9 @@ Both models work with all LLMsKnow tasks via the default batch inference path.
 
 ### LLMsKnow batch inference (default — no server needed)
 
-Tasks: `hotpotqa`, `mmlu`, `natural_questions`, `movies`, `popqa`, `sciq`, `searchqa`
+Tasks: `hotpotqa`, `mmlu`, `natural_questions`, `popqa`, `sciq`, `searchqa`
+
+> **Note:** `movies` is excluded — it has no train split so it cannot be used for classifier training.
 
 ```bash
 python scripts/run_with_server.py \
@@ -173,14 +175,27 @@ with JupyterExecutor() as jup:
 
 ### Checking inference/data generation status
 
+**Always run the audit script rather than guessing whether data is present.** Do not assume a dataset or its activations exist (or don't) based on prior context — verify with:
+
+```bash
+python scripts/audit_datasets.py --model Qwen/Qwen3-8B
+python scripts/audit_datasets.py --model meta-llama/Llama-3.1-8B-Instruct
+
+# Also check zarr sample counts (fast — metadata only):
+python scripts/audit_datasets.py --model Qwen/Qwen3-8B --zarr
+
+# Also check zarr disk usage (slow — runs du on every store):
+python scripts/audit_datasets.py --model Qwen/Qwen3-8B --zarr-size
+```
+
 Each dataset has train and test splits. The model name in output paths is the **last component of the HuggingFace model ID** (e.g., `Llama-3.1-8B-Instruct` for `meta-llama/Llama-3.1-8B-Instruct`, `Qwen3-8B` for `Qwen/Qwen3-8B`).
 
 Data lives at:
 - Generations: `output/{dataset}[_train]/{model_name}/generation.jsonl`
 - Eval results: `output/{dataset}[_train]/{model_name}/eval_results.json`
-- Activations: `shared/{dataset}[_train]/activations.zarr/`
+- Activations: `shared/{dataset}[_train]_{model_slug}/activations.zarr/`
 
-To check what data exists, scan these paths and compare line counts against expected sizes. A dataset split is **complete** when generation.jsonl line count matches the expected split size AND eval_results.json exists.
+A dataset split is **complete** when generation.jsonl line count matches the expected split size AND eval_results.json exists.
 
 ### Checking experiment/training status
 

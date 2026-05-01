@@ -11,8 +11,8 @@
 |----------|-------|--------|
 | Parameters | 3B | ~6 GB in float16 — well within H100/H200 VRAM |
 | Architecture | Decoder-only, GQA, NoPE | Standard hidden_states format expected |
-| Hidden size | ~2048 (TBC) | Zarr stores will be 2x smaller than Llama/Qwen3 (4096) |
-| Layers | ~28 (TBC) | Slightly fewer chunks per batch write |
+| Hidden size | 2048 (confirmed) | Zarr stores will be 2x smaller than Llama/Qwen3 (4096) |
+| Layers | 37 (confirmed) | 36 transformer blocks + embedding |
 | Context | 128k (YARN extrapolation) | No issue at max_tokens=64 |
 | Thinking mode | Yes (dual-mode) | Must disable — same class of problem as Qwen3 |
 | transformers req | ≥ 4.53.0 | **Must verify on target node before running** |
@@ -59,6 +59,15 @@ ssh alphagpu12 "/mnt/home/hyang1/.local/share/mamba/envs/p311/bin/python -c \
 ```
 If < 4.53.0, upgrade transformers. No other dependency changes expected.
 
+### Step 1b: Thinking mode suppression (done)
+`enable_thinking=False` on `apply_chat_template` is the documented SmolLM3 API (same as Qwen3).
+Added to `_format_chat_prompt_for_model` in `activation_logging/server.py`:
+```python
+if "qwen3" in model_name.lower() or "smollm3" in model_name.lower():
+    template_kwargs["enable_thinking"] = False
+```
+The model card also documents `/no_think` as a system message flag, but `enable_thinking=False` is sufficient.
+
 ### Step 2: Add to CLAUDE.md
 Add to the supported models table:
 ```
@@ -80,6 +89,12 @@ Check:
 - No `ValueError` from generate() about unknown kwargs
 
 ### Step 4: Smoke test with activations
+Architecture confirmed via direct test on alphagpu16:
+- **n_layers: 37** (36 transformer blocks + embedding)
+- **hidden_size: 2048** → use `input_dim: 2048` in all dataset configs
+
+Note: `output_hidden_states` warning in Step 3 log was a false alarm — hidden states ARE captured correctly. The warning fires during model init, not from our generate() call.
+
 ```bash
 python scripts/run_with_server.py \
     --step inference \
@@ -94,10 +109,9 @@ Check zarr store:
 import zarr
 z = zarr.open('/tmp/smollm3_smoke/activations.zarr', 'r')
 arr = z['arrays']['prompt_activations']
-print(arr.shape)    # (64, <n_layers>, 64, <hidden_size>)
-print(arr.chunks)   # (32, 1, 64, <hidden_size>)
+print(arr.shape)    # (64, 37, 64, 2048)
+print(arr.chunks)   # (32, 1, 64, 2048)
 ```
-Confirm `hidden_size` and `n_layers` match expected values.
 
 ### Step 5: Create dataset configs
 Create `configs/datasets/nq_test_smollm3.json` and `configs/datasets/nq_train_smollm3.json`

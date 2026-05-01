@@ -957,7 +957,8 @@ class ActivationParser:
                 logger.info(f"Found {len(gendf[~gendf['halu']])} non-hallucinations")
                 logger.info(f"Found {gendf['halu'].sum()/len(gendf)}% hallucinations")
         else:
-            # Apply train/test split
+            # Despite the function name, this is a train/val split within the training data.
+            # The true held-out test set comes from a separate zarr loaded with split_strategy="none".
             train_df, test_df = train_test_split(gendf, test_size=0.2,
                                                stratify=gendf['halu'], random_state=self.random_seed)
 
@@ -1155,17 +1156,24 @@ class ActivationParser:
         include_logprobs: bool,
         response_logprobs_top_k: int,
     ) -> str:
-        """Deterministic cache key for a set of preload parameters."""
+        """Deterministic cache key for a set of preload parameters.
+
+        The cache stores activation arrays that are seed-agnostic (same zarr
+        data regardless of split seed).  Split indices are recomputed from
+        self.df on every load, so the seed must NOT be part of the key —
+        different seeds can share the same cache.  n_total (len(self.df)) IS
+        included so that a change to the eval JSON (rows added/dropped)
+        produces a different fingerprint and forces a rebuild.
+        """
         zarr_path_resolved = str(Path(self.activations_path).resolve())
         zarr_count = int(self.activation_logger._response_activations.shape[0])
-        # Base key parts match the original (pre-three_way) fingerprint so
-        # existing two_way memmap caches remain valid.
+        n_total = len(self.df)
         key_parts: list = [
             zarr_path_resolved,
             sorted(relevant_layers),
             pad_length,
             zarr_count,
-            self.random_seed,
+            n_total,
             include_logprobs,
             response_logprobs_top_k,
         ]
@@ -1260,12 +1268,19 @@ class ActivationParser:
         except Exception:
             return None
 
-        # Staleness check: zarr sample count must match
+        # Staleness checks: zarr sample count and df row count must both match.
         zarr_count = int(self.activation_logger._response_activations.shape[0])
         if manifest.get("zarr_sample_count") != zarr_count:
             logger.warning(
                 f"Memmap cache stale: zarr has {zarr_count} samples, "
                 f"cache has {manifest.get('zarr_sample_count')}. Rebuilding."
+            )
+            return None
+        n_total = len(self.df)
+        if manifest.get("n_total") != n_total:
+            logger.warning(
+                f"Memmap cache stale: df has {n_total} rows, "
+                f"cache has {manifest.get('n_total')}. Rebuilding."
             )
             return None
 
@@ -1360,12 +1375,19 @@ class ActivationParser:
         # Try cache
         cached = self._load_memmap_cache(cache_dir, include_logprobs)
         if cached is not None:
-            train_idx = cached.pop('train_indices')
-            test_idx = cached.pop('test_indices')
-            val_idx = cached.pop('val_indices', None)
+            # Discard stored indices — they reflect the seed used at build time.
+            # Recompute from self.df so each seed gets its own split.
+            cached.pop('train_indices', None)
+            cached.pop('test_indices', None)
+            cached.pop('val_indices', None)
+            train_idx = np.where((self.df['split'] == 'train').values)[0].astype(np.int64)
+            test_idx = np.where((self.df['split'] == 'test').values)[0].astype(np.int64)
+            val_idx = None
+            if self.split_strategy == "three_way":
+                val_idx = np.where((self.df['split'] == 'val').values)[0].astype(np.int64)
             logger.info(
                 f"Loaded memmap cache from {cache_dir} "
-                f"(train={len(train_idx)}, test={len(test_idx)}"
+                f"(seed={self.random_seed}, train={len(train_idx)}, test={len(test_idx)}"
                 f"{f', val={len(val_idx)}' if val_idx is not None else ''})"
             )
             return self._split_cached_data(cached, train_idx, test_idx, is_memmap=True, val_indices=val_idx)
@@ -1409,6 +1431,7 @@ class ActivationParser:
             val_indices = np.where(val_mask)[0].astype(np.int64)
 
         # Write cache (best-effort)
+        saved_to_disk = False
         try:
             self._save_memmap_cache(
                 cache_dir, data, fingerprint, relevant_layers,
@@ -1416,9 +1439,28 @@ class ActivationParser:
                 train_indices, test_indices, val_indices=val_indices,
             )
             logger.info(f"Saved memmap cache to {cache_dir}")
+            saved_to_disk = True
         except Exception as e:
             logger.warning(f"Failed to save memmap cache: {e}")
 
+        # If save succeeded, drop the ~747 GB in-memory cache and reload via memmap
+        # to avoid the triple-copy that fancy indexing in _split_cached_data would
+        # otherwise produce on the is_memmap=False path.
+        if saved_to_disk:
+            del data
+            cached = self._load_memmap_cache(cache_dir, include_logprobs)
+            if cached is not None:
+                cached.pop('train_indices', None)
+                cached.pop('test_indices', None)
+                cached.pop('val_indices', None)
+                return self._split_cached_data(
+                    cached, train_indices, test_indices, is_memmap=True, val_indices=val_indices,
+                )
+            logger.warning(
+                "Memmap reload after save failed; falling back to in-memory split."
+            )
+
+        # Fallback: in-memory split (save failed, or reload failed)
         return self._split_cached_data(
             data, train_indices, test_indices, is_memmap=False,
             val_indices=val_indices,
@@ -1484,13 +1526,17 @@ class ActivationParser:
         # zarr slice.  With (1, 1, T, H) chunk shape the chunks for sample i are
         # laid out contiguously on disk, so this is maximally sequential I/O.
         from tqdm.auto import tqdm
-        with tqdm(total=len(zr_indices), desc=f"Preloading {split}", unit="sample") as pbar:
-            for df_pos, zr_idx in zip(df_positions, zr_indices):
+        total = len(zr_indices)
+        log_every = max(1, total // 100)  # log every 1%
+        with tqdm(total=total, desc=f"Preloading {split}", unit="sample") as pbar:
+            for i, (df_pos, zr_idx) in enumerate(zip(df_positions, zr_indices)):
                 # zarr_resp[zr_idx, relevant_layers, :T_read, :] → (L, T_read, H)
                 cache[df_pos, :, :T_read, :] = np.asarray(
                     zarr_resp[zr_idx, relevant_layers, :T_read, :]
                 )
                 pbar.update(1)
+                if (i + 1) % log_every == 0 or (i + 1) == total:
+                    logger.info(f"Preload {split}: {i + 1}/{total} ({(i + 1) / total * 100:.1f}%)")
 
         result: Dict[str, Any] = {
             'cache': cache,
