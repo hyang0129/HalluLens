@@ -58,6 +58,20 @@ def dir_size_mb(path: Path) -> Optional[float]:
         return None
 
 
+def memmap_cache_ready(zarr_path: Path) -> bool:
+    """True iff zarr has a built memmap cache (any hash subdir with manifest.json)."""
+    cache_dir = zarr_path / "_memmap_cache"
+    if not cache_dir.exists():
+        return False
+    try:
+        for sub in cache_dir.iterdir():
+            if sub.is_dir() and (sub / "manifest.json").exists():
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def zarr_samples(zarr_path: Path) -> Optional[int]:
     try:
         import zarr
@@ -96,7 +110,7 @@ def main():
     print()
 
     col_w = 26
-    header = f"  {'dataset':<{col_w}} {'split':<16}  {'gen':>8}  {'eval':>4}  {'zarr':>4}"
+    header = f"  {'dataset':<{col_w}} {'split':<16}  {'gen':>8}  {'eval':>4}  {'zarr':>4}  {'mem':>4}"
     if show_zarr_n:
         header += f"  {'zarr_n':>8}"
     if show_zarr_size:
@@ -138,8 +152,10 @@ def main():
         else:
             gen_str = f"{lines:,}"
 
+        has_mem = memmap_cache_ready(zarr_path) if has_zarr else False
         row = (f"  {icon} {dataset:<{col_w}} {split:<16}  {gen_str:>8}"
-               f"  {'✓' if has_eval else '✗':>4}  {'✓' if has_zarr else '✗':>4}")
+               f"  {'✓' if has_eval else '✗':>4}  {'✓' if has_zarr else '✗':>4}"
+               f"  {'✓' if has_mem else '✗':>4}")
 
         if show_zarr_n:
             zn = zarr_samples(zarr_path) if has_zarr else None

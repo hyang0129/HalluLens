@@ -14,17 +14,36 @@ ROOT = Path(__file__).resolve().parent.parent
 
 DATASET_LABELS = {
     "hotpotqa": "HotpotQA",
+    "hotpotqa_qwen3": "HotpotQA",
+    "hotpotqa_smollm3": "HotpotQA",
     "nq_test_hallu_cor": "NQ",
     "nq_qwen3": "NQ",
+    "nq_smollm3": "NQ",
     "mmlu": "MMLU",
+    "mmlu_qwen3": "MMLU",
+    "mmlu_smollm3": "MMLU",
     "movies": "Movies",
     "popqa": "PopQA",
+    "popqa_qwen3": "PopQA",
+    "popqa_smollm3": "PopQA",
     "sciq": "SciQ",
+    "sciq_qwen3": "SciQ",
+    "sciq_smollm3": "SciQ",
     "searchqa": "SearchQA",
+    "searchqa_qwen3": "SearchQA",
+    "searchqa_smollm3": "SearchQA",
 }
 
 # Display order
-DATASET_ORDER = ["hotpotqa", "nq_test_hallu_cor", "nq_qwen3", "mmlu", "movies", "popqa", "sciq", "searchqa"]
+DATASET_ORDER = [
+    "hotpotqa", "hotpotqa_qwen3", "hotpotqa_smollm3",
+    "nq_test_hallu_cor", "nq_qwen3", "nq_smollm3",
+    "mmlu", "mmlu_qwen3", "mmlu_smollm3",
+    "movies",
+    "popqa", "popqa_qwen3", "popqa_smollm3",
+    "sciq", "sciq_qwen3", "sciq_smollm3",
+    "searchqa", "searchqa_qwen3", "searchqa_smollm3",
+]
 
 
 def load_json(path: Path):
