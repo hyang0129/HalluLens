@@ -498,6 +498,7 @@ class PreloadedActivationDataset(Dataset):
         include_response_logprobs: bool = False,
         response_logprobs_top_k: int = 20,
         relevant_layers: Optional[List[int]] = None,
+        return_all_activations: bool = False,
         _row_indices: Optional[np.ndarray] = None,
         _logprob_token_ids: Optional[np.ndarray] = None,
         _logprob_token_logprobs: Optional[np.ndarray] = None,
@@ -516,6 +517,7 @@ class PreloadedActivationDataset(Dataset):
         self.relevant_layers = relevant_layers if relevant_layers is not None else list(range(self.L))
         self.include_response_logprobs = bool(include_response_logprobs)
         self.response_logprobs_top_k = int(response_logprobs_top_k)
+        self.return_all_activations = bool(return_all_activations)
         self._row_indices = _row_indices      # None = direct indexing, array = memmap indirection
         self._logprob_token_ids = _logprob_token_ids
         self._logprob_token_logprobs = _logprob_token_logprobs
@@ -633,6 +635,9 @@ class PreloadedActivationDataset(Dataset):
             'views_activations': views,
             'view_indices': torch.tensor(view_indices, dtype=torch.long),
         }
+        if self.return_all_activations:
+            # List of L tensors each (1, T, H) — same shape as non-preloaded ActivationDataset
+            sample['all_activations'] = list(acts.unsqueeze(1))
         if self.include_response_logprobs:
             sample.update(self._get_logprobs(idx, cache_idx))
         return sample
@@ -1503,9 +1508,14 @@ class ActivationParser:
             else:
                 missing.append(pos)
 
+        n_total = len(df_split)
         if missing:
             logger.warning(
-                f"Preload: {len(missing)} samples have no zarr entry — those rows will be zero-filled"
+                f"Preload {split}: {len(missing)}/{n_total} samples "
+                f"({len(missing)/n_total*100:.1f}%) have no zarr entry — "
+                f"those rows will be zero-filled. "
+                f"If near 100%, this indicates a prompt_hash mismatch between the "
+                f"generation JSONL and the zarr index (stale zarr from a different run)."
             )
 
         N = len(df_split)
@@ -1522,21 +1532,37 @@ class ActivationParser:
             f"({N * L * T_read * H * 2 / 1024**3:.2f} GB) ..."
         )
 
-        # Sample-first loop: for each sample read all L relevant layers in one
-        # zarr slice.  With (1, 1, T, H) chunk shape the chunks for sample i are
-        # laid out contiguously on disk, so this is maximally sequential I/O.
+        # Batched read: amortises per-call zarr decompression overhead by reading
+        # BATCH_SIZE samples at once via oindex.  Each individual read would
+        # decompress L chunks; batching reduces the number of zarr calls by ~200x.
         from tqdm.auto import tqdm
+        BATCH_SIZE = 256
         total = len(zr_indices)
         log_every = max(1, total // 100)  # log every 1%
         with tqdm(total=total, desc=f"Preloading {split}", unit="sample") as pbar:
-            for i, (df_pos, zr_idx) in enumerate(zip(df_positions, zr_indices)):
-                # zarr_resp[zr_idx, relevant_layers, :T_read, :] → (L, T_read, H)
-                cache[df_pos, :, :T_read, :] = np.asarray(
-                    zarr_resp[zr_idx, relevant_layers, :T_read, :]
+            for batch_start in range(0, total, BATCH_SIZE):
+                batch_end = min(batch_start + BATCH_SIZE, total)
+                batch_df_pos = df_positions[batch_start:batch_end]
+                batch_zr_idx = zr_indices[batch_start:batch_end]
+                # oindex accepts arbitrary integer lists → (B, L, T_read, H)
+                chunk = np.asarray(
+                    zarr_resp.oindex[batch_zr_idx, relevant_layers, :T_read, :]
                 )
-                pbar.update(1)
-                if (i + 1) % log_every == 0 or (i + 1) == total:
-                    logger.info(f"Preload {split}: {i + 1}/{total} ({(i + 1) / total * 100:.1f}%)")
+                cache[batch_df_pos, :, :T_read, :] = chunk
+                pbar.update(batch_end - batch_start)
+                if batch_end % log_every < BATCH_SIZE or batch_end == total:
+                    logger.info(f"Preload {split}: {batch_end}/{total} ({batch_end / total * 100:.1f}%)")
+
+        # Diagnostic: detect all-zero rows (symptom of hash-mismatch zero-fill)
+        zero_rows = int((cache.reshape(n_total, -1).sum(axis=1) == 0).sum())
+        if zero_rows > 0:
+            logger.warning(
+                f"Preload {split}: {zero_rows}/{n_total} rows are entirely zero "
+                f"({zero_rows/n_total*100:.1f}%). "
+                f"If this is near 100%, the probe will train on noise and AUROC will be ~0.5."
+            )
+        else:
+            logger.info(f"Preload {split}: all {n_total} rows have non-zero activations.")
 
         result: Dict[str, Any] = {
             'cache': cache,
@@ -1653,6 +1679,7 @@ class ActivationParser:
                 include_response_logprobs=include_response_logprobs,
                 response_logprobs_top_k=response_logprobs_top_k,
                 relevant_layers=_relevant_layers,
+                return_all_activations=return_all_activations,
                 _row_indices=data.get('_row_indices'),
                 _logprob_token_ids=data.get('logprob_token_ids'),
                 _logprob_token_logprobs=data.get('logprob_token_logprobs'),
