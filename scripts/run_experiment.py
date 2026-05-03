@@ -410,6 +410,7 @@ def run_linear_probe(
         include_response_logprobs=data_cfg.get("include_response_logprobs", False),
         response_logprobs_top_k=data_cfg.get("response_logprobs_top_k", 20),
         check_ram=False,
+        pad_length=data_cfg.get("pad_length", 63),
     )
 
     # Build full datasets
@@ -539,6 +540,7 @@ def run_multi_layer_linear_probe(
         include_response_logprobs=data_cfg.get("include_response_logprobs", False),
         response_logprobs_top_k=data_cfg.get("response_logprobs_top_k", 20),
         check_ram=False,
+        pad_length=data_cfg.get("pad_length", 63),
     )
 
     # Build full datasets
@@ -1654,15 +1656,25 @@ def main() -> None:
                         output_base, exp_name, dataset_name, method_name, f"seed_{seed}"
                     )
 
-                # Resume check
+                # Resume check — skip only when eval_metrics.json exists AND there is
+                # no run_error.json (which would indicate the prior result was degenerate).
                 eval_metrics_path = os.path.join(run_dir, "eval_metrics.json")
+                run_error_path = os.path.join(run_dir, "run_error.json")
+                prior_error = os.path.exists(run_error_path)
                 if os.path.exists(eval_metrics_path) and not args.force:
-                    logger.info(
-                        f"Skipping {method_name} seed={effective_seed} (already complete)"
-                    )
-                    if not is_learned:
-                        completed_nonlearned.add(method_name)
-                    continue
+                    if prior_error:
+                        logger.warning(
+                            f"Found both eval_metrics.json and run_error.json for "
+                            f"{method_name} seed={effective_seed} — re-running to fix "
+                            f"degenerate prior result. Use --force to suppress this check."
+                        )
+                    else:
+                        logger.info(
+                            f"Skipping {method_name} seed={effective_seed} (already complete)"
+                        )
+                        if not is_learned:
+                            completed_nonlearned.add(method_name)
+                        continue
 
                 os.makedirs(run_dir, exist_ok=True)
                 os.makedirs(os.path.join(run_dir, "artifacts"), exist_ok=True)
