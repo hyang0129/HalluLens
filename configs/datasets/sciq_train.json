@@ -1,7 +1,7 @@
 {
   "name": "sciq_train",
   "inference_json": "output/sciq_train/Llama-3.1-8B-Instruct/generation.jsonl",
-  "activations_path": "shared/sciq_train/activations.zarr",
+  "activations_path": "shared/sciq_train_llama_3_1_8b_instruct/activations.zarr",
   "eval_json": "output/sciq_train/Llama-3.1-8B-Instruct/eval_results_for_training.json",
   "raw_eval_jsonl": "output/sciq_train/Llama-3.1-8B-Instruct/raw_eval_res.jsonl",
   "model_name": "Llama-3.1-8B-Instruct",
