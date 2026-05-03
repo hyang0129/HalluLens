@@ -408,6 +408,9 @@ class MultiLayerLinearProbe(nn.Module):
             raise ValueError(f"pooling must be 'mean' or 'last', got '{pooling}'")
         self.pooling = pooling
         self.num_layers = num_layers
+        # LayerNorm prevents sigmoid saturation when activation norms vary across
+        # model families (e.g. Qwen3-8B has ~10x larger residual norms than Llama3-8B).
+        self.input_norm = nn.LayerNorm(num_layers * input_dim)
         self.linear = nn.Linear(num_layers * input_dim, 1)
 
     def forward(self, x):
@@ -421,6 +424,7 @@ class MultiLayerLinearProbe(nn.Module):
         else:
             pooled = x[:, :, -1, :]      # (B, num_layers, D)
         flat = pooled.reshape(pooled.size(0), -1)  # (B, num_layers * D)
+        flat = self.input_norm(flat)
         return torch.sigmoid(self.linear(flat))
 
 
