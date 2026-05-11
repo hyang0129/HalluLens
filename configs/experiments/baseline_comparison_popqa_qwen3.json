@@ -4,7 +4,6 @@
   "methods": [
     "contrastive_logprob_recon",
     "linear_probe",
-    "multi_layer_linear_probe",
     "token_entropy",
     "logprob_baseline"
   ],
