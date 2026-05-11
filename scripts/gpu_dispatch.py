@@ -34,6 +34,7 @@ Jupyter dispatch (opt-in, no silent fallback):
 import argparse
 import fcntl
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -54,6 +55,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 @dataclass
 class NodeConfig:
+    name: str  # logical identity; can differ from hostname (e.g. two Jupyter ports on one host)
     hostname: str
     python: str
     project_root: str
@@ -61,10 +63,12 @@ class NodeConfig:
     tags: List[str] = field(default_factory=list)
     jupyter_url: Optional[str] = None
     jupyter_password: str = "123"
+    source: Optional[str] = None  # "squeue" → entry is managed by sync-jupyter and will be regenerated
 
 
 @dataclass
 class NodeStatus:
+    name: str
     hostname: str
     reachable: bool
     gpu_name: Optional[str] = None
@@ -79,6 +83,7 @@ class NodeStatus:
 @dataclass
 class JobRecord:
     job_id: str
+    node_name: str  # logical node identity (matches NodeConfig.name)
     hostname: str
     command: str
     pid: Optional[int]
@@ -110,15 +115,22 @@ def load_nodes(config: dict) -> List[NodeConfig]:
     defaults = config.get("defaults", {})
     nodes = []
     for entry in config.get("nodes", []):
+        hostname = entry["hostname"]
         nodes.append(NodeConfig(
-            hostname=entry["hostname"],
+            name=entry.get("name", hostname),
+            hostname=hostname,
             python=entry.get("python", defaults.get("python", "python3")),
             project_root=entry.get("project_root", defaults.get("project_root", ".")),
             max_concurrent_jobs=entry.get("max_concurrent_jobs", 1),
             tags=entry.get("tags", []),
             jupyter_url=entry.get("jupyter_url", defaults.get("jupyter_url")),
             jupyter_password=entry.get("jupyter_password", defaults.get("jupyter_password", "123")),
+            source=entry.get("source"),
         ))
+    names = [n.name for n in nodes]
+    if len(names) != len(set(names)):
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        raise ValueError(f"Duplicate node names in config: {dupes}")
     return nodes
 
 
@@ -149,7 +161,7 @@ def ssh_run(hostname: str, cmd: str, timeout: int = 15) -> subprocess.CompletedP
 
 def check_node_health(node: NodeConfig, ssh_timeout: int = 10) -> NodeStatus:
     """SSH to a node, query nvidia-smi and running processes."""
-    status = NodeStatus(hostname=node.hostname, reachable=False)
+    status = NodeStatus(name=node.name, hostname=node.hostname, reachable=False)
 
     try:
         result = ssh_run(
@@ -177,7 +189,7 @@ def check_node_health(node: NodeConfig, ssh_timeout: int = 10) -> NodeStatus:
 
 def check_node_health_jupyter(node: NodeConfig) -> NodeStatus:
     """Query a node's GPU health via Jupyter API (fallback when SSH is unavailable)."""
-    status = NodeStatus(hostname=node.hostname, reachable=False)
+    status = NodeStatus(name=node.name, hostname=node.hostname, reachable=False)
     if not node.jupyter_url:
         status.error = "no jupyter_url configured"
         return status
@@ -248,6 +260,7 @@ def _manifest_path(config: dict) -> Path:
 def _record_from_dict(rec: dict) -> JobRecord:
     """Deserialise a JobRecord, back-filling fields absent from older manifests."""
     rec = {"dispatch_method": "ssh", **rec}
+    rec.setdefault("node_name", rec["hostname"])
     return JobRecord(**rec)
 
 
@@ -319,21 +332,21 @@ def update_manifest(manifest_path: Path, fn) -> List[JobRecord]:
 def select_best_node(
     nodes: List[NodeConfig],
     manifest: List[JobRecord],
-    statuses: dict,  # hostname -> NodeStatus
+    statuses: dict,  # name -> NodeStatus
     min_vram_gb: Optional[float] = None,
 ) -> Optional[NodeConfig]:
     """Pick the reachable node with fewest running jobs and most free VRAM."""
     running_counts: dict = {}
     for job in manifest:
         if job.status == "running":
-            running_counts[job.hostname] = running_counts.get(job.hostname, 0) + 1
+            running_counts[job.node_name] = running_counts.get(job.node_name, 0) + 1
 
     candidates = []
     for node in nodes:
-        ns = statuses.get(node.hostname)
+        ns = statuses.get(node.name)
         if ns is None or not ns.reachable:
             continue
-        running = running_counts.get(node.hostname, 0)
+        running = running_counts.get(node.name, 0)
         if running >= node.max_concurrent_jobs:
             continue
         free_vram_mb = 0.0
@@ -384,6 +397,7 @@ def dispatch_job(
 
     job = JobRecord(
         job_id=job_id,
+        node_name=node.name,
         hostname=node.hostname,
         command=command,
         pid=pid,
@@ -451,6 +465,7 @@ def dispatch_job_jupyter(
 
     job = JobRecord(
         job_id=job_id,
+        node_name=node.name,
         hostname=node.hostname,
         command=command,
         pid=pid,
@@ -468,6 +483,124 @@ def dispatch_job_jupyter(
 
 
 # ---------------------------------------------------------------------------
+# squeue-driven Jupyter node discovery
+# ---------------------------------------------------------------------------
+
+# Match SLURM job names like "jupyter_empire_8889" — the trailing digits are the
+# Jupyter port. Anchored at end so "jupyter_foo_8889_extra" is not matched.
+JUPYTER_JOB_NAME_RE = re.compile(r"jupyter_\w+_(\d+)$")
+
+
+def discover_jupyter_allocations(squeue_timeout: int = 15) -> List[dict]:
+    """Run `squeue --me` and return one dict per RUNNING jupyter_*_<port> allocation.
+
+    Each dict has: job_id, hostname, port, time_left. Multi-node allocations
+    (NODELIST containing '[') are skipped — we don't know which host serves the
+    Jupyter endpoint in that case.
+    """
+    try:
+        result = subprocess.run(
+            ["squeue", "--me", "--noheader", "--format=%i|%j|%T|%N|%L"],
+            capture_output=True,
+            text=True,
+            timeout=squeue_timeout,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "squeue not found in PATH — sync-jupyter must run on a SLURM submit host."
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"squeue timed out after {squeue_timeout}s") from exc
+
+    if result.returncode != 0:
+        raise RuntimeError(f"squeue failed (exit {result.returncode}): {result.stderr.strip()}")
+
+    allocations = []
+    for line in result.stdout.strip().splitlines():
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 5:
+            continue
+        job_id, name, state, nodelist, time_left = parts[:5]
+        if state != "RUNNING":
+            continue
+        m = JUPYTER_JOB_NAME_RE.match(name)
+        if not m:
+            continue
+        if "[" in nodelist or "," in nodelist:
+            # Multi-node allocation — ambiguous which host hosts the Jupyter
+            # server. Skip rather than guess.
+            continue
+        allocations.append({
+            "job_id": job_id,
+            "hostname": nodelist,
+            "port": int(m.group(1)),
+            "time_left": time_left,
+        })
+    return allocations
+
+
+def _build_squeue_node_entry(alloc: dict, defaults: dict) -> dict:
+    """Compose a nodes.json entry for one squeue allocation."""
+    return {
+        "name": f"{alloc['hostname']}-{alloc['port']}",
+        "hostname": alloc["hostname"],
+        "python": defaults.get("python", "python3"),
+        "project_root": defaults.get("project_root", "."),
+        "max_concurrent_jobs": 1,
+        "tags": ["training", "inference", "jupyter-only"],
+        "jupyter_url": f"http://{alloc['hostname']}:{alloc['port']}",
+        "jupyter_password": defaults.get("jupyter_password", "123"),
+        "source": "squeue",
+        "slurm_job_id": alloc["job_id"],
+        "slurm_time_left": alloc["time_left"],
+    }
+
+
+def sync_jupyter_nodes(config_path: Path, dry_run: bool = False) -> dict:
+    """Reconcile squeue-derived Jupyter entries in nodes.json with live SLURM state.
+
+    Removes every entry with source="squeue" and re-adds one per RUNNING
+    `jupyter_*_<port>` allocation reported by `squeue --me`. SSH-only and
+    hybrid (SSH+Jupyter) entries are left untouched.
+
+    Returns a summary dict: {added, removed, kept, allocations, written}.
+    """
+    with open(config_path) as f:
+        raw = json.load(f)
+
+    defaults = raw.get("defaults", {})
+    existing = raw.get("nodes", [])
+    managed_old = [n for n in existing if n.get("source") == "squeue"]
+    unmanaged = [n for n in existing if n.get("source") != "squeue"]
+    old_names = {n.get("name") or n.get("hostname") for n in managed_old}
+
+    allocations = discover_jupyter_allocations()
+    new_entries = [_build_squeue_node_entry(a, defaults) for a in allocations]
+    new_names = {e["name"] for e in new_entries}
+
+    added = sorted(new_names - old_names)
+    removed = sorted(old_names - new_names)
+    kept = sorted(new_names & old_names)
+
+    raw["nodes"] = unmanaged + new_entries
+
+    written = False
+    if not dry_run:
+        with open(config_path, "w") as f:
+            json.dump(raw, f, indent=2)
+            f.write("\n")
+        written = True
+
+    return {
+        "added": added,
+        "removed": removed,
+        "kept": kept,
+        "allocations": allocations,
+        "written": written,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Refresh job statuses
 # ---------------------------------------------------------------------------
 
@@ -478,24 +611,30 @@ def refresh_job_statuses(
 ) -> List[JobRecord]:
     """Check PIDs on nodes for running jobs, update statuses."""
     jobs = load_manifest(manifest_path)
-    node_map = {n.hostname: n for n in nodes}
+    name_map = {n.name: n for n in nodes}
+    hostname_seen: set = set()
+    for n in nodes:
+        hostname_seen.add(n.hostname)
 
     # Separate running jobs by dispatch method
+    # SSH jobs are deduped by hostname (ps result is shared across all logical
+    # nodes on the same host). Jupyter jobs are keyed by node_name because
+    # each logical node has its own Jupyter URL.
     ssh_by_host: dict = {}
-    jupyter_by_host: dict = {}
+    jupyter_by_name: dict = {}
     for i, job in enumerate(jobs):
         if job.status != "running" or job.pid is None:
             continue
         if job.dispatch_method == "jupyter":
-            jupyter_by_host.setdefault(job.hostname, []).append((i, job))
+            jupyter_by_name.setdefault(job.node_name, []).append((i, job))
         else:
             ssh_by_host.setdefault(job.hostname, []).append((i, job))
 
     changed = False
 
-    # SSH jobs: check via SSH
+    # SSH jobs: check via SSH (one probe per hostname, not per logical node)
     for hostname, job_list in ssh_by_host.items():
-        if hostname not in node_map:
+        if hostname not in hostname_seen:
             continue
         pids = [str(j.pid) for _, j in job_list]
         try:
@@ -517,9 +656,9 @@ def refresh_job_statuses(
         except (subprocess.TimeoutExpired, Exception):
             pass
 
-    # Jupyter jobs: check via Jupyter API
-    for hostname, job_list in jupyter_by_host.items():
-        node = node_map.get(hostname)
+    # Jupyter jobs: check via Jupyter API (one probe per logical node)
+    for node_name, job_list in jupyter_by_name.items():
+        node = name_map.get(node_name)
         if node is None or not node.jupyter_url:
             continue
         pids = [str(j.pid) for _, j in job_list]
@@ -567,7 +706,7 @@ def cmd_status(args: argparse.Namespace) -> None:
     running_counts: dict = {}
     for job in manifest:
         if job.status == "running":
-            running_counts[job.hostname] = running_counts.get(job.hostname, 0) + 1
+            running_counts[job.node_name] = running_counts.get(job.node_name, 0) + 1
 
     # Check all nodes in parallel via SSH; then retry unreachable ones via Jupyter
     statuses: dict = {}
@@ -578,10 +717,10 @@ def cmd_status(args: argparse.Namespace) -> None:
         }
         for future in as_completed(futures):
             node = futures[future]
-            statuses[node.hostname] = future.result()
+            statuses[node.name] = future.result()
 
     # For SSH-unreachable nodes that have jupyter_url, try Jupyter health check
-    jupyter_nodes = [n for n in nodes if n.jupyter_url and not statuses[n.hostname].reachable]
+    jupyter_nodes = [n for n in nodes if n.jupyter_url and not statuses[n.name].reachable]
     if jupyter_nodes:
         with ThreadPoolExecutor(max_workers=max(1, len(jupyter_nodes))) as pool:
             futures = {
@@ -592,16 +731,16 @@ def cmd_status(args: argparse.Namespace) -> None:
                 node = futures[future]
                 result = future.result()
                 if result.reachable:
-                    statuses[node.hostname] = result
+                    statuses[node.name] = result
 
-    header = f"{'NODE':<15} {'GPU':<18} {'VRAM USED/TOTAL':<18} {'GPU UTIL':<10} {'OUR JOBS':<10} {'STATUS':<12}"
+    header = f"{'NODE':<20} {'GPU':<18} {'VRAM USED/TOTAL':<18} {'GPU UTIL':<10} {'OUR JOBS':<10} {'STATUS':<12}"
     print(header)
     print("-" * len(header))
 
     for node in nodes:
-        ns = statuses.get(node.hostname)
+        ns = statuses.get(node.name)
         if ns is None or not ns.reachable:
-            print(f"{node.hostname:<15} {'-':<18} {'-':<18} {'-':<10} {'-':<10} {'unreachable':<12}")
+            print(f"{node.name:<20} {'-':<18} {'-':<18} {'-':<10} {'-':<10} {'unreachable':<12}")
             continue
 
         gpu_name = ns.gpu_name or "-"
@@ -614,12 +753,12 @@ def cmd_status(args: argparse.Namespace) -> None:
             vram = "-"
 
         util = f"{ns.gpu_util_pct:.0f}%" if ns.gpu_util_pct is not None else "-"
-        running = running_counts.get(node.hostname, 0)
+        running = running_counts.get(node.name, 0)
         node_status = "busy" if running >= node.max_concurrent_jobs else "available"
         if ns.via_jupyter:
             node_status += " (jupyter)"
 
-        print(f"{node.hostname:<15} {gpu_name:<18} {vram:<18} {util:<10} {running:<10} {node_status:<12}")
+        print(f"{node.name:<20} {gpu_name:<18} {vram:<18} {util:<10} {running:<10} {node_status:<12}")
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -633,7 +772,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     description = args.desc or ""
 
     if args.node:
-        target_nodes = [n for n in nodes if n.hostname == args.node]
+        target_nodes = [n for n in nodes if n.name == args.node]
         if not target_nodes:
             print(f"Error: node '{args.node}' not found in config", file=sys.stderr)
             sys.exit(1)
@@ -648,18 +787,19 @@ def cmd_run(args: argparse.Namespace) -> None:
         selected = target_nodes[0]
         if not selected.jupyter_url:
             print(
-                f"Error: node '{selected.hostname}' has no jupyter_url in configs/nodes.json. "
+                f"Error: node '{selected.name}' has no jupyter_url in configs/nodes.json. "
                 "Add it to use --jupyter.",
                 file=sys.stderr,
             )
             sys.exit(1)
 
-        # Still enforce the manifest-based busy guard
-        running = sum(1 for j in manifest if j.status == "running" and j.hostname == selected.hostname)
-        if running >= selected.max_concurrent_jobs:
+        # Still enforce the manifest-based busy guard, unless explicitly overridden
+        running = sum(1 for j in manifest if j.status == "running" and j.node_name == selected.name)
+        if running >= selected.max_concurrent_jobs and not args.force_concurrent:
             print(
-                f"Error: node '{selected.hostname}' is at max_concurrent_jobs "
-                f"({selected.max_concurrent_jobs}). Use 'jobs' to check running jobs.",
+                f"Error: node '{selected.name}' is at max_concurrent_jobs "
+                f"({selected.max_concurrent_jobs}). Use 'jobs' to check running jobs, "
+                "or pass --force-concurrent to dispatch a co-tenant (e.g. a CPU-only side job).",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -667,14 +807,14 @@ def cmd_run(args: argparse.Namespace) -> None:
         # Probe via Jupyter to show current GPU state (informational)
         ns = check_node_health_jupyter(selected)
         if not ns.reachable:
-            print(f"Error: Jupyter health check failed for '{selected.hostname}': {ns.error}", file=sys.stderr)
+            print(f"Error: Jupyter health check failed for '{selected.name}': {ns.error}", file=sys.stderr)
             sys.exit(1)
 
         if args.min_vram and ns.gpu_mem_total_mb and ns.gpu_mem_used_mb:
             free_gb = (ns.gpu_mem_total_mb - ns.gpu_mem_used_mb) / 1024.0
             if free_gb < args.min_vram:
                 print(
-                    f"Error: node '{selected.hostname}' has {free_gb:.1f} GB free VRAM, "
+                    f"Error: node '{selected.name}' has {free_gb:.1f} GB free VRAM, "
                     f"need {args.min_vram:.1f} GB",
                     file=sys.stderr,
                 )
@@ -692,7 +832,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             }
             for future in as_completed(futures):
                 node = futures[future]
-                statuses[node.hostname] = future.result()
+                statuses[node.name] = future.result()
 
         if args.node:
             ns = statuses.get(args.node)
@@ -726,7 +866,8 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     print(f"Job dispatched:")
     print(f"  Job ID:   {job.job_id}")
-    print(f"  Node:     {job.hostname}")
+    print(f"  Node:     {job.node_name}")
+    print(f"  Host:     {job.hostname}")
     print(f"  PID:      {job.pid}")
     print(f"  Via:      {job.dispatch_method}")
     print(f"  Log file: {job.log_file}")
@@ -749,7 +890,7 @@ def cmd_jobs(args: argparse.Namespace) -> None:
         print("No jobs found.")
         return
 
-    header = f"{'JOB_ID':<14} {'NODE':<15} {'STATUS':<12} {'VIA':<8} {'PID':<8} {'STARTED':<22} {'COMMAND'}"
+    header = f"{'JOB_ID':<14} {'NODE':<20} {'STATUS':<12} {'VIA':<8} {'PID':<8} {'STARTED':<22} {'COMMAND'}"
     print(header)
     print("-" * len(header))
 
@@ -759,7 +900,7 @@ def cmd_jobs(args: argparse.Namespace) -> None:
         if len(cmd_display) > 60:
             cmd_display = cmd_display[:57] + "..."
         print(
-            f"{job.job_id:<14} {job.hostname:<15} {job.status:<12} "
+            f"{job.job_id:<14} {job.node_name:<20} {job.status:<12} "
             f"{job.dispatch_method:<8} {str(job.pid or '-'):<8} {started:<22} {cmd_display}"
         )
 
@@ -768,7 +909,7 @@ def cmd_kill(args: argparse.Namespace) -> None:
     """Handle the 'kill' subcommand."""
     config = load_config(args.config)
     nodes = load_nodes(config)
-    node_map = {n.hostname: n for n in nodes}
+    name_map = {n.name: n for n in nodes}
     manifest_path = _manifest_path(config)
     jobs = load_manifest(manifest_path)
 
@@ -789,7 +930,7 @@ def cmd_kill(args: argparse.Namespace) -> None:
 
     if target.pid:
         if target.dispatch_method == "jupyter":
-            node = node_map.get(target.hostname)
+            node = name_map.get(target.node_name)
             if node and node.jupyter_url:
                 try:
                     from utils.jupyter_exec import JupyterExecutor
@@ -797,13 +938,13 @@ def cmd_kill(args: argparse.Namespace) -> None:
                     with JupyterExecutor(base_url=node.jupyter_url, password=node.jupyter_password) as jup:
                         result = jup.run(code)
                     if "ok" in result.stdout:
-                        print(f"Sent kill signal to PID {target.pid} on {target.hostname} (via Jupyter)")
+                        print(f"Sent kill signal to PID {target.pid} on {target.node_name} ({target.hostname}, via Jupyter)")
                     else:
                         print(f"Warning: unexpected Jupyter kill response: {result.stdout}")
                 except Exception as exc:
                     print(f"Warning: Jupyter kill failed: {exc}")
             else:
-                print(f"Warning: cannot kill jupyter job — node '{target.hostname}' has no jupyter_url")
+                print(f"Warning: cannot kill jupyter job — node '{target.node_name}' has no jupyter_url")
         else:
             try:
                 result = ssh_run(target.hostname, f"kill {target.pid}", timeout=10)
@@ -822,6 +963,38 @@ def cmd_kill(args: argparse.Namespace) -> None:
     jobs[target_idx].status = "killed"
     save_manifest(manifest_path, jobs)
     print(f"Job '{args.job_id}' marked as killed")
+
+
+def cmd_sync_jupyter(args: argparse.Namespace) -> None:
+    """Handle the 'sync-jupyter' subcommand."""
+    config_path = Path(args.config) if args.config else _default_config_path()
+    summary = sync_jupyter_nodes(config_path, dry_run=args.dry_run)
+
+    allocs = summary["allocations"]
+    print(f"Found {len(allocs)} live jupyter_*_<port> allocations from squeue --me")
+    for a in allocs:
+        print(f"  - {a['hostname']}:{a['port']}  job={a['job_id']}  time_left={a['time_left']}")
+
+    if summary["added"]:
+        print(f"\nAdded ({len(summary['added'])}):")
+        for n in summary["added"]:
+            print(f"  + {n}")
+    if summary["removed"]:
+        print(f"\nRemoved ({len(summary['removed'])}) — allocation no longer running:")
+        for n in summary["removed"]:
+            print(f"  - {n}")
+    if summary["kept"]:
+        print(f"\nRefreshed ({len(summary['kept'])}) — same name, slurm metadata updated:")
+        for n in summary["kept"]:
+            print(f"  ~ {n}")
+
+    if not summary["added"] and not summary["removed"] and not summary["kept"]:
+        print("\nNo squeue-managed Jupyter nodes (none currently allocated).")
+
+    if args.dry_run:
+        print(f"\n[dry-run] {config_path} NOT written.")
+    else:
+        print(f"\nWrote {config_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -856,6 +1029,16 @@ def main():
             "Never falls back silently — if Jupyter fails, the command fails."
         ),
     )
+    run_parser.add_argument(
+        "--force-concurrent",
+        action="store_true",
+        help=(
+            "Bypass the max_concurrent_jobs busy guard for this dispatch. "
+            "Use only when you know the new job won't contend with the "
+            "running job (e.g. dispatching a CPU-only side job onto a node "
+            "whose current occupant is GPU-bound)."
+        ),
+    )
     run_parser.add_argument("cmd", nargs="+", help="Command to run")
 
     # jobs
@@ -868,6 +1051,17 @@ def main():
     kill_parser = subparsers.add_parser("kill", help="Kill a running job")
     kill_parser.add_argument("job_id", help="Job ID to kill")
 
+    # sync-jupyter
+    sync_parser = subparsers.add_parser(
+        "sync-jupyter",
+        help="Reconcile squeue-managed Jupyter node entries in nodes.json",
+    )
+    sync_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the diff without writing nodes.json",
+    )
+
     args = parser.parse_args()
 
     handlers = {
@@ -875,6 +1069,7 @@ def main():
         "run": cmd_run,
         "jobs": cmd_jobs,
         "kill": cmd_kill,
+        "sync-jupyter": cmd_sync_jupyter,
     }
     handlers[args.command](args)
 

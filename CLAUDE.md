@@ -227,7 +227,12 @@ Experiment configs live at `configs/experiments/baseline_comparison_{name}.json`
 
 ### Running on GPU nodes
 
-**Never submit or kill SLURM jobs** without explicit user instruction. Do not run `sbatch`, `srun`, `scancel`, `gpu_dispatch.py run/kill`, or kill remote processes via SSH. Always ask the user before starting or stopping any job — killing a job loses its GPU allocation, and re-queuing can take a long time.
+**Never submit or kill SLURM jobs** without explicit user approval. Do not run `sbatch`, `srun`, `scancel`, `gpu_dispatch.py run/kill`, or kill remote processes via SSH. This includes killing orphaned or stale processes on GPU nodes.
+
+Approval must be obtained with a message of the form:
+> "I want to [specific action, e.g. kill PID 12345 on alphagpu22]. Yes/No?"
+
+Wait for the user to respond with **Yes** before proceeding. A general instruction to "check the situation" or "investigate" does not constitute approval to kill or submit jobs.
 
 **Avoid duplicate dispatches.** GPU dispatch via SSH can appear to fail (timeout) while the remote job actually launched successfully. Before re-dispatching:
 1. Check `ps aux | grep <script>` on the target node via SSH to confirm whether the process is running.
@@ -261,6 +266,42 @@ python scripts/gpu_dispatch.py kill JOB_ID
 ```
 
 Node registry is in `configs/nodes.json`. Job manifest is at `shared/gpu_jobs.json`.
+
+### Logical node names (Jupyter-only nodes)
+
+Node identity in the registry is the `name` field (defaults to `hostname` when absent). A single physical host can appear as multiple logical nodes when it hosts multiple Jupyter-bound GPU allocations on different ports. Example: `alphagpu01` runs two SLURM-allocated Jupyter servers (ports 8888 and 8889), registered as:
+
+- `alphagpu01-8888` → `http://alphagpu01:8888` (GPU 0 of that SLURM allocation)
+- `alphagpu01-8889` → `http://alphagpu01:8889` (a different physical GPU)
+
+Each logical node has its own `jupyter_url` and is dispatched to explicitly:
+
+```bash
+python scripts/gpu_dispatch.py run --jupyter --node alphagpu01-8888 -- bash my_job.sh
+```
+
+Notes:
+- `--node` matches the logical `name`, not `hostname`.
+- These Jupyter-only entries have no SSH path enabled, so auto-selection (no `--node`) will not pick them — they must be addressed explicitly via `--jupyter --node <name>`.
+- `gpu_dispatch.py status` will probe each logical node via its own Jupyter URL and report the GPU it actually sees through its `CUDA_VISIBLE_DEVICES` mask.
+
+### Syncing Jupyter-only nodes from squeue
+
+The Jupyter-only logical nodes in `configs/nodes.json` are managed by `gpu_dispatch.py sync-jupyter`. SLURM allocations for Jupyter servers come and go (they expire after `TIME_LIMI` or are cancelled), so the registry should be reconciled with `squeue --me` before relying on it.
+
+```bash
+# Preview which Jupyter nodes squeue says are live, without writing the file
+python scripts/gpu_dispatch.py sync-jupyter --dry-run
+
+# Apply: rewrite all entries with source=squeue from current SLURM state
+python scripts/gpu_dispatch.py sync-jupyter
+```
+
+How it works:
+- `sync-jupyter` runs `squeue --me` and matches RUNNING jobs whose name follows `jupyter_<word>_<port>` (e.g. `jupyter_empire_8889`). Each match becomes a logical node `<hostname>-<port>` with `source: "squeue"`, `slurm_job_id`, and `slurm_time_left` recorded.
+- Only entries with `"source": "squeue"` are touched — SSH-only nodes and hybrid SSH+Jupyter nodes (e.g. `alphagpu16`) are left untouched.
+- Multi-node SLURM allocations (NODELIST containing `[`) are skipped because the Jupyter server only runs on one host within the allocation.
+- Run this any time after starting/stopping a `jupyter_empire_<port>` SLURM job, or whenever `gpu_dispatch.py status` shows stale `unreachable` entries.
 
 The GPU Python env is: `/mnt/home/hyang1/.local/share/mamba/envs/p311/bin/python`
 
