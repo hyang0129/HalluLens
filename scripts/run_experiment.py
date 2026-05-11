@@ -1372,6 +1372,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print the run plan (expected/complete/failed/pending) and exit without executing",
     )
+    parser.add_argument(
+        "--smoketest-memmap-cache",
+        action="store_true",
+        help=(
+            "For each (dataset, seed), build the train+test ActivationParsers and "
+            "verify the canonical memmap cache exists for that fingerprint, then "
+            "exit before any training. Useful to confirm seeds 1..N will reuse the "
+            "seed-0 cache rather than rebuilding it (which can take many hours)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1518,6 +1528,64 @@ def main() -> None:
     # ---- Lazy import heavy deps ----
     from activation_logging.activation_parser import ActivationParser
 
+    # ---- Smoketest helpers ----
+    smoketest_results: list[dict] = []  # filled when --smoketest-memmap-cache
+
+    def _canonical_preload_params(methods_list, preloaded_method_cfgs, project_root):
+        """Derive (relevant_layers, pad_length, include_logprobs, top_k) from the
+        first learned method in the experiment. The memmap cache fingerprint is
+        identical across methods that share these data params, so any learned
+        method's data block represents what the experiment will actually load."""
+        for m in methods_list:
+            if m in preloaded_method_cfgs:
+                mcfg = preloaded_method_cfgs[m]
+            else:
+                mcfg_path = os.path.join(
+                    str(project_root), "configs", "methods", f"{m}.json"
+                )
+                if not os.path.exists(mcfg_path):
+                    continue
+                with open(mcfg_path) as f:
+                    mcfg = json.load(f)
+            if mcfg.get("training") is None:
+                continue  # non-learned method — doesn't preload
+            data = mcfg.get("data", {})
+            return (
+                parse_layer_range(data.get("relevant_layers", "14-29")),
+                int(data.get("pad_length", 63)),
+                bool(data.get("include_response_logprobs", False)),
+                int(data.get("response_logprobs_top_k", 20)),
+            )
+        return None
+
+    def _check_memmap_cache(ap, params, label):
+        """Compute the canonical fingerprint and report whether the cache exists.
+        Returns a result dict and prints a one-line HIT/MISS summary."""
+        relevant_layers, pad_length, include_logprobs, top_k = params
+        fp = ap._memmap_cache_fingerprint(
+            relevant_layers, pad_length, include_logprobs, top_k
+        )
+        cache_dir = ap._memmap_cache_dir(fp)
+        manifest = cache_dir / "manifest.json"
+        activations_npy = cache_dir / "activations.npy"
+        hit = manifest.exists() and activations_npy.exists()
+        result = {
+            "label": label,
+            "fingerprint": fp,
+            "cache_dir": str(cache_dir),
+            "hit": hit,
+            "manifest_exists": manifest.exists(),
+            "activations_npy_exists": activations_npy.exists(),
+            "n_total": len(ap.df),
+            "zarr_count": int(ap.activation_logger._response_activations.shape[0]),
+        }
+        status = "HIT " if hit else "MISS"
+        logger.info(
+            f"[smoketest] {status} {label}  fp={fp}  n_total={result['n_total']:,} "
+            f"zarr_count={result['zarr_count']:,}  -> {cache_dir}"
+        )
+        return result
+
     # ---- Main loop ----
     for dataset_name in datasets:
         # Load dataset config (use pre-loaded if available, else load from configs/)
@@ -1584,9 +1652,64 @@ def main() -> None:
                 verbose=True,
             )
 
+        # ---- Smoketest: check the test cache once per dataset ----
+        smoketest_params = None
+        if args.smoketest_memmap_cache:
+            smoketest_params = _canonical_preload_params(
+                methods, _preloaded_method_cfgs, project_root
+            )
+            if smoketest_params is None:
+                logger.warning(
+                    f"[smoketest] {dataset_name}: no learned method found in "
+                    f"experiment — nothing to check (non-learned methods don't preload)."
+                )
+            elif test_ap is not None:
+                smoketest_results.append(
+                    _check_memmap_cache(test_ap, smoketest_params, f"{dataset_name}/test")
+                )
+
         # Non-learned methods (token_entropy, logprob_baseline) run once regardless
         # of how many seeds are in the sweep.
         completed_nonlearned: set = set()
+
+        # Smoketest fast-path: the memmap cache fingerprint is seed-agnostic by
+        # design (uses zarr-path + n_total + cache params, not random_seed).  So
+        # for the train zarr, build the parser once at the first seed, check the
+        # cache, and replay the same HIT/MISS row for every other seed without
+        # rebuilding the parser (which can take several minutes per JSONL load).
+        if args.smoketest_memmap_cache and smoketest_params is not None and has_train_test:
+            first_seed = training_seeds[0]
+            first_split_seed = (
+                _split_seed_map.get(first_seed, global_split_seed) if _split_seed_map else global_split_seed
+            )
+            train_cfg = {**dataset_cfg, **dataset_cfg["train"]}
+            _resolve_paths(train_cfg, project_root)
+            train_eval_json = _build_eval_json(train_cfg)
+            logger.info(
+                f"[smoketest] Loading train ActivationParser once "
+                f"(split_seed={first_split_seed}) from: {train_cfg['activations_path']}"
+            )
+            ap = ActivationParser(
+                inference_json=train_cfg["inference_json"],
+                eval_json=train_eval_json,
+                activations_path=train_cfg["activations_path"],
+                logger_type=dataset_cfg.get("backend", "zarr"),
+                random_seed=first_split_seed,
+                split_strategy=split_strategy,
+                verbose=True,
+            )
+            for seed in training_seeds:
+                actual_split_seed = (
+                    _split_seed_map.get(seed, global_split_seed) if _split_seed_map else global_split_seed
+                )
+                smoketest_results.append(
+                    _check_memmap_cache(
+                        ap,
+                        smoketest_params,
+                        f"{dataset_name}/train  seed={seed} split_seed={actual_split_seed}",
+                    )
+                )
+            continue  # skip per-seed loop entirely for this dataset
 
         for seed_idx, seed in enumerate(training_seeds):
             actual_split_seed = (
@@ -1624,6 +1747,18 @@ def main() -> None:
                     split_strategy=split_strategy,
                     verbose=True,
                 )
+
+            # ---- Smoketest: check the train cache for this seed and skip training ----
+            if args.smoketest_memmap_cache:
+                if smoketest_params is not None:
+                    smoketest_results.append(
+                        _check_memmap_cache(
+                            ap,
+                            smoketest_params,
+                            f"{dataset_name}/train  seed={seed} split_seed={actual_split_seed}",
+                        )
+                    )
+                continue  # skip method loop entirely
 
             for method_name in methods:
                 # Load method config (use pre-loaded if available)
@@ -1784,6 +1919,18 @@ def main() -> None:
                             f,
                             indent=2,
                         )
+
+    if args.smoketest_memmap_cache:
+        n_total = len(smoketest_results)
+        n_hit = sum(1 for r in smoketest_results if r["hit"])
+        n_miss = n_total - n_hit
+        logger.info("")
+        logger.info(f"[smoketest] Summary: {n_hit}/{n_total} cache hits, {n_miss} miss")
+        if n_miss:
+            for r in smoketest_results:
+                if not r["hit"]:
+                    logger.info(f"[smoketest] MISS  {r['label']}  -> {r['cache_dir']}")
+        sys.exit(0 if n_miss == 0 else 1)
 
     logger.info("Experiment complete.")
 
