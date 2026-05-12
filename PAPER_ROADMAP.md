@@ -1,6 +1,6 @@
 # Paper Roadmap — EMNLP Submission
 
-**Last updated:** 2026-04-27
+**Last updated:** 2026-05-12
 **Target venue:** EMNLP 2026 (Main / Findings)
 **Submission window:** ~4 weeks from today
 **Status:** seed-0 sweep complete; multi-seed expansion + second-model + missing baselines in flight
@@ -17,7 +17,7 @@ Companion docs:
 
 ## 1. Paper claim (one paragraph)
 
-A learned contrastive compression of intermediate-layer activations detects intrinsic LLM hallucinations more reliably than (a) logprob/entropy from the same generation, (b) last-layer and multi-layer linear probes on the same activations, and (c) sampling-based output-uncertainty methods at matched compute. The signal is consistent across two model families (Llama-3.1-8B-Instruct and Qwen2.5-7B-Instruct), seven QA/reasoning benchmarks, and five training seeds; it transfers across datasets without retraining; and it concentrates in mid-to-late residual-stream layer pairs as predicted by the cross-layer-coherence theory.
+A learned contrastive compression of intermediate-layer activations detects intrinsic LLM hallucinations more reliably than (a) logprob/entropy from the same generation, (b) a single-layer linear probe on the same activations, and (c) sampling-based output-uncertainty methods at matched compute. A naive multi-layer linear probe (concatenated lower-half layers) underperforms the single-layer probe — reported as an ablation, not a main baseline — which motivates the learned compression. The signal is consistent across two model families (Llama-3.1-8B-Instruct and Qwen3-8B), six QA/reasoning benchmarks (HotpotQA, NQ, MMLU, PopQA, SciQ, SearchQA), and five training seeds; it transfers across datasets without retraining; and it concentrates in mid-to-late residual-stream layer pairs as predicted by the cross-layer-coherence theory.
 
 If any of those clauses fails to hold up empirically, the framing changes — that's fine, but **the framing must match what the data actually shows**. Don't write the abstract until §2 is closed.
 
@@ -27,18 +27,20 @@ If any of those clauses fails to hold up empirically, the framing changes — th
 
 | Component | Status | Notes |
 |---|---|---|
-| Llama-3.1-8B inference + activation logging, 7 datasets | ✅ done | HotpotQA, NQ, MMLU, Movies, PopQA, SciQ, SearchQA |
-| Llama-3.1-8B seed-0 training × 7 datasets × {linear, multi-layer, contrastive×3 scorers} | ✅ done | See [`results/seed0_results.md`](results/seed0_results.md) |
-| SearchQA Multi-Layer probe | ❌ hole | Backfill in week 1 |
-| Movies anomaly (contrastive < linear probe) | ❌ unexplained | Root-cause in week 1 |
-| Llama seeds {5, 26, 42, 63} × 7 datasets × 3 learned methods | 🟡 partial | ~84 training runs remaining |
-| Qwen2.5-7B inference + activation logging, 7 datasets | ❌ not started | Highest-priority GPU job |
-| Qwen2.5-7B seed sweep (5 seeds × 7 datasets × 3 methods) | ❌ not started | After inference completes |
-| P(true) baseline | ❌ not started | Cheap; one extra prompt per example |
-| Semantic-entropy baseline (Farquhar et al. 2024) on 3-dataset subset | ❌ not started | 10× inference cost; cap at HotpotQA, NQ, PopQA |
+| Llama-3.1-8B inference + activation logging, 6 datasets | ✅ done | HotpotQA, NQ, MMLU, PopQA, SciQ, SearchQA (Movies dropped — no train split) |
+| Llama-3.1-8B seed-0 training × 6 datasets × {linear, multi-layer, contrastive×3 scorers} | ✅ done | See [`results/seed0_results.md`](results/seed0_results.md) |
+| Qwen3-8B inference + activations, 6 datasets | ✅ done | Substitutes the originally-planned Qwen2.5-7B (better availability, same scale) |
+| Qwen3-8B seed-0 training × 6 datasets | ✅ done | See [`results/seed0_qwen3_results.md`](results/seed0_qwen3_results.md) |
+| SearchQA Multi-Layer probe | ↪️ obsolete | Multi-layer probe dropped from main grid (see below) |
+| Multi-layer probe dropped from main baseline grid | ✅ done | Commit `fabf4de`. Concatenating all 16 lower-half layers overfit — consistently underperformed the single-layer linear probe at layer 22. Keep as an **ablation row**, not a main baseline. Paper must explain the drop and report numbers from seed-0. |
+| Movies anomaly (contrastive < linear probe) | ↪️ obsolete | Movies excluded from experiment matrix (no train split) |
+| Llama seeds {1, 2, 3, 4} × 6 datasets × learned methods | 🟡 in flight | Runner shells: `scripts/run_baseline_llama3_seed{1..4}.sh` |
+| Qwen3-8B seed sweep, seeds {1, 2, 3, 4} × 6 datasets | 🟡 in flight | Runner shells: `scripts/run_baseline_qwen3_seed{1..4}.sh` |
+| P(true) baseline | ❌ not started | Cheap; one extra prompt per example. Tracked in [#50](https://github.com/hyang0129/HalluLens/issues/50). Output-space only — does not need activation logging; can run concurrently with the seed sweeps. |
+| Semantic-entropy baseline (Farquhar et al. 2024) on 3-dataset subset | ❌ not started | 10× inference cost; cap at HotpotQA, NQ, PopQA. Tracked in [#49](https://github.com/hyang0129/HalluLens/issues/49). Output-space only — does not need activation logging; can run concurrently with the seed sweeps on a separate GPU. |
 | Cross-dataset transfer table | ❌ not started | Train→test pairs across datasets, no new training |
 | AUPRC, ECE, bootstrap 95% CIs | ❌ not started | Pure analysis; zero compute |
-| Ablation: SimCLR-only vs +logprob-recon | ❌ not started | 1 retrain × seeds; reuses cached activations |
+| Ablation: SimCLR-only vs +logprob-recon | ✅ tried | Unsupervised SimCLR features + linear probe on top → ~random guessing. Logprob-recon aux loss is load-bearing. Need to log the run + write it up; no further compute. |
 | Ablation: layer-pair sensitivity | ❌ not started | Reuses cached activations |
 | Paper draft | ❌ not started | Target ~16h student time; LaTeX from week 3 |
 
@@ -60,14 +62,13 @@ If any of those clauses fails to hold up empirically, the framing changes — th
 Each item names the reviewer concern it forecloses. Don't reorder without a reason.
 
 1. **Second model: Qwen2.5-7B-Instruct.** Forecloses "results may be Llama-specific." This is the single highest-leverage missing piece. The Qwen 72B qgen plumbing is partially built (legacy §8.6); the 7B inference path needs `model_map` + `--quantization` wiring or the equivalent for non-quantized 7B. Prefer non-quantized 7B unless VRAM forces otherwise.
-2. **P(true) baseline** (Kadavath et al. 2022). Forecloses "didn't compare to prompt-based self-evaluation." Implementation cost: one templated follow-up prompt per generated answer. Run on all 7 datasets, both models.
-3. **Semantic entropy** (Farquhar et al. *Nature* 2024) on 3-dataset subset. Forecloses "didn't compare to the strongest sampling-based method." Cap at HotpotQA, NQ, PopQA to keep GPU bounded; frame as **compute-matched comparison** (1 forward pass vs. 10 samples + entailment clustering). Both models if budget allows; Llama-only is acceptable as long as the framing is honest.
+2. **P(true) baseline** (Kadavath et al. 2022). Forecloses "didn't compare to prompt-based self-evaluation." Implementation cost: one templated follow-up prompt per generated answer. Run on all 6 datasets, both models. **Output-space only — does not need activation logging**, so this can be dispatched independently of the seed sweeps. Tracked in [#50](https://github.com/hyang0129/HalluLens/issues/50).
+3. **Semantic entropy** (Farquhar et al. *Nature* 2024) on 3-dataset subset. Forecloses "didn't compare to the strongest sampling-based method." Cap at HotpotQA, NQ, PopQA to keep GPU bounded; frame as **compute-matched comparison** (1 forward pass vs. 10 samples + entailment clustering). Both models if budget allows; Llama-only is acceptable as long as the framing is honest. **Output-space only — does not need activation logging**, so this can be dispatched independently of the seed sweeps and won't compete for zarr stores. Tracked in [#49](https://github.com/hyang0129/HalluLens/issues/49).
 4. **Cross-dataset transfer table.** Forecloses "trained classifier may overfit per-dataset." For each (source, target) dataset pair, evaluate the source-trained checkpoint on the target test split. No new training. One supplementary table, one summary number in the body.
 5. **AUPRC + ECE + bootstrap 95% CIs across seeds.** Forecloses "AUROC alone hides class imbalance / calibration issues / seed noise." Pure analysis; merge into the main table where space allows, push extras to appendix.
-6. **Ablation: contrastive loss decomposition.** Train SimCLR-only and logprob-recon-only variants on 2 datasets × 5 seeds. Forecloses "which part of the loss matters." Reuses cached activations.
+6. **Ablation: contrastive loss decomposition — writeup only.** Already tried: unsupervised SimCLR contrastive pretraining followed by a linear probe on the learned features → ~random (AUROC ≈ 0.5). Interpretation: the logprob-recon auxiliary loss carries the hallucination signal; SimCLR alone learns representations that are invariant to the right things for self-supervision but orthogonal to the hallucination axis. The logprob-recon-only variant is still worth running (1 retrain × seeds × 2 datasets, cached activations) to complete the decomposition. Either way, this ablation closes the "which part of the loss matters" question, and the negative SimCLR-only result is itself a useful contribution.
 7. **Ablation: layer-pair sensitivity.** Sweep layer pairs on 1–2 datasets using cached layers 14–29 activations. Reuses cached activations. Connects directly to Justification 2.
-8. **Movies root-cause.** Either fix or own it. Likely candidates: small N (1.5k), label-noise from entity-string matching, or a genuine regime where the contrastive prior hurts. Either result is publishable; an unexplained loss in the main table is not.
-9. **Backfill SearchQA Multi-Layer probe.** No story choices here, just close the hole.
+8. **Multi-layer probe ablation + writeup.** The multi-layer probe (concatenation of layers 14–29) was dropped from the main baseline grid because it consistently underperformed the single-layer linear probe at layer 22 — likely overfitting from the ~16× parameter inflation with no inductive bias tying the layers together. We owe the reader: (a) one ablation row showing seed-0 multi-layer numbers next to single-layer, (b) a sentence in §Methods explaining why naive concatenation is the wrong baseline and why our learned contrastive compression is the right comparison, (c) connect this to the layer-pair-sensitivity ablation (item 7) — the contrastive method picks specific layer pairs rather than dumping all of them in. This is now part of the **motivation** for the method, not a hole.
 
 ## 5. Won't-add list (explicit cuts — read this before scoping creep)
 
@@ -89,7 +90,8 @@ Per (model, dataset, method) cell: 5 training seeds {0, 5, 26, 42, 63}, split se
 
 **Models:** {Llama-3.1-8B-Instruct, Qwen2.5-7B-Instruct}
 **Datasets:** {HotpotQA, NQ, MMLU, Movies, PopQA, SciQ, SearchQA}
-**Trained methods (per cell × 5 seeds):** {Linear probe, Multi-layer probe, Contrastive+Logprob-recon}
+**Trained methods (per cell × 5 seeds):** {Linear probe, Contrastive+Logprob-recon}
+**Ablation-only (seed-0, not in main grid):** Multi-layer probe (layers 14–29 concatenated) — reported once for motivation; see §4 item 8.
 **Non-trained methods (per cell × 1):** {Logprob, Token entropy, P(true)}
 **Sampling baselines:** Semantic entropy on {HotpotQA, NQ, PopQA} only.
 
@@ -113,8 +115,8 @@ GPU time is the binding constraint, not student time. Order matters.
 | 1 | Qwen2.5-7B inference + activation logging × 7 datasets × {train, test} splits | Longest-pole — everything downstream waits for these activations | ~1 week wall time at single-node throughput |
 | 2 | Llama remaining seeds (×4) × 7 datasets × 3 trained methods | Cheap once activations are cached; CPU-feasible-ish but GPU faster | ~1–2 days |
 | 3 | Qwen seeds × 7 × 3 methods | Starts as soon as job 1 produces each dataset's activations | ~2–3 days |
-| 4 | P(true) inference on both models × 7 datasets | Independent of training jobs; can interleave | ~1 day |
-| 5 | Semantic entropy on {HotpotQA, NQ, PopQA} × both models (or Llama-only if budget tight) | 10× inference cost; deliberately the last expensive thing | ~2–3 days |
+| 4 | P(true) inference on both models × 6 datasets — see [#50](https://github.com/hyang0129/HalluLens/issues/50) | Independent of training jobs; can interleave. Output-space only, so it can run on any free GPU regardless of activation-cache state. | ~1 day |
+| 5 | Semantic entropy on {HotpotQA, NQ, PopQA} × both models (or Llama-only if budget tight) — see [#49](https://github.com/hyang0129/HalluLens/issues/49) | 10× inference cost; deliberately the last expensive thing. Output-space only, so it can run on any free GPU regardless of activation-cache state. | ~2–3 days |
 | 6 | Ablations (loss decomposition, layer-pair) | All on cached activations | <1 day |
 
 Use `scripts/gpu_dispatch.py` for batch dispatch, `resume=True` everywhere. **Never submit or kill SLURM jobs without explicit approval** (per CLAUDE.md).
