@@ -98,6 +98,11 @@ def get_metrics(runs_dir: Path, dataset: str, seed: int = 0):
     if m:
         result["multi_layer"] = fmt(m.get("auroc"))
 
+    # saplma
+    m = load_json(runs_dir / dataset / "saplma" / seed_dir / "eval_metrics.json")
+    if m:
+        result["saplma"] = fmt(m.get("auroc"))
+
     # contrastive
     m = load_json(runs_dir / dataset / "contrastive_logprob_recon" / seed_dir / "eval_metrics.json")
     if m:
@@ -156,6 +161,7 @@ def main():
         ("Entropy", "token_entropy"),
         ("Lin. Probe", "linear_probe"),
         ("Multi-Layer", "multi_layer"),
+        ("SAPLMA", "saplma"),
         ("Contr. Cosine", "cosine"),
         ("Contr. Mahal.", "mahal"),
         ("Contr. KNN", "knn"),

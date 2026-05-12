@@ -1,0 +1,28 @@
+{
+  "name": "saplma",
+  "routine": "saplma",
+  "model_class": "simple_halu_classifier",
+  "model_params": {
+    "hidden_dims": [2048, 1024, 512],
+    "dropout": 0.1
+  },
+  "training": {
+    "max_epochs": 100,
+    "batch_size": 512,
+    "lr": 1e-3,
+    "balanced_sampling": true,
+    "use_infinite_index_stream": true,
+    "min_total_steps": 3000
+  },
+  "data": {
+    "relevant_layers": "14-29",
+    "probe_layer": 22,
+    "pad_length": 63,
+    "preload": true,
+    "include_response_logprobs": true,
+    "response_logprobs_top_k": 20
+  },
+  "evaluation": {
+    "metrics": ["auroc"]
+  }
+}
