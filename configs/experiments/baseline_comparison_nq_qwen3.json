@@ -5,7 +5,8 @@
     "contrastive_logprob_recon",
     "linear_probe",
     "token_entropy",
-    "logprob_baseline"
+    "logprob_baseline",
+    "saplma"
   ],
   "split_seed": 42,
   "training_seeds": [
