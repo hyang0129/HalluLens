@@ -1478,6 +1478,12 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated training seeds, overrides experiment config",
     )
     parser.add_argument(
+        "--methods",
+        type=str,
+        default=None,
+        help="Comma-separated method names to filter from experiment config (must be a subset of its methods list)",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Force re-run even if eval_metrics.json already exists",
@@ -1539,6 +1545,16 @@ def main() -> None:
             datasets = list(dataset_value)
 
         methods = experiment_cfg["methods"]
+        if args.methods is not None:
+            requested = [m.strip() for m in args.methods.split(",") if m.strip()]
+            unknown = [m for m in requested if m not in methods]
+            if unknown:
+                logger.error(
+                    f"--methods filter contains names not in experiment config: {unknown}. "
+                    f"Available: {methods}"
+                )
+                sys.exit(1)
+            methods = requested
 
         if args.seeds is not None:
             training_seeds = [int(s) for s in args.seeds.split(",")]
@@ -1599,6 +1615,14 @@ def main() -> None:
             exp_cfg_loaded = load_experiment_config(
                 args.experiment, project_root=str(project_root)
             )
+            if args.methods is not None:
+                exp_cfg_loaded["methods"] = methods
+                if exp_cfg_loaded.get("method_configs"):
+                    exp_cfg_loaded["method_configs"] = {
+                        m: exp_cfg_loaded["method_configs"][m]
+                        for m in methods
+                        if m in exp_cfg_loaded["method_configs"]
+                    }
         else:
             # Single-run mode: build a minimal config for enumerate_runs
             exp_cfg_loaded = dict(experiment_cfg)
