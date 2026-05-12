@@ -305,10 +305,8 @@ class SimpleHaluClassifier(nn.Module):
         x: (B, L, D)
         returns: (B, 1) sigmoid probability
         """
-        # Take only the last token's activations
+        x = x.float()
         last_token = x[:, -1, :]  # (B, D)
-        
-        # Pass through feed-forward layers
         logits = self.classifier(last_token)
         return torch.sigmoid(logits)
 
