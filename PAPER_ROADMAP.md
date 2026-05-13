@@ -1,6 +1,6 @@
 # Paper Roadmap — EMNLP Submission
 
-**Last updated:** 2026-05-12 (SAPLMA baseline added to grid)
+**Last updated:** 2026-05-12 (SAPLMA baseline added to grid; semantic-entropy item rescoped to a sampling-based baselines bundle — SE + SelfCheckGPT + SEP-SE + SEP-binary across 5–6 datasets, see #49)
 **Target venue:** EMNLP 2026 (Main / Findings)
 **Submission window:** ~4 weeks from today
 **Status:** seed-0 sweep complete; multi-seed expansion + second-model + missing baselines in flight
@@ -38,7 +38,7 @@ If any of those clauses fails to hold up empirically, the framing changes — th
 | Qwen3-8B seed sweep, seeds {1, 2, 3, 4} × 6 datasets | 🟡 in flight | Runner shells: `scripts/run_baseline_qwen3_seed{1..4}.sh` |
 | SAPLMA baseline (`SimpleHaluClassifier`) on full grid | ❌ not started | Code already in `activation_research/model.py:276` as `SimpleHaluClassifier` (~11M-param MLP on last-token activations) — wired into trainer but **absent from `configs/experiments/baseline_comparison_*.json`**. Forecloses the "linear probe is a strawman" reviewer concern. Activation-space; reuses cached zarr stores. Tracked in [#51](https://github.com/hyang0129/HalluLens/issues/51). |
 | P(true) baseline | ❌ not started | Cheap; one extra prompt per example. Tracked in [#50](https://github.com/hyang0129/HalluLens/issues/50). Output-space only — does not need activation logging; can run concurrently with the seed sweeps. |
-| Semantic-entropy baseline (Farquhar et al. 2024) on 3-dataset subset | ❌ not started | 10× inference cost; cap at HotpotQA, NQ, PopQA. Tracked in [#49](https://github.com/hyang0129/HalluLens/issues/49). Output-space only — does not need activation logging; can run concurrently with the seed sweeps on a separate GPU. |
+| Sampling-based baselines bundle (SE + SelfCheckGPT + SEP-SE + SEP-binary) | ❌ not started | One K=10 sampling pass produces 4 baselines. 5 free-form datasets {HotpotQA, NQ, PopQA, SciQ, SearchQA} for SE/SelfCheckGPT/SEP-SE; 6 datasets for SEP-binary (MMLU added — SEP-binary is activation-space and survives the NLI-clustering degeneracy on letter tokens that excludes MMLU from SE/SelfCheckGPT). SearchQA capped 10k test / 5k train. SEP-SE trained on 5k stratified train subset (Kossen-faithful regression on SE labels); SEP-binary trained on full train split with binary hallu labels — free byproduct, apples-to-apples with linear probe. Tracked in [#49](https://github.com/hyang0129/HalluLens/issues/49). Sampling pass is output-space only — can run concurrently with the seed sweeps on a separate GPU. |
 | Cross-dataset transfer table | ❌ not started | Train→test pairs across datasets, no new training |
 | AUPRC, ECE, bootstrap 95% CIs | ❌ not started | Pure analysis; zero compute |
 | Ablation: SimCLR-only vs +logprob-recon | ✅ tried | Unsupervised SimCLR features + linear probe on top → ~random guessing. Logprob-recon aux loss is load-bearing. Need to log the run + write it up; no further compute. |
@@ -65,7 +65,13 @@ Each item names the reviewer concern it forecloses. Don't reorder without a reas
 1. **Second model: Qwen2.5-7B-Instruct.** Forecloses "results may be Llama-specific." This is the single highest-leverage missing piece. The Qwen 72B qgen plumbing is partially built (legacy §8.6); the 7B inference path needs `model_map` + `--quantization` wiring or the equivalent for non-quantized 7B. Prefer non-quantized 7B unless VRAM forces otherwise. *(Status note: substituted with Qwen3-8B-Instruct — see §2 status table.)*
 2. **SAPLMA baseline** (Azaria & Mitchell 2023, "The Internal State of an LLM Knows When It's Lying"). Forecloses "linear probe is a strawman; you didn't compare to the established activation-based hallucination detector." The model is already implemented as `SimpleHaluClassifier` in [`activation_research/model.py:276`](activation_research/model.py#L276) — a 3-hidden-layer MLP (4096 → 2048 → 1024 → 512 → 1) on the last-token activations of a single layer, with ReLU + Dropout. It's wired into the trainer at [`scripts/train_activation_model.py:235`](scripts/train_activation_model.py#L235) as `simple_halu_classifier`, but **not in any `configs/experiments/baseline_comparison_*.json`** — so it's never been run in the baseline grid. The discriminating question this addresses: does our contrastive method beat (a) a 4K-param single linear hyperplane and (b) an 11M-param nonlinear MLP on the same activations, or only (a)? Without this, the paper's headline could collapse to "more parameters helps" rather than "contrastive structure helps." Activation-space; reuses cached activations; no new inference. Run on the full grid: 5 seeds × 6 datasets × {Llama-3.1-8B, Qwen3-8B} = 60 training runs. Probe layer should match `linear_probe` (layer 22) for an apples-to-apples comparison. Tracked in [#51](https://github.com/hyang0129/HalluLens/issues/51).
 3. **P(true) baseline** (Kadavath et al. 2022). Forecloses "didn't compare to prompt-based self-evaluation." Implementation cost: one templated follow-up prompt per generated answer. Run on all 6 datasets, both models. **Output-space only — does not need activation logging**, so this can be dispatched independently of the seed sweeps. Tracked in [#50](https://github.com/hyang0129/HalluLens/issues/50).
-4. **Semantic entropy** (Farquhar et al. *Nature* 2024) on 3-dataset subset. Forecloses "didn't compare to the strongest sampling-based method." Cap at HotpotQA, NQ, PopQA to keep GPU bounded; frame as **compute-matched comparison** (1 forward pass vs. 10 samples + entailment clustering). Both models if budget allows; Llama-only is acceptable as long as the framing is honest. **Output-space only — does not need activation logging**, so this can be dispatched independently of the seed sweeps and won't compete for zarr stores. Tracked in [#49](https://github.com/hyang0129/HalluLens/issues/49).
+4. **Sampling-based baselines bundle** — one K=10 sampling pass produces 4 baselines, each foreclosing a distinct reviewer concern:
+   - **Semantic entropy** (Farquhar et al. *Nature* 2024) — forecloses "didn't compare to the strongest sampling-based method."
+   - **SelfCheckGPT** (Manakul et al. EMNLP 2023; variants NLI / BERTScore / n-gram) — forecloses "didn't compare to the canonical black-box consistency baseline."
+   - **SEP-SE** (Kossen et al. 2024) — linear probe on activations trained to predict length-normalized SE; forecloses "didn't compare to the natural probe-based descendant of SE."
+   - **SEP-binary** — free byproduct of SEP infrastructure: linear probe on the same activations but trained on the binary hallucination label over the full train split. Forecloses "you undertrained SEP relative to your linear probe" and gives a genuine compute-matched probe baseline.
+
+   **Scope:** 5 free-form datasets (HotpotQA, NQ, PopQA, SciQ, SearchQA) for SE / SelfCheckGPT / SEP-SE; 6 datasets for SEP-binary (MMLU added — SEP-binary is activation-space and survives the NLI-clustering degeneracy on letter tokens that forces MMLU out of SE/SelfCheckGPT). SearchQA capped at 10k test / 5k train items to keep GPU bounded. SEP-SE trained on 5k stratified train subset per (dataset, model). Frame as **compute-matched comparison** (1 forward pass + linear probe vs. 10 samples + entailment clustering). Both models if budget allows; Llama-only is the firm fallback. **Sampling pass is output-space only — does not need activation logging**, so it can be dispatched independently of the seed sweeps and won't compete for zarr stores; SEP variants then read existing cached activations. Tracked in [#49](https://github.com/hyang0129/HalluLens/issues/49).
 5. **Cross-dataset transfer table.** Forecloses "trained classifier may overfit per-dataset." For each (source, target) dataset pair, evaluate the source-trained checkpoint on the target test split. No new training. One supplementary table, one summary number in the body.
 6. **AUPRC + ECE + bootstrap 95% CIs across seeds.** Forecloses "AUROC alone hides class imbalance / calibration issues / seed noise." Pure analysis; merge into the main table where space allows, push extras to appendix.
 7. **Ablation: contrastive loss decomposition — writeup only.** Already tried: unsupervised SimCLR contrastive pretraining followed by a linear probe on the learned features → ~random (AUROC ≈ 0.5). Interpretation: the logprob-recon auxiliary loss carries the hallucination signal; SimCLR alone learns representations that are invariant to the right things for self-supervision but orthogonal to the hallucination axis. The logprob-recon-only variant is still worth running (1 retrain × seeds × 2 datasets, cached activations) to complete the decomposition. Either way, this ablation closes the "which part of the loss matters" question, and the negative SimCLR-only result is itself a useful contribution.
@@ -95,7 +101,12 @@ Per (model, dataset, method) cell: 5 training seeds {0, 5, 26, 42, 63}, split se
 **Trained methods (per cell × 5 seeds):** {Linear probe, SAPLMA (`SimpleHaluClassifier`), Contrastive+Logprob-recon}
 **Ablation-only (seed-0, not in main grid):** Multi-layer probe (layers 14–29 concatenated) — reported once for motivation; see §4 item 9.
 **Non-trained methods (per cell × 1):** {Logprob, Token entropy, P(true)}
-**Sampling baselines:** Semantic entropy on {HotpotQA, NQ, PopQA} only.
+**Sampling baselines** (5 free-form datasets only — MMLU excluded due to NLI-clustering degeneracy on letter tokens; SearchQA test capped at 10k items, seed=42):
+- Semantic entropy — length-normalized (headline) + discrete (supplementary).
+- SelfCheckGPT — NLI (headline) + BERTScore + n-gram (supplementary).
+**Probe-style baselines from the same sampling pass (SEP, Kossen et al. 2024):**
+- SEP-SE: `sklearn.linear_model.Ridge` on last-token activations at the linear-probe layer, target = length-normalized SE. Trained on 5k stratified train subset per (dataset, model). 5 datasets.
+- SEP-binary: `sklearn.linear_model.LogisticRegression` on the same features, target = binary hallucination label, trained on full train split (free — no new sampling). 6 datasets (MMLU included). Apples-to-apples with the linear probe baseline.
 
 **Reported scorers for the contrastive method:** Cosine, Mahalanobis, KNN — KNN as the headline number based on seed-0 evidence; the other two as ablation rows.
 
@@ -118,12 +129,12 @@ GPU time is the binding constraint, not student time. Order matters.
 | 2 | Llama remaining seeds (×4) × 7 datasets × 3 trained methods | Cheap once activations are cached; CPU-feasible-ish but GPU faster | ~1–2 days |
 | 3 | Qwen seeds × 7 × 3 methods | Starts as soon as job 1 produces each dataset's activations | ~2–3 days |
 | 4 | P(true) inference on both models × 6 datasets — see [#50](https://github.com/hyang0129/HalluLens/issues/50) | Independent of training jobs; can interleave. Output-space only, so it can run on any free GPU regardless of activation-cache state. | ~1 day |
-| 5 | Semantic entropy on {HotpotQA, NQ, PopQA} × both models (or Llama-only if budget tight) — see [#49](https://github.com/hyang0129/HalluLens/issues/49) | 10× inference cost; deliberately the last expensive thing. Output-space only, so it can run on any free GPU regardless of activation-cache state. | ~2–3 days |
+| 5 | Sampling-based baselines bundle (SE + SelfCheckGPT + SEP-SE) on 5 free-form datasets × both models — see [#49](https://github.com/hyang0129/HalluLens/issues/49). SEP-binary then trained for free on 6 datasets from cached activations. | One K=10 sampling pass yields inputs for 4 baselines (SearchQA capped 5k train / 10k test). Output-space only, so it can run on any free GPU regardless of activation-cache state. | ~25–30 GPU-hr full / ~12–15 GPU-hr Llama-only |
 | 6 | Ablations (loss decomposition, layer-pair) | All on cached activations | <1 day |
 
 Use `scripts/gpu_dispatch.py` for batch dispatch, `resume=True` everywhere. **Never submit or kill SLURM jobs without explicit approval** (per CLAUDE.md).
 
-If GPU access slips by >3 days at any stage: cut semantic entropy first, then Qwen ablations, then drop semantic-entropy to Llama-only. Do not cut the Qwen full sweep — losing the second-model story is worse than losing semantic entropy.
+If GPU access slips by >3 days at any stage, cut #49's sampling-pass scope in this order: (1) drop SearchQA from #49 entirely (largest single dataset), (2) drop Qwen3-8B for SE + SelfCheckGPT + SEP-SE (Llama-only), (3) drop SciQ from the sampling-based methods, (4) drop SelfCheckGPT-BERTScore + n-gram (keep SelfCheckGPT-NLI). Then cut Qwen ablations. **Never cut SEP-binary** — it has no sampling cost and runs from cached activations. **Never cut the Qwen full seed sweep** — losing the second-model story is worse than losing sampling-based baselines.
 
 ---
 
@@ -144,7 +155,7 @@ Tables/figures owners (each is a single deliverable):
 - **Transfer matrix:** Heatmap of off-diagonal AUROC.
 - **Ablation table:** Loss decomposition + layer-pair sweep.
 - **Calibration figure:** Reliability diagrams for one dataset per model.
-- **Compute-matched comparison:** Bar of AUROC per forward-pass count (ours @ 1, semantic entropy @ 10) on the 3 covered datasets.
+- **Compute-matched comparison:** AUROC per forward-pass count across covered datasets. K=1 cluster: ours, linear probe, SAPLMA, SEP-binary, SEP-SE, P(true). K=10 cluster: semantic entropy (length-normalized), SelfCheckGPT-NLI. One panel per dataset (5 free-form datasets; MMLU gets the K=1 cluster only).
 
 ---
 
@@ -153,7 +164,8 @@ Tables/figures owners (each is a single deliverable):
 | Risk | Likelihood | Mitigation |
 |---|---|---|
 | Qwen results materially weaker than Llama | medium | Reframe as "model-family-dependent" honestly; Movies-style root-cause; this is a finding, not a failure — but it changes the abstract |
-| Semantic entropy beats us on its 3 datasets at 10× compute | medium | Pivot framing to compute-matched: ours wins per-FLOP. Theory still holds. |
+| SE or SelfCheckGPT-NLI beats us at 10× compute on its 5 datasets | medium | Pivot framing to compute-matched: ours wins per-FLOP. Theory still holds. |
+| **SEP-binary** (genuinely compute-matched linear probe) beats us on some datasets | medium | This would be a real threat, not a per-FLOP escape hatch — SEP-binary uses the same forward-pass count and the same training data as our linear probe baseline. Mitigation depends on outcome: if SEP-binary < contrastive across the board, this is a strong positive. If SEP-binary ≈ contrastive, the contribution must rest on transfer (§4 item 5) + ablations + the SAPLMA gap. Decide on data, not in advance. |
 | GPU node reclamation interrupts long Qwen inference | medium | `resume=True` everywhere; Zarr checkpointing; dispatch with `gpu_dispatch.py` not raw SSH |
 | Movies anomaly is genuine ("contrastive prior hurts on small entity-domain datasets") | medium | Own it in §6 limitations + a one-paragraph diagnosis. This actually strengthens the paper if framed as bounded scope. |
 | Multi-seed CIs reveal that contrastive vs. multi-layer probe gap is not significant on some datasets | medium-high | Headline becomes "consistent improvement at matched parameter count + transfer + Movies-style insight," not "always wins." Pre-commit to AUROC + AUPRC + win-rate-across-seeds reporting. |
