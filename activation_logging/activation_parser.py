@@ -1194,6 +1194,55 @@ class ActivationParser:
         zarr_path = Path(self.activations_path).resolve()
         return zarr_path / "_memmap_cache" / fingerprint
 
+    def _find_superset_memmap_cache(
+        self,
+        relevant_layers: List[int],
+        pad_length: int,
+    ) -> Optional[Path]:
+        """Scan for a logprob-included cache that's a superset of the (no-logprob)
+        request. Returns the cache dir or None.
+
+        Why: include_logprobs is part of the fingerprint, but a cache built with
+        logprobs contains the same activation/label/index arrays a no-logprob
+        consumer needs — the logprob arrays are just extras the consumer can
+        ignore. Avoid rebuilding a 100+ GB cache from zarr in that case.
+        """
+        parent = Path(self.activations_path).resolve() / "_memmap_cache"
+        if not parent.exists():
+            return None
+
+        zarr_count = int(self.activation_logger._response_activations.shape[0])
+        n_total = len(self.df)
+        requested_layers = sorted(relevant_layers)
+
+        for child in parent.iterdir():
+            if not child.is_dir():
+                continue
+            manifest_path = child / "manifest.json"
+            if not manifest_path.exists():
+                continue
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not manifest.get("include_logprobs"):
+                continue
+            if sorted(manifest.get("relevant_layers", [])) != requested_layers:
+                continue
+            if manifest.get("pad_length") != pad_length:
+                continue
+            if manifest.get("n_total") != n_total:
+                continue
+            if manifest.get("zarr_sample_count") != zarr_count:
+                continue
+            if manifest.get("split_strategy", "two_way") != self.split_strategy:
+                continue
+            if not (child / "activations.npy").exists():
+                continue
+            return child
+
+        return None
+
     def _save_memmap_cache(
         self,
         cache_dir: Path,
@@ -1379,6 +1428,16 @@ class ActivationParser:
 
         # Try cache
         cached = self._load_memmap_cache(cache_dir, include_logprobs)
+        if cached is None and not include_logprobs:
+            # Fall back to any logprob-included cache that's a structural superset.
+            superset_dir = self._find_superset_memmap_cache(relevant_layers, pad_length)
+            if superset_dir is not None:
+                logger.info(
+                    f"Memmap cache miss for fingerprint {fingerprint}; "
+                    f"reusing superset cache at {superset_dir.name} "
+                    f"(include_logprobs=True). Logprob arrays will be ignored."
+                )
+                cached = self._load_memmap_cache(superset_dir, include_logprobs=False)
         if cached is not None:
             # Discard stored indices — they reflect the seed used at build time.
             # Recompute from self.df so each seed gets its own split.
