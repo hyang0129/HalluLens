@@ -79,3 +79,6 @@ exploratory_work/
 
 # Claude Code agent worktrees (temporary git worktrees created by sub-agents)
 .claude/worktrees/
+
+# Ephemeral smoketest outputs (logs, GPU samples, time -v dumps)
+reports/smoketest_*/
