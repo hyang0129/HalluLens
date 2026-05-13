@@ -1438,6 +1438,103 @@ def run_logprob_baseline(
     return eval_metrics, []
 
 
+def run_llmsknow_probe(
+    ap,
+    dataset_cfg: dict,
+    method_cfg: dict,
+    experiment_cfg: dict,
+    output_dir: str,
+    device: str,
+    training_seed: int,
+    test_ap=None,
+) -> tuple[dict, list[dict]]:
+    """LLMsKnow Probe Baseline: sweep (layer, token) on dev subset, train final probe at best location."""
+    import numpy as np
+    from activation_research.llmsknow_probe import (
+        _get_split_cache,
+        eval_probe,
+        sweep_locations,
+        train_final_probe,
+    )
+
+    data_cfg = method_cfg["data"]
+    sweep_cfg = method_cfg.get("sweep", {})
+
+    relevant_layers = parse_layer_range(data_cfg["relevant_layers"])
+    pad_length = data_cfg.get("pad_length", 63)
+
+    ds_kwargs = dict(
+        relevant_layers=relevant_layers,
+        num_views=1,
+        pad_length=pad_length,
+        preload=data_cfg.get("preload", True),
+        include_response_logprobs=False,
+        response_logprobs_top_k=data_cfg.get("response_logprobs_top_k", 20),
+        check_ram=False,
+    )
+
+    train_ds = ap.get_dataset("train", **ds_kwargs)
+    eval_ap = test_ap if test_ap is not None else ap
+    test_ds = eval_ap.get_dataset("test", **ds_kwargs)
+
+    # Access the preloaded cache — handles both direct-index and memmap-indirection paths
+    train_cache, train_labels = _get_split_cache(train_ds)
+    test_cache, test_labels = _get_split_cache(test_ds)
+
+    dev_size = sweep_cfg.get("dev_size", 1000)
+    C = sweep_cfg.get("C", 1.0)
+    max_iter = sweep_cfg.get("max_iter", 1000)
+
+    # Phase 1: sweep (layer, token) on dev subset
+    sweep_matrix, best_layer_idx, best_token_pos = sweep_locations(
+        train_cache, train_labels, relevant_layers,
+        dev_size=dev_size, seed=training_seed, C=C, max_iter=max_iter,
+    )
+
+    # Save sweep results
+    artifacts_dir = os.path.join(output_dir, "artifacts")
+    np.save(os.path.join(artifacts_dir, "sweep_auroc_matrix.npy"), sweep_matrix)
+    sweep_summary = {
+        "relevant_layers": relevant_layers,
+        "best_layer_idx": int(best_layer_idx),
+        "best_layer": int(relevant_layers[best_layer_idx]),
+        "best_token_pos": int(best_token_pos),
+        "best_dev_auroc": float(np.nanmax(sweep_matrix)) if not np.all(np.isnan(sweep_matrix)) else float("nan"),
+    }
+    with open(os.path.join(artifacts_dir, "sweep_summary.json"), "w") as f:
+        json.dump(sweep_summary, f, indent=2)
+
+    # Phase 2: train final probe on full training set
+    probe = train_final_probe(
+        train_cache, train_labels, best_layer_idx, best_token_pos,
+        seed=training_seed, C=C, max_iter=max_iter,
+    )
+
+    # Evaluate on test set
+    outlier_class = dataset_cfg.get("outlier_class", 1)
+    auroc, scores = eval_probe(probe, test_cache, test_labels, best_layer_idx, best_token_pos, outlier_class=outlier_class)
+
+    eval_metrics = {
+        "method": method_cfg["name"],
+        "dataset": dataset_cfg["name"],
+        "seed": training_seed,
+        "split_seed": experiment_cfg.get("split_seed", 42),
+        "n_train": len(train_ds),
+        "n_test": len(test_ds),
+        "auroc": float(auroc),
+        "selected_layer": int(relevant_layers[best_layer_idx]),
+        "selected_token_pos": int(best_token_pos),
+        "sweep_best_dev_auroc": float(sweep_summary["best_dev_auroc"]),
+    }
+
+    predictions = [
+        {"example_id": i, "score_halu": float(s), "label_halu": int(l)}
+        for i, (s, l) in enumerate(zip(scores, test_labels))
+    ]
+
+    return eval_metrics, predictions
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -2036,6 +2133,11 @@ def main() -> None:
                         )
                     elif routine == "saplma":
                         eval_metrics, predictions = run_saplma(
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
+                            test_ap=test_ap,
+                        )
+                    elif routine == "llmsknow_probe":
+                        eval_metrics, predictions = run_llmsknow_probe(
                             ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
                         )

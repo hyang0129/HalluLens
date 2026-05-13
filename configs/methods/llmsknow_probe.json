@@ -1,0 +1,16 @@
+{
+  "name": "llmsknow_probe",
+  "routine": "llmsknow_probe",
+  "data": {
+    "relevant_layers": "14-29",
+    "pad_length": 63,
+    "preload": true,
+    "include_response_logprobs": false,
+    "response_logprobs_top_k": 20
+  },
+  "sweep": {
+    "dev_size": 1000,
+    "C": 1.0,
+    "max_iter": 1000
+  }
+}

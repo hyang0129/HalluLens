@@ -6,7 +6,8 @@
     "linear_probe",
     "token_entropy",
     "logprob_baseline",
-    "saplma"
+    "saplma",
+    "llmsknow_probe"
   ],
   "split_seed": 42,
   "training_seeds": [
