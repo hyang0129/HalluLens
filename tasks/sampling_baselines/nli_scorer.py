@@ -1,6 +1,5 @@
-"""Batched NLI matrix computation using cross-encoder/nli-deberta-v3-base."""
+"""Batched NLI matrix computation matching jlko/semantic_uncertainty reference."""
 import json
-import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -8,24 +7,14 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-NLI_MODEL_ID = "cross-encoder/nli-deberta-v3-base"
-
-# Strip leading hedges before NLI clustering (SE only; raw text preserved for SelfCheckGPT)
-_STRIP_RE = re.compile(
-    r"^(the answer is[:\s]*|answer[:\s]*|yes[,\.\s]+|no[,\.\s]+|"
-    r"therefore[,\s]+|so[,\s]+|thus[,\s]+|it is[:\s]*|that is[:\s]*)",
-    re.IGNORECASE,
-)
-
-
-def strip_surface_form(text: str) -> str:
-    return _STRIP_RE.sub("", text.strip()).strip()
+# Matches the reference impl (jlko/semantic_uncertainty EntailmentDeberta).
+NLI_MODEL_ID = "microsoft/deberta-v2-xlarge-mnli"
 
 
 class NLIScorer:
     """Compute (K+1)x(K+1) directed NLI matrices over {greedy}∪{K samples} per question.
 
-    Label order for cross-encoder/nli-deberta-v3-base:
+    Label order for deberta-v2-xlarge-mnli:
         0 = contradiction, 1 = neutral, 2 = entailment
     Verified dynamically via model.config.id2label at load time.
     """
@@ -107,14 +96,13 @@ class NLIScorer:
                 greedy = rec["greedy_answer"]
                 sample_texts = [s["text"] for s in rec["samples"]]
                 all_texts = [greedy] + sample_texts
-                stripped = [strip_surface_form(t) for t in all_texts]
 
-                matrix = self.compute_matrix(stripped)
+                matrix = self.compute_matrix(all_texts)
 
                 out = {
                     "row_idx": rec["row_idx"],
                     "nli_matrix": matrix.tolist(),
-                    "texts_stripped": stripped,
+                    "texts": all_texts,
                 }
                 fout.write(json.dumps(out, ensure_ascii=False) + "\n")
 
