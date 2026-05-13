@@ -9,8 +9,9 @@
     "response_logprobs_top_k": 20
   },
   "sweep": {
-    "dev_size": 1000,
+    "dev_size": 2000,
+    "val_size": 1000,
     "C": 1.0,
-    "max_iter": 1000
+    "max_iter": 100
   }
 }

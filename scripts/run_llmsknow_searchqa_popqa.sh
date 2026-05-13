@@ -1,0 +1,32 @@
+#!/bin/bash
+# LLMsKnow probe fanout — script A (intended for port 8887)
+# Datasets: searchqa (151k train) + popqa (11k train)
+# Models: Llama-3.1-8B-Instruct + Qwen3-8B
+# Seeds: 0,1,2,3,4 -> 20 cells total
+# Outputs land under runs/baseline_comparison_<task>[_qwen3]/ so audit_datasets.py picks them up.
+# CPU-only workload (sklearn LR sweep). Safe to dispatch with --force-concurrent
+# alongside a GPU-bound co-tenant.
+set -eo pipefail
+cd /mnt/home/hyang1/LLM_research/HalluLens
+
+PYTHON=/mnt/home/hyang1/.local/share/mamba/envs/p311/bin/python
+
+for TASK in searchqa popqa; do
+    for VARIANT in "" "_qwen3"; do
+        EXP_CFG="configs/experiments/baseline_comparison_${TASK}${VARIANT}.json"
+        echo "============================================"
+        echo "llmsknow_probe | experiment=baseline_comparison_${TASK}${VARIANT} | seeds=0..4"
+        echo "Started: $(date)"
+        echo "============================================"
+
+        $PYTHON scripts/run_experiment.py \
+            --experiment "$EXP_CFG" \
+            --methods llmsknow_probe \
+            --seeds 0,1,2,3,4 \
+            --device cuda
+    done
+done
+
+echo "============================================"
+echo "ALL DONE: $(date)"
+echo "============================================"

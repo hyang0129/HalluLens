@@ -1451,7 +1451,7 @@ def run_llmsknow_probe(
     """LLMsKnow Probe Baseline: sweep (layer, token) on dev subset, train final probe at best location."""
     import numpy as np
     from activation_research.llmsknow_probe import (
-        _get_split_cache,
+        _split_view,
         eval_probe,
         sweep_locations,
         train_final_probe,
@@ -1468,7 +1468,9 @@ def run_llmsknow_probe(
         num_views=1,
         pad_length=pad_length,
         preload=data_cfg.get("preload", True),
-        include_response_logprobs=False,
+        # Request logprobs so the fingerprint matches the canonical caches
+        # built by every other method; the loader will discard them.
+        include_response_logprobs=True,
         response_logprobs_top_k=data_cfg.get("response_logprobs_top_k", 20),
         check_ram=False,
     )
@@ -1477,18 +1479,20 @@ def run_llmsknow_probe(
     eval_ap = test_ap if test_ap is not None else ap
     test_ds = eval_ap.get_dataset("test", **ds_kwargs)
 
-    # Access the preloaded cache — handles both direct-index and memmap-indirection paths
-    train_cache, train_labels = _get_split_cache(train_ds)
-    test_cache, test_labels = _get_split_cache(test_ds)
+    # Lazy views — no big read happens here, only metadata.
+    train_full, train_rows, train_labels = _split_view(train_ds)
+    test_full, test_rows, test_labels = _split_view(test_ds)
 
-    dev_size = sweep_cfg.get("dev_size", 1000)
+    dev_size = sweep_cfg.get("dev_size", 2000)
+    val_size = sweep_cfg.get("val_size", 1000)
     C = sweep_cfg.get("C", 1.0)
-    max_iter = sweep_cfg.get("max_iter", 1000)
+    max_iter = sweep_cfg.get("max_iter", 100)
 
     # Phase 1: sweep (layer, token) on dev subset
     sweep_matrix, best_layer_idx, best_token_pos = sweep_locations(
-        train_cache, train_labels, relevant_layers,
-        dev_size=dev_size, seed=training_seed, C=C, max_iter=max_iter,
+        train_full, train_rows, train_labels, relevant_layers,
+        dev_size=dev_size, val_size=val_size, seed=training_seed,
+        C=C, max_iter=max_iter,
     )
 
     # Save sweep results
@@ -1506,13 +1510,16 @@ def run_llmsknow_probe(
 
     # Phase 2: train final probe on full training set
     probe = train_final_probe(
-        train_cache, train_labels, best_layer_idx, best_token_pos,
+        train_full, train_rows, train_labels, best_layer_idx, best_token_pos,
         seed=training_seed, C=C, max_iter=max_iter,
     )
 
     # Evaluate on test set
     outlier_class = dataset_cfg.get("outlier_class", 1)
-    auroc, scores = eval_probe(probe, test_cache, test_labels, best_layer_idx, best_token_pos, outlier_class=outlier_class)
+    auroc, scores = eval_probe(
+        probe, test_full, test_rows, test_labels,
+        best_layer_idx, best_token_pos, outlier_class=outlier_class,
+    )
 
     eval_metrics = {
         "method": method_cfg["name"],

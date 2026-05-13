@@ -3,9 +3,19 @@
 Implements a location-sweep sklearn logistic regression probe that:
 1. Finds the best (layer, token_position) pair on a dev subset.
 2. Trains a final classifier on the full training set at that location.
+
+The cache is *not* materialized eagerly. Each phase reads only the slice it
+needs from the (possibly memmapped) full activation cache:
+  - Sweep: a (D, L, T, H) dev subset where D = dev_size (typically 1000).
+  - Final fit + eval: a single (N, H) column at the chosen (layer, token).
+This keeps RAM usage constant w.r.t. N for the dominant terms; the alternative
+is materializing every (N_split, L, T, H) row, which is hundreds of GB on the
+big benchmarks.
 """
 
 from __future__ import annotations
+
+import time
 
 import numpy as np
 from loguru import logger
@@ -14,62 +24,89 @@ from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedShuffleSplit
 
 
-def _get_split_cache(
-    ds,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Extract (cache, labels) from a PreloadedActivationDataset.
-
-    Handles both the direct-indexing case (cache is already split-sized) and
-    the memmap-indirection case (cache is full-sized, _row_indices addresses
-    the split rows).
+def _split_view(ds) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return a lazy view over a PreloadedActivationDataset's split.
 
     Returns:
-        cache: float16 numpy array of shape (N_split, L, T, H)
-        labels: int numpy array of shape (N_split,)
+        full_cache: (N_total, L, T, H) array — may be a numpy memmap. Not copied.
+        row_indices: int64 array of shape (N_split,) — positions of this split's
+            rows inside full_cache. If the dataset is already split-sized,
+            row_indices is arange(N_split).
+        labels: int32 array of shape (N_split,).
     """
-    full_cache: np.ndarray = ds.cache  # may be (N_total, L, T, H) or (N_split, L, T, H)
+    full_cache: np.ndarray = ds.cache
     labels: np.ndarray = np.asarray(ds.labels, dtype=np.int32)
 
     row_indices = getattr(ds, "_row_indices", None)
-    if row_indices is not None:
-        # Memmap path: cache is full; index down to split rows
-        cache = full_cache[row_indices]  # (N_split, L, T, H)
+    if row_indices is None:
+        row_indices = np.arange(full_cache.shape[0], dtype=np.int64)
     else:
-        cache = full_cache  # already split-sized
+        row_indices = np.asarray(row_indices, dtype=np.int64)
 
-    return cache, labels
+    return full_cache, row_indices, labels
+
+
+def _take_rows(
+    full_cache: np.ndarray,
+    row_indices: np.ndarray,
+    sub_idx: np.ndarray,
+) -> np.ndarray:
+    """Materialize rows at split-relative positions sub_idx as a contiguous array.
+
+    Reads len(sub_idx) full (L, T, H) rows from full_cache.
+    """
+    global_idx = row_indices[sub_idx]
+    return np.asarray(full_cache[global_idx])
+
+
+def _take_column(
+    full_cache: np.ndarray,
+    row_indices: np.ndarray,
+    layer_idx: int,
+    token_pos: int,
+) -> np.ndarray:
+    """Materialize the (N_split, H) slice at one (layer, token) location.
+
+    Reads N_split × H values from full_cache instead of the full (L, T, H) rows.
+    """
+    return np.asarray(full_cache[row_indices, layer_idx, token_pos, :])
 
 
 def sweep_locations(
-    train_cache: np.ndarray,
-    train_labels: np.ndarray,
+    full_cache: np.ndarray,
+    row_indices: np.ndarray,
+    labels: np.ndarray,
     relevant_layers: list[int],
-    dev_size: int = 1000,
+    dev_size: int = 2000,
+    val_size: int = 1000,
     seed: int = 42,
     C: float = 1.0,
-    max_iter: int = 1000,
+    max_iter: int = 100,
 ) -> tuple[np.ndarray, int, int]:
     """Sweep all (layer_idx, token_pos) pairs on a dev subset.
 
     Args:
-        train_cache: Float16 array of shape (N, L, T, H).
-        train_labels: Int/bool array of shape (N,).
+        full_cache: (N_total, L, T, H) full cache (possibly memmap).
+        row_indices: (N_split,) positions of this split inside full_cache.
+        labels: (N_split,) int labels.
         relevant_layers: List of model layer indices (length L), e.g. [14, ..., 29].
-        dev_size: Number of samples to use in the dev subset.
+        dev_size: Total dev pool size — split into (dev_size - val_size) sub-train
+            and val_size sub-validation samples. Paper uses 2000 / 1000 val.
+        val_size: Held-out validation subset size for ranking locations.
         seed: Random seed for stratified sampling and LogisticRegression.
         C: Regularisation strength for LogisticRegression.
-        max_iter: Max iterations for LogisticRegression solver.
+        max_iter: Max iterations for LogisticRegression solver
+            (sklearn default 100 to match Orgad et al.).
 
     Returns:
-        sweep_auroc_matrix: Float array of shape (L, T), AUROC per pair (NaN for
-            skipped/padded positions).
+        sweep_auroc_matrix: (L, T) AUROC per pair (NaN for skipped/padded positions).
         best_layer_idx: Index into the L dimension (positional, not model layer id).
         best_token_pos: Index into the T dimension.
     """
-    N, L, T, H = train_cache.shape
-    labels = np.asarray(train_labels, dtype=np.int32)
+    N = row_indices.shape[0]
+    L, T = full_cache.shape[1], full_cache.shape[2]
+    labels = np.asarray(labels, dtype=np.int32)
 
-    # Stratified dev subset
     actual_dev = min(dev_size, N)
     if actual_dev < N:
         splitter = StratifiedShuffleSplit(n_splits=1, test_size=actual_dev, random_state=seed)
@@ -77,7 +114,12 @@ def sweep_locations(
     else:
         dev_idx = np.arange(N)
 
-    dev_cache = train_cache[dev_idx].astype(np.float32)  # (D, L, T, H)
+    logger.info(
+        f"sweep_locations: materialising {len(dev_idx)}-sample dev subset "
+        f"({len(dev_idx)} × {L} × {T} × {full_cache.shape[3]} × 2 bytes "
+        f"= {len(dev_idx) * L * T * full_cache.shape[3] * 2 / 1024**3:.2f} GB) ..."
+    )
+    dev_cache = _take_rows(full_cache, row_indices, dev_idx).astype(np.float32)
     dev_labels = labels[dev_idx]
 
     unique_classes = np.unique(dev_labels)
@@ -88,32 +130,56 @@ def sweep_locations(
         )
         return np.full((L, T), np.nan, dtype=np.float32), 0, 0
 
+    # Single stratified holdout inside the dev subset (paper procedure).
+    holdout = StratifiedShuffleSplit(n_splits=1, test_size=val_size, random_state=seed)
+    sub_tr_idx, sub_val_idx = next(holdout.split(np.zeros(len(dev_labels)), dev_labels))
+
     logger.info(
         f"sweep_locations: sweeping {L} layers × {T} token positions "
-        f"= {L * T} pairs on {len(dev_idx)}-sample dev subset ..."
+        f"= {L * T} pairs with single holdout "
+        f"({len(sub_tr_idx)} train / {len(sub_val_idx)} val) ..."
     )
 
     sweep_auroc = np.full((L, T), np.nan, dtype=np.float32)
+    sweep_start = time.monotonic()
+    log_every = 50  # log every N completed locations
+    locs_done = 0
+    locs_skipped = 0
+    total_pairs = L * T
 
     for li in range(L):
         for ti in range(T):
-            # Skip padded noise positions (activations are constant across samples)
             col = dev_cache[:, li, ti, :]  # (D, H)
             if np.std(col) < 1e-6:
-                continue  # leave as NaN
+                locs_skipped += 1
+                continue  # padded noise position — leave as NaN
+
+            X_tr, y_tr = col[sub_tr_idx], dev_labels[sub_tr_idx]
+            X_val, y_val = col[sub_val_idx], dev_labels[sub_val_idx]
+            if len(np.unique(y_tr)) < 2 or len(np.unique(y_val)) < 2:
+                locs_done += 1
+                continue
 
             clf = LogisticRegression(C=C, max_iter=max_iter, random_state=seed)
-            clf.fit(col, dev_labels)
-            scores = clf.predict_proba(col)[:, 1]
+            clf.fit(X_tr, y_tr)
+            scores = clf.predict_proba(X_val)[:, 1]
+            sweep_auroc[li, ti] = float(roc_auc_score(y_val, scores))
+            locs_done += 1
 
-            if len(np.unique(dev_labels)) < 2:
-                auroc = float("nan")
-            else:
-                auroc = roc_auc_score(dev_labels, scores)
+            if locs_done % log_every == 0:
+                elapsed = time.monotonic() - sweep_start
+                per_loc = elapsed / locs_done
+                pairs_seen = locs_done + locs_skipped
+                remaining = (total_pairs - pairs_seen) * per_loc
+                running_best = float(np.nanmax(sweep_auroc))
+                logger.info(
+                    f"sweep_locations: loc {locs_done} "
+                    f"(pair {pairs_seen}/{total_pairs}, skipped={locs_skipped}) — "
+                    f"elapsed {elapsed:.1f}s ({per_loc*1000:.0f}ms/loc), "
+                    f"ETA {remaining:.0f}s, "
+                    f"running best val AUROC={running_best:.4f}"
+                )
 
-            sweep_auroc[li, ti] = float(auroc)
-
-    # Select best pair
     if np.all(np.isnan(sweep_auroc)):
         logger.warning(
             "sweep_locations: no valid (layer, token) pair found "
@@ -136,8 +202,9 @@ def sweep_locations(
 
 
 def train_final_probe(
-    train_cache: np.ndarray,
-    train_labels: np.ndarray,
+    full_cache: np.ndarray,
+    row_indices: np.ndarray,
+    labels: np.ndarray,
     layer_idx: int,
     token_pos: int,
     seed: int = 42,
@@ -146,66 +213,44 @@ def train_final_probe(
 ) -> LogisticRegression:
     """Train a LogisticRegression probe on the full training set at one location.
 
-    Args:
-        train_cache: Float16 array of shape (N, L, T, H).
-        train_labels: Int array of shape (N,).
-        layer_idx: Index into the L dimension.
-        token_pos: Index into the T dimension.
-        seed: Random seed for LogisticRegression.
-        C: Regularisation strength.
-        max_iter: Max solver iterations.
-
-    Returns:
-        Fitted sklearn LogisticRegression.
+    Reads only the (N_split, H) column at (layer_idx, token_pos).
     """
-    X = train_cache[:, layer_idx, token_pos, :].astype(np.float32)  # (N, H)
-    y = np.asarray(train_labels, dtype=np.int32)
+    y = np.asarray(labels, dtype=np.int32)
 
     logger.info(
-        f"train_final_probe: training on {len(y)} samples at "
-        f"layer_idx={layer_idx}, token_pos={token_pos} ..."
+        f"train_final_probe: materialising ({len(y)}, {full_cache.shape[3]}) "
+        f"column at layer_idx={layer_idx}, token_pos={token_pos} "
+        f"({len(y) * full_cache.shape[3] * 2 / 1024**2:.1f} MB) ..."
     )
+    X = _take_column(full_cache, row_indices, layer_idx, token_pos).astype(np.float32)
 
+    logger.info(f"train_final_probe: training on {len(y)} samples ...")
     clf = LogisticRegression(C=C, max_iter=max_iter, random_state=seed)
     clf.fit(X, y)
-
     logger.info("train_final_probe: done.")
     return clf
 
 
 def eval_probe(
     probe: LogisticRegression,
-    test_cache: np.ndarray,
-    test_labels: np.ndarray,
+    full_cache: np.ndarray,
+    row_indices: np.ndarray,
+    labels: np.ndarray,
     layer_idx: int,
     token_pos: int,
     outlier_class: int = 1,
 ) -> tuple[float, np.ndarray]:
-    """Evaluate a fitted probe on the test set.
+    """Evaluate a fitted probe on the test set at one (layer, token) location.
 
-    Args:
-        probe: Fitted sklearn LogisticRegression.
-        test_cache: Float16 array of shape (N_test, L, T, H).
-        test_labels: Int array of shape (N_test,).
-        layer_idx: Index into the L dimension.
-        token_pos: Index into the T dimension.
-        outlier_class: Class index treated as the positive/hallucination class.
-
-    Returns:
-        auroc: AUROC score (float).
-        scores: 1-D float32 array of shape (N_test,), probability of outlier_class.
+    Reads only the (N_test, H) column.
     """
-    X = test_cache[:, layer_idx, token_pos, :].astype(np.float32)  # (N_test, H)
-    y = np.asarray(test_labels, dtype=np.int32)
+    y = np.asarray(labels, dtype=np.int32)
+    X = _take_column(full_cache, row_indices, layer_idx, token_pos).astype(np.float32)
 
-    # Find the column corresponding to outlier_class in probe.classes_
     classes = list(probe.classes_)
-    if outlier_class in classes:
-        col = classes.index(outlier_class)
-    else:
-        col = 1  # fallback
+    col = classes.index(outlier_class) if outlier_class in classes else 1
 
-    proba = probe.predict_proba(X)  # (N_test, n_classes)
+    proba = probe.predict_proba(X)
     scores = proba[:, col].astype(np.float32)
 
     if len(np.unique(y)) < 2:
