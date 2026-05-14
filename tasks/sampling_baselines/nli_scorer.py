@@ -22,7 +22,7 @@ class NLIScorer:
     def __init__(
         self,
         model_id: str = NLI_MODEL_ID,
-        batch_size: int = 256,
+        batch_size: int = 512,
         device: Optional[str] = None,
     ):
         self.model_id = model_id

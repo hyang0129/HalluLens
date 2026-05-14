@@ -1,0 +1,45 @@
+{
+  "model": "meta-llama/Llama-3.1-8B-Instruct",
+  "dataset": "hotpotqa",
+  "split": "test",
+  "max_tokens": 64,
+  "temperature": 1.0,
+  "warmup_batches": 2,
+  "measured_batches": 5,
+  "device": "NVIDIA H100 80GB HBM3",
+  "vram_total_gb": 79.2,
+  "rows": [
+    {
+      "batch_size": 384,
+      "n_warmup": 2,
+      "n_measured": 5,
+      "batch_walls_sec": [
+        4.866,
+        4.861,
+        5.187,
+        5.462,
+        4.92
+      ],
+      "mean_wall_sec": 5.059,
+      "rows_per_sec": 75.9,
+      "peak_alloc_gb": 35.33,
+      "peak_reserved_gb": 43.46
+    },
+    {
+      "batch_size": 512,
+      "n_warmup": 2,
+      "n_measured": 5,
+      "batch_walls_sec": [
+        6.151,
+        6.526,
+        6.968,
+        6.146,
+        6.577
+      ],
+      "mean_wall_sec": 6.474,
+      "rows_per_sec": 79.09,
+      "peak_alloc_gb": 42.11,
+      "peak_reserved_gb": 52.71
+    }
+  ]
+}

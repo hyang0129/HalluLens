@@ -1,0 +1,39 @@
+{
+  "model": "microsoft/deberta-v2-xlarge-mnli",
+  "dtype": "fp32",
+  "max_length": 512,
+  "device": "NVIDIA H100 80GB HBM3",
+  "warmup_batches": 2,
+  "measured_batches": 5,
+  "results": [
+    {
+      "batch_size": 256,
+      "max_length": 512,
+      "mean_wall_sec": 1.3261,
+      "pairs_per_sec": 193.1,
+      "sec_per_row": 0.5698,
+      "peak_alloc_gb": 13.24
+    },
+    {
+      "batch_size": 512,
+      "max_length": 512,
+      "mean_wall_sec": 2.4493,
+      "pairs_per_sec": 209.0,
+      "sec_per_row": 0.5262,
+      "peak_alloc_gb": 23.13
+    },
+    {
+      "batch_size": 1024,
+      "max_length": 512,
+      "mean_wall_sec": 4.9745,
+      "pairs_per_sec": 205.8,
+      "sec_per_row": 0.5344,
+      "peak_alloc_gb": 44.15
+    },
+    {
+      "batch_size": 2048,
+      "max_length": 512,
+      "oom": true
+    }
+  ]
+}
