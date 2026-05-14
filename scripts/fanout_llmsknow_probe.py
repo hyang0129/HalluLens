@@ -90,9 +90,12 @@ def write_units_file(path: Path, units) -> None:
 
 
 def dispatch_shard(node: str, units_file: Path, seeds: str, dry_run: bool) -> str:
+    # --force-concurrent: llmsknow_probe is CPU-only (sklearn LR + numpy memmap),
+    # so it's safe to co-tenant with an already-running GPU-bound job on the
+    # same slot. The default max_concurrent_jobs=1 guard would otherwise block.
     cmd = [
         "python", "scripts/gpu_dispatch.py", "run",
-        "--jupyter", "--node", node,
+        "--jupyter", "--node", node, "--force-concurrent",
         "--",
         "env", f"UNITS_FILE={units_file}", f"SEEDS={seeds}",
         "bash", "scripts/run_llmsknow_probe_shard.sh",
