@@ -24,6 +24,7 @@ from sklearn.metrics import roc_auc_score
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tasks.p_true.paths import ptrue_scores_path
 from tasks.sampling_baselines.paths import (
     DATASETS,
     MODELS,
@@ -92,6 +93,31 @@ def safe_auroc(scores: list, labels: list) -> Optional[float]:
         return None
 
 
+def bootstrap_auroc(scores: list, labels: list, n: int = 1000, seed: int = 42) -> Optional[tuple]:
+    """Return (lo, hi) 95% bootstrap CI on AUROC, or None if not computable."""
+    base = safe_auroc(scores, labels)
+    if base is None:
+        return None
+    rng = np.random.default_rng(seed)
+    y = np.array(labels, dtype=int)
+    s = np.array(scores, dtype=float)
+    mask = np.isfinite(s)
+    y, s = y[mask], s[mask]
+    aucs = []
+    for _ in range(n):
+        idx = rng.integers(0, len(y), size=len(y))
+        if len(np.unique(y[idx])) < 2:
+            continue
+        try:
+            aucs.append(roc_auc_score(y[idx], s[idx]))
+        except Exception:
+            pass
+    if len(aucs) < 50:
+        return None
+    aucs = np.array(aucs)
+    return (float(np.percentile(aucs, 2.5)), float(np.percentile(aucs, 97.5)))
+
+
 # ---------------------------------------------------------------------------
 # Per-dataset scorer
 # ---------------------------------------------------------------------------
@@ -150,6 +176,35 @@ def compute_dataset_aurocs(dataset: str, model_id: str) -> dict:
         result["sep_layer"] = sep_data.get("layer")
         result["sep_binary_n_train"] = sep_data.get("train_size_sep_binary")
         result["sep_se_n_train"] = sep_data.get("train_size_sep_se")
+
+    # P(true) — score direction: 1 - p_true (high p_true ⇒ correct ⇒ low halu score)
+    pt_path = ptrue_scores_path(dataset, model_id, "test")
+    if pt_path.exists():
+        pt_by_row = load_jsonl_by_row(str(pt_path))
+        # P(true) runs on all rows (no cap), so cap_indices is irrelevant here.
+        scores_fwd, lbls_fwd = [], []
+        scores_rev, lbls_rev = [], []
+        for row_idx, rec in sorted(pt_by_row.items()):
+            if row_idx >= len(labels_all):
+                continue
+            lbl = labels_all[row_idx]
+            if (v := rec.get("p_true")) is not None and np.isfinite(v):
+                scores_fwd.append(1.0 - v)
+                lbls_fwd.append(lbl)
+            if (v := rec.get("p_true_reversed")) is not None and np.isfinite(v):
+                scores_rev.append(1.0 - v)
+                lbls_rev.append(lbl)
+        auroc_fwd = safe_auroc(scores_fwd, lbls_fwd)
+        auroc_rev = safe_auroc(scores_rev, lbls_rev)
+        result["p_true_auroc_fwd"] = auroc_fwd
+        result["p_true_auroc_rev"] = auroc_rev
+        # Headline: max over forward / reversed (token-position-bias correction)
+        if auroc_fwd is not None and auroc_rev is not None:
+            result["p_true"] = max(auroc_fwd, auroc_rev)
+        elif auroc_fwd is not None:
+            result["p_true"] = auroc_fwd
+        else:
+            result["p_true"] = auroc_rev
 
     return result
 
@@ -237,12 +292,70 @@ def make_compute_matched_figure(table: pd.DataFrame, output_path: str) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+def _write_ptrue_bootstrap_ci(models, datasets, out_dir: Path) -> None:
+    """Compute and save bootstrap 95% CIs for P(true) AUROC across all cells."""
+    print("\nComputing P(true) bootstrap CIs (1000 resamples)...")
+    ci_results = []
+    for mid in models:
+        labels_cache = {}
+        for ds in datasets:
+            pt_path = ptrue_scores_path(ds, mid, "test")
+            if not pt_path.exists():
+                continue
+            if ds not in labels_cache:
+                eval_path = eval_results_json(ds, mid, "test")
+                if not eval_path.exists():
+                    continue
+                with open(eval_path) as f:
+                    labels_cache[ds] = np.array(json.load(f)["halu_test_res"], dtype=int)
+            labels_all = labels_cache[ds]
+
+            pt_by_row = load_jsonl_by_row(str(pt_path))
+            scores_fwd, lbls = [], []
+            scores_rev = []
+            for row_idx, rec in sorted(pt_by_row.items()):
+                if row_idx >= len(labels_all):
+                    continue
+                lbl = labels_all[row_idx]
+                if (v := rec.get("p_true")) is not None and np.isfinite(v):
+                    scores_fwd.append(1.0 - v)
+                    lbls.append(lbl)
+                if (v := rec.get("p_true_reversed")) is not None and np.isfinite(v):
+                    scores_rev.append(1.0 - v)
+
+            ci_fwd = bootstrap_auroc(scores_fwd, lbls)
+            ci_rev = bootstrap_auroc(scores_rev, lbls)
+            ci_results.append({
+                "dataset": ds,
+                "model": model_name(mid),
+                "p_true_auroc_fwd": safe_auroc(scores_fwd, lbls),
+                "p_true_ci_fwd": ci_fwd,
+                "p_true_auroc_rev": safe_auroc(scores_rev, lbls),
+                "p_true_ci_rev": ci_rev,
+                "n_rows": len(scores_fwd),
+            })
+            print(
+                f"  {ds}/{model_name(mid)}: "
+                f"fwd={ci_fwd}, rev={ci_rev}"
+            )
+
+    ci_path = out_dir / "p_true_bootstrap.json"
+    with open(ci_path, "w") as f:
+        json.dump(ci_results, f, indent=2)
+    print(f"Bootstrap CIs saved → {ci_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Assemble AUROC table and figure.")
     parser.add_argument("--models", nargs="+", default=MODELS)
     parser.add_argument("--datasets", nargs="+", default=DATASETS, choices=DATASETS)
     parser.add_argument("--output-dir", default="output/baseline_results")
     parser.add_argument("--no-figure", action="store_true")
+    parser.add_argument(
+        "--with-ci",
+        action="store_true",
+        help="Compute bootstrap 95%% CIs for all methods (slow; 1000 resamples × cells).",
+    )
     args = parser.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -266,9 +379,15 @@ def main():
         "dataset", "model",
         "se_length_normalized", "selfcheck_nli",
         "sep_se_auroc", "sep_binary_auroc",
+        "p_true",             # headline: max(fwd, rev) — score = 1 - P(true)
+        "p_true_auroc_fwd",
+        "p_true_auroc_rev",
     ]
     print_cols = [c for c in main_cols if c in table.columns]
     print(table[print_cols].to_string(index=False))
+
+    if args.with_ci:
+        _write_ptrue_bootstrap_ci(args.models, args.datasets, out_dir)
 
     if not args.no_figure:
         make_compute_matched_figure(table, str(out_dir / "compute_matched_auroc.pdf"))
