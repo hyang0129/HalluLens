@@ -29,7 +29,12 @@ def main():
     parser.add_argument("--dataset", required=True, choices=SAMPLING_DATASETS)
     parser.add_argument("--split", required=True, choices=["train", "test"])
     parser.add_argument("--model", required=True, help="HuggingFace model ID used for generation")
-    parser.add_argument("--threshold", type=float, default=0.5, help="Bidirectional NLI threshold")
+    parser.add_argument(
+        "--strict-entailment",
+        action="store_true",
+        help="Use the reference's strict rule (both directions argmax==entailment). "
+             "Default is the reference's loose rule (no contradiction, not both neutral).",
+    )
     args = parser.parse_args()
 
     samples = selfcheck_samples_path(args.dataset, args.model, args.split)
@@ -41,8 +46,11 @@ def main():
             print(f"ERROR: {label} file not found: {p}")
             sys.exit(1)
 
-    print(f"SE | {args.dataset}/{args.split} | {model_name(args.model)} | threshold={args.threshold}")
-    score_files(str(samples), str(nli), str(out), threshold=args.threshold)
+    print(
+        f"SE | {args.dataset}/{args.split} | {model_name(args.model)} | "
+        f"strict_entailment={args.strict_entailment}"
+    )
+    score_files(str(samples), str(nli), str(out), strict_entailment=args.strict_entailment)
 
 
 if __name__ == "__main__":

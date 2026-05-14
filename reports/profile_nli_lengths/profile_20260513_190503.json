@@ -1,0 +1,193 @@
+{
+  "tokenizer": "microsoft/deberta-v2-xlarge-mnli",
+  "max_rows_per_cell": 5000,
+  "per_cell": [
+    {
+      "split": "test",
+      "dataset": "hotpotqa",
+      "model": "Llama-3.1-8B-Instruct",
+      "n": 5000,
+      "p50": 57,
+      "p90": 62,
+      "p95": 64,
+      "p99": 66,
+      "max": 88
+    },
+    {
+      "split": "test",
+      "dataset": "hotpotqa",
+      "model": "Qwen3-8B",
+      "n": 5000,
+      "p50": 58,
+      "p90": 64,
+      "p95": 65,
+      "p99": 67,
+      "max": 76
+    },
+    {
+      "split": "test",
+      "dataset": "popqa",
+      "model": "Llama-3.1-8B-Instruct",
+      "n": 2854,
+      "p50": 115,
+      "p90": 124,
+      "p95": 126,
+      "p99": 130,
+      "max": 154
+    },
+    {
+      "split": "test",
+      "dataset": "popqa",
+      "model": "Qwen3-8B",
+      "n": 2854,
+      "p50": 59,
+      "p90": 64,
+      "p95": 65,
+      "p99": 67,
+      "max": 73
+    },
+    {
+      "split": "test",
+      "dataset": "sciq",
+      "model": "Llama-3.1-8B-Instruct",
+      "n": 1000,
+      "p50": 116,
+      "p90": 125,
+      "p95": 127,
+      "p99": 132,
+      "max": 156
+    },
+    {
+      "split": "test",
+      "dataset": "sciq",
+      "model": "Qwen3-8B",
+      "n": 1000,
+      "p50": 61,
+      "p90": 64,
+      "p95": 65,
+      "p99": 67,
+      "max": 73
+    },
+    {
+      "split": "test",
+      "dataset": "searchqa",
+      "model": "Llama-3.1-8B-Instruct",
+      "n": 5000,
+      "p50": 116,
+      "p90": 127,
+      "p95": 130,
+      "p99": 141,
+      "max": 171
+    },
+    {
+      "split": "test",
+      "dataset": "searchqa",
+      "model": "Qwen3-8B",
+      "n": 5000,
+      "p50": 59,
+      "p90": 64,
+      "p95": 65,
+      "p99": 67,
+      "max": 74
+    },
+    {
+      "split": "train",
+      "dataset": "hotpotqa",
+      "model": "Llama-3.1-8B-Instruct",
+      "n": 5000,
+      "p50": 57,
+      "p90": 62,
+      "p95": 64,
+      "p99": 66,
+      "max": 87
+    },
+    {
+      "split": "train",
+      "dataset": "hotpotqa",
+      "model": "Qwen3-8B",
+      "n": 5000,
+      "p50": 58,
+      "p90": 64,
+      "p95": 65,
+      "p99": 67,
+      "max": 77
+    },
+    {
+      "split": "train",
+      "dataset": "popqa",
+      "model": "Llama-3.1-8B-Instruct",
+      "n": 5000,
+      "p50": 116,
+      "p90": 125,
+      "p95": 127,
+      "p99": 131,
+      "max": 181
+    },
+    {
+      "split": "train",
+      "dataset": "popqa",
+      "model": "Qwen3-8B",
+      "n": 5000,
+      "p50": 60,
+      "p90": 64,
+      "p95": 65,
+      "p99": 67,
+      "max": 78
+    },
+    {
+      "split": "train",
+      "dataset": "sciq",
+      "model": "Llama-3.1-8B-Instruct",
+      "n": 5000,
+      "p50": 116,
+      "p90": 125,
+      "p95": 127,
+      "p99": 131,
+      "max": 205
+    },
+    {
+      "split": "train",
+      "dataset": "sciq",
+      "model": "Qwen3-8B",
+      "n": 5000,
+      "p50": 61,
+      "p90": 64,
+      "p95": 65,
+      "p99": 67,
+      "max": 74
+    },
+    {
+      "split": "train",
+      "dataset": "searchqa",
+      "model": "Llama-3.1-8B-Instruct",
+      "n": 5000,
+      "p50": 116,
+      "p90": 127,
+      "p95": 130,
+      "p99": 142,
+      "max": 191
+    },
+    {
+      "split": "train",
+      "dataset": "searchqa",
+      "model": "Qwen3-8B",
+      "n": 5000,
+      "p50": 60,
+      "p90": 64,
+      "p95": 65,
+      "p99": 68,
+      "max": 76
+    }
+  ],
+  "pooled": {
+    "n": 67708,
+    "p50": 62,
+    "p90": 120,
+    "p95": 124,
+    "p99": 130,
+    "max": 205
+  },
+  "pair_max_tokens": 413,
+  "margin": 1.5,
+  "suggested_max_length": 640
+}

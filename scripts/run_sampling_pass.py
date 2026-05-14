@@ -74,7 +74,14 @@ def main():
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=384,
+        help="Sampling batch size. 384 is the throughput sweet spot on H100 80GB "
+             "for both Llama-3.1-8B and Qwen3-8B at max_tokens=64 (see "
+             "reports/benchmark_sampling_batch/).",
+    )
     parser.add_argument(
         "--smoketest",
         action="store_true",

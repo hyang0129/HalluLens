@@ -8,6 +8,16 @@ MODELS = [
     "Qwen/Qwen3-8B",
 ]
 
+# Canonical dataset names → on-disk directory stems. Most datasets are 1:1, but
+# `nq` shipped with directories named `natural_questions[_train]`.
+_DATASET_DIR_STEM = {
+    "nq": "natural_questions",
+}
+
+
+def _dir_stem(dataset: str) -> str:
+    return _DATASET_DIR_STEM.get(dataset, dataset)
+
 
 def model_name(model_id: str) -> str:
     """Last component of HuggingFace model ID, matching output path convention."""
@@ -20,24 +30,28 @@ def model_slug(model_id: str) -> str:
 
 
 def generation_jsonl(dataset: str, model_id: str, split: str) -> Path:
-    ds_dir = f"{dataset}_train" if split == "train" else dataset
+    stem = _dir_stem(dataset)
+    ds_dir = f"{stem}_train" if split == "train" else stem
     return Path("output") / ds_dir / model_name(model_id) / "generation.jsonl"
 
 
 def eval_results_json(dataset: str, model_id: str, split: str) -> Path:
-    ds_dir = f"{dataset}_train" if split == "train" else dataset
+    stem = _dir_stem(dataset)
+    ds_dir = f"{stem}_train" if split == "train" else stem
     return Path("output") / ds_dir / model_name(model_id) / "eval_results_for_training.json"
 
 
 def zarr_path(dataset: str, model_id: str, split: str) -> Path:
+    stem = _dir_stem(dataset)
     slug = model_slug(model_id)
     if split == "train":
-        return Path("shared") / f"{dataset}_train_{slug}" / "activations.zarr"
-    return Path("shared") / f"{dataset}_{slug}" / "activations.zarr"
+        return Path("shared") / f"{stem}_train_{slug}" / "activations.zarr"
+    return Path("shared") / f"{stem}_{slug}" / "activations.zarr"
 
 
 def sampling_output_dir(dataset: str, model_id: str, split: str) -> Path:
-    ds_dir = f"{dataset}_train" if split == "train" else dataset
+    stem = _dir_stem(dataset)
+    ds_dir = f"{stem}_train" if split == "train" else stem
     return Path("output") / "sampling_baselines" / ds_dir / model_name(model_id)
 
 

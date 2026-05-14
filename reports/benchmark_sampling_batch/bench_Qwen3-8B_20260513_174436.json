@@ -1,0 +1,93 @@
+{
+  "model": "Qwen/Qwen3-8B",
+  "dataset": "hotpotqa",
+  "split": "test",
+  "max_tokens": 64,
+  "temperature": 1.0,
+  "warmup_batches": 2,
+  "measured_batches": 5,
+  "device": "NVIDIA H100 80GB HBM3",
+  "vram_total_gb": 79.2,
+  "rows": [
+    {
+      "batch_size": 16,
+      "n_warmup": 2,
+      "n_measured": 5,
+      "batch_walls_sec": [
+        2.59,
+        2.464,
+        2.568,
+        2.631,
+        2.477
+      ],
+      "mean_wall_sec": 2.546,
+      "rows_per_sec": 6.28,
+      "peak_alloc_gb": 16.25,
+      "peak_reserved_gb": 16.45
+    },
+    {
+      "batch_size": 32,
+      "n_warmup": 2,
+      "n_measured": 5,
+      "batch_walls_sec": [
+        2.474,
+        2.575,
+        2.503,
+        2.578,
+        2.604
+      ],
+      "mean_wall_sec": 2.547,
+      "rows_per_sec": 12.56,
+      "peak_alloc_gb": 17.29,
+      "peak_reserved_gb": 17.5
+    },
+    {
+      "batch_size": 64,
+      "n_warmup": 2,
+      "n_measured": 5,
+      "batch_walls_sec": [
+        2.54,
+        2.648,
+        2.641,
+        2.586,
+        2.654
+      ],
+      "mean_wall_sec": 2.614,
+      "rows_per_sec": 24.48,
+      "peak_alloc_gb": 19.26,
+      "peak_reserved_gb": 19.67
+    },
+    {
+      "batch_size": 128,
+      "n_warmup": 2,
+      "n_measured": 5,
+      "batch_walls_sec": [
+        2.958,
+        2.928,
+        2.986,
+        2.79,
+        2.957
+      ],
+      "mean_wall_sec": 2.924,
+      "rows_per_sec": 43.78,
+      "peak_alloc_gb": 22.94,
+      "peak_reserved_gb": 23.98
+    },
+    {
+      "batch_size": 256,
+      "n_warmup": 2,
+      "n_measured": 5,
+      "batch_walls_sec": [
+        4.104,
+        4.024,
+        4.063,
+        4.058,
+        4.243
+      ],
+      "mean_wall_sec": 4.098,
+      "rows_per_sec": 62.46,
+      "peak_alloc_gb": 30.74,
+      "peak_reserved_gb": 32.95
+    }
+  ]
+}

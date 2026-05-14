@@ -121,9 +121,13 @@ def compute_dataset_aurocs(dataset: str, model_id: str) -> dict:
             lbls.append(labels_all[row_idx])
         return scores, lbls
 
-    # SE (length-normalized)
+    # SE — headline is `semantic_entropy` (rao over logsumexp_by_id, raw sequence_logprob).
+    # length-normalized and discrete kept as auxiliary metrics.
     if dataset in SAMPLING_DATASETS:
         se_by_row = load_jsonl_by_row(str(se_labels_path(dataset, model_id, "test")))
+        scores, lbls = get_aligned(se_by_row, "semantic_entropy")
+        result["semantic_entropy"] = safe_auroc(scores, lbls)
+
         scores, lbls = get_aligned(se_by_row, "length_normalized_se")
         result["se_length_normalized"] = safe_auroc(scores, lbls)
 

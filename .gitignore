@@ -82,3 +82,6 @@ exploratory_work/
 
 # Ephemeral smoketest outputs (logs, GPU samples, time -v dumps)
 reports/smoketest_*/
+
+# Ephemeral sampling-baseline run outputs (cell/shard logs, fanout TSVs)
+reports/sampling_baselines_runs/

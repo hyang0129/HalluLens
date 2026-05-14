@@ -34,7 +34,14 @@ def main():
     parser.add_argument("--split", required=True, choices=["train", "test"])
     parser.add_argument("--model", required=True, help="HuggingFace model ID used for generation")
     parser.add_argument("--nli-model", default=NLI_MODEL_ID)
-    parser.add_argument("--batch-size", type=int, default=256, help="NLI pairs per forward pass")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=512,
+        help="NLI pairs per forward pass. 512 is the throughput sweet spot at fp32 "
+             "for deberta-v2-xlarge-mnli on H100 80GB (see "
+             "reports/benchmark_nli_throughput/); 1024 was slower.",
+    )
     parser.add_argument("--device", default=None, help="cuda / cpu (auto-detected if not set)")
     args = parser.parse_args()
 
