@@ -43,7 +43,10 @@ echo "============================================" | tee -a "$SHARD_LOG"
 
 FAILED_UNITS=()
 i=0
-while IFS=$'\t' read -r experiment_cfg; do
+# TSV format (written by scripts/fanout_llmsknow_probe.py):
+#   <experiment_config_path>\t# <human-readable label>
+# Split on TAB so the trailing label comment goes into the (ignored) second field.
+while IFS=$'\t' read -r experiment_cfg _label_comment; do
     case "$experiment_cfg" in ''|\#*) continue ;; esac
     i=$((i+1))
     unit_name=$(basename "$experiment_cfg" .json)
