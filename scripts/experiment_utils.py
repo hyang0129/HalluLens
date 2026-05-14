@@ -27,7 +27,21 @@ class RunSpec:
     method_name: str
     seed: Optional[int]
     run_dir: str
-    is_learned: bool
+    is_learned: bool  # True if the method runs once per seed (has a training block OR seeded: true)
+
+
+def is_seeded_method(method_cfg: dict) -> bool:
+    """True iff the method should produce one run per seed.
+
+    A method is seeded if either:
+      - it has a ``training`` block (gradient-trained learned methods), or
+      - it sets ``seeded: true`` explicitly (e.g. sklearn-based probes whose
+        train/dev split and ``random_state`` depend on the seed but have no
+        gradient training block).
+    """
+    if method_cfg.get("training") is not None:
+        return True
+    return bool(method_cfg.get("seeded", False))
 
 
 def load_experiment_config(
@@ -92,8 +106,8 @@ def enumerate_runs(
     """Produce the full list of expected runs from an experiment config.
 
     Replicates the directory path construction from run_experiment.py:
-      - Learned methods (those with "training" in their config): one run per seed
-      - Non-learned methods: one run with seed=None
+      - Seeded methods (training block OR ``seeded: true``): one run per seed
+      - Non-seeded methods: one run with seed=None
       - Path: {output_base}/{exp_name}/{dataset}/{method}/seed_{seed}
               or {output_base}/{exp_name}/{dataset}/{method}
     """
@@ -114,7 +128,7 @@ def enumerate_runs(
     for dataset_name in datasets:
         for method_name in methods:
             method_cfg = method_configs.get(method_name, {})
-            is_learned = method_cfg.get("training") is not None
+            is_learned = is_seeded_method(method_cfg)
             seeds = training_seeds if is_learned else [None]
 
             for seed in seeds:

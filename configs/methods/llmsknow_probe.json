@@ -1,6 +1,7 @@
 {
   "name": "llmsknow_probe",
   "routine": "llmsknow_probe",
+  "seeded": true,
   "data": {
     "relevant_layers": "14-29",
     "pad_length": 63,

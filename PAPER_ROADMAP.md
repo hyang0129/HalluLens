@@ -1,6 +1,7 @@
 # Paper Roadmap — EMNLP Submission
 
-**Last updated:** 2026-05-12 (SAPLMA baseline added to grid; semantic-entropy item rescoped to a sampling-based baselines bundle — SE + SelfCheckGPT + SEP-SE + SEP-binary across 5–6 datasets, see #49)
+**Last updated:** 2026-05-14 (extended-metrics row scoped to AUPRC + ECE + FPR@95 + bootstrap 95% CIs as a pure-CPU recompute on existing `predictions.csv` — see #59; llmsknow_probe seed bug fixed in #58, archived seed=null runs and dispatched 5-seed re-runs across 3 GPU nodes)
+**Previously:** 2026-05-12 (SAPLMA baseline added to grid; semantic-entropy item rescoped to a sampling-based baselines bundle — SE + SelfCheckGPT + SEP-SE + SEP-binary across 5–6 datasets, see #49)
 **Target venue:** EMNLP 2026 (Main / Findings)
 **Submission window:** ~4 weeks from today
 **Status:** seed-0 sweep complete; multi-seed expansion + second-model + missing baselines in flight
@@ -40,7 +41,7 @@ If any of those clauses fails to hold up empirically, the framing changes — th
 | P(true) baseline | ❌ not started | Cheap; one extra prompt per example. Tracked in [#50](https://github.com/hyang0129/HalluLens/issues/50). Output-space only — does not need activation logging; can run concurrently with the seed sweeps. |
 | Sampling-based baselines bundle (SE + SelfCheckGPT + SEP-SE + SEP-binary) | ❌ not started | One K=10 sampling pass produces 4 baselines. 5 free-form datasets {HotpotQA, NQ, PopQA, SciQ, SearchQA} for SE/SelfCheckGPT/SEP-SE; 6 datasets for SEP-binary (MMLU added — SEP-binary is activation-space and survives the NLI-clustering degeneracy on letter tokens that excludes MMLU from SE/SelfCheckGPT). SearchQA capped 10k test / 5k train. SEP-SE trained on 5k stratified train subset (Kossen-faithful regression on SE labels); SEP-binary trained on full train split with binary hallu labels — free byproduct, apples-to-apples with linear probe. Tracked in [#49](https://github.com/hyang0129/HalluLens/issues/49). Sampling pass is output-space only — can run concurrently with the seed sweeps on a separate GPU. |
 | Cross-dataset transfer table | ❌ not started | Train→test pairs across datasets, no new training |
-| AUPRC, ECE, bootstrap 95% CIs | ❌ not started | Pure analysis; zero compute |
+| AUPRC, ECE, FPR@95, bootstrap 95% CIs | ❌ not started | Pure CPU recompute on existing `predictions.csv` (zero GPU). FPR@95 = standard operational detection metric (lower is better). Tracked in [#59](https://github.com/hyang0129/HalluLens/issues/59). |
 | Ablation: SimCLR-only vs +logprob-recon | ✅ tried | Unsupervised SimCLR features + linear probe on top → ~random guessing. Logprob-recon aux loss is load-bearing. Need to log the run + write it up; no further compute. |
 | Ablation: layer-pair sensitivity | ❌ not started | Reuses cached activations |
 | Paper draft | ❌ not started | Target ~16h student time; LaTeX from week 3 |

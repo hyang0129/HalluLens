@@ -73,6 +73,7 @@ _memmap_cache/
 
 # Experiment run outputs
 runs/
+runs_archive/
 
 # Exploratory work (scratch notebooks, experiments)
 exploratory_work/
@@ -85,3 +86,6 @@ reports/smoketest_*/
 
 # Ephemeral sampling-baseline run outputs (cell/shard logs, fanout TSVs)
 reports/sampling_baselines_runs/
+
+# Ephemeral llmsknow_probe re-run outputs (shard logs, fanout TSVs)
+reports/llmsknow_probe_runs/
