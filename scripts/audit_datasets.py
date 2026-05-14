@@ -32,8 +32,11 @@ DATASETS = [
     ("popqa_train",            "train",          11_413),
     ("sciq",                   "test",            1_000),
     ("sciq_train",             "train",          11_679),
-    ("searchqa",               "train",         151_295),  # HF "train" = searchqa test (Qwen3 convention)
-    ("searchqa_train",         "test",           43_228),  # HF "test"  = searchqa train (Qwen3 convention)
+    # Note: SearchQA dir names predate the #60 flip to HF-standard convention.
+    # On-disk row counts reflect HF origin (unchanged); see configs/datasets/searchqa*.json
+    # for the post-flip role mapping (151K dir → train, 43K dir → test).
+    ("searchqa",               "train",         151_295),  # HF train split → used as train (post #60)
+    ("searchqa_train",         "test",           43_228),  # HF test split  → used as test  (post #60)
 ]
 
 # Train splits tolerate 0.25% variance; test splits must be exact.

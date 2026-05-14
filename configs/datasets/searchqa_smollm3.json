@@ -6,15 +6,15 @@
   "label_source": "eval_json",
   "outlier_class": 1,
   "train": {
-    "inference_json": "output/searchqa_train/SmolLM3-3B/generation.jsonl",
-    "activations_path": "shared/searchqa_train_smollm3_3b/activations.zarr",
-    "eval_json": "output/searchqa_train/SmolLM3-3B/eval_results.json",
-    "raw_eval_jsonl": "output/searchqa_train/SmolLM3-3B/raw_eval_res.jsonl"
-  },
-  "test": {
     "inference_json": "output/searchqa/SmolLM3-3B/generation.jsonl",
     "activations_path": "shared/searchqa_smollm3_3b/activations.zarr",
     "eval_json": "output/searchqa/SmolLM3-3B/eval_results.json",
     "raw_eval_jsonl": "output/searchqa/SmolLM3-3B/raw_eval_res.jsonl"
+  },
+  "test": {
+    "inference_json": "output/searchqa_train/SmolLM3-3B/generation.jsonl",
+    "activations_path": "shared/searchqa_train_smollm3_3b/activations.zarr",
+    "eval_json": "output/searchqa_train/SmolLM3-3B/eval_results.json",
+    "raw_eval_jsonl": "output/searchqa_train/SmolLM3-3B/raw_eval_res.jsonl"
   }
 }
