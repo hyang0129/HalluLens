@@ -117,7 +117,7 @@
       "jupyter_password": "123",
       "source": "squeue",
       "slurm_job_id": "945791",
-      "slurm_time_left": "2-23:17:18"
+      "slurm_time_left": "1-23:21:20"
     },
     {
       "name": "alphagpu03-8887",
@@ -134,7 +134,7 @@
       "jupyter_password": "123",
       "source": "squeue",
       "slurm_job_id": "945457",
-      "slurm_time_left": "2-23:17:24"
+      "slurm_time_left": "1-23:21:26"
     },
     {
       "name": "alphagpu03-8888",
@@ -151,7 +151,7 @@
       "jupyter_password": "123",
       "source": "squeue",
       "slurm_job_id": "945136",
-      "slurm_time_left": "2-23:17:18"
+      "slurm_time_left": "1-23:21:20"
     },
     {
       "name": "alphagpu03-8889",
@@ -168,7 +168,41 @@
       "jupyter_password": "123",
       "source": "squeue",
       "slurm_job_id": "945140",
-      "slurm_time_left": "2-23:17:18"
+      "slurm_time_left": "1-23:21:20"
+    },
+    {
+      "name": "alphagpu01-8886",
+      "hostname": "alphagpu01",
+      "python": "/mnt/home/hyang1/.local/share/mamba/envs/p311/bin/python",
+      "project_root": "/mnt/home/hyang1/LLM_research/HalluLens",
+      "max_concurrent_jobs": 1,
+      "tags": [
+        "training",
+        "inference",
+        "jupyter-only"
+      ],
+      "jupyter_url": "http://alphagpu01:8886",
+      "jupyter_password": "123",
+      "source": "squeue",
+      "slurm_job_id": "948692",
+      "slurm_time_left": "2-22:56:54"
+    },
+    {
+      "name": "alphagpu01-8885",
+      "hostname": "alphagpu01",
+      "python": "/mnt/home/hyang1/.local/share/mamba/envs/p311/bin/python",
+      "project_root": "/mnt/home/hyang1/LLM_research/HalluLens",
+      "max_concurrent_jobs": 1,
+      "tags": [
+        "training",
+        "inference",
+        "jupyter-only"
+      ],
+      "jupyter_url": "http://alphagpu01:8885",
+      "jupyter_password": "123",
+      "source": "squeue",
+      "slurm_job_id": "948691",
+      "slurm_time_left": "2-22:56:51"
     }
   ],
   "defaults": {
