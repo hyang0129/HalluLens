@@ -2032,10 +2032,12 @@ def main() -> None:
                     method_cfg["training"] = dict(method_cfg["training"])
                     method_cfg["training"]["max_epochs"] = max_epochs_override
 
-                is_learned = method_cfg.get("training") is not None
+                from scripts.experiment_utils import is_seeded_method
+
+                is_learned = is_seeded_method(method_cfg)
 
                 if not is_learned:
-                    # Non-learned methods run exactly once across the entire seed sweep.
+                    # Non-seeded methods run exactly once across the entire seed sweep.
                     if method_name in completed_nonlearned:
                         continue
                     effective_seed = None

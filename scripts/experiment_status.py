@@ -40,6 +40,7 @@ from scripts.experiment_utils import (
     classify_run,
     count_summary,
     enumerate_runs,
+    is_seeded_method,
     load_experiment_config,
 )
 
@@ -155,7 +156,9 @@ def _print_status_matrix(
         n_learned = sum(
             1
             for m in methods_seen
-            if experiment_cfg.get("method_configs", {}).get(m, {}).get("training") is not None
+            if is_seeded_method(
+                experiment_cfg.get("method_configs", {}).get(m, {})
+            )
         )
         n_non_learned = len(methods_seen) - n_learned
         total = (n_learned * len(seeds) + n_non_learned) * len(datasets_seen)
