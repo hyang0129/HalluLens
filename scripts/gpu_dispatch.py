@@ -708,24 +708,46 @@ def cmd_status(args: argparse.Namespace) -> None:
         if job.status == "running":
             running_counts[job.node_name] = running_counts.get(job.node_name, 0) + 1
 
-    # Check all nodes in parallel via SSH; then retry unreachable ones via Jupyter
+    # Probe nodes for health. Nodes with jupyter_url are probed via Jupyter
+    # first because the kernel runs inside the SLURM cgroup and so nvidia-smi
+    # only sees the GPU actually allocated to that logical port. SSH on a
+    # multi-GPU host returns every physical GPU and the parser only keeps the
+    # first one, so the reading would belong to whichever GPU happens to be
+    # index 0 — usually not the one our job is on.
     statuses: dict = {}
-    with ThreadPoolExecutor(max_workers=max(1, len(nodes))) as pool:
-        futures = {
-            pool.submit(check_node_health, node, ssh_timeout): node
-            for node in nodes
-        }
-        for future in as_completed(futures):
-            node = futures[future]
-            statuses[node.name] = future.result()
+    jupyter_first = [n for n in nodes if n.jupyter_url]
+    ssh_only = [n for n in nodes if not n.jupyter_url]
 
-    # For SSH-unreachable nodes that have jupyter_url, try Jupyter health check
-    jupyter_nodes = [n for n in nodes if n.jupyter_url and not statuses[n.name].reachable]
-    if jupyter_nodes:
-        with ThreadPoolExecutor(max_workers=max(1, len(jupyter_nodes))) as pool:
+    if jupyter_first:
+        with ThreadPoolExecutor(max_workers=max(1, len(jupyter_first))) as pool:
             futures = {
                 pool.submit(check_node_health_jupyter, node): node
-                for node in jupyter_nodes
+                for node in jupyter_first
+            }
+            for future in as_completed(futures):
+                node = futures[future]
+                statuses[node.name] = future.result()
+
+    if ssh_only:
+        with ThreadPoolExecutor(max_workers=max(1, len(ssh_only))) as pool:
+            futures = {
+                pool.submit(check_node_health, node, ssh_timeout): node
+                for node in ssh_only
+            }
+            for future in as_completed(futures):
+                node = futures[future]
+                statuses[node.name] = future.result()
+
+    # SSH fallback for jupyter_url nodes whose Jupyter probe failed.
+    ssh_fallback = [
+        n for n in jupyter_first
+        if not statuses[n.name].reachable
+    ]
+    if ssh_fallback:
+        with ThreadPoolExecutor(max_workers=max(1, len(ssh_fallback))) as pool:
+            futures = {
+                pool.submit(check_node_health, node, ssh_timeout): node
+                for node in ssh_fallback
             }
             for future in as_completed(futures):
                 node = futures[future]
