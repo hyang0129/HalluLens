@@ -2,6 +2,7 @@
   "experiment_name": "baseline_comparison_hotpotqa_qwen3",
   "dataset": "hotpotqa_qwen3",
   "methods": [
+    "contrastive",
     "contrastive_logprob_recon",
     "linear_probe",
     "token_entropy",

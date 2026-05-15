@@ -2,6 +2,7 @@
   "experiment_name": "baseline_comparison_popqa",
   "dataset": "popqa",
   "methods": [
+    "contrastive",
     "contrastive_logprob_recon",
     "linear_probe",
     "token_entropy",
