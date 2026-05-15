@@ -21,17 +21,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tasks.p_true.paths import DATASETS, ptrue_scores_path
+from tasks.p_true.paths import DATASETS, ptrue_scores_path, resolve_split_paths
 from tasks.p_true.scorer import PTrueScorer
-from tasks.sampling_baselines.paths import eval_results_json, generation_jsonl, model_name
+from tasks.sampling_baselines.paths import model_name
 
 SMOKETEST_ROWS = 50
 
 
-def load_labels(dataset: str, model_id: str, split: str) -> list:
-    eval_path = eval_results_json(dataset, model_id, split)
+def load_labels(eval_path) -> list:
     if not eval_path.exists():
-        raise FileNotFoundError(f"eval_results not found: {eval_path}")
+        raise FileNotFoundError(f"eval_json not found: {eval_path}")
     with open(eval_path) as f:
         data = json.load(f)
     return data["halu_test_res"]
@@ -50,12 +49,14 @@ def main():
     )
     args = parser.parse_args()
 
-    gen_path = generation_jsonl(args.dataset, args.model, args.split)
+    paths = resolve_split_paths(args.dataset, args.model, args.split)
+    gen_path = paths["generation_jsonl"]
+    eval_path = paths["eval_json"]
     if not gen_path.exists():
         print(f"ERROR: generation.jsonl not found: {gen_path}")
         sys.exit(1)
 
-    labels = load_labels(args.dataset, args.model, args.split)
+    labels = load_labels(eval_path)
     out_path = ptrue_scores_path(args.dataset, args.model, args.split)
 
     row_indices = None
