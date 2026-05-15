@@ -18,24 +18,26 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tasks.p_true.paths import DATASETS, MODELS, ptrue_scores_path
-from tasks.sampling_baselines.paths import eval_results_json, generation_jsonl, model_name
+from tasks.p_true.paths import DATASETS, MODELS, ptrue_scores_path, resolve_split_paths
+from tasks.sampling_baselines.paths import model_name
 
 
 # Expected test-split row counts per dataset (informational; actual count from
-# generation.jsonl is the authoritative source since SearchQA naming is inverted).
+# generation.jsonl is the authoritative source).  Post-Issue-#60, searchqa test
+# is the ~43K split, not the legacy 151K — paths now come from the dataset
+# config rather than directory naming, so the count below matches reality.
 _EXPECTED_COUNTS = {
     "hotpotqa": 7405,
     "nq": 4155,
     "popqa": 2854,
     "sciq": 1000,
-    "searchqa": 151140,  # ~151K; varies slightly by model
+    "searchqa": 43227,
     "mmlu": 10225,
 }
 
 
 def count_generation_rows(dataset: str, model_id: str) -> int:
-    p = generation_jsonl(dataset, model_id, "test")
+    p = resolve_split_paths(dataset, model_id, "test")["generation_jsonl"]
     if not p.exists():
         return -1
     with open(p) as f:
@@ -92,12 +94,13 @@ def spot_check(models, datasets, n: int, save_dir: Path) -> None:
                 print(f"SKIP {ds}/{model_name(mid)}: ptrue.jsonl not found")
                 continue
 
-            eval_path = eval_results_json(ds, mid, "test")
+            paths = resolve_split_paths(ds, mid, "test")
+            eval_path = paths["eval_json"]
             if ds not in label_cache and eval_path.exists():
                 with open(eval_path) as f:
                     label_cache[ds] = json.load(f).get("halu_test_res", [])
 
-            gen_path = generation_jsonl(ds, mid, "test")
+            gen_path = paths["generation_jsonl"]
 
             # Load ptrue.jsonl
             rows = []
