@@ -89,3 +89,10 @@ reports/sampling_baselines_runs/
 
 # Ephemeral llmsknow_probe re-run outputs (shard logs, fanout TSVs)
 reports/llmsknow_probe_runs/
+
+# Generated experiment-coverage markdown (from scripts/audit_coverage.py)
+reports/experiment_coverage_*.md
+
+# SLURM time-left in nodes.json is auto-refreshed by gpu_dispatch.py
+# sync-jupyter and constantly dirties the working tree.
+configs/nodes.json
