@@ -181,6 +181,47 @@ def test_compute_for_run_skips_ece_for_non_probabilistic(tmp_path: Path):
     assert "token_entropy" not in PROBABILISTIC_METHODS  # sanity
 
 
+def test_results_table_merges_sidecar(tmp_path: Path):
+    """results_table._merge_extended_metrics promotes sidecar fields and
+    flattens CI tuples; missing sidecar is silently skipped (NaN in CSV)."""
+    from scripts.results_table import _merge_extended_metrics
+
+    # No sidecar → no-op, dict unchanged.
+    metrics: dict = {"auroc": 0.8}
+    _merge_extended_metrics(tmp_path, metrics)
+    assert metrics == {"auroc": 0.8}
+
+    # Sidecar present → AUPRC/FPR/ECE merged, CI tuples flattened to *_lo/*_hi.
+    sidecar = {
+        "auroc": 0.823, "auprc": 0.591, "fpr_at_95_tpr": 0.412,
+        "auroc_ci95": [0.811, 0.836], "auprc_ci95": [0.572, 0.609],
+        "fpr_at_95_tpr_ci95": [0.385, 0.441], "ece": 0.038,
+    }
+    with open(tmp_path / "eval_metrics_extended.json", "w") as f:
+        json.dump(sidecar, f)
+    _merge_extended_metrics(tmp_path, metrics)
+    assert metrics["auprc"] == pytest.approx(0.591)
+    assert metrics["fpr_at_95_tpr"] == pytest.approx(0.412)
+    assert metrics["ece"] == pytest.approx(0.038)
+    assert metrics["auroc_ci95_lo"] == pytest.approx(0.811)
+    assert metrics["auroc_ci95_hi"] == pytest.approx(0.836)
+    assert metrics["fpr_at_95_tpr_ci95_hi"] == pytest.approx(0.441)
+
+
+def test_results_table_skips_null_ece(tmp_path: Path):
+    """Non-probabilistic methods write ece=null; merger drops it (no NaN row)."""
+    from scripts.results_table import _merge_extended_metrics
+
+    sidecar = {"auprc": 0.5, "fpr_at_95_tpr": 0.3, "ece": None,
+               "auroc_ci95": [0.4, 0.6]}
+    with open(tmp_path / "eval_metrics_extended.json", "w") as f:
+        json.dump(sidecar, f)
+    metrics: dict = {}
+    _merge_extended_metrics(tmp_path, metrics)
+    assert "ece" not in metrics
+    assert metrics["auprc"] == pytest.approx(0.5)
+
+
 def test_compute_for_run_is_byte_identical(tmp_path: Path):
     rng = np.random.default_rng(0)
     n = 300

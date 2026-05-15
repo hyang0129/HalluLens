@@ -181,6 +181,48 @@ _TRAINING_METRIC_KEYS = {
                                    "seq_logprob_auroc"),
 }
 
+# Extended metrics from eval_metrics_extended.json (issue #59). Universally
+# applicable across methods — sidecar handles the per-method ECE skip itself
+# (writes null for non-probabilistic methods, which is dropped below).
+_EXTENDED_METRIC_KEYS = (
+    "auprc",
+    "fpr_at_95_tpr",
+    "ece",
+)
+# CI fields are 2-tuples on disk; flatten to two scalar columns for the
+# long-form CSV (which expects scalar metric_value).
+_EXTENDED_CI_KEYS = (
+    "auroc_ci95",
+    "auprc_ci95",
+    "fpr_at_95_tpr_ci95",
+)
+
+
+def _merge_extended_metrics(run_dir: Path, metrics: dict[str, float]) -> None:
+    """Merge eval_metrics_extended.json sidecar into ``metrics`` if present.
+
+    Missing sidecar is silent — the corresponding columns will simply be
+    blank in the long-form CSV (effectively NaN). Run
+    ``scripts/compute_extended_metrics.py`` to populate.
+    """
+    sidecar = run_dir / "eval_metrics_extended.json"
+    if not sidecar.exists():
+        return
+    with open(sidecar) as f:
+        ext = json.load(f)
+    for k in _EXTENDED_METRIC_KEYS:
+        v = ext.get(k)
+        if isinstance(v, (int, float)) and np.isfinite(v):
+            metrics[k] = float(v)
+    for k in _EXTENDED_CI_KEYS:
+        ci = ext.get(k)
+        if isinstance(ci, (list, tuple)) and len(ci) == 2:
+            lo, hi = ci
+            if isinstance(lo, (int, float)) and np.isfinite(lo):
+                metrics[f"{k}_lo"] = float(lo)
+            if isinstance(hi, (int, float)) and np.isfinite(hi):
+                metrics[f"{k}_hi"] = float(hi)
+
 
 def _model_from_config_name(cfg_name: str) -> str:
     stem = cfg_name.removesuffix(".json")
@@ -226,6 +268,7 @@ def collect_training_cells() -> list[dict]:
                     v = eval_data.get(k)
                     if isinstance(v, (int, float)) and np.isfinite(v):
                         metrics[k] = float(v)
+                _merge_extended_metrics(run_dir, metrics)
 
             cells.append({
                 "key": {
@@ -242,6 +285,11 @@ def collect_training_cells() -> list[dict]:
                 "paths": {
                     "run_dir":      _rel(run_dir),
                     "eval_metrics": _rel(run_dir / "eval_metrics.json"),
+                    "eval_metrics_extended": (
+                        _rel(run_dir / "eval_metrics_extended.json")
+                        if (run_dir / "eval_metrics_extended.json").exists()
+                        else None
+                    ),
                     "config":       _rel(cfg_path),
                 },
             })
