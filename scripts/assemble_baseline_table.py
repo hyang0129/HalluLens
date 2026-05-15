@@ -171,10 +171,8 @@ def compute_dataset_aurocs(dataset: str, model_id: str) -> dict:
     if sep_path.exists():
         with open(sep_path) as f:
             sep_data = json.load(f)
-        result["sep_binary_auroc"] = sep_data.get("sep_binary_auroc")
         result["sep_se_auroc"] = sep_data.get("sep_se_auroc")
         result["sep_layer"] = sep_data.get("layer")
-        result["sep_binary_n_train"] = sep_data.get("train_size_sep_binary")
         result["sep_se_n_train"] = sep_data.get("train_size_sep_se")
 
     # P(true) — score direction: 1 - p_true (high p_true ⇒ correct ⇒ low halu score)
@@ -230,14 +228,12 @@ def make_compute_matched_figure(table: pd.DataFrame, output_path: str) -> None:
 
     method_style = {
         "Our contrastive (K=1)": dict(K=1, marker="*", color="tab:red", linestyle="none"),
-        "SEP-binary (K=1)": dict(K=1, marker="D", color="tab:orange", linestyle="none"),
         "SEP-SE (K=1)": dict(K=1, marker="s", color="tab:purple", linestyle="none"),
         "SelfCheckGPT-NLI (K=10)": dict(K=10, marker="o", color="tab:blue", linestyle="none"),
         "SE length-norm (K=10)": dict(K=10, marker="^", color="tab:green", linestyle="none"),
     }
 
     col_map = {
-        "SEP-binary (K=1)": "sep_binary_auroc",
         "SEP-SE (K=1)": "sep_se_auroc",
         "SelfCheckGPT-NLI (K=10)": "selfcheck_nli",
         "SE length-norm (K=10)": "se_length_normalized",
@@ -378,7 +374,7 @@ def main():
     main_cols = [
         "dataset", "model",
         "se_length_normalized", "selfcheck_nli",
-        "sep_se_auroc", "sep_binary_auroc",
+        "sep_se_auroc",
         "p_true",             # headline: max(fwd, rev) — score = 1 - P(true)
         "p_true_auroc_fwd",
         "p_true_auroc_rev",
