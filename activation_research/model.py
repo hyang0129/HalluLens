@@ -310,6 +310,119 @@ class SimpleHaluClassifier(nn.Module):
         logits = self.classifier(last_token)
         return torch.sigmoid(logits)
 
+class SaplmaWithReconHead(nn.Module):
+    """SAPLMA classifier with auxiliary logprob reconstruction head.
+
+    Identical inference path to ``SimpleHaluClassifier``: a feed-forward MLP
+    on the last token's activation produces a sigmoid hallucination
+    probability.  During training, a separate decoder reconstructs the
+    per-token logprob sequence from the penultimate (dim ``hidden_dims[-1]``)
+    representation ``z``.  Training objective:
+
+        L = L_BCE(sigmoid_logit, y) + λ · L_recon(g(z), ℓ)
+
+    The auxiliary decoder is discarded at inference; ``forward()`` is a
+    drop-in replacement for ``SimpleHaluClassifier.forward()``.
+
+    Ablation rationale: isolates the contribution of the contrastive
+    objective in ``LogprobReconProgressiveCompressor`` by giving SAPLMA
+    the same auxiliary recon target.  See issue #67.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 4096,
+        hidden_dims=(2048, 1024, 512),
+        dropout: float = 0.1,
+        recon_seq_len: int = 64,
+        recon_hidden_dim: int = 256,
+        recon_lambda: float = 1.0,
+        logprob_var_threshold: float = 1e-4,
+    ):
+        super().__init__()
+        hidden_dims = list(hidden_dims)
+        self.recon_seq_len = int(recon_seq_len)
+        self.recon_lambda = float(recon_lambda)
+        self.logprob_var_threshold = float(logprob_var_threshold)
+
+        body_layers = []
+        prev_dim = int(input_dim)
+        for h in hidden_dims:
+            body_layers.extend([
+                nn.Linear(prev_dim, int(h)),
+                nn.ReLU(),
+                nn.Dropout(float(dropout)),
+            ])
+            prev_dim = int(h)
+        self.body = nn.Sequential(*body_layers)
+        self.head = nn.Linear(prev_dim, 1)
+
+        self.decoder = nn.Sequential(
+            nn.Linear(prev_dim, int(recon_hidden_dim)),
+            nn.GELU(),
+            nn.Linear(int(recon_hidden_dim), self.recon_seq_len),
+        )
+
+    def _encode(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.float()
+        last_token = x[:, -1, :]
+        return self.body(last_token)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Inference path — identical to ``SimpleHaluClassifier.forward``.
+
+        x : (B, L, D)
+        returns : (B, 1) sigmoid probability of hallucination
+        """
+        z = self._encode(x)
+        return torch.sigmoid(self.head(z))
+
+    def forward_with_recon(self, x: torch.Tensor):
+        """Training forward — exposes z and the recon prediction.
+
+        Returns
+        -------
+        sigmoid_logit : (B, 1)
+        z : (B, hidden_dims[-1])
+        logprob_pred : (B, recon_seq_len)
+        """
+        z = self._encode(x)
+        sigmoid_logit = torch.sigmoid(self.head(z))
+        logprob_pred = self.decoder(z)
+        return sigmoid_logit, z, logprob_pred
+
+    def recon_loss(
+        self,
+        logprob_pred: torch.Tensor,
+        logprob_target: torch.Tensor,
+    ):
+        """MSE reconstruction loss with variance diagnostic.
+
+        Same semantics as
+        ``LogprobReconProgressiveCompressor.recon_loss``: suppresses
+        the loss when batch logprob variance falls below
+        ``logprob_var_threshold`` and resamples the target to
+        ``recon_seq_len`` via linear interpolation.
+        """
+        target = logprob_target.float()
+
+        logprob_var = float(target.var())
+        if logprob_var < self.logprob_var_threshold:
+            zero = torch.zeros(1, device=logprob_pred.device).squeeze()
+            return zero, {"logprob_var": logprob_var, "suppressed": True}
+
+        if target.shape[-1] != self.recon_seq_len:
+            target = F.interpolate(
+                target.unsqueeze(1),
+                size=self.recon_seq_len,
+                mode="linear",
+                align_corners=False,
+            ).squeeze(1)
+
+        loss = F.mse_loss(logprob_pred, target)
+        return loss, {"logprob_var": logprob_var, "suppressed": False}
+
+
 class HallucinationClassifier(nn.Module):
     """
     Simple feed-forward classifier for hallucination detection using the last token of a selected layer.

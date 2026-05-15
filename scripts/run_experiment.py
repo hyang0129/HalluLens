@@ -639,6 +639,148 @@ def run_saplma(
     return eval_metrics, predictions
 
 
+def run_saplma_logprob_recon(
+    ap,
+    dataset_cfg: dict,
+    method_cfg: dict,
+    experiment_cfg: dict,
+    output_dir: str,
+    device: str,
+    training_seed: int,
+    test_ap=None,
+) -> tuple[dict, list[dict]]:
+    """Train and evaluate SAPLMA + logprob recon auxiliary on a single layer.
+
+    Ablation for issue #67 — isolates the contribution of the contrastive
+    objective in ``contrastive_logprob_recon`` by giving SAPLMA the same
+    auxiliary recon target. Inference path is identical to plain SAPLMA.
+    """
+    data_cfg = method_cfg["data"]
+    train_cfg = method_cfg["training"]
+    model_params = method_cfg.get("model_params", {})
+
+    relevant_layers = (
+        parse_layer_range(data_cfg["relevant_layers"])
+        if "relevant_layers" in data_cfg
+        else list(range(14, 30))
+    )
+    probe_layer = data_cfg["probe_layer"]
+    if probe_layer not in relevant_layers:
+        raise ValueError(
+            f"probe_layer={probe_layer} not in relevant_layers={relevant_layers}"
+        )
+    probe_layer_pos = relevant_layers.index(probe_layer)
+
+    # num_views=1 + fixed_layer=<pos> makes _select_view_indices return [pos]
+    # deterministically, so views_activations is (1, T, H) — same shape that
+    # LinearProbeTrainer expects, but with logprob fields attached.
+    ds_kwargs = dict(
+        relevant_layers=relevant_layers,
+        num_views=1,
+        fixed_layer=probe_layer_pos,
+        min_target_layers=1,
+        preload=data_cfg.get("preload", True),
+        include_response_logprobs=True,
+        response_logprobs_top_k=data_cfg.get("response_logprobs_top_k", 20),
+        check_ram=False,
+        pad_length=data_cfg.get("pad_length", 63),
+    )
+
+    train_ds = ap.get_dataset("train", **ds_kwargs)
+    eval_ap = test_ap if test_ap is not None else ap
+    test_ds = eval_ap.get_dataset("test", **ds_kwargs)
+
+    has_val = ap.split_strategy == "three_way"
+    val_ds = ap.get_dataset("val", **ds_kwargs) if has_val else test_ds
+
+    from activation_research.model import SaplmaWithReconHead
+    from activation_research.trainer import SaplmaReconTrainer, SaplmaReconTrainerConfig
+
+    model = SaplmaWithReconHead(
+        input_dim=dataset_cfg["input_dim"],
+        hidden_dims=tuple(model_params.get("hidden_dims", [2048, 1024, 512])),
+        dropout=model_params.get("dropout", 0.1),
+        recon_seq_len=model_params.get("recon_seq_len", 64),
+        recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+        recon_lambda=model_params.get("recon_lambda", 1.0),
+        logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
+    )
+
+    checkpoint_dir = os.path.join(output_dir, "artifacts")
+    config = SaplmaReconTrainerConfig(
+        max_epochs=train_cfg["max_epochs"],
+        batch_size=train_cfg["batch_size"],
+        lr=train_cfg["lr"],
+        steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+        min_total_steps=train_cfg.get("min_total_steps"),
+        grad_clip_norm=train_cfg.get("grad_clip_norm"),
+        balanced_sampling=train_cfg.get("balanced_sampling", True),
+        use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", False),
+        infinite_stream_seed=training_seed,
+        pooling="mean",
+        device=device,
+        num_workers=experiment_cfg.get("num_workers", 4),
+        persistent_workers=experiment_cfg.get("persistent_workers", True),
+        checkpoint_dir=checkpoint_dir,
+        save_every=1,
+        recon_lambda=model_params.get("recon_lambda", 1.0),
+    )
+
+    trainer = SaplmaReconTrainer(model, config=config)
+    trainer.fit(train_dataset=train_ds, val_dataset=val_ds)
+
+    torch.save(
+        {"model_state_dict": model.state_dict()},
+        os.path.join(output_dir, "artifacts", "final_weights.pt"),
+    )
+
+    from sklearn.metrics import roc_auc_score
+    from torch.utils.data import DataLoader
+
+    model.eval()
+    eval_device = torch.device(
+        device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    model.to(eval_device)
+
+    eval_loader = DataLoader(test_ds, batch_size=train_cfg["batch_size"], shuffle=False)
+    all_preds, all_labels = [], []
+    with torch.no_grad():
+        for batch in eval_loader:
+            x = batch["views_activations"].to(eval_device)
+            if x.dim() == 4:
+                x = x.squeeze(1)
+            preds = model(x)
+            all_preds.append(preds.cpu())
+            all_labels.append(batch["halu"].cpu())
+
+    all_preds_np = torch.cat(all_preds).squeeze().numpy()
+    all_labels_np = torch.cat(all_labels).numpy()
+    if len(set(all_labels_np)) < 2:
+        auroc = float("nan")
+    else:
+        auroc = roc_auc_score(all_labels_np, all_preds_np)
+
+    eval_metrics = {
+        "method": method_cfg["name"],
+        "dataset": dataset_cfg["name"],
+        "seed": training_seed,
+        "split_seed": experiment_cfg.get("split_seed", 42),
+        "n_train": len(train_ds),
+        "n_test": len(test_ds),
+        "auroc": float(auroc),
+        "probe_layer": probe_layer,
+        "recon_lambda": float(model_params.get("recon_lambda", 1.0)),
+    }
+
+    predictions = [
+        {"example_id": i, "score_halu": float(s), "label_halu": int(l)}
+        for i, (s, l) in enumerate(zip(all_preds_np, all_labels_np))
+    ]
+
+    return eval_metrics, predictions
+
+
 def run_multi_layer_linear_probe(
     ap,
     dataset_cfg: dict,
@@ -2142,6 +2284,11 @@ def main() -> None:
                         )
                     elif routine == "saplma":
                         eval_metrics, predictions = run_saplma(
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
+                            test_ap=test_ap,
+                        )
+                    elif routine == "saplma_logprob_recon":
+                        eval_metrics, predictions = run_saplma_logprob_recon(
                             ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
                         )

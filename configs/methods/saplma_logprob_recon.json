@@ -1,0 +1,32 @@
+{
+  "name": "saplma_logprob_recon",
+  "routine": "saplma_logprob_recon",
+  "model_class": "saplma_with_recon_head",
+  "model_params": {
+    "hidden_dims": [2048, 1024, 512],
+    "dropout": 0.1,
+    "recon_seq_len": 64,
+    "recon_hidden_dim": 256,
+    "recon_lambda": 1.0,
+    "logprob_var_threshold": 1e-4
+  },
+  "training": {
+    "max_epochs": 100,
+    "batch_size": 512,
+    "lr": 1e-3,
+    "balanced_sampling": true,
+    "use_infinite_index_stream": true,
+    "min_total_steps": 3000
+  },
+  "data": {
+    "relevant_layers": "14-29",
+    "probe_layer": 22,
+    "pad_length": 63,
+    "preload": true,
+    "include_response_logprobs": true,
+    "response_logprobs_top_k": 20
+  },
+  "evaluation": {
+    "metrics": ["auroc"]
+  }
+}

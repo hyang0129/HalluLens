@@ -7,6 +7,7 @@
     "token_entropy",
     "logprob_baseline",
     "saplma",
+    "saplma_logprob_recon",
     "llmsknow_probe"
   ],
   "split_seed": 42,
