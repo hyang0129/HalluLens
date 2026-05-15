@@ -1,6 +1,7 @@
 # Paper Roadmap — EMNLP Submission
 
-**Last updated:** 2026-05-14 (extended-metrics row scoped to AUPRC + ECE + FPR@95 + bootstrap 95% CIs as a pure-CPU recompute on existing `predictions.csv` — see #59; llmsknow_probe seed bug fixed in #58, archived seed=null runs and dispatched 5-seed re-runs across 3 GPU nodes)
+**Last updated:** 2026-05-15 (reconciled §2 against `scripts/results_table.py` disk audit: Llama all 5 seeds complete across every trained method; sampling bundle #49 is **done** (60/60 cells); SAPLMA #51 is **in flight, not unstarted** (55/90 — Llama-complete, Qwen partial); Qwen3 has 21/132 cells outstanding from the #58 re-runs; SmolLM3 configs exist but are explicitly out of scope per §5.)
+**Previously:** 2026-05-14 (extended-metrics row scoped to AUPRC + ECE + FPR@95 + bootstrap 95% CIs as a pure-CPU recompute on existing `predictions.csv` — see #59; llmsknow_probe seed bug fixed in #58, archived seed=null runs and dispatched 5-seed re-runs across 3 GPU nodes)
 **Previously:** 2026-05-12 (SAPLMA baseline added to grid; semantic-entropy item rescoped to a sampling-based baselines bundle — SE + SelfCheckGPT + SEP-SE + SEP-binary across 5–6 datasets, see #49)
 **Target venue:** EMNLP 2026 (Main / Findings)
 **Submission window:** ~4 weeks from today
@@ -26,6 +27,8 @@ If any of those clauses fails to hold up empirically, the framing changes — th
 
 ## 2. What's done vs. what's missing
 
+> **Source of truth:** run `python scripts/results_table.py` for the live cell-by-cell disk audit (training + sampling + SEP + P(true)). The table below is a hand-curated summary that can drift; the script is authoritative for any "is X done" question.
+
 | Component | Status | Notes |
 |---|---|---|
 | Llama-3.1-8B inference + activation logging, 6 datasets | ✅ done | HotpotQA, NQ, MMLU, PopQA, SciQ, SearchQA (Movies dropped — no train split) |
@@ -35,11 +38,13 @@ If any of those clauses fails to hold up empirically, the framing changes — th
 | SearchQA Multi-Layer probe | ↪️ obsolete | Multi-layer probe dropped from main grid (see below) |
 | Multi-layer probe dropped from main baseline grid | ✅ done | Commit `fabf4de`. Concatenating all 16 lower-half layers overfit — consistently underperformed the single-layer linear probe at layer 22. Keep as an **ablation row**, not a main baseline. Paper must explain the drop and report numbers from seed-0. |
 | Movies anomaly (contrastive < linear probe) | ↪️ obsolete | Movies excluded from experiment matrix (no train split) |
-| Llama seeds {1, 2, 3, 4} × 6 datasets × learned methods | 🟡 in flight | Runner shells: `scripts/run_baseline_llama3_seed{1..4}.sh` |
-| Qwen3-8B seed sweep, seeds {1, 2, 3, 4} × 6 datasets | 🟡 in flight | Runner shells: `scripts/run_baseline_qwen3_seed{1..4}.sh` |
-| SAPLMA baseline (`SimpleHaluClassifier`) on full grid | ❌ not started | Code already in `activation_research/model.py:276` as `SimpleHaluClassifier` (~11M-param MLP on last-token activations) — wired into trainer but **absent from `configs/experiments/baseline_comparison_*.json`**. Forecloses the "linear probe is a strawman" reviewer concern. Activation-space; reuses cached zarr stores. Tracked in [#51](https://github.com/hyang0129/HalluLens/issues/51). |
-| P(true) baseline | ❌ not started | Cheap; one extra prompt per example. Tracked in [#50](https://github.com/hyang0129/HalluLens/issues/50). Output-space only — does not need activation logging; can run concurrently with the seed sweeps. |
-| Sampling-based baselines bundle (SE + SelfCheckGPT + SEP-SE + SEP-binary) | ❌ not started | One K=10 sampling pass produces 4 baselines. 5 free-form datasets {HotpotQA, NQ, PopQA, SciQ, SearchQA} for SE/SelfCheckGPT/SEP-SE; 6 datasets for SEP-binary (MMLU added — SEP-binary is activation-space and survives the NLI-clustering degeneracy on letter tokens that excludes MMLU from SE/SelfCheckGPT). SearchQA capped 10k test / 5k train. SEP-SE trained on 5k stratified train subset (Kossen-faithful regression on SE labels); SEP-binary trained on full train split with binary hallu labels — free byproduct, apples-to-apples with linear probe. Tracked in [#49](https://github.com/hyang0129/HalluLens/issues/49). Sampling pass is output-space only — can run concurrently with the seed sweeps on a separate GPU. |
+| Llama seeds {1, 2, 3, 4} × 6 datasets × learned methods | ✅ done | All 132/132 Llama cells complete across linear / contrastive / saplma / llmsknow / logprob / token-entropy (verified via `results_table.py` 2026-05-15). |
+| Qwen3-8B seed sweep, seeds {1, 2, 3, 4} × 6 datasets | 🟡 in flight | 111/132 cells complete; 21 remaining from the #58 re-runs dispatched 2026-05-14. Runner shells: `scripts/run_baseline_qwen3_seed{1..4}.sh`. |
+| SmolLM3 third-model expansion | ⛔ out of scope | Configs exist (`configs/experiments/baseline_comparison_*.json` reference SmolLM3 → 162 pending cells), but per §5 we are not adding a third model for this submission. Configs left in place for the journal extension; do not dispatch. |
+| SAPLMA baseline (`SimpleHaluClassifier`) on full grid | 🟡 in flight | 55/90 cells complete across {Llama-3.1-8B, Qwen3-8B} (Llama-complete, Qwen partial in the #58 sweep). Code at [`activation_research/model.py:276`](activation_research/model.py#L276); wired into the baseline grid. Forecloses "linear probe is a strawman." Tracked in [#51](https://github.com/hyang0129/HalluLens/issues/51). |
+| P(true) baseline | ❌ not started | 0/12 cells. Cheap; one extra prompt per example. Tracked in [#50](https://github.com/hyang0129/HalluLens/issues/50). Output-space only — does not need activation logging; can run concurrently with the Qwen seed sweep. |
+| Sampling-based baselines bundle (SE + SelfCheckGPT) | ✅ done | 60/60 sampling cells complete: SE × 3 variants (length-normalized, discrete, semantic-entropy) + SelfCheckGPT × 3 variants (NLI, BERTScore, n-gram) across 5 free-form datasets × 2 models. Tracked in [#49](https://github.com/hyang0129/HalluLens/issues/49). |
+| SEP-SE + SEP-binary probes | ❌ not started | 0/12 SEP cells. Linear probes on cached activations against SE / binary-hallu labels (Kossen et al. 2024). No new sampling needed — reads existing #49 outputs + cached zarr stores. Apples-to-apples compute match against `linear_probe`. Part of [#49](https://github.com/hyang0129/HalluLens/issues/49). |
 | Cross-dataset transfer table | ❌ not started | Train→test pairs across datasets, no new training |
 | AUPRC, ECE, FPR@95, bootstrap 95% CIs | ❌ not started | Pure CPU recompute on existing `predictions.csv` (zero GPU). FPR@95 = standard operational detection metric (lower is better). Tracked in [#59](https://github.com/hyang0129/HalluLens/issues/59). |
 | Ablation: SimCLR-only vs +logprob-recon | ✅ tried | Unsupervised SimCLR features + linear probe on top → ~random guessing. Logprob-recon aux loss is load-bearing. Need to log the run + write it up; no further compute. |

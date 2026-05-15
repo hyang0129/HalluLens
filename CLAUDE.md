@@ -1,5 +1,11 @@
 # HalluLens — Claude Code Guidelines
 
+## Paper Writing
+
+The EMNLP 2026 paper draft lives in `paper/`. When drafting, editing, or extending **paper content** (sections, outline, abstract, claims, tables, figures, bibliography), only read from and write to files inside `paper/`. Do not synthesize paper prose from `PAPER_ROADMAP.md`, `THEORETICAL_JUSTIFICATION.md`, `docs/planning/`, `results/`, or any other location unless the user explicitly names a source to pull from.
+
+Rationale: the roadmap, theory doc, and SOTA tracker are *planning material* written for collaborators, not reviewers. The user controls when and how content bridges from planning into the paper — auto-importing roadmap prose into the draft loses voice and short-circuits the editorial pass.
+
 ## Project Overview
 
 Research codebase for detecting hallucinations in LLMs via mutual information analysis of intermediate layer activations. Pairs contrastive representation learning with benchmark evaluation (PreciseWikiQA, LLMsKnow).
@@ -172,6 +178,20 @@ with JupyterExecutor() as jup:
 **When to use:** Any time `COMPUTE_CONTEXT=REMOTE_GPU` and code needs to run on GPU (model inference, training, activation logging). Prefer this over asking the user to manually run notebook cells.
 
 ## Dataset & Experiment Status
+
+### Canonical results view across all baselines
+
+`scripts/results_table.py` is the **single source of truth** for what experiments have produced numbers. It walks every cell across training runs (`configs/experiments/baseline_comparison_*.json`), sampling baselines (SE variants, SelfCheckGPT), SEP probes, and P(true), and emits one row per (dataset × model × method × seed) with status (`complete` / `pending` / `running` / `missing` / `failed` / `partial`) and metrics. Prefer it over `audit_coverage.py` for any "what do we have" question.
+
+```bash
+# Writes output/results_table/results_table.{json,csv}
+python scripts/results_table.py
+
+# Custom output dir
+python scripts/results_table.py --out-dir /tmp/results
+```
+
+The JSON form (`results_table.json`) is agent-friendly — one entry per cell with `kind`, `key`, `status`, `metrics`, `expected_rows`, `actual_rows`, `paths`. The CSV form is long-form (one row per cell × metric) and convenient for pandas / spreadsheet inspection.
 
 ### Checking inference/data generation status
 
