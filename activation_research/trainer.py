@@ -2366,3 +2366,66 @@ class LayerAwareContrastiveTrainer(Trainer):
         self.start_epoch = int(checkpoint.get("epoch", 0)) + 1
         self.best_loss = float(checkpoint.get("best_loss", float("inf")))
         logger.info(f"Resumed training from epoch {self.start_epoch}")
+
+
+@dataclass
+class SaplmaReconTrainerConfig(LinearProbeTrainerConfig):
+    """Configuration for ``SaplmaReconTrainer``.
+
+    Adds a single field ``recon_lambda`` for the logprob reconstruction
+    auxiliary weight.
+    """
+
+    recon_lambda: float = 1.0
+
+
+class SaplmaReconTrainer(LinearProbeTrainer):
+    """SAPLMA classifier with auxiliary logprob reconstruction loss.
+
+    Combined loss:
+
+        L = L_BCE(sigmoid_logit, y) + lambda * L_recon(g(z), ell)
+
+    Validation is inherited unchanged - inference reads only the sigmoid
+    logit, so AUROC is directly comparable to plain SAPLMA.
+
+    Expects:
+    - ``model`` to be a ``SaplmaWithReconHead`` (exposes ``forward_with_recon``
+      and ``recon_loss``).
+    - Batches to carry ``response_token_logprobs`` of shape
+      ``(B, pad_length)`` with NaN padding (as produced by
+      ``PreloadedActivationDataset._get_logprobs``).
+    """
+
+    def __init__(self, model: torch.nn.Module, *, config: SaplmaReconTrainerConfig):
+        super().__init__(model, config=config)
+        self.recon_lambda = float(config.recon_lambda)
+
+    def training_step(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, Dict[str, float]]:
+        x = batch["views_activations"].to(self.device, non_blocking=True)
+        if x.dim() == 4:
+            x = x.squeeze(1)
+        labels = batch["halu"].to(self.device, non_blocking=True).float().view(-1, 1)
+
+        sigmoid_logit, _z, logprob_pred = self.model.forward_with_recon(x)
+        bce = self.loss_fn(sigmoid_logit, labels)
+
+        recon = torch.zeros((), device=self.device)
+        if self.recon_lambda > 0.0 and "response_token_logprobs" in batch:
+            logprob = batch["response_token_logprobs"].to(self.device, non_blocking=True).float()
+            nan_mask = logprob.isnan()
+            if nan_mask.any():
+                row_means = logprob.nanmean(dim=-1, keepdim=True)
+                # Rows that are entirely NaN have nanmean = NaN; fall back to 0.
+                row_means = torch.where(row_means.isnan(), torch.zeros_like(row_means), row_means)
+                logprob = logprob.masked_fill(nan_mask, 0.0)
+                logprob = logprob + nan_mask.float() * row_means
+            recon, _diag = self.model.recon_loss(logprob_pred, logprob)
+
+        loss = bce + self.recon_lambda * recon
+        acc = float(((sigmoid_logit > 0.5).float() == labels).float().mean().item())
+        return loss, {
+            "acc": acc,
+            "bce": float(bce.detach().cpu().item()),
+            "recon": float(recon.detach().cpu().item()) if isinstance(recon, torch.Tensor) else float(recon),
+        }
