@@ -1,6 +1,7 @@
 # Paper Roadmap — EMNLP Submission
 
-**Last updated:** 2026-05-15 (reconciled §2 against `scripts/results_table.py` disk audit: Llama all 5 seeds complete across every trained method; sampling bundle #49 is **done** (60/60 cells); SAPLMA #51 is **in flight, not unstarted** (55/90 — Llama-complete, Qwen partial); Qwen3 has 21/132 cells outstanding from the #58 re-runs; SmolLM3 configs exist but are explicitly out of scope per §5.)
+**Last updated:** 2026-05-15 (related-work sweep for 2025/early-2026; **ICR Probe (ACL 2025) promoted from cite-only to must-add baseline** — Path B implementation reuses cached hidden states + recomputes attention per layer (~2–3 days eng + ~1 day GPU for HotpotQA phase 1, both models). Tracked as two issues: [#69](https://github.com/hyang0129/HalluLens/issues/69) (attention-map infra) → [#70](https://github.com/hyang0129/HalluLens/issues/70) (probe model + training). Concurrent-work cluster (CLAP, ACT-ViT, Internal-Layers, HALT) cited but not run. See §11.)
+**Previously:** 2026-05-15 (reconciled §2 against `scripts/results_table.py` disk audit: Llama all 5 seeds complete across every trained method; sampling bundle #49 is **done** (60/60 cells); SAPLMA #51 is **in flight, not unstarted** (55/90 — Llama-complete, Qwen partial); Qwen3 has 21/132 cells outstanding from the #58 re-runs; SmolLM3 configs exist but are explicitly out of scope per §5.)
 **Previously:** 2026-05-14 (extended-metrics row scoped to AUPRC + ECE + FPR@95 + bootstrap 95% CIs as a pure-CPU recompute on existing `predictions.csv` — see #59; llmsknow_probe seed bug fixed in #58, archived seed=null runs and dispatched 5-seed re-runs across 3 GPU nodes)
 **Previously:** 2026-05-12 (SAPLMA baseline added to grid; semantic-entropy item rescoped to a sampling-based baselines bundle — SE + SelfCheckGPT + SEP-SE + SEP-binary across 5–6 datasets, see #49)
 **Target venue:** EMNLP 2026 (Main / Findings)
@@ -188,3 +189,75 @@ Tables/figures owners (each is a single deliverable):
 - **Don't start writing before §6 ablations are at least sketched** — rewriting around new ablation results is more expensive than writing them up after.
 - **Do flag any deviation** from this roadmap with a one-line entry in the file's "Last updated" section + a note in commits.
 - **Do prefer producing the supplementary appendix early.** It's where reviewer concerns get parked cheaply.
+
+---
+
+## 11. Related work — 2025 / early 2026 sweep (added 2026-05-15)
+
+A literature pass for papers published since the original SOTA tracker was last filled. Each entry below is graded on (a) whether a reviewer is likely to ask about it, and (b) whether it warrants a new baseline run vs. a related-work citation only.
+
+### 11.1 Tier 1 — directly comparable, reviewer is likely to ask
+
+| Paper | Venue | Method | Action |
+|---|---|---|---|
+| **ICR Probe** (Zhang et al.) — [arXiv:2507.16488](https://arxiv.org/abs/2507.16488), [code](https://github.com/XavierZhang2002/ICR_Probe) | ACL 2025 long | Per-layer **ICR Score** = JSD(projection-onto-vocab, mean attention) for each module; tiny MLP `(L, 128, 64, 32, 1)` on the L-dim score vector (<16K params — smaller than SAPLMA's 110K). Compared to SAPLMA, SEP, PPL, length-normed entropy, LLM-Check. Evaluated on Llama-3-8B-Instruct + Qwen2.5-7B-Instruct + Gemma-2-9B-it across HaluEval / SQuAD / HotpotQA / TriviaQA. Headline AUROC on Gemma-2 ≈ 0.80–0.84. | **Cite in related work, mandatory.** Run as a baseline if and only if §4 #1–#4 (Qwen seed sweep + SAPLMA + P(true) + sampling bundle) are fully done with time to spare. Repo is "for illustration" — non-trivial port. See risk note below. |
+| **CLAP — Cross-Layer Attention Probing** ([arXiv:2509.09700](https://arxiv.org/abs/2509.09700)) | Sep 2025 | Treats the full residual stream as a sequence; lightweight attention classifier over all layers. 5 LLMs × 3 tasks; gains over single-layer probes. | Cite as concurrent multi-layer probing work. No new baseline. |
+| **Hallucination Detection with the Internal Layers of LLMs** ([arXiv:2509.14254](https://arxiv.org/abs/2509.14254)) | Sep 2025 | Learned dynamic weighting + combination of layer activations. Evaluated on TruthfulQA / HaluEval / ReFact. | Cite as the "learned-layer-weighting" competitor in the related-work paragraph that motivates the contrastive compression. No new baseline. |
+| **ACT-ViT** ([arXiv:2510.00296](https://arxiv.org/abs/2510.00296)) | Oct 2025 | ViT over (layers × tokens) activation tensors; explicitly tests **transfer** across 15 LLM × dataset combinations. | Cite in §6 transfer-matrix subsection — frame our 6×6 transfer table as complementary evidence. No new baseline. |
+
+### 11.2 Tier 2 — citation only, no baseline
+
+- **HALT** — logprobs as time series + GRU ([arXiv:2602.02888](https://arxiv.org/html/2602.02888), Feb 2026). Cite to acknowledge that our logprob baseline is the simple variant of a richer family.
+- **HaluNet** — multi-granular uncertainty fusion on NQ/TriviaQA ([arXiv:2512.24562](https://arxiv.org/abs/2512.24562)).
+- **Adaptive Token Selection** ([arXiv:2504.07863](https://arxiv.org/html/2504.07863v2), Apr 2025) — relevant to our last-token aggregation choice.
+- **Spectral attention features** ([arXiv:2502.17598](https://arxiv.org/html/2502.17598v2), Feb 2025) — alternative signal source.
+- **Pre-trained UQ heads** ([arXiv:2505.08200](https://arxiv.org/html/2505.08200v1), May 2025) — lightweight probe-head alternative.
+
+### 11.3 Decision: ICR Probe as a baseline — **YES, add to must-add list**
+
+**Reversal of the earlier "cite-only" call.** Reasoning:
+
+1. **Their results aren't usable as-is.** ICR Probe reports on Llama-3-8B / Qwen2.5-7B / Gemma-2-9B with 10K samples and an 80/20 split on HaluEval / SQuAD / HotpotQA / TriviaQA. HotpotQA is the only dataset overlap with our grid; the model versions differ (3 vs 3.1; Qwen2.5 vs Qwen3); the labeling pipeline differs. We can't lift numbers into our table — we have to run it in our pipeline or not cite the result.
+2. **The "different signal type" differentiation is weaker on a second read.** A reviewer skimming related work groups ICR Probe and our method together as "activation-based detectors." Omitting an ACL 2025 long paper from the same bucket is a real credibility hit, not a defensible scoping cut.
+3. **Implementation is cheaper than the first pass suggested** — see §11.3.1.
+
+#### 11.3.1 Implementation path (Path B — recompute attention from cached states)
+
+ICR Score per layer needs two inputs:
+- **Module update projected onto vocab:** `Proj_ℓ = softmax(W_U · Δh_ℓ)` with `Δh_ℓ = h_ℓ − h_{ℓ−1}`. We already have all `h_ℓ` cached in zarr — this is a post-processing pass over existing activations.
+- **Attention weights per layer (averaged over heads).** Not in zarr. Two options:
+  - **Path A — re-run inference with attention logging:** ~1 week GPU across 6 datasets × 2 models. Rejected.
+  - **Path B — recompute attention from cached `h_{ℓ−1}`:** load layer ℓ-1 hidden states, run *only* that layer's attention sublayer with HF weights, capture attention probs. Forward-pass for one attention block per layer per sample. Engineering ~2–3 days; compute ~half a day per (model, dataset). Selected.
+
+**Cached-state precondition — VERIFIED 2026-05-15:** Path B requires full-sequence (prompt + response) hidden states per layer. Confirmed by code inspection that every inference path that produced our zarr stores uses `sequence_mode="all"` explicitly: all 6 LLMsKnow task modules (`tasks/llmsknow/{hotpotqa,natural_questions,mmlu,popqa,sciq,searchqa,movies}.py` — `HFTransformersAdapter(..., sequence_mode="all", ...)`), the standalone NQ runner (`scripts/natural_questions.py:397`), and the server path used for PreciseWikiQA (`utils/lm.py:192` hardcodes `ACTIVATION_SEQUENCE_MODE=all`). No reliance on defaults. **Path B is unblocked on existing zarr stores; no re-inference needed.**
+
+Probe itself is a `(L, 128, 64, 32, 1)` MLP, <16K params, trains in minutes per (model, dataset, seed).
+
+#### 11.3.2 Scope (start small, expand if Path B works)
+
+**Phase 1 (lead dataset):** HotpotQA on both models, 5 seeds. Direct overlap with ICR Probe's reported evaluation — gives a sanity check that our reimplementation reproduces their published trend.
+
+**Phase 2 (if phase 1 reproduces):** roll out to remaining 5 datasets × both models × 5 seeds.
+
+**Phase 3 (optional):** add to compute-matched comparison plot.
+
+#### 11.3.3 GPU budget impact (update §7)
+
+Add as a new job row between current jobs 5 and 6:
+
+| Order | Job | Why | Approx. GPU-hours |
+|---|---|---|---|
+| 5.5 | ICR Probe attention recompute (Path B) + probe training, HotpotQA × 2 models first | Foreclose ACL-2025 reviewer concern. Falls back to "we tried, didn't reproduce, here's the diagnosis" if phase 1 fails — that is also a valid paper outcome. | ~1 day eng + ~1 day GPU (phase 1); +2 days GPU if phase 2 rolls out |
+
+#### 11.3.4 Cut order (update §7)
+
+If GPU access slips, cut ICR Probe *after* SearchQA in #49 and Qwen-side sampling baselines, but *before* cutting the Qwen full seed sweep. Specifically: keep ICR Probe phase 1 even under tight budget — losing the lead-dataset comparison is worse than losing phase 2 rollout.
+
+### 11.4 Risk register update
+
+Add one row to §9:
+
+| Risk | Likelihood | Mitigation |
+|---|---|---|
+| Path B (recompute attention from cached hidden states) drifts numerically from a true forward pass — e.g. dropout, RoPE state, KV-cache effects | medium | Validate against one full forward pass on a held-out batch before scaling; if drift is non-negligible, fall back to Path A scoped to HotpotQA only |
+| ICR Probe phase 1 reproduces ≈ their headline number AND beats our contrastive method on HotpotQA | low–medium | This is a real risk, not a framing issue. Mitigation depends on outcome: if ICR > ours by margin, pivot framing to compute/parameter efficiency + transfer + ablations — same playbook as the SAPLMA-matches-us risk in §9. Decide on data. |
