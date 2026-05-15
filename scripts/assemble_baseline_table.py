@@ -1,16 +1,19 @@
-"""Phase 6: Assemble AUROC table and compute-matched figure.
+"""Assemble the compute-matched AUROC figure (and optional P(true) bootstrap CIs).
 
-Reads all score files, aligns by row_idx, computes AUROC vs binary hallu label,
-outputs CSV + PDF figure.
+AUROC numbers come from `output/results_table/results_table.json` — produced
+by `scripts/results_table.py`. This script no longer re-computes AUROC; it
+only renders the matplotlib figure and (optionally) bootstrap CIs from the
+raw P(true) score files.
 
 Usage:
-    python scripts/assemble_baseline_table.py \\
-        --models meta-llama/Llama-3.1-8B-Instruct Qwen/Qwen3-8B \\
-        --output-dir output/baseline_results
+    # Make the figure (reads results_table.json):
+    python scripts/results_table.py
+    python scripts/assemble_baseline_table.py
 
-    # Llama only
+    # Custom output dir + bootstrap CIs for P(true):
     python scripts/assemble_baseline_table.py \\
-        --models meta-llama/Llama-3.1-8B-Instruct
+        --output-dir output/baseline_results \\
+        --with-ci
 """
 import argparse
 import json
@@ -19,10 +22,10 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-import pandas as pd
 from sklearn.metrics import roc_auc_score
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from tasks.p_true.paths import ptrue_scores_path
 from tasks.sampling_baselines.paths import (
@@ -31,76 +34,131 @@ from tasks.sampling_baselines.paths import (
     SAMPLING_DATASETS,
     eval_results_json,
     model_name,
-    nli_matrix_path,
-    se_labels_path,
-    selfcheck_samples_path,
-    selfcheck_scores_path,
-    sep_results_path,
-    searchqa_test_cap_path,
 )
 
+DEFAULT_RESULTS_JSON = PROJECT_ROOT / "output" / "results_table" / "results_table.json"
+
 
 # ---------------------------------------------------------------------------
-# Score loading helpers
+# Results-table loader: turn long-form cells into a {(dataset, model): {col: auroc}} view
 # ---------------------------------------------------------------------------
 
-def load_jsonl_by_row(path: str) -> dict:
-    """Load jsonl into {row_idx: record} dict."""
-    by_row = {}
-    p = Path(path)
-    if not p.exists():
-        return by_row
-    with open(p) as f:
-        for line in f:
-            try:
-                rec = json.loads(line)
-                by_row[rec["row_idx"]] = rec
-            except Exception:
-                pass
-    return by_row
+# Mapping from results_table method names to the figure's column names.
+_FIGURE_COLUMNS = {
+    ("sampling", "se_length_normalized"):  "se_length_normalized",
+    ("sampling", "selfcheck_nli"):         "selfcheck_nli",
+    ("sep", "sep"):                        "sep_se_auroc",
+}
 
 
-def load_hallu_labels(dataset: str, model_id: str, split: str = "test") -> Optional[np.ndarray]:
-    eval_path = eval_results_json(dataset, model_id, split)
-    if not eval_path.exists():
-        return None
-    with open(eval_path) as f:
-        data = json.load(f)
-    return np.array(data["halu_test_res"], dtype=int)
+def load_figure_table(results_json: Path) -> list[dict]:
+    """Pivot the long-form cells into one row per (dataset, model)."""
+    with open(results_json) as f:
+        payload = json.load(f)
+
+    pivot: dict[tuple[str, str], dict[str, float]] = {}
+    for cell in payload["cells"]:
+        col = _FIGURE_COLUMNS.get((cell["kind"], cell["key"]["method"]))
+        if col is None or cell["status"] != "complete":
+            continue
+        key = (cell["key"]["dataset"], cell["key"]["model"])
+        metric_key = "sep_se_auroc" if cell["kind"] == "sep" else "auroc"
+        v = cell["metrics"].get(metric_key)
+        if v is None:
+            continue
+        pivot.setdefault(key, {})[col] = v
+
+    rows = []
+    for (ds, m), cols in pivot.items():
+        rows.append({"dataset": ds, "model": m, **cols})
+    return rows
 
 
-def load_cap_indices(dataset: str, model_id: str) -> Optional[set]:
-    if dataset != "searchqa":
-        return None
-    cap_path = searchqa_test_cap_path(model_id)
-    if not cap_path.exists():
-        return None
-    with open(cap_path) as f:
-        return set(json.load(f)["question_ids"])
+# ---------------------------------------------------------------------------
+# Figure
+# ---------------------------------------------------------------------------
+
+def make_compute_matched_figure(table: list[dict], output_path: Path) -> None:
+    """One panel per dataset; x=forward-pass count, y=AUROC."""
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("matplotlib not installed — skipping figure.")
+        return
+
+    all_datasets = [d for d in SAMPLING_DATASETS] + ["mmlu"]
+
+    n_cols = 3
+    n_rows = (len(all_datasets) + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows), squeeze=False)
+
+    method_style = {
+        "SEP-SE (K=1)":            dict(K=1,  marker="s", color="tab:purple", col="sep_se_auroc"),
+        "SelfCheckGPT-NLI (K=10)": dict(K=10, marker="o", color="tab:blue",   col="selfcheck_nli"),
+        "SE length-norm (K=10)":   dict(K=10, marker="^", color="tab:green",  col="se_length_normalized"),
+    }
+
+    for ax_idx, ds in enumerate(all_datasets):
+        row, col = divmod(ax_idx, n_cols)
+        ax = axes[row][col]
+        ds_rows = [r for r in table if r["dataset"] == ds]
+
+        for label, style in method_style.items():
+            for row_data in ds_rows:
+                val = row_data.get(style["col"])
+                if val is None or not np.isfinite(val):
+                    continue
+                ax.scatter(
+                    style["K"], val,
+                    label=f"{label} ({row_data['model']})",
+                    marker=style["marker"], color=style["color"], s=80, zorder=3,
+                )
+
+        ax.set_title(ds, fontsize=11)
+        ax.set_xlabel("Forward passes at test time")
+        ax.set_ylabel("AUROC")
+        ax.set_xlim(0, 12)
+        ax.set_ylim(0.4, 1.0)
+        ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
+        ax.legend(fontsize=7, loc="lower right")
+
+    # Hide unused panels
+    for ax_idx in range(len(all_datasets), n_rows * n_cols):
+        r, c = divmod(ax_idx, n_cols)
+        axes[r][c].set_visible(False)
+
+    fig.suptitle("Compute-matched AUROC comparison", fontsize=13)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    print(f"Figure saved → {output_path}")
+    plt.close(fig)
 
 
-def safe_auroc(scores: list, labels: list) -> Optional[float]:
-    if len(scores) < 10:
-        return None
-    y = np.array(labels, dtype=int)
-    s = np.array(scores, dtype=float)
+# ---------------------------------------------------------------------------
+# Bootstrap CIs (P(true) only — uses raw scores, not the results table)
+# ---------------------------------------------------------------------------
+
+def _safe_auroc(scores, labels) -> Optional[float]:
+    s, y = np.asarray(scores, dtype=float), np.asarray(labels, dtype=int)
     mask = np.isfinite(s)
-    if mask.sum() < 10 or len(np.unique(y[mask])) < 2:
+    s, y = s[mask], y[mask]
+    if len(s) < 10 or len(np.unique(y)) < 2:
         return None
     try:
-        return float(roc_auc_score(y[mask], s[mask]))
+        return float(roc_auc_score(y, s))
     except Exception:
         return None
 
 
-def bootstrap_auroc(scores: list, labels: list, n: int = 1000, seed: int = 42) -> Optional[tuple]:
+def _bootstrap_auroc(scores, labels, n: int = 1000, seed: int = 42):
     """Return (lo, hi) 95% bootstrap CI on AUROC, or None if not computable."""
-    base = safe_auroc(scores, labels)
+    base = _safe_auroc(scores, labels)
     if base is None:
         return None
     rng = np.random.default_rng(seed)
-    y = np.array(labels, dtype=int)
-    s = np.array(scores, dtype=float)
+    y = np.asarray(labels, dtype=int)
+    s = np.asarray(scores, dtype=float)
     mask = np.isfinite(s)
     y, s = y[mask], s[mask]
     aucs = []
@@ -118,178 +176,7 @@ def bootstrap_auroc(scores: list, labels: list, n: int = 1000, seed: int = 42) -
     return (float(np.percentile(aucs, 2.5)), float(np.percentile(aucs, 97.5)))
 
 
-# ---------------------------------------------------------------------------
-# Per-dataset scorer
-# ---------------------------------------------------------------------------
-
-def compute_dataset_aurocs(dataset: str, model_id: str) -> dict:
-    """Return dict of {method: auroc} for one (dataset, model) cell."""
-    result = {"dataset": dataset, "model": model_name(model_id)}
-
-    labels_all = load_hallu_labels(dataset, model_id, "test")
-    if labels_all is None:
-        return result
-
-    cap_indices = load_cap_indices(dataset, model_id)
-
-    def get_aligned(by_row: dict, score_key: str):
-        """Extract (scores, labels) aligned by row_idx, respecting cap."""
-        scores, lbls = [], []
-        for row_idx, rec in sorted(by_row.items()):
-            if cap_indices is not None and row_idx not in cap_indices:
-                continue
-            if row_idx >= len(labels_all):
-                continue
-            val = rec.get(score_key)
-            if val is None or (isinstance(val, float) and not np.isfinite(val)):
-                continue
-            scores.append(val)
-            lbls.append(labels_all[row_idx])
-        return scores, lbls
-
-    # SE — headline is `semantic_entropy` (rao over logsumexp_by_id, raw sequence_logprob).
-    # length-normalized and discrete kept as auxiliary metrics.
-    if dataset in SAMPLING_DATASETS:
-        se_by_row = load_jsonl_by_row(str(se_labels_path(dataset, model_id, "test")))
-        scores, lbls = get_aligned(se_by_row, "semantic_entropy")
-        result["semantic_entropy"] = safe_auroc(scores, lbls)
-
-        scores, lbls = get_aligned(se_by_row, "length_normalized_se")
-        result["se_length_normalized"] = safe_auroc(scores, lbls)
-
-        scores, lbls = get_aligned(se_by_row, "discrete_se")
-        result["se_discrete"] = safe_auroc(scores, lbls)
-
-        # SelfCheckGPT
-        sc_by_row = load_jsonl_by_row(str(selfcheck_scores_path(dataset, model_id, "test")))
-        for key in ("nli", "bertscore", "ngram"):
-            scores, lbls = get_aligned(sc_by_row, key)
-            result[f"selfcheck_{key}"] = safe_auroc(scores, lbls)
-
-    # SEP
-    sep_path = sep_results_path(dataset, model_id)
-    if sep_path.exists():
-        with open(sep_path) as f:
-            sep_data = json.load(f)
-        result["sep_se_auroc"] = sep_data.get("sep_se_auroc")
-        result["sep_layer"] = sep_data.get("layer")
-        result["sep_se_n_train"] = sep_data.get("train_size_sep_se")
-
-    # P(true) — score direction: 1 - p_true (high p_true ⇒ correct ⇒ low halu score)
-    pt_path = ptrue_scores_path(dataset, model_id, "test")
-    if pt_path.exists():
-        pt_by_row = load_jsonl_by_row(str(pt_path))
-        # P(true) runs on all rows (no cap), so cap_indices is irrelevant here.
-        scores_fwd, lbls_fwd = [], []
-        scores_rev, lbls_rev = [], []
-        for row_idx, rec in sorted(pt_by_row.items()):
-            if row_idx >= len(labels_all):
-                continue
-            lbl = labels_all[row_idx]
-            if (v := rec.get("p_true")) is not None and np.isfinite(v):
-                scores_fwd.append(1.0 - v)
-                lbls_fwd.append(lbl)
-            if (v := rec.get("p_true_reversed")) is not None and np.isfinite(v):
-                scores_rev.append(1.0 - v)
-                lbls_rev.append(lbl)
-        auroc_fwd = safe_auroc(scores_fwd, lbls_fwd)
-        auroc_rev = safe_auroc(scores_rev, lbls_rev)
-        result["p_true_auroc_fwd"] = auroc_fwd
-        result["p_true_auroc_rev"] = auroc_rev
-        # Headline: max over forward / reversed (token-position-bias correction)
-        if auroc_fwd is not None and auroc_rev is not None:
-            result["p_true"] = max(auroc_fwd, auroc_rev)
-        elif auroc_fwd is not None:
-            result["p_true"] = auroc_fwd
-        else:
-            result["p_true"] = auroc_rev
-
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Figure
-# ---------------------------------------------------------------------------
-
-def make_compute_matched_figure(table: pd.DataFrame, output_path: str) -> None:
-    """One panel per dataset; x=forward-pass count, y=AUROC."""
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError:
-        print("matplotlib not installed — skipping figure.")
-        return
-
-    free_form = [d for d in SAMPLING_DATASETS if d != "mmlu"]
-    all_datasets = free_form + ["mmlu"]
-
-    n_cols = 3
-    n_rows = (len(all_datasets) + n_cols - 1) // n_cols
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows), squeeze=False)
-
-    method_style = {
-        "Our contrastive (K=1)": dict(K=1, marker="*", color="tab:red", linestyle="none"),
-        "SEP-SE (K=1)": dict(K=1, marker="s", color="tab:purple", linestyle="none"),
-        "SelfCheckGPT-NLI (K=10)": dict(K=10, marker="o", color="tab:blue", linestyle="none"),
-        "SE length-norm (K=10)": dict(K=10, marker="^", color="tab:green", linestyle="none"),
-    }
-
-    col_map = {
-        "SEP-SE (K=1)": "sep_se_auroc",
-        "SelfCheckGPT-NLI (K=10)": "selfcheck_nli",
-        "SE length-norm (K=10)": "se_length_normalized",
-    }
-
-    for ax_idx, ds in enumerate(all_datasets):
-        row, col = divmod(ax_idx, n_cols)
-        ax = axes[row][col]
-        ds_rows = table[table["dataset"] == ds]
-
-        for label, style in method_style.items():
-            if label == "Our contrastive (K=1)":
-                continue  # placeholder — no data yet in this table
-            col_key = col_map.get(label)
-            if col_key is None or col_key not in ds_rows.columns:
-                continue
-            for _, row_data in ds_rows.iterrows():
-                val = row_data.get(col_key)
-                if val is not None and np.isfinite(val):
-                    ax.scatter(
-                        style["K"],
-                        val,
-                        label=f"{label} ({model_name(row_data['model'])})",
-                        marker=style["marker"],
-                        color=style["color"],
-                        s=80,
-                        zorder=3,
-                    )
-
-        ax.set_title(ds, fontsize=11)
-        ax.set_xlabel("Forward passes at test time")
-        ax.set_ylabel("AUROC")
-        ax.set_xlim(0, 12)
-        ax.set_ylim(0.4, 1.0)
-        ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
-        ax.legend(fontsize=7, loc="lower right")
-
-    # Hide unused panels
-    for ax_idx in range(len(all_datasets), n_rows * n_cols):
-        r, c = divmod(ax_idx, n_cols)
-        axes[r][c].set_visible(False)
-
-    fig.suptitle("Compute-matched AUROC comparison", fontsize=13)
-    fig.tight_layout()
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    print(f"Figure saved → {output_path}")
-    plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
 def _write_ptrue_bootstrap_ci(models, datasets, out_dir: Path) -> None:
-    """Compute and save bootstrap 95% CIs for P(true) AUROC across all cells."""
     print("\nComputing P(true) bootstrap CIs (1000 resamples)...")
     ci_results = []
     for mid in models:
@@ -306,87 +193,79 @@ def _write_ptrue_bootstrap_ci(models, datasets, out_dir: Path) -> None:
                     labels_cache[ds] = np.array(json.load(f)["halu_test_res"], dtype=int)
             labels_all = labels_cache[ds]
 
-            pt_by_row = load_jsonl_by_row(str(pt_path))
-            scores_fwd, lbls = [], []
-            scores_rev = []
-            for row_idx, rec in sorted(pt_by_row.items()):
-                if row_idx >= len(labels_all):
-                    continue
-                lbl = labels_all[row_idx]
-                if (v := rec.get("p_true")) is not None and np.isfinite(v):
-                    scores_fwd.append(1.0 - v)
-                    lbls.append(lbl)
-                if (v := rec.get("p_true_reversed")) is not None and np.isfinite(v):
-                    scores_rev.append(1.0 - v)
+            scores_fwd, lbls, scores_rev = [], [], []
+            with open(pt_path) as f:
+                for line in f:
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    row_idx = rec.get("row_idx")
+                    if row_idx is None or row_idx >= len(labels_all):
+                        continue
+                    lbl = int(labels_all[row_idx])
+                    if (v := rec.get("p_true")) is not None and np.isfinite(v):
+                        scores_fwd.append(1.0 - v)
+                        lbls.append(lbl)
+                    if (v := rec.get("p_true_reversed")) is not None and np.isfinite(v):
+                        scores_rev.append(1.0 - v)
 
-            ci_fwd = bootstrap_auroc(scores_fwd, lbls)
-            ci_rev = bootstrap_auroc(scores_rev, lbls)
+            ci_fwd = _bootstrap_auroc(scores_fwd, lbls)
+            ci_rev = _bootstrap_auroc(scores_rev, lbls)
             ci_results.append({
                 "dataset": ds,
                 "model": model_name(mid),
-                "p_true_auroc_fwd": safe_auroc(scores_fwd, lbls),
+                "p_true_auroc_fwd": _safe_auroc(scores_fwd, lbls),
                 "p_true_ci_fwd": ci_fwd,
-                "p_true_auroc_rev": safe_auroc(scores_rev, lbls),
+                "p_true_auroc_rev": _safe_auroc(scores_rev, lbls),
                 "p_true_ci_rev": ci_rev,
                 "n_rows": len(scores_fwd),
             })
-            print(
-                f"  {ds}/{model_name(mid)}: "
-                f"fwd={ci_fwd}, rev={ci_rev}"
-            )
+            print(f"  {ds}/{model_name(mid)}: fwd={ci_fwd}, rev={ci_rev}")
 
+    out_dir.mkdir(parents=True, exist_ok=True)
     ci_path = out_dir / "p_true_bootstrap.json"
     with open(ci_path, "w") as f:
         json.dump(ci_results, f, indent=2)
     print(f"Bootstrap CIs saved → {ci_path}")
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main():
-    parser = argparse.ArgumentParser(description="Assemble AUROC table and figure.")
-    parser.add_argument("--models", nargs="+", default=MODELS)
-    parser.add_argument("--datasets", nargs="+", default=DATASETS, choices=DATASETS)
-    parser.add_argument("--output-dir", default="output/baseline_results")
-    parser.add_argument("--no-figure", action="store_true")
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--with-ci",
-        action="store_true",
-        help="Compute bootstrap 95%% CIs for all methods (slow; 1000 resamples × cells).",
+        "--results-json",
+        type=Path,
+        default=DEFAULT_RESULTS_JSON,
+        help=f"Path to results_table.json (default: {DEFAULT_RESULTS_JSON}).",
     )
+    parser.add_argument("--models", nargs="+", default=MODELS,
+                        help="Models for P(true) bootstrap CI (default: all).")
+    parser.add_argument("--datasets", nargs="+", default=DATASETS, choices=DATASETS,
+                        help="Datasets for P(true) bootstrap CI.")
+    parser.add_argument("--output-dir", type=Path, default=Path("output/baseline_results"))
+    parser.add_argument("--no-figure", action="store_true")
+    parser.add_argument("--with-ci", action="store_true",
+                        help="Compute P(true) bootstrap 95%% CIs (1000 resamples × cells).")
     args = parser.parse_args()
 
-    out_dir = Path(args.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if not args.results_json.exists():
+        sys.exit(
+            f"results_table.json not found at {args.results_json}. "
+            f"Run: python scripts/results_table.py"
+        )
 
-    rows = []
-    for mid in args.models:
-        for ds in args.datasets:
-            print(f"  {ds} / {model_name(mid)}")
-            r = compute_dataset_aurocs(ds, mid)
-            rows.append(r)
-
-    table = pd.DataFrame(rows)
-
-    csv_path = out_dir / "baseline_auroc_table.csv"
-    table.to_csv(csv_path, index=False)
-    print(f"\nTable saved → {csv_path}")
-
-    # Pretty-print main table columns
-    main_cols = [
-        "dataset", "model",
-        "se_length_normalized", "selfcheck_nli",
-        "sep_se_auroc",
-        "p_true",             # headline: max(fwd, rev) — score = 1 - P(true)
-        "p_true_auroc_fwd",
-        "p_true_auroc_rev",
-    ]
-    print_cols = [c for c in main_cols if c in table.columns]
-    print(table[print_cols].to_string(index=False))
-
-    if args.with_ci:
-        _write_ptrue_bootstrap_ci(args.models, args.datasets, out_dir)
+    table = load_figure_table(args.results_json)
+    print(f"Loaded {len(table)} (dataset, model) cells from {args.results_json}")
 
     if not args.no_figure:
-        make_compute_matched_figure(table, str(out_dir / "compute_matched_auroc.pdf"))
+        make_compute_matched_figure(table, args.output_dir / "compute_matched_auroc.pdf")
+
+    if args.with_ci:
+        _write_ptrue_bootstrap_ci(args.models, args.datasets, args.output_dir)
 
 
 if __name__ == "__main__":
