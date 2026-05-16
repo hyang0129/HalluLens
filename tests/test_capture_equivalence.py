@@ -92,8 +92,11 @@ def test_response_to_response_equivalence(tiny_generate_output):
     hidden_states = tiny_generate_output["hidden_states"]
 
     ours = stitch_response_to_response(attentions, prompt_len, r_max)
-    assert ours.shape == (len(attentions[1][0]) if response_len > 0 else len(attentions[0]),
-                          r_max, r_max)
+    # Why: attentions[k] is a tuple of per-layer attention tensors, so
+    # len(attentions[k]) is num_layers. attentions[1][0] would give the batch
+    # dim of the layer-0 tensor — wrong axis.
+    num_layers = len(attentions[1]) if response_len > 0 else len(attentions[0])
+    assert ours.shape == (num_layers, r_max, r_max)
     assert ours.dtype == np.float16
 
     # Upstream path: instantiate ICRScore. core_positions controls cross-region
