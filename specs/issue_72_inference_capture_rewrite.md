@@ -75,8 +75,14 @@ for sample in samples:                       # B=1 to start; see Risks #1 for ba
     icr            = compute_icr_score(resp_attn, resp_hs, ...)
     generated_text = tokenizer.decode(out.sequences[0][prompt_len:], skip_special_tokens=True)
     hallucinated   = not is_correct(generated_text, sample.reference_answer)  # inline, per-dataset
+    # Logprob capture — logits already in memory from decode, negligible extra cost.
+    # out.scores is a tuple of length response_len; each element is (1, vocab_size) logits.
+    token_logprobs, topk_ids, topk_logprobs = extract_logprobs(out.scores, out.sequences[0][prompt_len:], top_k=K)
     writer.append(sample, resp_hs, resp_attn, icr,
-                  token_ids=out.sequences[0], hallucinated=hallucinated)
+                  token_ids=out.sequences[0][prompt_len:],
+                  prompt_token_ids=out.sequences[0][:prompt_len],
+                  token_logprobs=token_logprobs, topk_ids=topk_ids, topk_logprobs=topk_logprobs,
+                  hallucinated=hallucinated)
 writer.finalize()   # synthesizes eval_results.json from meta.jsonl for compat
 ```
 
@@ -140,32 +146,70 @@ Per dataset × model:
 
 ```
 shared/icr_capture/{dataset}_{model_slug}/
-  config.json                  # model_name, num_layers, hidden_dim, r_max, dtype, ...
-  meta.jsonl                   # one line per fully-written sample (authoritative)
-  response_activations.npy     # memmap (N, num_layers+1, max_response_len, hidden_dim) fp16
-  response_attention.npy       # memmap (N, num_layers, r_max, r_max) fp16
-  prompt_activations.npy       # memmap (N, num_layers+1, max_prompt_len, hidden_dim) fp16   [optional]
-  prompt_token_ids.npy         # memmap (N, max_prompt_len) int32  (-1 padded)
-  response_token_ids.npy       # memmap (N, max_response_len) int32  (-1 padded)
-  prompt_len.npy               # memmap (N,) int32
-  response_len.npy             # memmap (N,) int32
-  icr_scores.npy               # (N, num_layers) fp32  — full numpy save, no memmap needed (~1.4 MB / 10k samples)
-  generation.jsonl             # (carried over) prompt + generated text + sampling metadata
+  config.json                       # model_name, num_layers, hidden_dim, r_max, dtype, response_logprobs_top_k, ...
+  meta.jsonl                        # one line per fully-written sample (authoritative)
+  response_activations.npy          # memmap (N, num_layers+1, max_response_len, hidden_dim) fp16
+  response_attention.npy            # memmap (N, num_layers, r_max, r_max) fp16
+  prompt_activations.npy            # memmap (N, num_layers+1, max_prompt_len, hidden_dim) fp16
+  prompt_token_ids.npy              # memmap (N, max_prompt_len) int32  (-1 padded)
+  response_token_ids.npy            # memmap (N, max_response_len) int32  (-1 padded)
+  response_token_logprobs.npy       # memmap (N, max_response_len) float32  (log prob of generated token; NaN padded)
+  response_topk_token_ids.npy       # memmap (N, max_response_len, response_logprobs_top_k) int32  (-1 padded)
+  response_topk_logprobs.npy        # memmap (N, max_response_len, response_logprobs_top_k) float32  (NaN padded)
+  prompt_len.npy                    # memmap (N,) int32
+  response_len.npy                  # memmap (N,) int32
+  icr_scores.npy                    # (N, num_layers) fp32  — full numpy save, no memmap needed (~1.4 MB / 10k samples)
+  generation.jsonl                  # prompt + generated text + labels + task-specific fields (see below)
+  eval_results.json                 # synthesized by finalize() for backward compat (see below)
 ```
 
-`meta.jsonl` line format:
+`config.json` must include `response_logprobs_top_k` (default 20, matching the zarr convention) so readers
+know K without parsing the array shape. Minimum required keys:
 ```json
-{"sample_index": 42, "key": "mmlu_42", "prompt_len": 137, "response_len": 28, "hallucinated": true, "wrote_at": "2026-05-16T..."}
+{"model_name": "...", "num_layers": 36, "hidden_dim": 4096, "r_max": 64, "dtype": "float16",
+ "response_logprobs_top_k": 20, "max_prompt_len": 512, "max_response_len": 256}
 ```
+
+`meta.jsonl` line format — must include `prompt_hash` so the compatibility reader can key lookups by
+SHA-256(prompt) without re-reading `generation.jsonl`:
+```json
+{"sample_index": 42, "key": "mmlu_42", "prompt_hash": "<sha256hex>", "prompt_len": 137, "response_len": 28, "hallucinated": true, "wrote_at": "2026-05-16T..."}
+```
+
+`generation.jsonl` field contract — one JSON object per line, fields required:
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `prompt` | str | yes | full prompt as fed to the model |
+| `generation` | str | yes | decoded response (skip_special_tokens=True) |
+| `answer` | str | yes | reference/gold answer used for `is_correct` |
+| `question` | str | yes | question text (may duplicate part of `prompt`; needed by P(true) scorer) |
+| `hallucinated` | bool | yes | `not is_correct(generation, answer)` |
+| `prompt_hash` | str | yes | sha256(prompt) — must match `meta.jsonl` |
+| `sample_index` | int | yes | row index into the memmap arrays |
+
+Task-specific passthrough fields (e.g. `subject` for MMLU, `id` for HotpotQA, `supporting_facts` for
+HotpotQA) should be forwarded from the dataset record so that `--step eval-only` can reconstruct labels
+without re-running inference.
+
+`eval_results.json` synthesized by `finalize()` — must use the **array format** that `ActivationParser._load_metadata`
+reads (not the per-key dict format). `abstantion` is all-False for inline-eval runs (we never write a
+meta line without a label, so there are no abstained samples):
+```json
+{"halu_test_res": [true, false, true, ...], "abstantion": [false, false, false, ...]}
+```
+Both lists are index-aligned with `generation.jsonl` rows (row 0 = sample_index 0, etc.).
 
 Resume on restart: open `meta.jsonl`, take `max(sample_index)`, restart from `+1`. If a memmap row was partially written before crash, it gets overwritten with no harm — we never trust a row without a meta line.
 
 ## Storage budget (rough)
 
-Per sample, Qwen3-8B (36 layers, hidden_dim=4096, max_response_len=256, r_max=64, fp16):
+Per sample, Qwen3-8B (36 layers, hidden_dim=4096, max_response_len=256, r_max=64, fp16, top_k=20):
 - response_activations: 37 × 256 × 4096 × 2 ≈ 76 MB
 - response_attention:   36 × 64 × 64 × 2  ≈ 0.3 MB
-- prompt_activations:   37 × max_prompt_len × 4096 × 2 ≈ similar order to response_activations
+- prompt_activations:   37 × max_prompt_len × 4096 × 2 ≈ similar order to response_activations  (required, not optional)
+- response_token_logprobs: 256 × 4 ≈ 1 KB
+- response_topk_token_ids + response_topk_logprobs: 256 × 20 × (4 + 4) ≈ 40 KB
 - token IDs, lengths, ICR scores: < 1 KB
 
 → ~150 MB/sample dominated by activations. 10k-sample dataset ≈ 1.5 TB.
@@ -173,8 +217,6 @@ Per sample, Qwen3-8B (36 layers, hidden_dim=4096, max_response_len=256, r_max=64
 This is the same order of magnitude as existing zarr stores. **The memmap rewrite is not a storage win** — it's a code-quality and correctness win. If we want to shrink storage, the right knobs are:
 - Truncate `max_response_len` (need to audit how long responses actually are; 256 is generous).
 - Save activations at a subset of layers (e.g. the layers probes actually train on, per Wave 4's `--train-layers 14-29`).
-- Drop `prompt_activations` if no consumer needs them.
-
 These are storage-side decisions, separable from the memmap rewrite. Default v1: keep behavior parity with existing zarr (all layers, full response window up to `max_response_len`).
 
 ## Datasets + models to re-capture (v1)
@@ -211,7 +253,7 @@ At ~16 samp/s steady-state, MMLU test (10k) ≈ 10 min/model; MMLU train (100k) 
 ## Concrete plan (sketch)
 
 1. **Audit token-ID presence** across existing zarrs (extend `scripts/audit_zarr_prefix.py` to also list which arrays exist per store). Identifies which datasets currently have token IDs (useful as a numerical-equivalence reference against the new path) and which would have needed re-capture anyway.
-2. **Port the upstream stitching primitive.** Implement `stitch_response_to_response(out.attentions, prompt_len, r_max)` in a new module `activation_logging/generate_capture.py`. The implementation mirrors upstream `_pre_process_attn` lines 53–102 but stream-slices to response-to-response keys instead of materializing the full `(T, T)` matrix. Unit-test it on a tiny model (e.g. `sshleifer/tiny-gpt2`) against a hand-stitched reference.
+2. **Port the upstream stitching primitive and logprob extractor.** Implement `stitch_response_to_response(out.attentions, prompt_len, r_max)` and `extract_logprobs(out.scores, response_ids, top_k)` in a new module `activation_logging/generate_capture.py`. `out.scores` is a tuple of `(1, vocab_size)` logit tensors (one per decode step); `extract_logprobs` applies `log_softmax`, gathers the generated token's logprob, and runs `torch.topk` to get the top-K alternatives — all on CPU after moving off GPU. Unit-test the stitching primitive on a tiny model (e.g. `sshleifer/tiny-gpt2`) against a hand-stitched reference.
 3. **Prototype the capture script** on one (dataset × model) pair — `sciq_qwen3_8b` (1000 samples, smallest, fast iteration). End-to-end: load model, run generation with `output_attentions=True`, stream-stitch, write memmap + meta, compute ICR inline, read back. No probe training yet.
 4. **Build the `MemmapInferenceCapture` writer** as the abstraction (mirrors `AttentionMemmapWriter` from Wave 4 but with two memmap streams + token IDs + ICR sidecar).
 5. **Numerical-equivalence gate.** Run the new capture path on one sample, then run upstream's reference `_pre_process_attn` (downloaded ad-hoc from the upstream repo, or via a vendored copy) on the same `model.generate()` output, and assert `max|ours - upstream| < 1e-3` on the response-to-response sub-block. This is the canary that protects the apples-to-apples comparison. **Must pass before any full re-capture run starts.**
