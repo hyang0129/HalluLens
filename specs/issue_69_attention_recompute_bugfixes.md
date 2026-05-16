@@ -157,13 +157,69 @@ contiguous compute.
 * GPU sampler: `reports/smoketest_attention_recompute/gpu_llama_3_1_8b_instruct_20260515_231027.log`
 * Smoke output store + scores: `reports/smoketest_attention_recompute/hotpotqa_llama_3_1_8b_instruct/`
 
-## Follow-ups
+## Smoketest re-run — Qwen3-8B on HotpotQA (data-blocked)
 
-* The same smoketest should be repeated with `MODEL="Qwen/Qwen3-8B"` once
-  Qwen activations are available, to confirm the `rotary_emb` lookup also
-  works on `Qwen3Model`. The `getattr(model.model, "rotary_emb", None)`
-  pattern is generic, but the underlying `LlamaRotaryEmbedding` vs.
-  `Qwen3RotaryEmbedding` call signatures should be re-checked end-to-end.
+Job `3112bf8b500e` on alphagpu04-8884 (H100 80GB), invoked as:
+
+```
+python scripts/gpu_dispatch.py run --jupyter --node alphagpu04-8884 -- \
+    'MODEL=Qwen/Qwen3-8B bash scripts/smoketest_attention_recompute.sh'
+```
+
+Result: **recompute pipeline works on Qwen3, but the smoketest fails at
+Phase 3 because the source zarr is partially blank at the front.**
+
+| Phase | Outcome | Notes |
+|------:|---------|-------|
+| 1 | `PASS` printed — **but vacuously** | All 4 validate samples had `response_len=0` and were skipped; the per-block diff list was empty so the `< 1e-3` assertion held over an empty set. |
+| 2 | Exit 0; `response_attn.npy` + `icr_scores.npy` allocated; `meta.jsonl` empty | All 20 samples skipped with `response_len=0`; `Done. Wrote 0 samples`. |
+| 3 | **FAIL** — `AssertionError: (0, 20)` | Readback correctly caught the empty `meta.jsonl`. |
+| 4 | Not reached | Phase 3 abort under `set -eo pipefail`. |
+
+### Root cause
+
+`shared/hotpotqa_qwen3_8b/activations.zarr` (8877 samples) has **1472
+contiguous zero-length samples at indices 0..1471** with empty
+`sample_key` strings. The first nonzero sample is at index 1472. The
+smoketest reads samples 0..19, which all fall inside the blank prefix.
+The Llama zarr at the same path has full data from index 0.
+
+The recompute code itself behaved correctly: the per-sample
+`response_len == 0` guard skipped each blank row with a warning, no
+attention bytes were written for them, and Phase 3 caught the empty
+meta. The `rotary_emb` lookup on `Qwen3Model` was reached (Phase 2 model
+load + setup completed) but never exercised on a non-empty sample.
+
+### Follow-ups (revised)
+
+* **Source data — Qwen3 hotpotqa zarr is half-empty at the front.** Regenerate
+  it, or audit-then-slice off the leading 1472 blank rows. Worth checking
+  every Qwen3 dataset via `scripts/audit_datasets.py --model Qwen/Qwen3-8B
+  --zarr` — this leading-blank-block pattern may not be hotpotqa-specific.
+* **`scripts/recompute_attention.py --validate-first` silent-success bug.**
+  When every input sample has `response_len == 0`, the script still prints
+  `PASS: all max |A_recomp - A_full| < 1e-3` because the empty-set check
+  holds vacuously. It should fail (or at minimum loudly warn + exit non-zero)
+  when the validated-block count is 0. The smoketest wrapper currently
+  inherits the false positive in its `OK: Phase 1 passed` line. Fix the
+  primitive, not the wrapper.
+* **Re-run the Qwen3 smoketest once one of the two prerequisites lands**
+  (a non-blank Qwen3 zarr exists, or the smoketest is pointed at a
+  dataset where Qwen3 has populated data). Goal is still the same:
+  confirm `Qwen3RotaryEmbedding`'s call signature is compatible with the
+  `getattr(model.model, "rotary_emb", None)` lookup end-to-end, on at
+  least one non-empty sample.
+* **Dispatcher gotcha (now documented in the smoketest script header).**
+  `gpu_dispatch.py run` does `" ".join(args.cmd)` and ships the result to
+  a remote `bash -c`, so a local-shell-side
+  `MODEL=... python scripts/gpu_dispatch.py run ...` silently runs the
+  Llama default. Inline the assignment into the dispatched command as a
+  single quoted arg (see the script header for the canonical form). The
+  first Qwen3 dispatch on this branch (job `d458428b4afa`) hit exactly
+  this pitfall and re-ran Llama; the PASS lines reported in that run are
+  not Qwen3 evidence.
 * The Phase 1 numerical tolerance is `1e-3` per block — tight enough to
   catch the kind of subtle layout / RoPE mismatches Bug 2 produced
-  (where it would have passed shape checks but produced garbage).
+  (where it would have passed shape checks but produced garbage). This
+  remains true; it's just not what the current Qwen3 run actually
+  exercised.

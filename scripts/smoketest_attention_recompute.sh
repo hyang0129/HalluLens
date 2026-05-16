@@ -22,8 +22,28 @@
 #       bash scripts/smoketest_attention_recompute.sh
 #
 # Defaults run Llama-3.1-8B on HotpotQA.  Override via env vars to smoke-test
-# the Qwen3-8B path or a different dataset:
+# the Qwen3-8B path or a different dataset. Because `gpu_dispatch.py run`
+# joins its trailing argv with spaces and ships the result to a remote
+# `bash -c`, a local-shell-side `MODEL=... gpu_dispatch.py run ...` does NOT
+# propagate — the smoketest will silently fall back to the Llama default.
+# Inline the assignment into the dispatched command as a single quoted arg:
+#   python scripts/gpu_dispatch.py run --jupyter --node <NODE> -- \
+#       'MODEL=Qwen/Qwen3-8B bash scripts/smoketest_attention_recompute.sh'
+# (Confirm the model actually ran by checking `Model:` in
+# shared/logs/<job_id>.log and the artifact dir under
+# reports/smoketest_attention_recompute/.)
+#
+# For a local (non-dispatched) run on the GPU node itself the simple env-var
+# form still works:
 #   MODEL="Qwen/Qwen3-8B" DATASET="hotpotqa" bash scripts/smoketest_attention_recompute.sh
+#
+# Source-data prerequisite: the script reads
+# shared/${DATASET}_${MODEL_SLUG}/activations.zarr and only processes samples
+# with response_len > 0. If the first N rows of that zarr are blank (e.g. the
+# Qwen3 hotpotqa store had 1472 leading zero-length samples), all N
+# smoketest samples are skipped, Phase 2 writes 0 meta entries, and Phase 3
+# fails with `AssertionError: (0, 20)`. Verify the source zarr's response_len
+# at the offsets the smoketest reads (samples 0..N-1) before re-running.
 set -eo pipefail
 cd /mnt/home/hyang1/LLM_research/HalluLens
 
