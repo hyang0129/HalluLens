@@ -258,6 +258,148 @@ def build_writer_config(model: Any, args: argparse.Namespace) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Step: capture (batched helper)
+# ---------------------------------------------------------------------------
+
+def _run_batch(
+    pending: list,
+    tokenizer: Any,
+    model: Any,
+    task_module: Any,
+    is_correct_adapter: Any,
+    writer: Any,
+    args: argparse.Namespace,
+) -> None:
+    """Tokenize, generate, stitch, and write one batch of pending samples."""
+    import torch
+    from activation_logging.generate_capture import (
+        extract_logprobs_batched,
+        stitch_prompt_hidden_states_batched,
+        stitch_response_hidden_states_batched,
+        stitch_response_to_response_batched,
+    )
+
+    assert tokenizer.pad_token is not None, (
+        "tokenizer.pad_token must be set before batched generate"
+    )
+    tokenizer.padding_side = "left"
+
+    prompts = [s["prompt"] for s in pending]
+    batch = tokenizer(
+        prompts,
+        padding=True,
+        truncation=True,
+        max_length=args.max_prompt_len,
+        return_tensors="pt",
+    ).to(model.device)
+
+    prompt_lens = batch.attention_mask.sum(dim=1).cpu().numpy()  # (B,)
+    padded_prompt_len = batch.input_ids.shape[1]
+    B = len(pending)
+
+    with torch.no_grad():
+        out = model.generate(
+            batch.input_ids,
+            attention_mask=batch.attention_mask,
+            max_new_tokens=args.max_response_len,
+            do_sample=False,
+            output_attentions=True,
+            output_hidden_states=True,
+            output_scores=True,
+            return_dict_in_generate=True,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+
+    response_lens = np.empty(B, dtype=np.int32)
+    for b in range(B):
+        resp_b = out.sequences[b, padded_prompt_len:]
+        eos_positions = (resp_b == tokenizer.eos_token_id).nonzero(as_tuple=False)
+        if len(eos_positions) > 0:
+            response_lens[b] = int(eos_positions[0].item()) + 1
+        else:
+            response_lens[b] = int(resp_b.shape[0])
+
+    resp_attn = stitch_response_to_response_batched(
+        out.attentions, prompt_lens, response_lens, args.r_max
+    )
+    resp_hs = stitch_response_hidden_states_batched(
+        out.hidden_states, prompt_lens, response_lens, args.max_response_len
+    )
+    prompt_hs = stitch_prompt_hidden_states_batched(
+        out.hidden_states, prompt_lens, args.max_prompt_len
+    )
+    token_lp, topk_ids, topk_lp = extract_logprobs_batched(
+        out.scores, out.sequences, prompt_lens, response_lens, args.top_k
+    )
+
+    for b in range(B):
+        s = pending[b]
+        sample = s["sample"]
+        resp_ids = out.sequences[b, padded_prompt_len:padded_prompt_len + int(response_lens[b])]
+        decoded = tokenizer.decode(resp_ids, skip_special_tokens=True)
+        hallucinated = not is_correct_adapter(task_module, decoded, sample)
+
+        icr_per_layer = compute_icr_per_layer(
+            resp_attn[b], resp_hs[b], int(response_lens[b]), top_p=0.1
+        )
+
+        p_len = int(prompt_lens[b])
+        real_token_start = padded_prompt_len - p_len
+        prompt_ids_np = pad_to(
+            batch.input_ids[b, real_token_start:].cpu().numpy(),
+            args.max_prompt_len, -1
+        ).astype(np.int32)
+        response_ids_np = pad_to(
+            resp_ids.cpu().numpy(), args.max_response_len, -1
+        ).astype(np.int32)
+        token_lp_np = pad_to(token_lp[b], args.max_response_len, np.nan).astype(np.float32)
+        topk_ids_np = pad_2d(topk_ids[b], args.max_response_len, args.top_k, -1).astype(np.int32)
+        topk_lp_np = pad_2d(topk_lp[b], args.max_response_len, args.top_k, np.nan).astype(np.float32)
+
+        passthrough = {
+            k: v for k, v in sample.items()
+            if k not in ("question", "answer", "possible_answers")
+        }
+        answer_raw = sample.get("answer", sample.get("possible_answers", ""))
+        answer_str = json.dumps(answer_raw) if isinstance(answer_raw, list) else str(answer_raw)
+
+        gen_record = {
+            "prompt": s["prompt"],
+            "generation": decoded,
+            "answer": answer_str,
+            "question": sample.get("question", ""),
+            "hallucinated": hallucinated,
+            "prompt_hash": s["prompt_hash"],
+            "sample_index": s["sample_index"],
+            **passthrough,
+        }
+
+        writer.append(
+            sample_index=s["sample_index"],
+            prompt_hash=s["prompt_hash"],
+            key=str(sample.get("id", s["dataset_index"])),
+            prompt_len=p_len,
+            response_len=int(response_lens[b]),
+            prompt_activations=prompt_hs[b],
+            response_activations=resp_hs[b],
+            response_attention=resp_attn[b],
+            prompt_token_ids=prompt_ids_np,
+            response_token_ids=response_ids_np,
+            response_token_logprobs=token_lp_np,
+            response_topk_token_ids=topk_ids_np,
+            response_topk_logprobs=topk_lp_np,
+            icr_score_per_layer=icr_per_layer,
+            hallucinated=hallucinated,
+            generation_record=gen_record,
+        )
+
+        logger.info(
+            "  [batch] sample_index=%d  response_len=%d  hallucinated=%s  icr_mean=%.4f",
+            s["sample_index"], int(response_lens[b]), hallucinated, float(icr_per_layer.mean()),
+        )
+
+
+# ---------------------------------------------------------------------------
 # Step: capture
 # ---------------------------------------------------------------------------
 
@@ -265,13 +407,9 @@ def _run_capture(args: argparse.Namespace) -> int:
     import torch
     from activation_logging.generate_capture import (
         extract_logprobs,
-        extract_logprobs_batched,
         stitch_prompt_hidden_states,
-        stitch_prompt_hidden_states_batched,
         stitch_response_hidden_states,
-        stitch_response_hidden_states_batched,
         stitch_response_to_response,
-        stitch_response_to_response_batched,
     )
     from activation_logging.inference_capture_writer import InferenceCaptureWriter
 
@@ -297,6 +435,8 @@ def _run_capture(args: argparse.Namespace) -> int:
 
     # Load model
     tokenizer, model = load_model_eager(args.model)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     # Determine resume mode
     out_path = Path(args.out_dir)
@@ -304,7 +444,9 @@ def _run_capture(args: argparse.Namespace) -> int:
     writer_mode = "a" if config_path.exists() else "w"
 
     config_dict = build_writer_config(model, args)
-    logger.info("Writer mode: %s  out_dir: %s", writer_mode, args.out_dir)
+    logger.info("Writer mode: %s  out_dir: %s  batch_size: %d", writer_mode, args.out_dir, args.batch_size)
+
+    batch_size = args.batch_size
 
     with InferenceCaptureWriter(
         args.out_dir,
@@ -312,117 +454,142 @@ def _run_capture(args: argparse.Namespace) -> int:
         n_samples=len(dataset),
         config_dict=config_dict,
     ) as writer:
-        for i, sample in enumerate(dataset):
-            prompt = build_prompt(sample, task_module)
-            p_hash = sha256(prompt)
+        if batch_size <= 1:
+            for i, sample in enumerate(dataset):
+                prompt = build_prompt(sample, task_module)
+                p_hash = sha256(prompt)
 
-            if writer.is_written(p_hash):
-                logger.debug("Skipping already-written sample %d (hash=%s)", i, p_hash[:8])
-                continue
+                if writer.is_written(p_hash):
+                    logger.debug("Skipping already-written sample %d (hash=%s)", i, p_hash[:8])
+                    continue
 
-            sample_index = writer.next_index()
-            logger.info(
-                "Sample %d/%d  index=%d  task=%s",
-                i + 1, len(dataset), sample_index, args.task,
-            )
-
-            inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-            prompt_len = inputs.input_ids.shape[1]
-
-            with torch.no_grad():
-                out = model.generate(
-                    inputs.input_ids,
-                    output_attentions=True,
-                    output_hidden_states=True,
-                    output_scores=True,
-                    return_dict_in_generate=True,
-                    max_new_tokens=args.max_response_len,
-                    do_sample=False,
+                sample_index = writer.next_index()
+                logger.info(
+                    "Sample %d/%d  index=%d  task=%s",
+                    i + 1, len(dataset), sample_index, args.task,
                 )
 
-            response_ids = out.sequences[0][prompt_len:]
-            response_len = response_ids.shape[0]
-            decoded = tokenizer.decode(response_ids, skip_special_tokens=True)
+                inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+                prompt_len = inputs.input_ids.shape[1]
 
-            # Inline label — pure CPU, negligible latency vs generate()
-            hallucinated = not is_correct_adapter(task_module, decoded, sample)
+                with torch.no_grad():
+                    out = model.generate(
+                        inputs.input_ids,
+                        output_attentions=True,
+                        output_hidden_states=True,
+                        output_scores=True,
+                        return_dict_in_generate=True,
+                        max_new_tokens=args.max_response_len,
+                        do_sample=False,
+                    )
 
-            # Stitch into fixed-shape arrays
-            resp_attn = stitch_response_to_response(
-                out.attentions, prompt_len, args.r_max, response_len
-            )
-            resp_hs = stitch_response_hidden_states(
-                out.hidden_states, prompt_len, args.max_response_len
-            )
-            prompt_hs = stitch_prompt_hidden_states(
-                out.hidden_states, prompt_len, args.max_prompt_len
-            )
+                response_ids = out.sequences[0][prompt_len:]
+                response_len = response_ids.shape[0]
+                decoded = tokenizer.decode(response_ids, skip_special_tokens=True)
 
-            # Logprobs
-            token_lp, topk_ids, topk_lp = extract_logprobs(
-                out.scores, response_ids, top_k=args.top_k
-            )
+                hallucinated = not is_correct_adapter(task_module, decoded, sample)
 
-            # ICR score vector — one scalar per layer
-            icr_per_layer = compute_icr_per_layer(
-                resp_attn, resp_hs, int(response_len), top_p=0.1
-            )
+                resp_attn = stitch_response_to_response(
+                    out.attentions, prompt_len, args.r_max, response_len
+                )
+                resp_hs = stitch_response_hidden_states(
+                    out.hidden_states, prompt_len, args.max_response_len
+                )
+                prompt_hs = stitch_prompt_hidden_states(
+                    out.hidden_states, prompt_len, args.max_prompt_len
+                )
 
-            # Pad token ID and logprob arrays to fixed sizes
-            prompt_ids_np = pad_to(
-                inputs.input_ids[0].cpu().numpy(), args.max_prompt_len, -1
-            ).astype(np.int32)
-            response_ids_np = pad_to(
-                response_ids.cpu().numpy(), args.max_response_len, -1
-            ).astype(np.int32)
-            token_lp_np = pad_to(token_lp, args.max_response_len, np.nan).astype(np.float32)
-            topk_ids_np = pad_2d(topk_ids, args.max_response_len, args.top_k, -1).astype(np.int32)
-            topk_lp_np = pad_2d(topk_lp, args.max_response_len, args.top_k, np.nan).astype(np.float32)
+                token_lp, topk_ids, topk_lp = extract_logprobs(
+                    out.scores, response_ids, top_k=args.top_k
+                )
 
-            # Build task-specific passthrough fields for generation record
-            passthrough = {
-                k: v for k, v in sample.items()
-                if k not in ("question", "answer", "possible_answers")
-            }
+                icr_per_layer = compute_icr_per_layer(
+                    resp_attn, resp_hs, int(response_len), top_p=0.1
+                )
 
-            # Normalise answer field to str for storage; popqa uses a list
-            answer_raw = sample.get("answer", sample.get("possible_answers", ""))
-            answer_str = json.dumps(answer_raw) if isinstance(answer_raw, list) else str(answer_raw)
+                prompt_ids_np = pad_to(
+                    inputs.input_ids[0].cpu().numpy(), args.max_prompt_len, -1
+                ).astype(np.int32)
+                response_ids_np = pad_to(
+                    response_ids.cpu().numpy(), args.max_response_len, -1
+                ).astype(np.int32)
+                token_lp_np = pad_to(token_lp, args.max_response_len, np.nan).astype(np.float32)
+                topk_ids_np = pad_2d(topk_ids, args.max_response_len, args.top_k, -1).astype(np.int32)
+                topk_lp_np = pad_2d(topk_lp, args.max_response_len, args.top_k, np.nan).astype(np.float32)
 
-            gen_record = {
-                "prompt": prompt,
-                "generation": decoded,
-                "answer": answer_str,
-                "question": sample.get("question", ""),
-                "hallucinated": hallucinated,
-                "prompt_hash": p_hash,
-                "sample_index": sample_index,
-                **passthrough,
-            }
+                passthrough = {
+                    k: v for k, v in sample.items()
+                    if k not in ("question", "answer", "possible_answers")
+                }
 
-            writer.append(
-                sample_index=sample_index,
-                prompt_hash=p_hash,
-                key=str(sample.get("id", i)),
-                prompt_len=prompt_len,
-                response_len=int(response_len),
-                prompt_activations=prompt_hs,
-                response_activations=resp_hs,
-                response_attention=resp_attn,
-                prompt_token_ids=prompt_ids_np,
-                response_token_ids=response_ids_np,
-                response_token_logprobs=token_lp_np,
-                response_topk_token_ids=topk_ids_np,
-                response_topk_logprobs=topk_lp_np,
-                icr_score_per_layer=icr_per_layer,
-                hallucinated=hallucinated,
-                generation_record=gen_record,
-            )
+                answer_raw = sample.get("answer", sample.get("possible_answers", ""))
+                answer_str = json.dumps(answer_raw) if isinstance(answer_raw, list) else str(answer_raw)
 
-            logger.info(
-                "  response_len=%d  hallucinated=%s  icr_mean=%.4f",
-                response_len, hallucinated, float(icr_per_layer.mean()),
-            )
+                gen_record = {
+                    "prompt": prompt,
+                    "generation": decoded,
+                    "answer": answer_str,
+                    "question": sample.get("question", ""),
+                    "hallucinated": hallucinated,
+                    "prompt_hash": p_hash,
+                    "sample_index": sample_index,
+                    **passthrough,
+                }
+
+                writer.append(
+                    sample_index=sample_index,
+                    prompt_hash=p_hash,
+                    key=str(sample.get("id", i)),
+                    prompt_len=prompt_len,
+                    response_len=int(response_len),
+                    prompt_activations=prompt_hs,
+                    response_activations=resp_hs,
+                    response_attention=resp_attn,
+                    prompt_token_ids=prompt_ids_np,
+                    response_token_ids=response_ids_np,
+                    response_token_logprobs=token_lp_np,
+                    response_topk_token_ids=topk_ids_np,
+                    response_topk_logprobs=topk_lp_np,
+                    icr_score_per_layer=icr_per_layer,
+                    hallucinated=hallucinated,
+                    generation_record=gen_record,
+                )
+
+                logger.info(
+                    "  response_len=%d  hallucinated=%s  icr_mean=%.4f",
+                    response_len, hallucinated, float(icr_per_layer.mean()),
+                )
+        else:
+            pending_samples: list[dict] = []
+            for i, sample in enumerate(dataset):
+                prompt = build_prompt(sample, task_module)
+                p_hash = sha256(prompt)
+
+                if writer.is_written(p_hash):
+                    logger.debug("Skipping already-written sample %d (hash=%s)", i, p_hash[:8])
+                    continue
+
+                sample_index = writer.next_index()
+                logger.info(
+                    "Sample %d/%d  index=%d  task=%s (pending batch)",
+                    i + 1, len(dataset), sample_index, args.task,
+                )
+                pending_samples.append({
+                    "dataset_index": i,
+                    "sample": sample,
+                    "prompt": prompt,
+                    "prompt_hash": p_hash,
+                    "sample_index": sample_index,
+                })
+
+                if len(pending_samples) == batch_size:
+                    _run_batch(pending_samples, tokenizer, model, task_module,
+                               is_correct_adapter, writer, args)
+                    pending_samples = []
+
+            if pending_samples:
+                _run_batch(pending_samples, tokenizer, model, task_module,
+                           is_correct_adapter, writer, args)
 
     logger.info("Capture complete. Output dir: %s", args.out_dir)
     return 0
@@ -558,6 +725,11 @@ def main() -> int:
     parser.add_argument("--step", choices=("capture", "eval-only"), default="capture",
                         help="capture (default): full GPU pipeline. "
                              "eval-only: re-run is_correct over existing generation.jsonl.")
+    parser.add_argument("--batch-size", type=int, default=1,
+                        help="Number of samples per generate() call. B=1 uses the B=1 path "
+                             "(no left-padding). B>1 uses batched stitching primitives. "
+                             "Llama-3.1-8B at max_prompt=512, max_response=64: B=4 fits "
+                             "comfortably on H100 80GB.")
     args = parser.parse_args()
 
     if args.step == "capture":

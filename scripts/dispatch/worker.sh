@@ -61,6 +61,7 @@ while true; do
   R_MAX=$(        "$PYTHON" -c "import json,sys; d=json.load(open('$CELL_PATH')); print(d['r_max'])")
   TOP_K=$(        "$PYTHON" -c "import json,sys; d=json.load(open('$CELL_PATH')); print(d['top_k'])")
   N_SAMPLES=$(    "$PYTHON" -c "import json,sys; d=json.load(open('$CELL_PATH')); v=d['n_samples']; print('' if v is None else str(v))")
+  BATCH_SIZE=$(   "$PYTHON" -c "import json,sys; d=json.load(open('$CELL_PATH')); print(d.get('batch_size', 1))")
 
   CAPTURE_ARGS=(
     --task        "$TASK"
@@ -71,6 +72,7 @@ while true; do
     --max-response-len "$MAX_RESP"
     --r-max       "$R_MAX"
     --top-k       "$TOP_K"
+    --batch-size  "$BATCH_SIZE"
   )
   if [ -n "$N_SAMPLES" ]; then
     CAPTURE_ARGS+=(--n-samples "$N_SAMPLES")

@@ -106,6 +106,7 @@ def generate_manifest(
     max_response_len: int = 64,
     r_max: int = 64,
     top_k: int = 20,
+    batch_size: int = 1,
 ) -> int:
     init_dispatch_dirs(dispatch_root)
     written = 0
@@ -140,6 +141,7 @@ def generate_manifest(
                     "max_response_len": max_response_len,
                     "r_max":           r_max,
                     "top_k":           top_k,
+                    "batch_size":      batch_size,
                 }
                 cell_path.write_text(
                     json.dumps(cell, indent=2), encoding="utf-8"
@@ -175,6 +177,9 @@ def main() -> int:
                              "past the attention sub-block ICR scoring uses.")
     parser.add_argument("--r-max", type=int, default=64)
     parser.add_argument("--top-k", type=int, default=20)
+    parser.add_argument("--batch-size", type=int, default=1,
+                        help="Number of samples per generate() call (default 1). "
+                             "Pass 4 for Phase 1 HotpotQA grid.")
     args = parser.parse_args()
 
     dispatch_root = Path(args.dispatch_root)
@@ -189,6 +194,7 @@ def main() -> int:
         max_response_len=args.max_response_len,
         r_max=args.r_max,
         top_k=args.top_k,
+        batch_size=args.batch_size,
     )
     print(f"Done — {total} cells queued in {dispatch_root / 'pending'}")
     return 0

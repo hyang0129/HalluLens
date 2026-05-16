@@ -231,6 +231,176 @@ def stitch_prompt_hidden_states(
     return out
 
 
+def stitch_response_to_response_batched(
+    attentions: Tuple[Tuple[Any, ...], ...],
+    prompt_lens: np.ndarray,
+    response_lens: np.ndarray,
+    r_max: int,
+) -> np.ndarray:
+    """Head-averaged response-to-response attention for a batch.
+
+    Returns:
+        (B, num_layers, r_max, r_max) float16 numpy array.
+    """
+    B = len(prompt_lens)
+    decode_steps = attentions[1:]
+
+    if len(decode_steps) > 0:
+        num_layers = len(decode_steps[0])
+    else:
+        num_layers = len(attentions[0])
+
+    out = np.zeros((B, num_layers, r_max, r_max), dtype=np.float16)
+    max_steps = min(len(decode_steps), r_max)
+
+    for t_idx in range(max_steps):
+        t = t_idx + 1  # 1-indexed response token
+        for layer_idx, layer_attn in enumerate(decode_steps[t_idx]):
+            # layer_attn: (B, num_heads, 1, padded_prompt_len + t)
+            layer_cpu = layer_attn.detach().cpu().float()
+            key_len = layer_cpu.shape[-1]
+            # Why: with left-padding, response tokens always start at position
+            # padded_prompt_len (identical for all b in the batch), NOT at
+            # prompt_lens[b] which is the real (unpadded) length. Infer
+            # padded_prompt_len from key_len - t since key grows by 1 per step.
+            padded_prompt_len = key_len - t
+            slice_end = min(padded_prompt_len + r_max, key_len)
+            for b in range(B):
+                # Why: HF still emits attention for pad-token decode steps after
+                # a sample EOS'd; those rows would contaminate the response sub-block.
+                if t > response_lens[b]:
+                    continue
+                row = layer_cpu[b, :, 0, padded_prompt_len:slice_end]  # (num_heads, n_keys)
+                n_keys = row.shape[-1]
+                if n_keys < r_max:
+                    row = F.pad(row, (0, r_max - n_keys))
+                row_avg = row.mean(dim=0)  # (r_max,)
+                out[b, layer_idx, t_idx] = row_avg.numpy().astype(np.float16)
+
+    return out
+
+
+def stitch_response_hidden_states_batched(
+    hidden_states: Tuple[Tuple[Any, ...], ...],
+    prompt_lens: np.ndarray,
+    response_lens: np.ndarray,
+    max_response_len: int,
+) -> np.ndarray:
+    """Stack per-token decode hidden states into a fixed-shape batch array.
+
+    Returns:
+        (B, num_layers + 1, max_response_len, hidden_dim) float16 numpy array.
+    """
+    B = len(prompt_lens)
+    prefill_layers = hidden_states[0]
+    num_layers_plus1 = len(prefill_layers)
+    hidden_dim = prefill_layers[0].shape[-1]
+
+    decode_steps = hidden_states[1:]
+    out = np.zeros((B, num_layers_plus1, max_response_len, hidden_dim), dtype=np.float16)
+
+    max_steps = min(len(decode_steps), max_response_len)
+    for t_idx in range(max_steps):
+        t = t_idx + 1  # 1-indexed response token
+        for layer_idx, layer_hs in enumerate(decode_steps[t_idx]):
+            # layer_hs: (B, 1, hidden_dim)
+            layer_cpu = layer_hs.detach().cpu().float()
+            for b in range(B):
+                # Why: skip pad-token decode steps emitted after sample b EOS'd.
+                if t > response_lens[b]:
+                    continue
+                token_hs = layer_cpu[b, 0].numpy().astype(np.float16)
+                out[b, layer_idx, t_idx] = token_hs
+
+    return out
+
+
+def stitch_prompt_hidden_states_batched(
+    hidden_states: Tuple[Tuple[Any, ...], ...],
+    prompt_lens: np.ndarray,
+    max_prompt_len: int,
+) -> np.ndarray:
+    """Extract prompt hidden states from the prefill pass for a batch.
+
+    Returns:
+        (B, num_layers + 1, max_prompt_len, hidden_dim) float16 numpy array.
+    """
+    B = len(prompt_lens)
+    prefill_layers = hidden_states[0]
+    num_layers_plus1 = len(prefill_layers)
+    hidden_dim = prefill_layers[0].shape[-1]
+
+    out = np.zeros((B, num_layers_plus1, max_prompt_len, hidden_dim), dtype=np.float16)
+
+    for layer_idx, layer_hs in enumerate(prefill_layers):
+        # layer_hs: (B, padded_prompt_len, hidden_dim)
+        layer_cpu = layer_hs.detach().cpu().float()
+        for b in range(B):
+            p_len = int(prompt_lens[b])
+            n_tokens = min(p_len, max_prompt_len)
+            # Why: prompt_lens[b] is the real (unpadded) token count from
+            # attention_mask.sum(); left-padding means real tokens are at the
+            # *right* end of the padded sequence. Slice from the right.
+            padded_len = layer_cpu.shape[1]
+            start = padded_len - p_len  # first real token index (left-padding offset)
+            tokens = layer_cpu[b, start:start + n_tokens].numpy().astype(np.float16)
+            out[b, layer_idx, :n_tokens] = tokens
+
+    return out
+
+
+def extract_logprobs_batched(
+    scores: Tuple[Any, ...],
+    sequences: Any,
+    prompt_lens: np.ndarray,
+    response_lens: np.ndarray,
+    top_k: int = 20,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Extract per-step log probabilities for a batch from generate() scores.
+
+    Args:
+        scores: out.scores — tuple of length actual_response_len, each (B, vocab_size).
+        sequences: out.sequences — (B, padded_prompt_len + actual_response_len).
+        prompt_lens: (B,) int — real (unpadded) prompt lengths.
+        response_lens: (B,) int — actual response length per sample.
+        top_k: number of alternative tokens to keep per position.
+
+    Returns:
+        (token_logprobs (B, R) fp32, topk_ids (B, R, K) int32, topk_logprobs (B, R, K) fp32)
+        where R = max(response_lens).
+    """
+    B = len(prompt_lens)
+    actual_steps = len(scores)
+    R = int(np.max(response_lens)) if B > 0 else 0
+    padded_prompt_len = sequences.shape[1] - actual_steps
+
+    token_logprobs = np.zeros((B, R), dtype=np.float32)
+    topk_ids_arr = np.zeros((B, R, top_k), dtype=np.int32)
+    topk_logprobs_arr = np.zeros((B, R, top_k), dtype=np.float32)
+
+    for t_idx in range(actual_steps):
+        t = t_idx + 1  # 1-indexed response token
+        step_logits = scores[t_idx].detach().cpu()  # (B, vocab_size)
+        vocab_size = step_logits.shape[-1]
+        actual_k = min(top_k, vocab_size)
+
+        for b in range(B):
+            # Why: skip pad-token decode steps emitted after sample b EOS'd.
+            if t > response_lens[b]:
+                continue
+            logits_1d = step_logits[b].float()
+            log_probs = F.log_softmax(logits_1d, dim=-1)
+
+            token_id = int(sequences[b, padded_prompt_len + t_idx])
+            token_logprobs[b, t_idx] = float(log_probs[token_id])
+
+            tk_vals, tk_ids = torch.topk(log_probs, k=actual_k)
+            topk_logprobs_arr[b, t_idx, :actual_k] = tk_vals.numpy().astype(np.float32)
+            topk_ids_arr[b, t_idx, :actual_k] = tk_ids.numpy().astype(np.int32)
+
+    return token_logprobs, topk_ids_arr, topk_logprobs_arr
+
+
 def extract_logprobs(
     scores: Tuple[Any, ...],
     generated_token_ids: Any,
