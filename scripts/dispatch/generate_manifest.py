@@ -102,6 +102,10 @@ def generate_manifest(
     models: list[str],
     splits: list[str],
     n_samples: int | None,
+    max_prompt_len: int = 512,
+    max_response_len: int = 64,
+    r_max: int = 64,
+    top_k: int = 20,
 ) -> int:
     init_dispatch_dirs(dispatch_root)
     written = 0
@@ -132,10 +136,10 @@ def generate_manifest(
                     "model":           model,
                     "out_dir":         str(out_dir).replace("\\", "/"),
                     "n_samples":       n_samples,
-                    "max_prompt_len":  512,
-                    "max_response_len": 256,
-                    "r_max":           64,
-                    "top_k":           20,
+                    "max_prompt_len":  max_prompt_len,
+                    "max_response_len": max_response_len,
+                    "r_max":           r_max,
+                    "top_k":           top_k,
                 }
                 cell_path.write_text(
                     json.dumps(cell, indent=2), encoding="utf-8"
@@ -165,6 +169,12 @@ def main() -> int:
                         help="Comma-separated logical split names (test, train).")
     parser.add_argument("--n-samples", type=int, default=None,
                         help="Cap per cell (omit for full split).")
+    parser.add_argument("--max-prompt-len", type=int, default=512)
+    parser.add_argument("--max-response-len", type=int, default=64,
+                        help="Default 64 — matches r_max so we never generate "
+                             "past the attention sub-block ICR scoring uses.")
+    parser.add_argument("--r-max", type=int, default=64)
+    parser.add_argument("--top-k", type=int, default=20)
     args = parser.parse_args()
 
     dispatch_root = Path(args.dispatch_root)
@@ -174,7 +184,11 @@ def main() -> int:
     splits = [s.strip() for s in args.splits.split(",") if s.strip()]
 
     total = generate_manifest(
-        dispatch_root, out_base_dir, tasks, models, splits, args.n_samples
+        dispatch_root, out_base_dir, tasks, models, splits, args.n_samples,
+        max_prompt_len=args.max_prompt_len,
+        max_response_len=args.max_response_len,
+        r_max=args.r_max,
+        top_k=args.top_k,
     )
     print(f"Done — {total} cells queued in {dispatch_root / 'pending'}")
     return 0
