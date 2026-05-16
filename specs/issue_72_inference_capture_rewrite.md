@@ -56,6 +56,7 @@ Single Python process, single GPU per run. Generation and attention capture happ
 
 ```
 load_model_eager(model_name)                # HF, attn_implementation='eager'
+load_evaluator(task)                         # per-dataset is_correct; substring/regex for LLMsKnow
 prepare_dataset(task)                        # existing task module's iterator
 for sample in samples:                       # B=1 to start; see Risks #1 for batching
     inputs = tokenize(sample.prompt)
@@ -69,11 +70,14 @@ for sample in samples:                       # B=1 to start; see Risks #1 for ba
             ...
         )
     # out.attentions is a heterogeneous tuple — see "Upstream stitching contract".
-    resp_attn = stitch_response_to_response(out.attentions, prompt_len, r_max)
-    resp_hs   = stitch_response_hidden_states(out.hidden_states, prompt_len)
-    icr       = compute_icr_score(resp_attn, resp_hs, ...)
-    writer.append(sample, resp_hs, resp_attn, icr, token_ids=out.sequences[0])
-writer.finalize()
+    resp_attn      = stitch_response_to_response(out.attentions, prompt_len, r_max)
+    resp_hs        = stitch_response_hidden_states(out.hidden_states, prompt_len)
+    icr            = compute_icr_score(resp_attn, resp_hs, ...)
+    generated_text = tokenizer.decode(out.sequences[0][prompt_len:], skip_special_tokens=True)
+    hallucinated   = not is_correct(generated_text, sample.reference_answer)  # inline, per-dataset
+    writer.append(sample, resp_hs, resp_attn, icr,
+                  token_ids=out.sequences[0], hallucinated=hallucinated)
+writer.finalize()   # synthesizes eval_results.json from meta.jsonl for compat
 ```
 
 The key shifts from the current architecture:
@@ -93,9 +97,10 @@ The contract we must enforce is internal: **labels must be the same across every
 
 Concretely:
 
-1. **Generation step** of the new capture path is responsible for producing `generation.jsonl` (text + metadata), `response_activations.npy`, `response_attention.npy`, `response_token_ids.npy`, `icr_scores.npy`, and `meta.jsonl`.
-2. **Eval step is unchanged** — call the existing task module's `run_step('eval', ...)` (e.g. `tasks/llmsknow/hotpotqa.py` uses substring match via `compute_correctness`; `tasks/shortform/precise_wikiqa.py` uses an LLM judge). This writes `output/{dataset}/{model_name}/eval_results.json` in the same format every other baseline already consumes.
-3. **ICR Probe training** loads labels via `activation_research/icr_dataset.py:_load_labels` (or its successor in this rewrite), reading the same `eval_results.json`. No new label format, no new evaluator, no new threshold.
+1. **Generation step** of the new capture path produces `generation.jsonl` (text + metadata + label), `response_activations.npy`, `response_attention.npy`, `response_token_ids.npy`, `icr_scores.npy`, and `meta.jsonl`. Each `meta.jsonl` line includes a `hallucinated` field (bool).
+2. **Labels are computed inline** — after `model.generate()` returns for each sample, call the task module's `is_correct(generated_text, reference_answer)` and write `hallucinated = not is_correct(...)` into that sample's `meta.jsonl` line and into `generation.jsonl`. For LLMsKnow tasks this is a substring/regex check in `tasks/llmsknow/<dataset>.py`, pure CPU, negligible latency relative to generation. At the end of the run, `writer.finalize()` synthesizes `eval_results.json` from `meta.jsonl` for backward compatibility with other baseline consumers (SE, P(true), SelfCheckGPT, SEP, contrastive) that read that file today.
+3. **No separate `--step eval` call** is needed for label production. The capture script's default mode produces the label as part of the generation loop. A `--step eval-only` flag is kept for re-labeling an existing `generation.jsonl` without re-running inference (in case the evaluator logic changes), but it is a convenience, not the primary path.
+4. **ICR Probe training** loads labels from `meta.jsonl` (via the `hallucinated` field) or from the synthesized `eval_results.json` — same data either way. No new evaluator, no new threshold.
 
 **What this rules out:**
 - Adding a "did the answer hallucinate?" check inside the new capture loop that uses any criterion *other than* the task module's evaluator. If a task's evaluator is wrong or noisy, fix it in the task module — don't shadow it.
@@ -103,7 +108,8 @@ Concretely:
 - Using sample-level fields the paper might mention (e.g. some HaluEval rows have a built-in `hallucination` column) instead of our task-module's label. Datasets that ship pre-labels are fine to use, but only if the same column is used for *every* baseline on that dataset.
 
 **What this allows:**
-- The new capture path emitting generation only and deferring eval to a follow-up `--step eval` call. In fact this is the path of least resistance — `scripts/run_with_server.py` already supports `--step inference` / `--step eval` / `--step all`, and the new capture script should expose the same three modes for parity.
+- A `--step eval-only` mode that re-runs the per-dataset evaluator over an existing `generation.jsonl` without re-capturing (useful if the evaluator changes and we need to re-label without re-running GPU inference). This is a convenience path.
+- The evaluator for LLMsKnow tasks is cheap enough to run inline with no batching needed. If PreciseWikiQA (LLM judge) is ever added to the ICR capture scope, batch the judge calls at end-of-run rather than per-sample inline.
 
 ## Upstream stitching contract (load-bearing)
 
@@ -149,7 +155,7 @@ shared/icr_capture/{dataset}_{model_slug}/
 
 `meta.jsonl` line format:
 ```json
-{"sample_index": 42, "key": "mmlu_42", "prompt_len": 137, "response_len": 28, "wrote_at": "2026-05-16T..."}
+{"sample_index": 42, "key": "mmlu_42", "prompt_len": 137, "response_len": 28, "hallucinated": true, "wrote_at": "2026-05-16T..."}
 ```
 
 Resume on restart: open `meta.jsonl`, take `max(sample_index)`, restart from `+1`. If a memmap row was partially written before crash, it gets overwritten with no harm — we never trust a row without a meta line.
