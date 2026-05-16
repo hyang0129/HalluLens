@@ -72,6 +72,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Why: `python scripts/capture_inference.py` adds only scripts/ to sys.path,
+# not the repo root — so first-party packages like activation_logging fail to
+# import. Mirror the convention used by every other script in this dir.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 import numpy as np
 
 logger = logging.getLogger(__name__)
