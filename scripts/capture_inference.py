@@ -580,6 +580,10 @@ def _run_capture(args: argparse.Namespace) -> int:
                 )
         else:
             pending_samples: list[dict] = []
+            # Why: writer.next_index() returns max(written) + 1 from disk, which
+            # doesn't change until _run_batch flushes. Inside one batch we must
+            # advance the sample_index ourselves by len(pending_samples).
+            next_index = writer.next_index()
             for i, sample in enumerate(dataset):
                 prompt = build_prompt(sample, task_module)
                 p_hash = sha256(prompt)
@@ -588,7 +592,7 @@ def _run_capture(args: argparse.Namespace) -> int:
                     logger.debug("Skipping already-written sample %d (hash=%s)", i, p_hash[:8])
                     continue
 
-                sample_index = writer.next_index()
+                sample_index = next_index + len(pending_samples)
                 logger.info(
                     "Sample %d/%d  index=%d  task=%s (pending batch)",
                     i + 1, len(dataset), sample_index, args.task,
@@ -605,6 +609,7 @@ def _run_capture(args: argparse.Namespace) -> int:
                     _run_batch(pending_samples, tokenizer, model, task_module,
                                is_correct_adapter, writer, args)
                     pending_samples = []
+                    next_index = writer.next_index()
 
             if pending_samples:
                 _run_batch(pending_samples, tokenizer, model, task_module,
