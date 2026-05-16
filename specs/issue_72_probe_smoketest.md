@@ -20,22 +20,31 @@ If AUROC > chance (>0.5 ± noise) on a reasonable capture size, the wiring is ri
 
 ## In scope
 
-1. **`activation_research/icr_probe.py`** — `ICRProbe(nn.Module)` matching the paper exactly:
-   `Linear(L, 128) → ReLU → Linear(128, 64) → ReLU → Linear(64, 32) → ReLU → Linear(32, 1)`.
-   ~10 LOC.
+1. **`activation_research/icr_probe.py`** — `ICRProbe(nn.Module)` matching **upstream's released `utils.py:5-26` exactly** (the paper's reproducibility artifact, not the simplified placeholder in spec #70 §4.1):
+
+   ```
+   Linear(L,   128) → BatchNorm1d(128) → LeakyReLU(0.01) → Dropout(0.3)
+   Linear(128, 64)  → BatchNorm1d(64)  → LeakyReLU(0.01) → Dropout(0.3)
+   Linear(64,  32)  → BatchNorm1d(32)  → LeakyReLU(0.01) → Dropout(0.3)
+   Linear(32,  1)   → Sigmoid
+   ```
+
+   ~15 LOC. Note the explicit `Sigmoid` output and matching `nn.BCELoss` (NOT `BCEWithLogitsLoss`) — upstream's loss expects probabilities, not logits.
+
 2. **`scripts/smoketest_probe_72.py`** — standalone CLI that:
    - Takes a `--capture-dir` (one out_dir produced by `capture_inference.py`).
    - Loads `ICRDataset(mode="memmap", capture_dir=...)`.
    - Builds train/val/test splits (stratified, seed=0; reuses the existing `_make_split_indices`).
-   - Trains `ICRProbe` with BCE-with-logits + Adam (lr=1e-3, weight_decay=0, batch_size=256) for 50 epochs with early stopping on val AUROC (patience=10).
+   - Trains `ICRProbe` with **`nn.BCELoss` + Adam (lr=1e-3, weight_decay=0, batch_size=256) + `ReduceLROnPlateau` scheduler on val loss** for 50 epochs with early stopping on val AUROC (patience=10). Matches upstream's `icr_probe.py:38-46` optimizer+scheduler configuration; explicit `lr` / `wd` / `bs` / `epochs` / `patience` values are best-guess defaults since upstream doesn't ship a single canonical config — document the chosen values in the eventual results writeup.
    - Prints test-split metrics: AUROC, AUPRC, accuracy, ECE.
    - Writes `<capture-dir>/probe_eval/eval_metrics.json` and `predictions.csv`.
    - No checkpoint saving (smoketest only).
-3. **`tests/test_icr_probe.py`** — 5-test set:
-   - `test_probe_forward_shape` — `(B, L) → (B,)`.
+3. **`tests/test_icr_probe.py`** — 6-test set:
+   - `test_probe_forward_shape` — `(B, L) → (B,)` and outputs in `[0, 1]` (post-sigmoid).
    - `test_probe_backward_pass` — loss has grad, weights update after a step.
-   - `test_probe_param_count` — sanity-check it's the ~12K params the paper claims.
-   - `test_probe_overfits_tiny_batch` — 16 random samples, 200 epochs → train loss < 0.01.
+   - `test_probe_param_count` — sanity-check it's roughly upstream's param count (with BatchNorm adding ~2 × hidden parameters per layer; expect ~13K params for L=32).
+   - `test_probe_overfits_tiny_batch` — 16 random samples, 200 epochs → train loss < 0.05 (relaxed from 0.01 because BatchNorm + sigmoid + tiny batch can stall slightly).
+   - `test_probe_train_mode_vs_eval_mode` — BatchNorm + Dropout behave differently between `.train()` and `.eval()`; verify outputs differ.
    - `test_smoketest_cli_dry_run` — invokes `smoketest_probe_72.py --help` and asserts exit 0.
 
 ## Out of scope (explicit non-goals)
