@@ -149,6 +149,24 @@ COMPUTE_CONTEXT=LOCAL_CPU   # or REMOTE_GPU
 - GPU-intensive work (inference, activation logging, model training) can run here via notebooks or CLI
 - Preferred workflow: use notebooks for interactive GPU work, CLI scripts for batch jobs
 
+### Never run compute on the login node
+
+The Empire AI login host (`alpha1.empire-ai.org`, reachable via `ssh empire-ai`)
+is for orchestration only — `git`, `gh`, `gpu_dispatch.py`, file inspection.
+**Never run CPU- or GPU-intensive work on the login node**, including pytest
+suites that load real models (even small ones like `sshleifer/tiny-gpt2`),
+training scripts, inference loops, or anything that pegs cores for more than
+a few seconds. The login node is shared across users; bursting CPU there
+degrades the cluster for everyone and violates Empire AI usage policy.
+
+For test and verification runs, prefer **`utils/jupyter_exec.py`** against an
+already-allocated Jupyter-only node (e.g. `alphagpu23:8889`). It needs no new
+SLURM allocation and runs inside an existing kernel. For long-running jobs,
+dispatch through `gpu_dispatch.py run` after explicit user approval. Either
+way, redirect pytest / script output to a log file on the remote node and
+poll the log via subsequent `jupyter_exec` or `tail` calls rather than
+holding an SSH stdout stream open.
+
 ### Claude Code GPU execution (REMOTE_GPU only)
 
 Claude Code can execute code directly on the GPU node without user intervention using `utils/jupyter_exec.py`, which connects via the Jupyter REST + WebSocket API.
