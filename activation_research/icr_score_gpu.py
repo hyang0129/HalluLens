@@ -62,9 +62,11 @@ def compute_icr_per_layer_batched_gpu(
     # Gather h_block_input at top-k positions for each query.
     D = h_in.shape[-1]
     idx_exp = topk_indices.unsqueeze(-1).expand(B, L, r_max, k_max, D)
-    # Why: expand h_in along the key axis so each query's k_max key indices are
-    # independent — reshape (B,L,r_max,D) → (B,L,r_max,r_max,D) then gather at dim=3.
-    h_topk = h_in.unsqueeze(3).expand(B, L, r_max, r_max, D).gather(3, idx_exp)  # (B, L, r_max, k_max, D)
+    # Why: insert the QUERY axis (dim 2) as the broadcast singleton so the original
+    # r_max axis of h_in remains the key axis for gather. With .unsqueeze(3) (the
+    # wrong axis), every k position collapses to the same h_in[q], yielding identical
+    # projections for all k keys and a degenerate softmax(zscore(...)).
+    h_topk = h_in.unsqueeze(2).expand(B, L, r_max, r_max, D).gather(3, idx_exp)  # (B, L, r_max, k_max, D)
 
     # Projection: w_i = (delta_h[q] · h_topk[q,j]) / (||h_topk[q,j]|| + 1e-8)
     dh_exp = dh.unsqueeze(3)                                  # (B, L, r_max, 1, D)

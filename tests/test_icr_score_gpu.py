@@ -191,6 +191,33 @@ def test_gpu_fp16_attention_input():
 
 
 # ---------------------------------------------------------------------------
+# 5b. Realistic r_max → k > 1 (regression for h_in.unsqueeze axis bug)
+# ---------------------------------------------------------------------------
+
+def test_gpu_matches_numpy_realistic_r_max():
+    """At r_max=64 (production size), top_p=0.1 gives k=6 — the regime where
+    h_in gather axis matters. With the wrong unsqueeze axis, all k positions
+    collapse to the same h_in[q], degenerating the JSD; this test catches it.
+
+    Smaller fixtures (r_max=8) silently pass because k=int(0.1*8)=0→clamped to
+    1, and JSD with a single-element distribution is identically 0 either way.
+    """
+    from activation_research.icr_score_gpu import compute_icr_per_layer_batched_gpu
+
+    B, L, r_max, D = 2, 3, 64, 128
+    attn, h, dh = _make_tensors(B=B, L=L, r_max=r_max, hidden_dim=D, seed=7)
+    rlens = torch.tensor([r_max, r_max], dtype=torch.int64)
+
+    gpu_out = compute_icr_per_layer_batched_gpu(attn, h, dh, rlens).numpy()
+    numpy_out = _numpy_reference(attn, h, dh, rlens)
+
+    max_diff = float(np.max(np.abs(gpu_out - numpy_out)))
+    assert max_diff < 1e-5, (
+        f"r_max=64 GPU vs numpy max|diff|={max_diff:.2e} >= 1e-5"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 6. CPU fallback (monkeypatch cuda unavailable)
 # ---------------------------------------------------------------------------
 
