@@ -208,3 +208,51 @@ def test_logprobs_equivalence(batched_results, unbatched_results):
         assert diff < TOLERANCE, (
             f"token_lp b={b}: max diff {diff:.4e} >= {TOLERANCE}"
         )
+
+
+def test_icr_scores_gpu_matches_numpy_reference(batched_results, unbatched_results):
+    """GPU ICR path (B>1) must match per-sample numpy reference within 1e-4.
+
+    This is the gate that says "GPU ICR is safe for Phase 1": the batched GPU
+    kernel must reproduce the B=1 numpy-reference ICR scores within the
+    allowed fp16/fp32 drift budget.
+    """
+    from activation_research.icr_score import compute_icr_score
+    from activation_research.icr_score_gpu import compute_icr_per_layer_batched_gpu
+    from scripts.capture_inference import compute_icr_per_layer
+
+    ICR_TOLERANCE = 1e-4
+
+    resp_attn = batched_results["resp_attn"]   # (B, L, r_max, r_max) float16
+    resp_hs = batched_results["resp_hs"]       # (B, L+1, max_resp, hidden_dim) float16
+    response_lens = batched_results["response_lens"]  # (B,) int32
+
+    B = resp_attn.shape[0]
+    L = resp_attn.shape[1]
+
+    # Numpy reference: per-sample B=1 loop (same as the production B=1 path).
+    numpy_icr = np.stack([
+        compute_icr_per_layer(resp_attn[b], resp_hs[b], int(response_lens[b]))
+        for b in range(B)
+    ])  # (B, L)
+
+    # GPU path: batched kernel with the same slicing logic as _run_batch.
+    r_max = resp_attn.shape[2]
+    h_in_np = resp_hs[:, :-1, :r_max].astype(np.float32)   # (B, L, r_max, D)
+    h_out_np = resp_hs[:, 1:, :r_max].astype(np.float32)   # (B, L, r_max, D)
+    gpu_icr = compute_icr_per_layer_batched_gpu(
+        torch.from_numpy(resp_attn.astype(np.float32)),
+        torch.from_numpy(h_in_np),
+        torch.from_numpy(h_out_np - h_in_np),
+        torch.from_numpy(response_lens.astype(np.int64)),
+        top_p=0.1,
+    ).numpy()   # (B, L)
+
+    for b in range(B):
+        max_diff = float(np.max(np.abs(gpu_icr[b] - numpy_icr[b])))
+        assert max_diff < ICR_TOLERANCE, (
+            f"ICR gate b={b} (response_len={response_lens[b]}): "
+            f"max|gpu - numpy|={max_diff:.2e} >= {ICR_TOLERANCE}"
+        )
+
+    assert np.all(np.isfinite(gpu_icr)), "GPU ICR output contains NaN/Inf"

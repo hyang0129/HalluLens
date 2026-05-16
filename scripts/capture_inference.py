@@ -332,6 +332,27 @@ def _run_batch(
         out.scores, out.sequences, prompt_lens, response_lens, args.top_k
     )
 
+    r_max = args.r_max
+    if args.batch_size > 1 and torch.cuda.is_available():
+        from activation_research.icr_score_gpu import compute_icr_per_layer_batched_gpu
+
+        # Why: resp_hs is (B, L+1, max_response_len, hidden_dim); slice key dim to r_max
+        # so the GPU kernel receives exactly the same (R=r_max) window as compute_icr_score.
+        h_in_t = torch.from_numpy(resp_hs[:, :-1, :r_max]).float()
+        h_out_t = torch.from_numpy(resp_hs[:, 1:, :r_max]).float()
+        icr_scores_batch = compute_icr_per_layer_batched_gpu(
+            torch.from_numpy(resp_attn).to(model.device),
+            h_in_t.to(model.device),
+            (h_out_t - h_in_t).to(model.device),
+            torch.from_numpy(response_lens.astype(np.int64)).to(model.device),
+            top_p=0.1,
+        ).cpu().numpy()  # (B, L)
+    else:
+        icr_scores_batch = np.stack([
+            compute_icr_per_layer(resp_attn[b], resp_hs[b], int(response_lens[b]))
+            for b in range(B)
+        ])
+
     for b in range(B):
         s = pending[b]
         sample = s["sample"]
@@ -339,9 +360,7 @@ def _run_batch(
         decoded = tokenizer.decode(resp_ids, skip_special_tokens=True)
         hallucinated = not is_correct_adapter(task_module, decoded, sample)
 
-        icr_per_layer = compute_icr_per_layer(
-            resp_attn[b], resp_hs[b], int(response_lens[b]), top_p=0.1
-        )
+        icr_per_layer = icr_scores_batch[b].astype(np.float32)
 
         p_len = int(prompt_lens[b])
         real_token_start = padded_prompt_len - p_len
