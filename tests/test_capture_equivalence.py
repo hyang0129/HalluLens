@@ -116,14 +116,19 @@ def test_response_to_response_equivalence(tiny_generate_output):
         icr_device=None,
     )
 
-    # upstream.origin_attentions: (L, H, T, T) where T = prompt_len + response_len.
-    # The response-to-response sub-block is at [prompt_len:, prompt_len:].
+    # upstream.origin_attentions: (L, H, T, T) where T = prompt_len + (len(attentions) - 1).
+    # The response-to-response sub-block is at [prompt_len:, prompt_len:]; clipped at T.
     L, H, T, _ = upstream.origin_attentions.shape
-    r_actual = min(response_len, r_max)
 
     upstream_sub = upstream.origin_attentions[
-        :, :, prompt_len : prompt_len + r_actual, prompt_len : prompt_len + r_actual
-    ]  # (L, H, r_actual, r_actual)
+        :, :, prompt_len:, prompt_len:
+    ]  # (L, H, T - prompt_len, T - prompt_len)
+    # Why: out.sequences may include an EOS token beyond the attentions tuple
+    # length, so response_len computed from out.sequences can over-count by 1.
+    # Align both sides to upstream's actual response width.
+    r_actual = upstream_sub.shape[-1]
+    r_actual = min(r_actual, r_max)
+    upstream_sub = upstream_sub[:, :, :r_actual, :r_actual]
 
     # Head-average to match our (L, r, r) layout.
     upstream_head_avg = upstream_sub.mean(dim=1).detach().cpu().numpy()  # (L, r_actual, r_actual)
