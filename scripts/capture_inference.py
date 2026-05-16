@@ -190,17 +190,20 @@ def compute_icr_per_layer(
     from activation_research.icr_score import compute_icr_score
 
     num_layers = resp_attn.shape[0]
+    r_max = resp_attn.shape[1]
     scores = np.zeros(num_layers, dtype=np.float32)
     for l in range(num_layers):
+        # Why: compute_icr_score expects h_block_input/delta_h aligned to the
+        # attention sub-block (R=r_max), not the full max_response_len.
         # resp_hs[l] is block input h^{l-1}; resp_hs[l+1] is block output h^l.
-        h_block_input = resp_hs[l].astype(np.float32)
-        h_block_output = resp_hs[l + 1].astype(np.float32)
+        h_block_input = resp_hs[l][:r_max].astype(np.float32)
+        h_block_output = resp_hs[l + 1][:r_max].astype(np.float32)
         delta_h = h_block_output - h_block_input
         scores[l] = compute_icr_score(
             response_attn=resp_attn[l].astype(np.float32),
             h_block_input=h_block_input,
             delta_h=delta_h,
-            response_len=response_len,
+            response_len=min(response_len, r_max),
             top_p=top_p,
         )
     return scores
