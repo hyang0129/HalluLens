@@ -13,7 +13,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 DISPATCH_ROOT="${DISPATCH_ROOT:-$PROJECT_ROOT/shared/icr_capture/_dispatch}"
 
-PYTHON="python"
+# Why: the Jupyter kernel's default `python` is the `ml` miniconda env which
+# lacks our project deps (jsonlines, datasets pinned versions, etc.). Pin to
+# the p311 mamba env unless overridden, matching scripts/smoketest_capture_72.sh.
+PYTHON="${PYTHON:-/mnt/home/hyang1/.local/share/mamba/envs/p311/bin/python}"
 CLI="$SCRIPT_DIR/_claim_cli.py"
 
 WORKER_ID="${HOSTNAME}_$$_$RANDOM"
