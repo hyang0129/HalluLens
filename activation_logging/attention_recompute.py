@@ -56,11 +56,17 @@ def _call_self_attn(
     normed: torch.Tensor,
     causal_mask: torch.Tensor,
     position_ids: torch.Tensor,
+    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
 ) -> torch.Tensor:
     """Call block.self_attn with output_attentions=True, handling API variants.
 
     Tries the standard position_ids API first; falls back to the newer
     position_embeddings API (transformers >= ~4.46) on TypeError.
+
+    Args:
+        position_embeddings: Pre-computed (cos, sin) RoPE tensors.  Pass this
+            when rotary_emb lives at the model level (not the block level), as
+            in newer Llama/Qwen3 transformers releases.
 
     Returns:
         (n_heads, T, T) float32 attention weight tensor.
@@ -78,27 +84,31 @@ def _call_self_attn(
             )
         return weights.squeeze(0).float()  # (n_heads, T, T)
 
-    # Standard API: self_attn computes RoPE internally from position_ids.
-    try:
-        return _extract(
-            block.self_attn(
-                normed,
-                attention_mask=causal_mask,
-                position_ids=position_ids,
-                output_attentions=True,
-            )
-        )
-    except TypeError:
-        pass
+    # If position_embeddings were not pre-computed by the caller, try to derive
+    # them from a rotary_emb module on the block or its self_attn sub-module
+    # (older transformers layout, pre-~4.50).
+    if position_embeddings is None:
+        if hasattr(block, "rotary_emb"):
+            cos, sin = block.rotary_emb(normed, position_ids)
+            position_embeddings = (cos, sin)
+        elif hasattr(block.self_attn, "rotary_emb"):
+            cos, sin = block.self_attn.rotary_emb(normed, position_ids)
+            position_embeddings = (cos, sin)
 
-    # Newer API (transformers >= ~4.46): position_embeddings pre-computed outside.
-    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
-    if hasattr(block, "rotary_emb"):
-        cos, sin = block.rotary_emb(normed, position_ids)
-        position_embeddings = (cos, sin)
-    elif hasattr(block.self_attn, "rotary_emb"):
-        cos, sin = block.self_attn.rotary_emb(normed, position_ids)
-        position_embeddings = (cos, sin)
+    # Standard API: self_attn computes RoPE internally from position_ids.
+    # Only attempt if we still have no position_embeddings (old-style layout).
+    if position_embeddings is None:
+        try:
+            return _extract(
+                block.self_attn(
+                    normed,
+                    attention_mask=causal_mask,
+                    position_ids=position_ids,
+                    output_attentions=True,
+                )
+            )
+        except TypeError:
+            pass
 
     return _extract(
         block.self_attn(
@@ -118,6 +128,7 @@ def recompute_block_attention(
     response_len: int,
     position_ids: Optional[torch.Tensor] = None,
     device: str = "cpu",
+    rotary_emb: Optional[nn.Module] = None,
 ) -> torch.Tensor:
     """Recompute head-averaged response-to-response attention for one transformer block.
 
@@ -131,11 +142,9 @@ def recompute_block_attention(
     weights and will raise RuntimeError.
 
     Args:
-        h_prev: (T, H) float32 full-sequence hidden state entering this block,
-                where T = prompt_len + response_len.  Stored zarr activations are
-                float16; cast to float32 before passing.  No RMSNorm is applied
-                here — h_prev is the pre-norm block input and the block's internal
-                forward handles normalization.
+        h_prev: (T, H) full-sequence hidden state entering this block,
+                where T = prompt_len + response_len.  Will be cast to the
+                block's parameter dtype automatically.
         block: A single HF transformer block (e.g. ``model.model.layers[ℓ]``).
                The caller is responsible for loading the model and passing the block.
         prompt_len: Number of prompt tokens.  Prompt positions are 0..prompt_len-1.
@@ -144,6 +153,12 @@ def recompute_block_attention(
         position_ids: (T,) int64 or None.  If None, inferred as ``arange(T)``,
                       matching original inference positions.
         device: Device string for computation (default "cpu").
+        rotary_emb: Optional rotary embedding module.  In newer transformers
+                    releases (>= ~4.50), rotary_emb moved from the individual
+                    decoder block to the parent LlamaModel/Qwen2Model.  Pass
+                    ``model.model.rotary_emb`` when available so that
+                    position_embeddings can be pre-computed before calling
+                    block.self_attn.
 
     Returns:
         (response_len, response_len) float32 tensor of head-averaged
@@ -168,8 +183,6 @@ def recompute_block_attention(
     if prompt_len < 0:
         raise ValueError(f"prompt_len must be >= 0, got {prompt_len}")
 
-    h_prev = h_prev.to(device=device, dtype=torch.float32)
-
     if position_ids is None:
         position_ids = torch.arange(T, device=device, dtype=torch.long).unsqueeze(0)
     else:
@@ -177,8 +190,10 @@ def recompute_block_attention(
         if position_ids.ndim == 1:
             position_ids = position_ids.unsqueeze(0)  # (1, T)
 
-    causal_mask = _build_causal_mask(T, device)
     block = block.to(device).eval()
+    model_dtype = next(block.parameters()).dtype
+    h_prev = h_prev.to(device=device, dtype=model_dtype)
+    causal_mask = _build_causal_mask(T, device).to(dtype=model_dtype)
 
     with torch.no_grad():
         hidden_states = h_prev.unsqueeze(0)  # (1, T, H)
@@ -191,6 +206,14 @@ def recompute_block_attention(
         else:
             normed = hidden_states
 
-        attn_weights = _call_self_attn(block, normed, causal_mask, position_ids)
+        # Pre-compute position_embeddings if a model-level rotary_emb was passed.
+        # In newer transformers (>= ~4.50) rotary_emb lives on the parent model,
+        # not on individual decoder blocks.
+        precomputed_pe: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+        if rotary_emb is not None:
+            cos, sin = rotary_emb(normed, position_ids)
+            precomputed_pe = (cos, sin)
+
+        attn_weights = _call_self_attn(block, normed, causal_mask, position_ids, precomputed_pe)
 
     return _head_average_resp_to_resp(attn_weights, prompt_len, response_len)

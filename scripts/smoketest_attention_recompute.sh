@@ -35,7 +35,7 @@ R_MAX="${R_MAX:-64}"
 
 MODEL_BASENAME=$(basename "$MODEL")
 # Slug matches scripts/audit_datasets.py:model_slug — lowercased, '-'/'.' → '_'.
-MODEL_SLUG=$(echo "$MODEL_BASENAME" | tr '[:upper:]' '[:lower:]' | tr '-.' '__')
+MODEL_SLUG=$(echo "$MODEL_BASENAME" | tr '[:upper:]' '[:lower:]' | tr -- '-.' '__')
 
 SRC_ZARR="shared/${DATASET}_${MODEL_SLUG}/activations.zarr"
 

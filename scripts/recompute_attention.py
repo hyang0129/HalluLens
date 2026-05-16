@@ -236,6 +236,7 @@ def _run_validate(
                 prompt_len=prompt_len,
                 response_len=response_len,
                 device=device,
+                rotary_emb=getattr(model.model, "rotary_emb", None),
             )
             recomp_all.append(attn_resp[:r, :r].cpu().numpy())
 
@@ -468,6 +469,7 @@ def _run_main(args: argparse.Namespace) -> None:
                     prompt_len=P,
                     response_len=R,
                     device=args.device,
+                    rotary_emb=getattr(model.model, "rotary_emb", None),
                 ).cpu().numpy()  # (R, R) float32
 
                 attn_per_block[b, :R, :R] = attn_resp.astype(np.float16)

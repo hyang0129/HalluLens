@@ -11,7 +11,7 @@ echo "Started: $(date)"
 echo "============================================"
 $PYTHON scripts/run_p_true_for_model.py \
     --model meta-llama/Llama-3.1-8B-Instruct \
-    --batch-size 128
+    --batch-size 64
 
 echo ""
 echo "============================================"
@@ -20,7 +20,7 @@ echo "Started: $(date)"
 echo "============================================"
 $PYTHON scripts/run_p_true_for_model.py \
     --model Qwen/Qwen3-8B \
-    --batch-size 128
+    --batch-size 64
 
 echo ""
 echo "============================================"
