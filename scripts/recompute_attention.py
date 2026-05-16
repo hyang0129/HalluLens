@@ -186,7 +186,10 @@ def _run_validate(
 ) -> bool:
     """4-sample numerical equivalence check: recompute vs. full forward pass.
 
-    Returns True if all max|A_recomp - A_full| < _VALIDATE_TOL.
+    Returns True if at least one sample was checked AND all
+    max|A_recomp - A_full| < _VALIDATE_TOL.  Returns False if every candidate
+    sample had response_len < 1 (which previously produced a vacuous PASS,
+    seen during the Qwen3 smoketest on a zarr with blank leading rows).
     """
     arrays_group = activations_root["arrays"]
     prompt_activations: zarr.Array = arrays_group["prompt_activations"]
@@ -208,6 +211,7 @@ def _run_validate(
         )
 
     all_pass = True
+    checked_samples = 0
     print(f"\n{'Sample':<10} {'Block':>6} {'max|diff|':>12} {'argmax_match':>14}")
     print("-" * 48)
 
@@ -221,6 +225,7 @@ def _run_validate(
             logger.warning(f"Sample {key!r} has response_len={response_len}; skipping validate")
             continue
 
+        checked_samples += 1
         recomp_all: list[np.ndarray] = []
         for b in range(num_blocks):
             prompt_h = torch.from_numpy(
@@ -286,8 +291,18 @@ def _run_validate(
             )
 
     print()
+    if checked_samples == 0:
+        print(
+            f"FAIL: 0/{len(validate_indices)} candidate samples had response_len >= 1 — "
+            f"nothing was validated. Source zarr may be blank at the leading indices "
+            f"({validate_indices[0]}..{validate_indices[-1]})."
+        )
+        return False
     if all_pass:
-        print(f"PASS: all max |A_recomp - A_full| < {_VALIDATE_TOL}")
+        print(
+            f"PASS: all max |A_recomp - A_full| < {_VALIDATE_TOL} "
+            f"({checked_samples}/{len(validate_indices)} samples checked)"
+        )
     else:
         print(f"FAIL: one or more blocks exceeded tolerance {_VALIDATE_TOL}")
     return all_pass
