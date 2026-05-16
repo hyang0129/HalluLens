@@ -21,10 +21,10 @@ Cell JSON format (consumed by scripts/capture_inference.py via worker.sh):
       "task":            "sciq",
       "split":           "test",
       "model":           "meta-llama/Llama-3.1-8B-Instruct",
-      "out_dir":         "shared/icr_capture/sciq_Llama-3.1-8B-Instruct",
+      "out_dir":         "shared/icr_capture/sciq_test_Llama-3.1-8B-Instruct",
       "n_samples":       null,
       "max_prompt_len":  512,
-      "max_response_len":256,
+      "max_response_len":64,
       "r_max":           64,
       "top_k":           20
     }

@@ -32,7 +32,7 @@ echo "=== log: $LOG" | tee -a "$LOG"
     --model "$MODEL" \
     --out-dir "$OUT_DIR" \
     --max-prompt-len 256 \
-    --max-response-len 256 \
+    --max-response-len 64 \
     --r-max 64 \
     --top-k 20 \
     --n-samples 50 2>&1 | tee -a "$LOG"

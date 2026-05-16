@@ -12,7 +12,7 @@ Usage:
         --model meta-llama/Llama-3.1-8B-Instruct \\
         --out-dir shared/icr_capture/hotpotqa_Llama-3.1-8B-Instruct \\
         --max-prompt-len 512 \\
-        --max-response-len 256 \\
+        --max-response-len 64 \\
         --r-max 64 \\
         --top-k 20 \\
         --n-samples 100  # for smoketest; omit for full split
@@ -265,9 +265,13 @@ def _run_capture(args: argparse.Namespace) -> int:
     import torch
     from activation_logging.generate_capture import (
         extract_logprobs,
+        extract_logprobs_batched,
         stitch_prompt_hidden_states,
+        stitch_prompt_hidden_states_batched,
         stitch_response_hidden_states,
+        stitch_response_hidden_states_batched,
         stitch_response_to_response,
+        stitch_response_to_response_batched,
     )
     from activation_logging.inference_capture_writer import InferenceCaptureWriter
 
@@ -539,8 +543,12 @@ def main() -> int:
                         help="Output directory (shared/icr_capture/<dataset>_<model_slug>/).")
     parser.add_argument("--max-prompt-len", type=int, default=512,
                         help="Max prompt length in tokens (padding / truncation target).")
-    parser.add_argument("--max-response-len", type=int, default=256,
-                        help="Max new tokens to generate; also response storage width.")
+    parser.add_argument("--max-response-len", type=int, default=64,
+                        help="Max new tokens to generate; also response storage width. "
+                             "Default 64 matches r_max — ICR scoring only consumes the "
+                             "first r_max response positions (cross-region masking per "
+                             "icr_probe_paper_notes.md §9), so generating past that is "
+                             "wasted GPU time.")
     parser.add_argument("--r-max", type=int, default=64,
                         help="Max response-to-response attention window (r_max × r_max per layer).")
     parser.add_argument("--top-k", type=int, default=20,

@@ -40,7 +40,7 @@ def _write_cell(pending: Path, cell_id: str) -> Path:
         "out_dir": f"shared/icr_capture/{cell_id}",
         "n_samples": None,
         "max_prompt_len": 512,
-        "max_response_len": 256,
+        "max_response_len": 64,
         "r_max": 64,
         "top_k": 20,
     }
