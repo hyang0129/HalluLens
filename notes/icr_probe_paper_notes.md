@@ -33,6 +33,37 @@ The token-wise average is performed downstream (in the probe input pipeline, not
 
 ---
 
+## 1.5 Where the attention comes from — `generate()` returns
+
+**Answer: attention is captured during `model.generate(..., output_attentions=True, return_dict_in_generate=True)`. `out.attentions` is a heterogeneous tuple of length `1 + response_len` that `_pre_process_attn` stitches into one unified `(L, H, T, T)` causal matrix.**
+
+Source: `icr_score.py:62-86` (`_pre_process_attn`). The per-piece shapes:
+
+| `out.attentions[k]` | Source | Shape per layer (after squeezing batch) |
+|---|---|---|
+| `k = 0` | Prefill forward pass on the prompt | `(num_heads, prompt_len, prompt_len)` |
+| `k ≥ 1` | Decode step that emitted response token `k − 1` | `(num_heads, 1, prompt_len + k)` |
+
+The prefill chunk is square — full prompt-to-prompt attention from the initial forward. Each decode-step chunk is a *single attention row* (one query position emitting one token), with key length growing by 1 each step as the autoregressive context grows.
+
+Upstream's stitching:
+1. Right-pad each prefill row to `token_num = prompt_len + response_len` with zeros (`F.pad(..., (0, padding_size))` at `icr_score.py:69-72`).
+2. Right-pad each decode-step row to `token_num` similarly (`icr_score.py:84-87`).
+3. Concatenate prefill rows + decode-step rows along the query dimension to get `(L, H, T, T)`.
+4. Zero out cross-region positions via `set_other_attn_scores_to_zero` (§9 below).
+
+**Implication for our re-capture path (issue: inference rewrite).** We never need to materialize the full `(T, T)` matrix. For the ICR Probe, only response-to-response is consumed (§9). We can stream-slice as decode steps emit:
+
+- Skip `out.attentions[0]` entirely — prompt-to-prompt is masked out anyway.
+- For each `out.attentions[t]` with `t ≥ 1`, take the key slice `[prompt_len : prompt_len + r_max]`. The remaining `(num_heads, 1, r_max)` row is the t-th query position's response-to-response attention.
+- Stack `t = 1 .. min(response_len, r_max)` rows → `(num_heads, r_max, r_max)` per layer. Mean over heads (§4) → `(r_max, r_max)`. This is what gets persisted.
+
+Peak memory becomes `O(L × H × r_max)` per decode step instead of `O(L × H × T²)`. The prefill chunk that HF holds internally is still `(L, H, P, P)` — that's the bottleneck during the prefill step, not the per-token loop.
+
+**Caveat for the apples-to-apples gate.** Our stream-slice must produce the same bytes as upstream's "stitch first, then mask" sequence. They are mathematically equivalent — the masked positions in upstream's full matrix are exactly the positions we never materialize — but the contract requires a numerical-equivalence assertion on a real prompt before we trust the rewrite.
+
+---
+
 ## 2. Module granularity (one score per layer vs. attn + MLP separately)
 
 **Answer: one ICR score per (response-token, layer). Not separated by attention / MLP sublayer.**
