@@ -3,18 +3,15 @@ tests/test_attention_parser.py
 
 Integration-style tests for AttentionParser (activation_logging/attention_parser.py).
 
-Fixture ``tmp_stores`` builds a synthetic attention.zarr (via AttentionZarrLogger) and
-a synthetic activations.zarr (hand-built zarr arrays + ZarrActivationsLogger opened
-read-only) so no real model weights or GPU are needed.
+Fixture ``tmp_stores`` builds a synthetic attention directory (via
+AttentionMemmapWriter) and a synthetic activations.zarr (hand-built zarr arrays +
+ZarrActivationsLogger opened read-only) so no real model weights or GPU are needed.
 
-Zarr layout summary:
-  attention.zarr  — written by AttentionZarrLogger
-    arrays/response_attn  (3, 2, 8, 8)  float16
-    arrays/sample_key     (3,)
-    arrays/response_len   (3,)   int32
-    arrays/prompt_len     (3,)   int32
-    meta/config.json
-    meta/index.jsonl
+Numpy memmap layout summary:
+  attention/  — written by AttentionMemmapWriter
+    response_attn.npy   (3, 2, 8, 8)  float16  (pre-allocated memmap)
+    meta.jsonl          one JSON line per written sample
+    config.json         writer config (model_name, num_layers, r_max, dtype, etc.)
 
   activations.zarr  — hand-built, then opened via ZarrActivationsLogger(read_only=True)
     arrays/prompt_activations     (3, 3, 8, 16)  float16   (L+1 = 3 layers)
@@ -23,6 +20,7 @@ Zarr layout summary:
     arrays/response_len           (3,)            int32
     arrays/sample_key             (3,)            str
     meta/index.jsonl
+    meta/config.json              {"model_name": ..., "num_layers": ..., "r_max": ...}
 """
 from __future__ import annotations
 
@@ -35,7 +33,7 @@ import pytest
 import torch
 import zarr
 
-from activation_logging.attention_zarr_logger import AttentionZarrLogger
+from activation_logging.attention_memmap_writer import AttentionMemmapWriter
 from activation_logging.attention_parser import AttentionParser
 from activation_logging.zarr_activations_logger import ZarrActivationsLogger
 
@@ -145,6 +143,17 @@ def _build_activations_zarr(
             }
             fh.write(json.dumps(entry) + "\n")
 
+    # meta/config.json — required by AttentionParser._validate_model_name,
+    # which reads zarr_path/meta/config.json to cross-check model_name.
+    act_config = {
+        "model_name": MODEL_NAME,
+        "num_layers": act_layers - 1,  # L (not L+1) — matches attention store convention
+        "r_max": r_max,
+    }
+    (meta_dir / "config.json").write_text(
+        json.dumps(act_config, indent=2), encoding="utf-8"
+    )
+
     return resp_acts_data
 
 
@@ -155,8 +164,8 @@ def _build_activations_zarr(
 @pytest.fixture
 def tmp_stores(tmp_path: Path):
     """
-    Build synthetic attention.zarr + activations.zarr, return a dict with:
-      - "attention_path":   Path to attention.zarr
+    Build synthetic attention dir (memmap) + activations.zarr, return a dict with:
+      - "attention_path":   Path to attention/ directory (numpy memmap store)
       - "activations_path": Path to activations.zarr
       - "act_logger":       ZarrActivationsLogger opened read-only
       - "resp_acts_data":   np.ndarray (3, 3, 8, 16) float16 — ground-truth activations
@@ -167,7 +176,6 @@ def tmp_stores(tmp_path: Path):
     """
     rng = np.random.default_rng(42)
 
-    attn_path = tmp_path / "attention.zarr"
     act_path = tmp_path / "activations.zarr"
 
     # ------------------------------------------------------------------ #
@@ -192,8 +200,9 @@ def tmp_stores(tmp_path: Path):
     )
 
     # ------------------------------------------------------------------ #
-    # 2. Build attention.zarr via AttentionZarrLogger                     #
+    # 2. Build attention dir via AttentionMemmapWriter                    #
     # ------------------------------------------------------------------ #
+    attn_dir = tmp_path / "attention"
     config_dict = {
         "source_activations_zarr": str(act_path),
         "model_name": MODEL_NAME,
@@ -203,19 +212,20 @@ def tmp_stores(tmp_path: Path):
     }
 
     attn_data_list = []
-    with AttentionZarrLogger(
-        zarr_path=str(attn_path),
+    with AttentionMemmapWriter(
+        out_dir=str(attn_dir),
         mode="w",
+        n_samples=NUM_SAMPLES,
         num_layers=NUM_LAYERS,
         r_max=R_MAX,
         config_dict=config_dict,
-        expected_samples=NUM_SAMPLES,
         dtype="float16",
     ) as attn_logger:
         for i, key in enumerate(SAMPLE_KEYS):
             attn_arr = _make_attn_data(rng, NUM_LAYERS, R_MAX)
             attn_data_list.append(attn_arr)
             attn_logger.write(
+                sample_index=i,
                 sample_key=key,
                 response_attn=attn_arr,
                 response_len=RESPONSE_LENS[i],
@@ -223,7 +233,7 @@ def tmp_stores(tmp_path: Path):
             )
 
     return {
-        "attention_path": attn_path,
+        "attention_path": attn_dir,
         "activations_path": act_path,
         "act_logger": act_logger,
         "resp_acts_data": resp_acts_data,
@@ -417,43 +427,48 @@ class TestConfigMismatchRaises:
     def test_config_mismatch_raises(self, tmp_stores: dict[str, Any], tmp_path: Path):
         """
         AttentionParser raises ValueError at __init__ when the attention store's
-        model_name does not match the activations logger's reported model_name.
+        model_name does not match the activations store's meta/config.json.
 
-        The parser checks: config.get("model_name") against
-        act_logger._config.get("model_name") when _config exists.
-        Since ZarrActivationsLogger has no _config attribute, we monkey-patch
-        a _config dict onto a fresh logger to trigger the validation path.
+        The parser reads <activations_zarr>/meta/config.json from disk via the
+        public ``zarr_path`` attribute on ZarrActivationsLogger.  No monkey-patching
+        is needed — the activations zarr fixture already writes meta/config.json with
+        MODEL_NAME, and we build a mismatch attention store using AttentionMemmapWriter
+        with a different model_name.
         """
-        # Build a second attention store with a different model name
-        mismatch_attn_path = tmp_path / "mismatch_attention.zarr"
+        # Build a mismatch attention store with a wrong model name
+        mismatch_attn_dir = tmp_path / "mismatch_attention"
         mismatch_config = {
             "source_activations_zarr": str(tmp_stores["activations_path"]),
             "model_name": "some-other-model/v2",   # intentionally wrong
             "num_layers": NUM_LAYERS,
             "r_max": R_MAX,
+            "attention_region": "response_to_response",
         }
-        with AttentionZarrLogger(
-            zarr_path=str(mismatch_attn_path),
+        with AttentionMemmapWriter(
+            out_dir=str(mismatch_attn_dir),
             mode="w",
+            n_samples=1,
             num_layers=NUM_LAYERS,
             r_max=R_MAX,
             config_dict=mismatch_config,
-        ) as az:
-            # Write one sample so the store is valid
-            az.write(
+            dtype="float16",
+        ) as mw:
+            # Write one sample so the store is structurally valid
+            mw.write(
+                sample_index=0,
                 sample_key=SAMPLE_KEYS[0],
                 response_attn=np.zeros((NUM_LAYERS, R_MAX, R_MAX), dtype=np.float16),
                 response_len=RESPONSE_LENS[0],
                 prompt_len=PROMPT_LENS[0],
             )
 
-        # Monkey-patch _config onto the activations logger so the parser can
-        # detect the mismatch (the parser checks hasattr(act_logger, "_config"))
+        # The activations logger already has meta/config.json with MODEL_NAME
+        # (written by _build_activations_zarr). The parser will read it from disk
+        # and detect the mismatch — no monkey-patching required.
         act_logger = tmp_stores["act_logger"]
-        act_logger._config = {"model_name": MODEL_NAME}   # matches the real model, not "some-other-model"
 
         with pytest.raises(ValueError, match="model_name"):
             AttentionParser(
-                attention_zarr_path=str(mismatch_attn_path),
+                attention_zarr_path=str(mismatch_attn_dir),
                 activations_parser=act_logger,
             )

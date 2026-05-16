@@ -3,14 +3,16 @@
 # Chains the two validation paths exposed by scripts/recompute_attention.py:
 #
 #   Phase 1 — --validate-first        (GPU; 4-sample diff vs. full-model forward)
-#   Phase 2 — --max-samples N         (GPU; write small attention.zarr, N=20)
-#   Phase 3 — AttentionParser readback (CPU; verify shapes + key alignment)
+#   Phase 2 — --max-samples N         (GPU; write small attention store, N=20)
+#   Phase 3 — Attention store readback (CPU; verify shapes + write-evidence)
+#   Phase 4 — icr_scores.npy readback  (CPU; verify shape + no all-zero rows)
 #
 # Phase 1 asserts max|A_recomp - A_full| < 1e-3 per block (fp16 tolerance,
 # enforced by the script itself — exits 1 on fail).  Phase 2 writes a 20-sample
-# attention.zarr under reports/smoketest_attention_recompute/.  Phase 3 reads it
-# back via AttentionParser and asserts the expected number of keys and the
-# layer-axis size matches the model's num_hidden_layers.
+# attention store under reports/smoketest_attention_recompute/.  Phase 3 reads it
+# back via np.memmap and asserts the expected number of entries and that at least
+# the first written row is non-zero.  Phase 4 loads icr_scores.npy and asserts
+# shape (N, num_blocks) and that no written row is all-zero.
 #
 # Logs + timing + GPU samples land in reports/smoketest_attention_recompute/.
 #
@@ -39,7 +41,8 @@ SRC_ZARR="shared/${DATASET}_${MODEL_SLUG}/activations.zarr"
 
 LOG_DIR=reports/smoketest_attention_recompute
 SMOKE_OUT_DIR="${LOG_DIR}/${DATASET}_${MODEL_SLUG}"
-ATTN_ZARR="${SMOKE_OUT_DIR}/attention.zarr"
+ATTN_DIR="${SMOKE_OUT_DIR}/attention"
+ICR_SCORES="${SMOKE_OUT_DIR}/icr_scores.npy"
 mkdir -p "$LOG_DIR" "$SMOKE_OUT_DIR"
 
 STAMP=$(date +%Y%m%d_%H%M%S)
@@ -55,7 +58,8 @@ echo "GPU:        $(nvidia-smi --query-gpu=name,memory.free --format=csv,noheade
 echo "Dataset:    $DATASET"                          | tee -a "$LOG_FILE"
 echo "Model:      $MODEL  (slug: $MODEL_SLUG)"       | tee -a "$LOG_FILE"
 echo "Source:     $SRC_ZARR"                         | tee -a "$LOG_FILE"
-echo "Attn out:   $ATTN_ZARR"                        | tee -a "$LOG_FILE"
+echo "Attn out:   $ATTN_DIR"                         | tee -a "$LOG_FILE"
+echo "ICR out:    $ICR_SCORES"                       | tee -a "$LOG_FILE"
 echo "Samples:    $SAMPLES (Phase 2)"                | tee -a "$LOG_FILE"
 echo "R_max:      $R_MAX"                            | tee -a "$LOG_FILE"
 echo "Log:        $LOG_FILE"                         | tee -a "$LOG_FILE"
@@ -69,9 +73,9 @@ if [[ ! -d "$SRC_ZARR" ]]; then
 fi
 
 # Clean prior smoke output so the writer starts from a known empty state
-# (recompute_attention.py opens AttentionZarrLogger with mode='w' on a fresh
+# (recompute_attention.py opens AttentionMemmapWriter with mode='w' on a fresh
 # path; we want to exercise that fresh-write path on every smoketest).
-rm -rf "$ATTN_ZARR"
+rm -rf "$ATTN_DIR" "$ICR_SCORES" "${SMOKE_OUT_DIR}/icr_scores_meta.jsonl"
 
 # Background GPU sampler — useful for spotting GPU starvation during the
 # per-sample loop (the recompute pass is CPU-light, GPU-heavy on attn).
@@ -111,7 +115,8 @@ run_phase () {
 /usr/bin/time -v -o "${TIME_FILE}.phase1" \
     $PYTHON scripts/recompute_attention.py \
         --activations-zarr "$SRC_ZARR" \
-        --attention-zarr   "$ATTN_ZARR" \
+        --attention-dir    "$ATTN_DIR" \
+        --icr-scores-path  "$ICR_SCORES" \
         --model            "$MODEL" \
         --r-max            "$R_MAX" \
         --validate-first 2>&1 | tee -a "$LOG_FILE"
@@ -126,15 +131,16 @@ fi
 
 # ---------------------------------------------------------------------------
 # Phase 2 — --max-samples N
-#   Write a small attention.zarr.  --validate-first does NOT write the store
+#   Write a small attention store.  --validate-first does NOT write the store
 #   (it short-circuits after the check), so this is the first phase that
-#   exercises the AttentionZarrLogger path end-to-end.
+#   exercises the AttentionMemmapWriter path end-to-end.
 # ---------------------------------------------------------------------------
-rm -rf "$ATTN_ZARR"
+rm -rf "$ATTN_DIR" "$ICR_SCORES" "${SMOKE_OUT_DIR}/icr_scores_meta.jsonl"
 /usr/bin/time -v -o "${TIME_FILE}.phase2" \
     $PYTHON scripts/recompute_attention.py \
         --activations-zarr "$SRC_ZARR" \
-        --attention-zarr   "$ATTN_ZARR" \
+        --attention-dir    "$ATTN_DIR" \
+        --icr-scores-path  "$ICR_SCORES" \
         --model            "$MODEL" \
         --r-max            "$R_MAX" \
         --max-samples      "$SAMPLES" 2>&1 | tee -a "$LOG_FILE"
@@ -146,53 +152,51 @@ if [[ "$PHASE2_EXIT" -ne 0 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Phase 3 — AttentionParser readback (CPU-only)
-#   Confirms that what we wrote in Phase 2 can be read back via the public
-#   reader API, and that shapes / counts match expectations.
+# Phase 3 — Attention store readback (CPU-only)
+#   Confirms that what we wrote in Phase 2 can be read back via np.memmap,
+#   and that shapes / counts match expectations.
 # ---------------------------------------------------------------------------
 echo                                                          | tee -a "$LOG_FILE"
-echo "--- Phase 3: AttentionParser readback ---"              | tee -a "$LOG_FILE"
-$PYTHON - "$ATTN_ZARR" "$SAMPLES" "$R_MAX" <<'PY' 2>&1 | tee -a "$LOG_FILE"
+echo "--- Phase 3: Attention store readback ---"              | tee -a "$LOG_FILE"
+$PYTHON - "$ATTN_DIR" "$SAMPLES" "$R_MAX" <<'PY' 2>&1 | tee -a "$LOG_FILE"
 import json, sys
 from pathlib import Path
-import torch
+import numpy as np
 
-attn_path = Path(sys.argv[1])
+attn_dir = Path(sys.argv[1])
 expected_n = int(sys.argv[2])
 expected_rmax = int(sys.argv[3])
 
-# Sanity: config.json present and well-formed
-cfg = json.loads((attn_path / "meta" / "config.json").read_text())
+# config.json at the root of attn_dir (not meta/config.json)
+cfg = json.loads((attn_dir / "config.json").read_text())
 print("config.json keys:", sorted(cfg.keys()))
 for k in ("source_activations_zarr", "model_name", "num_layers", "num_heads",
-          "head_dim", "attention_region", "r_max", "dtype"):
+          "head_dim", "attention_region", "r_max", "dtype", "storage_format"):
     print(f"  {k}: {cfg.get(k)}")
-assert cfg["attention_region"] == "response_to_response", cfg["attention_region"]
 assert cfg["r_max"] == expected_rmax, (cfg["r_max"], expected_rmax)
+assert cfg["storage_format"] == "numpy_memmap_v1", cfg["storage_format"]
 
-# Reader API
-from activation_logging.attention_parser import AttentionParser
-ap = AttentionParser(str(attn_path))
-keys = ap.list_keys()
-print(f"\nAttentionParser: {len(keys)} keys, len()={len(ap)}")
-assert len(keys) == expected_n, (len(keys), expected_n)
-assert len(ap) == expected_n, (len(ap), expected_n)
+# meta.jsonl — authoritative record of written samples
+meta_lines = [json.loads(line) for line in (attn_dir / "meta.jsonl").read_text().strip().splitlines()]
+print(f"\nmeta.jsonl: {len(meta_lines)} sample entries")
+assert len(meta_lines) == expected_n, (len(meta_lines), expected_n)
 
-# Round-trip the first key through get_attention()
-first = ap.get_attention(keys[0])
-print(f"\nget_attention({keys[0]!r}):")
-for k, v in first.items():
-    if hasattr(v, "shape"):
-        print(f"  {k}: shape={tuple(v.shape)} dtype={v.dtype}")
-    else:
-        print(f"  {k}: {v}")
-ra = first["response_attn"]
-L = cfg["num_layers"]
-assert ra.shape == (L, expected_rmax, expected_rmax), (ra.shape, L, expected_rmax)
-assert ra.dtype == torch.float32, ra.dtype
-assert 1 <= first["response_len"] <= expected_rmax, first["response_len"]
-assert first["prompt_len"] >= 0, first["prompt_len"]
-print("\nOK: Phase 3 — readback shapes + dtype + bounds all consistent.")
+# response_attn.npy as np.memmap (raw binary, no .npy header — shape from config)
+n_samples = cfg["n_samples"]
+num_layers = cfg["num_layers"]
+r_max = cfg["r_max"]
+dtype = cfg["dtype"]
+mm = np.memmap(attn_dir / "response_attn.npy", dtype=dtype, mode="r",
+               shape=(n_samples, num_layers, r_max, r_max))
+print(f"response_attn.npy: shape={mm.shape} dtype={mm.dtype}")
+# Spot check: the row indexed by the first meta entry should be non-zero
+first_idx = meta_lines[0]["sample_index"]
+first_row = np.asarray(mm[first_idx])
+assert first_row.shape == (num_layers, r_max, r_max)
+nonzero_fraction = (first_row != 0).mean()
+print(f"  first written row[{first_idx}]: nonzero fraction = {nonzero_fraction:.3f}")
+assert nonzero_fraction > 0.0, f"first written row is all zero — write failed"
+print("\nOK: Phase 3 — readback shapes + dtype + write-evidence all consistent.")
 PY
 PHASE3_EXIT=${PIPESTATUS[0]}
 
@@ -201,6 +205,52 @@ if [[ "$PHASE3_EXIT" -ne 0 ]]; then
     PHASE_FAIL=1
 else
     echo "OK:   Phase 3 (readback) passed"                    | tee -a "$LOG_FILE"
+fi
+
+# ---------------------------------------------------------------------------
+# Phase 4 — icr_scores.npy readback (CPU-only)
+#   Confirms shape (N, num_blocks), dtype float32, and that every written
+#   sample has at least one non-zero score (all-zero row indicates a
+#   score-compute failure).
+# ---------------------------------------------------------------------------
+echo                                                          | tee -a "$LOG_FILE"
+echo "--- Phase 4: icr_scores.npy readback ---"               | tee -a "$LOG_FILE"
+$PYTHON - "$ICR_SCORES" "$SAMPLES" <<'PY' 2>&1 | tee -a "$LOG_FILE"
+import json, sys
+from pathlib import Path
+import numpy as np
+
+icr_path = Path(sys.argv[1])
+expected_n = int(sys.argv[2])
+
+arr = np.load(icr_path)
+print(f"icr_scores.npy: shape={arr.shape} dtype={arr.dtype}")
+assert arr.dtype == np.float32, arr.dtype
+assert arr.ndim == 2, arr.shape
+
+meta_path = icr_path.parent / (icr_path.stem + "_meta.jsonl")
+meta_lines = [json.loads(line) for line in meta_path.read_text().strip().splitlines()]
+written_indices = [m["sample_index"] for m in meta_lines]
+print(f"icr_scores_meta.jsonl: {len(written_indices)} entries")
+assert len(written_indices) == expected_n, (len(written_indices), expected_n)
+
+# Every written sample must have at least one non-zero score
+all_zero_count = 0
+for idx in written_indices:
+    if np.all(arr[idx] == 0):
+        all_zero_count += 1
+        print(f"  WARN: row {idx} is all-zero")
+print(f"\n{all_zero_count}/{len(written_indices)} written samples are all-zero")
+assert all_zero_count == 0, f"{all_zero_count} written samples have all-zero ICR scores — compute failed"
+print("OK: Phase 4 — icr_scores.npy populated correctly.")
+PY
+PHASE4_EXIT=${PIPESTATUS[0]}
+
+if [[ "$PHASE4_EXIT" -ne 0 ]]; then
+    echo "FAIL: Phase 4 (icr_scores readback) exited $PHASE4_EXIT" | tee -a "$LOG_FILE"
+    PHASE_FAIL=1
+else
+    echo "OK:   Phase 4 (icr_scores readback) passed"              | tee -a "$LOG_FILE"
 fi
 
 # ---------------------------------------------------------------------------
