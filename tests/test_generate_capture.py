@@ -79,29 +79,31 @@ def test_stitch_response_to_response_shape_and_dtype(generate_output):
 
 
 def test_stitch_response_to_response_equivalence(generate_output):
-    """Stream-stitched result must match the naive slice-then-average reference."""
+    """Stream-stitched result must match the naive slice-then-average reference.
+
+    Reference semantic: response position q comes from attentions[q]'s LAST
+    query row. q=0 reads from the prefill's last prompt query (response slice
+    empty → naturally zero); q>=1 reads from the sole decode-pass row.
+    """
     out, prompt_len = generate_output
     r_max = 8
 
     result = stitch_response_to_response(out.attentions, prompt_len, r_max)
 
-    # Naive reference: for each decode step t>=1, directly slice the key dim
-    # and mean over heads.
-    decode_steps = out.attentions[1:]
-    num_layers = len(decode_steps[0])
-    response_len = len(decode_steps)
+    num_layers = len(out.attentions[0])
+    response_len = len(out.attentions)
     n_steps = min(response_len, r_max)
 
     ref = np.zeros((num_layers, r_max, r_max), dtype=np.float32)
-    for t in range(n_steps):
-        for layer_idx, layer_attn in enumerate(decode_steps[t]):
-            arr = layer_attn[0, :, 0, prompt_len:].float()  # (heads, keys_so_far)
+    for q in range(n_steps):
+        for layer_idx, layer_attn in enumerate(out.attentions[q]):
+            arr = layer_attn[0, :, -1, prompt_len:].float()  # (heads, keys_after_prompt)
             n_keys = arr.shape[-1]
             if n_keys < r_max:
                 arr = F.pad(arr, (0, r_max - n_keys))
             else:
                 arr = arr[:, :r_max]
-            ref[layer_idx, t] = arr.mean(dim=0).detach().numpy()
+            ref[layer_idx, q] = arr.mean(dim=0).detach().numpy()
 
     assert np.max(np.abs(result.astype(np.float32) - ref)) < 1e-3
 
@@ -109,8 +111,7 @@ def test_stitch_response_to_response_equivalence(generate_output):
 def test_stitch_response_to_response_truncation(generate_output):
     """When response_len > r_max the output is still exactly r_max wide."""
     out, prompt_len = generate_output
-    response_len = len(out.attentions) - 1
-    # Choose r_max smaller than actual response so truncation is exercised.
+    response_len = len(out.attentions)
     r_max = max(1, response_len - 1)
 
     result = stitch_response_to_response(out.attentions, prompt_len, r_max)
@@ -123,12 +124,11 @@ def test_stitch_response_to_response_truncation(generate_output):
 def test_stitch_response_to_response_padding(generate_output):
     """When r_max > response_len, rows past response_len are zero."""
     out, prompt_len = generate_output
-    response_len = len(out.attentions) - 1
+    response_len = len(out.attentions)
     r_max = response_len + 4
 
     result = stitch_response_to_response(out.attentions, prompt_len, r_max)
 
-    # Rows [response_len:] in the query dimension must be all-zero.
     assert np.all(result[:, response_len:, :] == 0)
 
 
@@ -147,6 +147,41 @@ def test_stitch_response_to_response_zero_response_len(generate_output):
     assert np.all(result == 0)
 
 
+def test_stitch_response_to_response_q0_is_zero(generate_output):
+    """q=0 row is zero because the prefill's response sub-block is empty.
+
+    The prefill's last query (prompt_len-1) attends only over prompt keys;
+    the slice [prompt_len:] is empty, so the row pads to all-zero.
+    """
+    out, prompt_len = generate_output
+    r_max = 8
+
+    result = stitch_response_to_response(out.attentions, prompt_len, r_max)
+
+    assert np.all(result[:, 0, :] == 0)
+
+
+def test_stitch_response_to_response_last_position_filled(generate_output):
+    """Regression: q=response_len-1 must be FILLED (not the old zero row).
+
+    The pre-fix stitcher used attentions[1:] and so left q=R-1 untouched —
+    this test guards against that off-by-one returning.
+    """
+    out, prompt_len = generate_output
+    response_len = len(out.attentions)
+    r_max = response_len
+
+    result = stitch_response_to_response(out.attentions, prompt_len, r_max)
+
+    # response_len-1 row has key range [prompt_len : prompt_len+(response_len-1)],
+    # which is response_len-1 nonzero entries (for response_len >= 2).
+    if response_len >= 2:
+        last_q_row = result[:, response_len - 1, :]
+        assert np.any(last_q_row != 0), (
+            f"q={response_len - 1} row is all zeros — off-by-one regression."
+        )
+
+
 # ---------------------------------------------------------------------------
 # stitch_response_hidden_states
 # ---------------------------------------------------------------------------
@@ -154,11 +189,15 @@ def test_stitch_response_to_response_zero_response_len(generate_output):
 def test_stitch_response_hidden_states_layer_zero_is_embedding(
     model_and_tokenizer, generate_output
 ):
-    """Layer-0 entries match HF hidden_states[0] (token emb + positional emb)."""
-    model, tokenizer = model_and_tokenizer
+    """Layer-0 entries match HF hidden_states[q] (token emb + positional emb).
+
+    Semantic: response position q comes from hidden_states[q]'s LAST position
+    — for q=0 (prefill) that's the last prompt position; for q>=1 (decode)
+    that's the sole new position.
+    """
     out, prompt_len = generate_output
 
-    response_len = len(out.hidden_states) - 1  # subtract prefill step
+    response_len = len(out.hidden_states)
     max_response_len = response_len + 2
     hidden_dim = out.hidden_states[0][0].shape[-1]
 
@@ -166,19 +205,31 @@ def test_stitch_response_hidden_states_layer_zero_is_embedding(
         out.hidden_states, prompt_len, max_response_len
     )
 
-    # HF hidden_states layer 0 is the embedding output: wte(id) + wpe(position).
-    # For each decode step t (1-indexed in hidden_states), compute expected
-    # directly from the raw tensors that model.generate stores.
     expected = np.zeros((response_len, hidden_dim), dtype=np.float32)
-    for t in range(response_len):
-        # hidden_states[t+1] is decode step t (0-indexed), layer-0 entry.
-        hs_t_layer0 = out.hidden_states[t + 1][0]  # (batch=1, 1, hidden_dim)
-        expected[t] = hs_t_layer0[0, 0].detach().cpu().float().numpy()
+    for q in range(response_len):
+        hs_q_layer0 = out.hidden_states[q][0]  # (batch=1, query_len, hidden_dim)
+        expected[q] = hs_q_layer0[0, -1].detach().cpu().float().numpy()
 
-    # result[0] is layer-0 (embedding output). Compare valid rows only.
     actual = result[0, :response_len].astype(np.float32)
     assert actual.shape == expected.shape
     assert np.max(np.abs(actual - expected)) < 1e-2
+
+
+def test_stitch_response_hidden_states_last_position_filled(generate_output):
+    """Regression: q=response_len-1 hidden state must be filled (not zero)."""
+    out, prompt_len = generate_output
+    response_len = len(out.hidden_states)
+    max_response_len = response_len
+
+    result = stitch_response_hidden_states(
+        out.hidden_states, prompt_len, max_response_len
+    )
+
+    # Compare the last response position against hidden_states[response_len-1]'s
+    # last position, layer 0.
+    expected_last = out.hidden_states[response_len - 1][0][0, -1].detach().cpu().float().numpy()
+    actual_last = result[0, response_len - 1].astype(np.float32)
+    assert np.max(np.abs(actual_last - expected_last)) < 1e-2
 
 
 # ---------------------------------------------------------------------------

@@ -7,22 +7,26 @@ heterogeneous outputs of `model.generate(..., output_attentions=True,
 output_hidden_states=True, return_dict_in_generate=True)` into the
 fixed-shape tensors that the memmap writer persists.
 
-Contracts (must hold to match upstream XavierZhang2002/ICR_Probe byte-for-byte
-on the response-to-response sub-block; see specs/issue_72_inference_capture_rewrite.md
-"Upstream stitching contract" and notes/icr_probe_paper_notes.md §1.5):
+Contracts (verified empirically against transformers 4.57; see also
+specs/issue_72_inference_capture_rewrite.md "Upstream stitching contract"
+and notes/icr_probe_paper_notes.md §1.5):
 
-    out.attentions: tuple of length 1 + response_len.
-      [0]             — prefill: per-layer (batch, num_heads, prompt_len, prompt_len)
-      [t>=1]          — decode step that emitted response token t-1:
-                        per-layer (batch, num_heads, 1, prompt_len + t)
+    out.attentions: tuple of length response_len (NOT 1+response_len).
+      [0]             — prefill: per-layer (batch, num_heads, prompt_len, prompt_len).
+                        The LAST query row (q = prompt_len - 1) is the one whose
+                        logits sampled response token 0.
+      [q>=1]          — decode pass that sampled response token q:
+                        per-layer (batch, num_heads, 1, prompt_len + q).
 
-    out.hidden_states: tuple of length 1 + response_len.
-      [0]             — prefill: per-layer (batch, prompt_len, hidden_dim)
-                        for layers 0..L (where 0 is the embedding output)
-      [t>=1]          — decode step: per-layer (batch, 1, hidden_dim) for
-                        layers 0..L for the newly-emitted token
+    out.hidden_states: tuple of length response_len; symmetric to out.attentions.
+      [0]             — prefill: per-layer (batch, prompt_len, hidden_dim).
+                        The LAST position (prompt_len - 1) is the hidden state
+                        that produced response token 0.
+      [q>=1]          — decode: per-layer (batch, 1, hidden_dim) for
+                        the position that produced response token q.
 
-    out.scores: tuple of length response_len; each is (batch, vocab_size) logits.
+    out.scores: tuple of length response_len; scores[q] is (batch, vocab_size)
+    logits whose argmax/sample produced response token q.
 
 Functions exposed:
 
@@ -30,9 +34,10 @@ Functions exposed:
                                 response_len=None) -> np.ndarray
         Returns head-averaged response-to-response attention of shape
         (num_layers, r_max, r_max) float16, zero-padded past response_len.
-        Skips attentions[0] entirely. For each decode step t>=1, slices the
-        key dimension at [prompt_len : prompt_len + r_max] and head-averages
-        per layer. Row t-1 of the output is for response token t-1.
+        For each emitted response token q in [0, response_len), takes the
+        LAST query row of attentions[q] and slices the key dim at
+        [prompt_len : prompt_len + r_max]. The q=0 row is naturally zero
+        because the prefill's last query has no response keys yet.
 
     stitch_response_hidden_states(hidden_states, prompt_len, max_response_len)
         -> np.ndarray
@@ -89,55 +94,48 @@ def stitch_response_to_response(
         attentions: out.attentions from model.generate(...).
         prompt_len: number of prompt tokens (used to offset the key slice).
         r_max: max stored response length (output dim).
-        response_len: actual response length; defaults to len(attentions) - 1.
+        response_len: actual response length; defaults to len(attentions).
 
     Returns:
         (num_layers, r_max, r_max) float16 numpy array, zero-padded past
         min(response_len, r_max).
     """
     if response_len is None:
-        # Why: attentions[0] is the prefill step, not a response token.
-        response_len = len(attentions) - 1
+        # Why: out.attentions has one entry per emitted response token (the
+        # prefill at index 0 produced token 0 from its last query row).
+        response_len = len(attentions)
 
-    # Why: attentions[0] is prompt-to-prompt (prefill); ICR zeroes cross-region
-    # attention before top-k anyway (notes §9), so we never need it.
-    decode_steps = attentions[1:]
-
-    # Infer num_layers from the first available decode step, or from prefill if
-    # response_len == 0.
-    if len(decode_steps) > 0:
-        num_layers = len(decode_steps[0])
-    else:
-        num_layers = len(attentions[0])
+    # Why: infer num_layers from the prefill (always present even if response_len == 0).
+    num_layers = len(attentions[0])
 
     out = np.zeros((num_layers, r_max, r_max), dtype=np.float16)
 
-    n_steps = min(response_len, r_max, len(decode_steps))
-    for t in range(n_steps):
-        # decode_steps[t] is a tuple of length num_layers; each element is
-        # (batch=1, num_heads, 1, prompt_len + t + 1).
-        for layer_idx, layer_attn in enumerate(decode_steps[t]):
-            # Why: batch dim is always 1 in v1; squeeze it to (num_heads, 1, key_len).
+    n_steps = min(response_len, r_max, len(attentions))
+    for q in range(n_steps):
+        # attentions[q] is the forward pass that sampled response token q. Its
+        # LAST query row (q=0 → last prompt position; q>=1 → sole decode pos)
+        # carries the attention pattern that picked token q.
+        for layer_idx, layer_attn in enumerate(attentions[q]):
             assert layer_attn.shape[0] == 1, (
                 f"Expected batch=1, got {layer_attn.shape[0]}"
             )
-            layer_attn = layer_attn.squeeze(0)  # (num_heads, 1, key_len)
+            layer_attn = layer_attn.squeeze(0)  # (num_heads, query_len, key_len)
 
-            # Slice the response-to-response key range. Key positions
-            # [prompt_len : prompt_len + r_max] are the response tokens seen so far.
             key_len = layer_attn.shape[-1]
+            # Response keys live at [prompt_len : prompt_len + q] in the cache.
+            # For q=0 this slice is empty (prefill cache has no response yet),
+            # so the row will be zero-padded — semantically correct because
+            # token 0 was sampled without attending to any response token.
             slice_end = min(prompt_len + r_max, key_len)
-            row = layer_attn[:, 0, prompt_len:slice_end]  # (num_heads, n_keys)
+            row = layer_attn[:, -1, prompt_len:slice_end]  # (num_heads, n_keys)
 
-            # Pad to r_max along the key dimension so the result is always r_max wide.
             n_keys = row.shape[-1]
             if n_keys < r_max:
-                pad = r_max - n_keys
-                row = F.pad(row, (0, pad))  # (num_heads, r_max)
+                row = F.pad(row, (0, r_max - n_keys))  # (num_heads, r_max)
 
             # Head-average per notes §4: simple mean over all heads.
             row_avg = row.float().mean(dim=0)  # (r_max,)
-            out[layer_idx, t] = row_avg.detach().cpu().numpy().astype(np.float16)
+            out[layer_idx, q] = row_avg.detach().cpu().numpy().astype(np.float16)
 
     return out
 
@@ -147,11 +145,12 @@ def stitch_response_hidden_states(
     prompt_len: int,
     max_response_len: int,
 ) -> np.ndarray:
-    """Stack per-token decode hidden states into a fixed-shape array.
+    """Stack per-token hidden states into a fixed-shape array.
 
     Args:
         hidden_states: out.hidden_states from model.generate(...).
-        prompt_len: number of prompt tokens (unused here; kept for API symmetry).
+        prompt_len: number of prompt tokens (used to pick the prefill's last
+                    position for q=0).
         max_response_len: output time dimension.
 
     Returns:
@@ -159,35 +158,30 @@ def stitch_response_hidden_states(
         zero-padded past min(response_len, max_response_len). Layer 0 is the
         embedding output (HF convention).
     """
-    # Why: hidden_states[0] is the prefill pass; hidden_states[t>=1] are decode
-    # steps. Each element of hidden_states[0] is (batch, prompt_len, hidden_dim)
-    # for one layer (0 = embedding output, 1..L = block outputs).
     prefill_layers = hidden_states[0]
-
-    # Why: batch dim is always 1 in v1; assert and squeeze.
     assert prefill_layers[0].shape[0] == 1, (
         f"Expected batch=1, got {prefill_layers[0].shape[0]}"
     )
 
-    num_layers_plus1 = len(prefill_layers)  # L+1 (embedding + L blocks)
+    num_layers_plus1 = len(prefill_layers)
     hidden_dim = prefill_layers[0].shape[-1]
 
-    decode_steps = hidden_states[1:]  # length == response_len
-    response_len = len(decode_steps)
+    response_len = len(hidden_states)
     n_steps = min(response_len, max_response_len)
 
     out = np.zeros((num_layers_plus1, max_response_len, hidden_dim), dtype=np.float16)
 
-    for t in range(n_steps):
-        # decode_steps[t] is a tuple of length num_layers_plus1; each element
-        # is (batch=1, 1, hidden_dim) for the newly-emitted token.
-        for layer_idx, layer_hs in enumerate(decode_steps[t]):
+    for q in range(n_steps):
+        # hidden_states[q] is the forward pass that produced response token q.
+        # For q=0 it's the prefill (LAST position = prompt_len-1); for q>=1 it's
+        # the sole new position.
+        for layer_idx, layer_hs in enumerate(hidden_states[q]):
             assert layer_hs.shape[0] == 1, (
                 f"Expected batch=1, got {layer_hs.shape[0]}"
             )
-            # (1, 1, hidden_dim) -> (hidden_dim,)
-            token_hs = layer_hs[0, 0].detach().cpu().float().numpy()
-            out[layer_idx, t] = token_hs.astype(np.float16)
+            # (1, query_len, hidden_dim) -> (hidden_dim,) at the LAST position.
+            token_hs = layer_hs[0, -1].detach().cpu().float().numpy()
+            out[layer_idx, q] = token_hs.astype(np.float16)
 
     return out
 
@@ -243,39 +237,39 @@ def stitch_response_to_response_batched(
         (B, num_layers, r_max, r_max) float16 numpy array.
     """
     B = len(prompt_lens)
-    decode_steps = attentions[1:]
-
-    if len(decode_steps) > 0:
-        num_layers = len(decode_steps[0])
-    else:
-        num_layers = len(attentions[0])
+    num_layers = len(attentions[0])
 
     out = np.zeros((B, num_layers, r_max, r_max), dtype=np.float16)
-    max_steps = min(len(decode_steps), r_max)
+    max_steps = min(len(attentions), r_max)
 
-    for t_idx in range(max_steps):
-        t = t_idx + 1  # 1-indexed response token
-        for layer_idx, layer_attn in enumerate(decode_steps[t_idx]):
-            # layer_attn: (B, num_heads, 1, padded_prompt_len + t)
+    for q in range(max_steps):
+        # attentions[q] is the forward pass that sampled response token q
+        # across the batch. For q=0 it's the prefill (shape
+        # (B, H, padded_prompt_len, padded_prompt_len)); for q>=1 it's a decode
+        # pass (shape (B, H, 1, padded_prompt_len + q)). The LAST query row is
+        # what produced token q in both cases.
+        for layer_idx, layer_attn in enumerate(attentions[q]):
             layer_cpu = layer_attn.detach().cpu().float()
             key_len = layer_cpu.shape[-1]
-            # Why: with left-padding, response tokens always start at position
-            # padded_prompt_len (identical for all b in the batch), NOT at
-            # prompt_lens[b] which is the real (unpadded) length. Infer
-            # padded_prompt_len from key_len - t since key grows by 1 per step.
-            padded_prompt_len = key_len - t
+            # Why: with left-padding, response keys live at
+            # [padded_prompt_len : padded_prompt_len + q]. Infer
+            # padded_prompt_len from key_len: prefill (q=0) has
+            # key_len == padded_prompt_len; decode (q>=1) has
+            # key_len == padded_prompt_len + q. So key_len - q gives
+            # padded_prompt_len uniformly.
+            padded_prompt_len = key_len - q
             slice_end = min(padded_prompt_len + r_max, key_len)
             for b in range(B):
-                # Why: HF still emits attention for pad-token decode steps after
-                # a sample EOS'd; those rows would contaminate the response sub-block.
-                if t > response_lens[b]:
+                # Why: skip pad-token decode steps emitted after sample b EOS'd
+                # — those rows would contaminate the response sub-block.
+                if q >= response_lens[b]:
                     continue
-                row = layer_cpu[b, :, 0, padded_prompt_len:slice_end]  # (num_heads, n_keys)
+                row = layer_cpu[b, :, -1, padded_prompt_len:slice_end]  # (num_heads, n_keys)
                 n_keys = row.shape[-1]
                 if n_keys < r_max:
                     row = F.pad(row, (0, r_max - n_keys))
                 row_avg = row.mean(dim=0)  # (r_max,)
-                out[b, layer_idx, t_idx] = row_avg.numpy().astype(np.float16)
+                out[b, layer_idx, q] = row_avg.numpy().astype(np.float16)
 
     return out
 
@@ -286,7 +280,7 @@ def stitch_response_hidden_states_batched(
     response_lens: np.ndarray,
     max_response_len: int,
 ) -> np.ndarray:
-    """Stack per-token decode hidden states into a fixed-shape batch array.
+    """Stack per-token hidden states into a fixed-shape batch array.
 
     Returns:
         (B, num_layers + 1, max_response_len, hidden_dim) float16 numpy array.
@@ -296,21 +290,21 @@ def stitch_response_hidden_states_batched(
     num_layers_plus1 = len(prefill_layers)
     hidden_dim = prefill_layers[0].shape[-1]
 
-    decode_steps = hidden_states[1:]
     out = np.zeros((B, num_layers_plus1, max_response_len, hidden_dim), dtype=np.float16)
+    max_steps = min(len(hidden_states), max_response_len)
 
-    max_steps = min(len(decode_steps), max_response_len)
-    for t_idx in range(max_steps):
-        t = t_idx + 1  # 1-indexed response token
-        for layer_idx, layer_hs in enumerate(decode_steps[t_idx]):
-            # layer_hs: (B, 1, hidden_dim)
+    for q in range(max_steps):
+        # hidden_states[q] is the forward pass that produced response token q.
+        # For q=0 (prefill): shape (B, padded_prompt_len, hidden_dim) — take
+        # the LAST position. For q>=1 (decode): shape (B, 1, hidden_dim) — also
+        # the last (= only) position.
+        for layer_idx, layer_hs in enumerate(hidden_states[q]):
             layer_cpu = layer_hs.detach().cpu().float()
             for b in range(B):
-                # Why: skip pad-token decode steps emitted after sample b EOS'd.
-                if t > response_lens[b]:
+                if q >= response_lens[b]:
                     continue
-                token_hs = layer_cpu[b, 0].numpy().astype(np.float16)
-                out[b, layer_idx, t_idx] = token_hs
+                token_hs = layer_cpu[b, -1].numpy().astype(np.float16)
+                out[b, layer_idx, q] = token_hs
 
     return out
 
@@ -378,25 +372,24 @@ def extract_logprobs_batched(
     topk_ids_arr = np.zeros((B, R, top_k), dtype=np.int32)
     topk_logprobs_arr = np.zeros((B, R, top_k), dtype=np.float32)
 
-    for t_idx in range(actual_steps):
-        t = t_idx + 1  # 1-indexed response token
-        step_logits = scores[t_idx].detach().cpu()  # (B, vocab_size)
+    for q in range(actual_steps):
+        # scores[q] is the logits whose sample produced response token q.
+        step_logits = scores[q].detach().cpu()  # (B, vocab_size)
         vocab_size = step_logits.shape[-1]
         actual_k = min(top_k, vocab_size)
 
         for b in range(B):
-            # Why: skip pad-token decode steps emitted after sample b EOS'd.
-            if t > response_lens[b]:
+            if q >= response_lens[b]:
                 continue
             logits_1d = step_logits[b].float()
             log_probs = F.log_softmax(logits_1d, dim=-1)
 
-            token_id = int(sequences[b, padded_prompt_len + t_idx])
-            token_logprobs[b, t_idx] = float(log_probs[token_id])
+            token_id = int(sequences[b, padded_prompt_len + q])
+            token_logprobs[b, q] = float(log_probs[token_id])
 
             tk_vals, tk_ids = torch.topk(log_probs, k=actual_k)
-            topk_logprobs_arr[b, t_idx, :actual_k] = tk_vals.numpy().astype(np.float32)
-            topk_ids_arr[b, t_idx, :actual_k] = tk_ids.numpy().astype(np.int32)
+            topk_logprobs_arr[b, q, :actual_k] = tk_vals.numpy().astype(np.float32)
+            topk_ids_arr[b, q, :actual_k] = tk_ids.numpy().astype(np.int32)
 
     return token_logprobs, topk_ids_arr, topk_logprobs_arr
 
