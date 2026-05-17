@@ -36,14 +36,14 @@ def test_dataset_under_cap_returns_full_slice(tmp_path):
     assert ranges == [(None, None)]
 
 
-def test_dataset_over_cap_emits_capped_slices(tmp_path):
+def test_dataset_over_cap_emits_only_first_slice(tmp_path):
     ranges = _slice_ranges_for_dataset(
         expected_size=90_447, cap=50_000, out_base_dir=tmp_path, base_cell_id="x",
     )
-    assert ranges == [(0, 50_000), (50_000, 90_447)]
+    assert ranges == [(0, 50_000)]
 
 
-def test_skip_completed_slices(tmp_path):
+def test_skip_completed_advances_to_next_slice_only(tmp_path):
     (tmp_path / "x_0-50000").mkdir()
     (tmp_path / "x_0-50000" / "eval_results.json").write_text("{}")
 
@@ -53,7 +53,18 @@ def test_skip_completed_slices(tmp_path):
     assert ranges == [(50_000, 90_447)]
 
 
-def test_generate_manifest_emits_capped_cells_with_index_fields(tmp_path):
+def test_all_slices_done_returns_empty(tmp_path):
+    for s, e in [(0, 50_000), (50_000, 90_447)]:
+        d = tmp_path / f"x_{s}-{e}"
+        d.mkdir()
+        (d / "eval_results.json").write_text("{}")
+    ranges = _slice_ranges_for_dataset(
+        expected_size=90_447, cap=50_000, out_base_dir=tmp_path, base_cell_id="x",
+    )
+    assert ranges == []
+
+
+def test_generate_manifest_emits_one_capped_cell_with_index_fields(tmp_path):
     dispatch_root = tmp_path / "_dispatch"
     out_base = tmp_path / "icr"
 
@@ -66,20 +77,17 @@ def test_generate_manifest_emits_capped_cells_with_index_fields(tmp_path):
         n_samples=None,
         cap=50_000,
     )
-    assert n == 2, f"expected 2 cells (90447 split into 2), got {n}"
+    assert n == 1, f"expected 1 cell (only first slice emitted), got {n}"
 
     pending = list((dispatch_root / "pending").glob("*.json"))
     cell_ids = sorted(p.stem for p in pending)
-    assert cell_ids == [
-        "hotpotqa_train_Llama-3.1-8B-Instruct_0-50000",
-        "hotpotqa_train_Llama-3.1-8B-Instruct_50000-90447",
-    ]
+    assert cell_ids == ["hotpotqa_train_Llama-3.1-8B-Instruct_0-50000"]
 
     first = json.loads(pending[0].read_text())
-    assert first["index_start"] == 0 or first["index_start"] == 50_000
-    assert first["index_end"] in (50_000, 90_447)
+    assert first["index_start"] == 0
+    assert first["index_end"] == 50_000
     assert first["shuffle_seed"] == 0
-    assert "_0-" in first["out_dir"] or "_50000-" in first["out_dir"]
+    assert first["out_dir"].endswith("_0-50000")
 
 
 def test_generate_manifest_under_cap_omits_index_suffix(tmp_path):
@@ -105,30 +113,26 @@ def test_generate_manifest_under_cap_omits_index_suffix(tmp_path):
     assert cell["index_end"] is None
 
 
-def test_appendix_run_emits_only_new_slice(tmp_path):
+def test_appendix_run_emits_next_slice(tmp_path):
     dispatch_root = tmp_path / "_dispatch"
     out_base = tmp_path / "icr"
 
-    # First pass: cap=50000. Should emit two cells covering [0, 50000) and [50000, 90447).
+    # First pass: cap=50000. Emits exactly the [0, 50000) slice.
     n1 = generate_manifest(
         dispatch_root=dispatch_root, out_base_dir=out_base,
         tasks=["hotpotqa"], models=["meta-llama/Llama-3.1-8B-Instruct"],
         splits=["train"], n_samples=None, cap=50_000,
     )
-    assert n1 == 2
+    assert n1 == 1
 
-    # Simulate the first slice having completed: drop a done eval_results.json
-    # and remove its pending cell. The dispatcher's normal flow would do this,
-    # but for this test we do it manually.
+    # Simulate the first slice having completed and its pending cell consumed.
     first_cell = dispatch_root / "pending" / "hotpotqa_train_Llama-3.1-8B-Instruct_0-50000.json"
     first_cell.unlink()
-    second_cell = dispatch_root / "pending" / "hotpotqa_train_Llama-3.1-8B-Instruct_50000-90447.json"
-    second_cell.unlink()
     done_dir = out_base / "hotpotqa_train_Llama-3.1-8B-Instruct_0-50000"
     done_dir.mkdir(parents=True)
     (done_dir / "eval_results.json").write_text("{}")
 
-    # Second pass: same cap. Should emit only the second slice, not re-queue the first.
+    # Second pass: same cap. Now emits the next slice [50000, 90447).
     n2 = generate_manifest(
         dispatch_root=dispatch_root, out_base_dir=out_base,
         tasks=["hotpotqa"], models=["meta-llama/Llama-3.1-8B-Instruct"],

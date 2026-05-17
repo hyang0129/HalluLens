@@ -101,20 +101,24 @@ def _slice_ranges_for_dataset(
     out_base_dir: Path,
     base_cell_id: str,
 ) -> list[tuple[int | None, int | None]]:
-    """Return list of (start, end) slices to emit for this dataset.
+    """Return at most ONE slice to emit for this dataset.
 
     Slice semantics:
       - cap is None OR expected_size is None OR expected_size <= cap →
-        one cell with (None, None) = full dataset, no suffix in cell_id/out_dir.
-      - expected_size > cap → emit cells covering [0, cap), [cap, 2*cap), …
-        until expected_size is reached. Cells already-completed on disk
-        (out_dir/_{start}-{end} contains eval_results.json) are skipped so a
-        second invocation appends the next slice without re-queuing finished
-        ones.
+        single cell (None, None) = full dataset, no suffix in cell_id/out_dir.
+      - expected_size > cap → emit exactly one slice: the first
+        [k*cap, min((k+1)*cap, expected_size)) whose out_dir does NOT yet
+        contain eval_results.json. Earlier slices that ARE complete are
+        skipped (so a re-invocation appends the next slice rather than
+        re-queuing the headline grid).
+      - All slices already done → return [] (no cell to emit).
+
+    This makes --cap behave as "give me the next slice of size cap" rather
+    than "emit every slice upfront", matching the headline-then-appendix
+    workflow.
     """
     if cap is None or expected_size is None or expected_size <= cap:
         return [(None, None)]
-    ranges: list[tuple[int | None, int | None]] = []
     start = 0
     while start < expected_size:
         end = min(start + cap, expected_size)
@@ -123,9 +127,8 @@ def _slice_ranges_for_dataset(
         if (sub_dir / "eval_results.json").exists():
             start = end
             continue
-        ranges.append((start, end))
-        start = end
-    return ranges
+        return [(start, end)]
+    return []
 
 
 def generate_manifest(
@@ -234,12 +237,14 @@ def main() -> int:
                         help="Number of samples per generate() call (default 1). "
                              "Pass 4 for Phase 1 HotpotQA grid.")
     parser.add_argument("--cap", type=int, default=None,
-                        help="Per-cell sample cap (default: no cap). Splits whose "
-                             "expected size exceeds the cap are shuffled "
-                             "deterministically (seed=--shuffle-seed) and emitted as "
-                             "multiple [start, end) slice cells of size up to cap, e.g. "
-                             "0-50000, 50000-100000, .... Slices already complete on "
-                             "disk are skipped, so re-running with a larger cap appends.")
+                        help="Per-cell sample cap (default: no cap). For splits whose "
+                             "expected size exceeds the cap, emits exactly ONE slice "
+                             "cell of size up to cap from the deterministically shuffled "
+                             "(seed=--shuffle-seed) dataset — the first slice whose "
+                             "out_dir does NOT yet contain eval_results.json. Re-invoking "
+                             "after the first 50k is captured appends [50000, 100000), "
+                             "then [100000, ...) on subsequent runs. Datasets under cap "
+                             "pass through unchanged.")
     parser.add_argument("--shuffle-seed", type=int, default=0,
                         help="Seed for the deterministic shuffle when --cap is set. "
                              "Must stay constant across appendix runs of the same "
