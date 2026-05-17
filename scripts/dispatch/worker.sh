@@ -22,7 +22,22 @@ CLI="$SCRIPT_DIR/_claim_cli.py"
 WORKER_ID="${HOSTNAME}_$$_$RANDOM"
 CAPTURE_LOG="/tmp/capture_${WORKER_ID}.log"
 
-trap 'kill "$HB_PID" 2>/dev/null; echo "worker $WORKER_ID exiting (trap)."' EXIT
+# Why: the previous trap only killed $HB_PID, so a SIGTERM to this script left
+# capture_inference.py running as an orphan (PPID=1) — orphans then wrote to
+# the same memmap out_dir as the next dispatched worker, racing on every
+# sample. We now track $CAPTURE_PID explicitly and propagate signals to it.
+# pkill -P $$ is a safety net for any other direct children.
+_cleanup() {
+  [ -n "${CAPTURE_PID:-}" ] && kill -TERM "$CAPTURE_PID" 2>/dev/null
+  [ -n "${HB_PID:-}" ]      && kill -TERM "$HB_PID"      2>/dev/null
+  pkill -TERM -P $$ 2>/dev/null
+  sleep 2
+  [ -n "${CAPTURE_PID:-}" ] && kill -KILL "$CAPTURE_PID" 2>/dev/null
+  [ -n "${HB_PID:-}" ]      && kill -KILL "$HB_PID"      2>/dev/null
+  pkill -KILL -P $$ 2>/dev/null
+  echo "worker $WORKER_ID exiting (trap)."
+}
+trap _cleanup EXIT INT TERM
 
 echo "worker $WORKER_ID starting — dispatch_root=$DISPATCH_ROOT"
 
@@ -90,9 +105,15 @@ while true; do
 
   echo "worker $WORKER_ID: running capture_inference.py task=$TASK split=$SPLIT model=$MODEL"
   set +e
+  # Why: launch in background and track $CAPTURE_PID so the EXIT trap can
+  # forward SIGTERM to it. A previous pipeline + ${PIPESTATUS[0]} pattern
+  # left the python child unkillable from the trap.
   "$PYTHON" "$PROJECT_ROOT/scripts/capture_inference.py" "${CAPTURE_ARGS[@]}" \
-    2>&1 | tee "$CAPTURE_LOG"
-  EXIT_CODE=${PIPESTATUS[0]}
+    > "$CAPTURE_LOG" 2>&1 &
+  CAPTURE_PID=$!
+  wait "$CAPTURE_PID"
+  EXIT_CODE=$?
+  CAPTURE_PID=""
   set -e
 
   if [ "$EXIT_CODE" -eq 0 ]; then
