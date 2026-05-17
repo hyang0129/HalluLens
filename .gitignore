@@ -83,6 +83,7 @@ exploratory_work/
 
 # Claude Code agent worktrees (temporary git worktrees created by sub-agents)
 .claude/worktrees/
+.claude/scheduled_tasks.lock
 
 # Ephemeral smoketest outputs (logs, GPU samples, time -v dumps)
 reports/smoketest_*/

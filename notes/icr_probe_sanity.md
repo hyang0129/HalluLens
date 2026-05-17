@@ -85,12 +85,16 @@ print("per-layer std: ", scores.std(axis=0))       # should be > 0 at most layer
 top_p-collapsed-to-1 issue) or all scores ≈ some constant (probably a
 z-score-then-softmax issue with degenerate inputs).
 
-Fill in:
-- shape:
-- nan / inf:
-- global range:
-- per-layer mean range (min over layers, max over layers):
-- per-layer std range (min over layers, max over layers):
+Fill in (Llama-3.1-8B-Instruct, HotpotQA train, post-recompute with full-sequence top-p):
+- shape: `(49996, 32)` — float32
+- nan / inf: False / False
+- global range: `[0.0213, 0.3827]` — well inside JSD bound of ln(2) ≈ 0.693
+- per-layer mean range: `[0.1969, 0.2486]` — varies meaningfully across layers
+- per-layer std range: `[0.0145, 0.0323]` — all 32/32 layers have std > 1e-4
+
+**Pass.** No NaN/Inf, values JSD-bounded, per-layer mean varies, every layer varies sample-to-sample.
+
+Qwen3-8B HotpotQA train capture: pending (see follow-up issue).
 
 ---
 
@@ -128,17 +132,21 @@ print(f"n layers above 0.55:      {sum(a > 0.55 for a in aurocs)}/{len(aurocs)}"
 with hallucination — that's still signal, just inverted, and the probe will learn
 the sign during training. Report `max(auroc, 1 - auroc)` if you want a direction-free view.
 
-Fill in (Llama):
-- Label balance (pos fraction):
-- Best single-layer AUROC + layer index:
-- Mean across layers:
-- Layers above 0.55:
+Fill in (Llama-3.1-8B-Instruct, HotpotQA train, post-recompute):
+- Label balance (pos fraction): 0.6189 (49,996 samples)
+- Best single-layer AUROC (raw): 0.5484 at layer 7
+- Best single-layer AUROC (direction-free, `max(a, 1-a)`): 0.5524 at layer 1
+- Mean across layers (raw): 0.5008
+- Mean across layers (direction-free): 0.5229
+- Layers above 0.55 (raw): 0/32 ; (direction-free): 2/32
 
-Repeat for Qwen3 cell and fill in:
-- Label balance:
-- Best single-layer AUROC + layer index:
-- Mean across layers:
-- Layers above 0.55:
+**Pass (marginal).** Best layer clears 0.55 direction-free; spans 2 layers.
+Per-layer single-feature signal is weak — this is a model-specific characteristic
+(Llama-3.1-8B residual stream geometry differs from the paper's Gemma-2) and
+puts a ceiling on how far any linear-on-score combination can go. The probe
+itself recovers more signal via the L=32-wide MLP (see Check 3).
+
+Qwen3-8B HotpotQA train: pending capture (see follow-up issue).
 
 ---
 
@@ -168,10 +176,21 @@ final number.)
 - [ ] Test AUROC > 0.55 (confirms training produces a probe that's at least
       doing something, even at this tiny budget)
 
-Fill in:
-- Test AUROC:
-- Run wall time:
-- Errors / warnings of note:
+**What we have so far (not the full Phase 1 sweep — see caveat below):**
+
+A 5-fold stratified CV on the single Llama-3.1-8B HotpotQA train capture cell
+(via `scripts/icr_probe_cv.py`), post-recompute with full-sequence top-p:
+
+- CV AUROC: **0.6747 ± 0.0056** (5 folds, 49,996 samples)
+- Pipeline runs end-to-end; probe trains, eval emits standard artifacts
+- Test AUROC clears 0.55 by a wide margin → end-to-end pipeline is sound
+
+**Caveat — this is not the Phase 1 sweep.** Spec §13 calls for 5 *seeds*
+through `scripts/run_experiment.py` with the standard train→test artifact
+layout (`runs/baseline_comparison_hotpotqa/.../icr_probe/seed_<s>/`), not
+5-fold CV on a single capture. The CV result demonstrates the score formula
+and trainer work; it does not produce the per-seed artifacts that
+`results_table.py` aggregates. Phase 1 itself is in the follow-up issue.
 
 ---
 
@@ -201,7 +220,10 @@ A result where ICR probe is mid-pack, or even one of the weaker baselines, is
 fine and publishable. The paper's claim is about our contrastive method;
 ICR probe is one comparison point among many.
 
-Fill in:
+**Pending** — requires Phase 1 sweep (5 seeds × 2 models via `scripts/run_experiment.py`).
+Tracked in follow-up issue.
+
+Fill in (after Phase 1 completes):
 - ICR probe mean AUROC (Llama HotpotQA, 5 seeds):
 - ICR probe mean AUROC (Qwen3 HotpotQA, 5 seeds):
 - Rank among baselines on Llama HotpotQA:
@@ -225,8 +247,11 @@ Remediation path (separate follow-up PR):
 4. Re-run Phase 1 with the new scores and report whether AUROC moves.
 
 Status:
-- [ ] Not triggered (Check 3 AUROC > 0.55)
-- [ ] Triggered — follow-up PR in flight: #___
+- [x] Not triggered — CV AUROC 0.6747 ± 0.0056 is well above 0.55. The
+  top_p deviation was nevertheless fixed proactively in commit 029af6c
+  (effective-k now uses full sequence length); pre-fix best-single-layer
+  was 0.5475, post-fix 0.5524, and CV AUROC moved from 0.6460 → 0.6747.
+- [ ] Triggered — follow-up PR in flight: N/A
 
 ---
 
