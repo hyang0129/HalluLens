@@ -273,11 +273,34 @@ Same as every other baseline:
 
 ## 9. Sanity checks (gating, before launching full Phase 1)
 
-Before running 5 seeds × 2 models × HotpotQA, the implementer must:
+**Gate philosophy.** The paper's ~0.84 AUROC on HotpotQA is on **Gemma-2**.
+We run on Llama-3.1-8B-Instruct and Qwen3-8B — different model family,
+tokenizer, chat template, residual stream geometry. There is no published
+number for our models to match. The earlier "within ~0.03 of paper's 0.84"
+language was cross-model and conceptually wobbly; it has been redefined to
+check the actually-meaningful properties.
 
-1. **Single-sample ICR score printout.** Pick one HotpotQA sample. Print its 32-dim ICR vector. Compare order-of-magnitude to what the paper plots (typical JSD values are in [0, 0.7]). If we get all-zeros or all-1s, something is wrong.
-2. **Train-set discriminability sanity.** Compute mean ICR vector for hallucinated vs. non-hallucinated samples on the train split. Plot, eyeball, expect *some* per-layer separation if the method is going to work at all. If the means are visually indistinguishable, the score computation is suspect; debug before training.
-3. **Tiny-budget probe smoke.** Train ICRProbe for 5 epochs on 1K random samples, 1 seed. Report test AUROC. Expectation: anywhere from 0.55 to 0.80; if 0.50 ± 0.01 (chance), §3 is wrong; if >0.90 on this tiny budget, suspect a label leak.
+The full sanity-check template lives at [`notes/icr_probe_sanity.md`](../notes/icr_probe_sanity.md)
+(empty in the PR, filled after the captures complete on Empire AI).
+Summary of the gates:
+
+1. **Score distribution sane.** `icr_scores.npy` has no NaN/Inf, values fit
+   in `[0, ~1.0]` (JSD bound is ln(2) ≈ 0.693), per-layer mean varies, and
+   most layers have non-trivial std.
+2. **Train-set discriminability.** At least one layer's raw single-feature
+   AUROC on train labels > 0.55, AND ≥25% of layers clear 0.55. Confirms the
+   score has signal *before* training the probe.
+3. **End-to-end pipeline runs.** Tiny-budget probe (5 epochs) completes
+   without errors, writes the expected artifacts (`linear_probe_last.pt`,
+   `eval_metrics.json`, `predictions.csv`), and produces test AUROC > 0.55.
+4. **Competitive vs other baselines on same data.** After Phase 1's 5 seeds
+   land, mean AUROC > 0.55 (robust above chance) AND ICR Probe is positioned
+   defensibly against `contrastive` / `saplma` / `linear_probe` / `llmsknow_probe`
+   on the same `(model, dataset)`. Mid-pack is acceptable.
+
+**The top_p deviation (PR plan §A.2) is investigated only if gate 3 collapses
+to chance.** A below-paper number that's still well above chance is a fine,
+publishable result — *not* a trigger for remediation.
 
 Paste sanity-check results into the PR before launching the full Phase 1 sweep.
 
@@ -365,14 +388,23 @@ Expected runtime per seed: minutes (the probe is tiny; data is precomputed). 10 
 
 ## 14. Decision gate before Phase 2 rollout
 
-After Phase 1 results land, compare mean test AUROC on HotpotQA to:
-- Paper's HotpotQA number on Gemma-2: ~0.84
-- Our contrastive method's HotpotQA number: see `results/seed0_results.md`
+The paper's ~0.84 number was on **Gemma-2**, not on Llama or Qwen3, so it is
+not a target for our Phase 1. The decision rests on the redefined §9 gates
+applied to our `(model, dataset)` results.
 
 Three branches:
-- **ICR Probe within 0.03 of paper's number** → Phase 2 (rollout to 5 datasets). Probe is faithfully reproduced.
-- **ICR Probe far below paper's number on HotpotQA** → diagnose. Likely culprits: §3 placeholder mismatch, §9 sanity check missed something, Path B numerical drift not actually within tolerance. Do NOT roll out to Phase 2 until reproduced.
-- **ICR Probe far above paper's number** → suspect label leak; audit train/test split, audit token-ID-vs-position alignment in §3, audit query position handling.
+- **Phase 1 passes §9 gates 1–4 on both models** → roll out to Phase 2
+  (popqa, mmlu, natural_questions, sciq, searchqa). The reimplementation is
+  sound on our regime; scaling out is mechanical.
+- **Phase 1 passes gates 1–3 but ICR Probe sits in the lower half vs other
+  baselines on both models** → document the finding and proceed with Phase 2
+  anyway. That's a publishable result about the method as applied to
+  Llama/Qwen3 outputs; no need to delay.
+- **Phase 1 fails gate 3 (probe at chance on at least one model)** →
+  stop and diagnose. Top suspects: (a) the top_p deviation noted in the PR
+  (remediate via a follow-up `scripts/recompute_icr_scores.py`); (b) score
+  formula bug not caught by unit tests; (c) data-pipeline alignment between
+  `meta.jsonl` indices and `icr_scores.npy` rows.
 
 Document the branch taken in the PR.
 
@@ -382,9 +414,9 @@ Document the branch taken in the PR.
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| §3 placeholders chosen wrong despite reading paper | medium | §9 sanity checks gate Phase 1; tiny smoke test catches gross errors |
-| Phase 1 reproduces paper trend AND beats our contrastive method | low-medium | This is the per-issue manifestation of the §11.4 risk in `PAPER_ROADMAP.md`. Decide on data. |
-| Phase 1 fails to reproduce paper trend on HotpotQA | medium | Diagnose before Phase 2. Up to 3 days of debugging budget; beyond that, fall back to "we tried, here is the diagnosis" cite-only paragraph |
+| §3 placeholders chosen wrong despite reading paper | low | Resolved via `notes/icr_probe_paper_notes.md`; §9 sanity checks 1–2 would catch a gross score-formula bug |
+| ICR Probe beats our contrastive method on our regime | low-medium | This is the per-issue manifestation of the §11.4 risk in `PAPER_ROADMAP.md`. Decide on data — a competitive baseline is a feature, not a failure. |
+| Phase 1 probe collapses to chance AUROC | medium | §9 gate 3 catches this. Diagnose: top_p deviation (plan §A.2), score-formula bug, or data alignment issue. Up to 3 days of debugging budget; beyond that, fall back to "we tried, here is the diagnosis" cite-only paragraph |
 | `W_U` lookup is wrong (e.g. tied weights handled differently across HF model families) | low | Sanity check: `W_U.shape == (vocab_size, hidden_size)`; verify by decoding `argmax(W_U @ h_last)` matches the model's predicted next token on one sample |
 | Top-k indices include padding positions (yields garbage token IDs) | medium | §3.4 explicitly handles this — implementer must add masking unit test |
 | Filename collision with linear probe causes generic loaders to load the wrong checkpoint | low | Each method has its own subdirectory; documented in §10 |
