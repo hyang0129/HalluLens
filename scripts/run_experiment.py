@@ -1684,6 +1684,130 @@ def run_llmsknow_probe(
     return eval_metrics, predictions
 
 
+def run_icr_probe(
+    ap,
+    dataset_cfg: dict,
+    method_cfg: dict,
+    experiment_cfg: dict,
+    output_dir: str,
+    device: str,
+    training_seed: int,
+    test_ap=None,
+) -> tuple[dict, list[dict]]:
+    """ICR Probe per Issue #70.
+
+    Trains an ICRProbe MLP on precomputed icr_scores.npy from the capture
+    directory, evaluates on the separate test cell, and returns eval_metrics
+    + predictions in the standard schema.
+
+    Dataset config must have an "icr_capture" block with "train_dir" and
+    "test_dir" keys pointing to InferenceCaptureWriter output directories.
+    """
+    import torch
+    from sklearn.metrics import roc_auc_score
+    from torch.utils.data import DataLoader
+
+    from activation_research.icr_dataset import ICRDataset
+    from activation_research.icr_probe import ICRProbe
+    from activation_research.icr_trainer import ICRProbeTrainer, ICRProbeTrainerConfig
+
+    icr_cfg = dataset_cfg["icr_capture"]
+    train_cfg = method_cfg["training"]
+    data_cfg = method_cfg.get("data", {})
+
+    split_seed = experiment_cfg.get("split_seed", 42)
+    val_fraction = data_cfg.get("val_fraction", 0.1)
+
+    train_ds = ICRDataset(
+        icr_cfg["train_dir"],
+        mode="memmap",
+        split="train",
+        val_fraction=val_fraction,
+        random_seed=split_seed,
+    )
+    val_ds = ICRDataset(
+        icr_cfg["train_dir"],
+        mode="memmap",
+        split="val",
+        val_fraction=val_fraction,
+        random_seed=split_seed,
+    )
+    test_ds = ICRDataset(
+        icr_cfg["test_dir"],
+        mode="memmap",
+        split="all",
+        random_seed=split_seed,
+    )
+
+    num_layers = int(train_ds[0]["icr_score"].shape[0])
+
+    model = ICRProbe(input_dim=num_layers)
+    config = ICRProbeTrainerConfig(
+        max_epochs=train_cfg["max_epochs"],
+        batch_size=train_cfg["batch_size"],
+        # learning_rate and lr both used; set both for clarity.
+        learning_rate=train_cfg.get("lr", 1e-3),
+        lr=train_cfg.get("lr", 1e-3),
+        weight_decay=train_cfg.get("weight_decay", 0.0),
+        plateau_patience=train_cfg.get("plateau_patience", 5),
+        plateau_factor=train_cfg.get("plateau_factor", 0.5),
+        early_stop_patience=train_cfg.get("early_stop_patience", 10),
+        device=device,
+        num_workers=experiment_cfg.get("num_workers", 4),
+        persistent_workers=experiment_cfg.get("persistent_workers", True),
+        checkpoint_dir=os.path.join(output_dir, "artifacts"),
+        save_every=1,
+    )
+    trainer = ICRProbeTrainer(model, config=config)
+    trainer.fit(train_dataset=train_ds, val_dataset=val_ds)
+
+    # Test evaluation
+    model.eval()
+    eval_device = torch.device(
+        device
+        if device != "auto"
+        else ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    model.to(eval_device)
+
+    loader = DataLoader(
+        test_ds, batch_size=train_cfg["batch_size"], shuffle=False
+    )
+    all_logits, all_labels, all_hashes = [], [], []
+    with torch.no_grad():
+        for batch in loader:
+            x = batch["icr_score"].to(eval_device)
+            all_logits.append(torch.sigmoid(model(x)).cpu())
+            all_labels.append(batch["halu"].cpu())
+            all_hashes.extend(batch["hashkey"])
+
+    scores = torch.cat(all_logits).numpy()
+    labels = torch.cat(all_labels).numpy()
+    auroc = (
+        float(roc_auc_score(labels, scores))
+        if len(set(labels.tolist())) >= 2
+        else float("nan")
+    )
+
+    eval_metrics = {
+        "method": method_cfg["name"],
+        "dataset": dataset_cfg["name"],
+        "seed": training_seed,
+        "split_seed": split_seed,
+        "n_train": len(train_ds),
+        "n_val": len(val_ds),
+        "n_test": len(test_ds),
+        "auroc": auroc,
+        "selected_layer": None,  # ICR consumes all layers simultaneously
+        "num_layers": num_layers,
+    }
+    predictions = [
+        {"example_id": h, "score_halu": float(s), "label_halu": int(l)}
+        for h, s, l in zip(all_hashes, scores, labels)
+    ]
+    return eval_metrics, predictions
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -2294,6 +2418,11 @@ def main() -> None:
                         )
                     elif routine == "llmsknow_probe":
                         eval_metrics, predictions = run_llmsknow_probe(
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
+                            test_ap=test_ap,
+                        )
+                    elif routine == "icr_probe":
+                        eval_metrics, predictions = run_icr_probe(
                             ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
                         )

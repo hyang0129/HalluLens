@@ -1,0 +1,17 @@
+{
+  "name": "icr_probe",
+  "routine": "icr_probe",
+  "seeded": true,
+  "training": {
+    "max_epochs": 50,
+    "batch_size": 256,
+    "lr": 1e-3,
+    "weight_decay": 0.0,
+    "plateau_patience": 5,
+    "plateau_factor": 0.5,
+    "early_stop_patience": 10
+  },
+  "data": {
+    "val_fraction": 0.1
+  }
+}

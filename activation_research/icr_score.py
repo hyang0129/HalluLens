@@ -44,6 +44,7 @@ def compute_icr_score(
     delta_h: np.ndarray,         # (R, H) float32 — h^l - h^{l-1} at response positions
     response_len: int,            # actual response length (<= R)
     top_p: float = 0.1,          # per notes §3: top_p overrides top_k in upstream
+    prompt_len: int = 0,          # upstream uses k = int(top_p * (prompt_len + response_len))
 ) -> float:
     """Return token-mean ICR Score for one (sample, layer).
 
@@ -51,6 +52,11 @@ def compute_icr_score(
     JSD variant from notes §10. Top-k key positions are the top-p fraction of the
     attention row; projection direction is the l2-normalized h_block_input at those
     positions; projected quantity is delta_h at the query position.
+
+    prompt_len: the upstream code computes k = int(top_p * len(current_token_attn))
+    where current_token_attn spans the full sequence (prompt + response).  Passing
+    prompt_len=0 (old behaviour) gives k = int(top_p * response_len) which is ~10x
+    too small; pass the actual prompt token count for a faithful reproduction.
     """
     if top_p <= 0 or top_p > 1:
         raise ValueError(f"top_p must be in (0, 1], got {top_p}")
@@ -87,7 +93,7 @@ def compute_icr_score(
     h_in = h_block_input[:response_len]                 # (response_len, H)
     dh = delta_h[:response_len]                         # (response_len, H)
 
-    k = max(1, int(top_p * response_len))
+    k = max(1, int(top_p * (prompt_len + response_len)))
 
     per_token_jsds = []
     for q in range(response_len):
