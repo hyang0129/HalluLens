@@ -1051,6 +1051,430 @@ def train_contrastive_logprob_recon(
                 _cleanup_legacy_checkpoints(checkpoint_dir, keep_filenames={"contrastive_last.pt"})
 
 
+def _contrastive_collate_with_logprob_attn(batch):
+    """Collate that pads/stacks logprob + attention summary fields alongside
+    the standard contrastive fields.
+
+    Same logprob behaviour as :func:`_contrastive_collate_with_logprob`.
+    Adds optional ``attention_forward`` / ``attention_backward`` tensors
+    (each ``(B, K, num_stat_features)``) when present in every item. If a
+    direction's tensor is missing from any item it is omitted from the
+    output — the trainer treats this as "no K recon for that direction
+    this batch" and skips the corresponding loss term.
+
+    Each direction is treated independently. NaN entries inside the
+    attention tensors are preserved verbatim and handled by the model's
+    ``recon_loss_attn`` (NaN-masked + variance-suppressed).
+    """
+    out = _contrastive_collate_with_logprob(batch)
+
+    for direction_key in ("attention_forward", "attention_backward"):
+        if not all(direction_key in b for b in batch):
+            continue
+        stacked = torch.stack([b[direction_key].float() for b in batch], dim=0)
+        out[direction_key] = stacked  # (B, K, num_stat_features)
+
+    return out
+
+
+def train_contrastive_logprob_attn_recon(
+    model,
+    train_dataset,
+    test_dataset=None,
+    epochs=10,
+    batch_size=512,
+    lr=1e-6,
+    temperature=0.07,
+    device="cuda",
+    num_workers=16,
+    sub_batch_size=64,
+    checkpoint_dir="checkpoints",
+    save_every=1,
+    resume_from=None,
+    persistent_workers=True,
+    cleanup_legacy_checkpoints: bool = True,
+    snapshot_every: int = 0,
+    snapshot_keep_last: int = 5,
+    use_labels=False,
+    ignore_label=-1,
+    same_sample_weight=1.0,
+    same_class_weight=1.0,
+    balanced_sampling=False,
+    recon_lambda: float = None,
+    attn_recon_lambda: float = None,
+    use_infinite_index_stream: bool = False,
+    infinite_stream_shuffle: bool = True,
+    infinite_stream_seed: int = 0,
+    steps_per_epoch_override: int = None,
+    grad_clip_norm: float = None,
+):
+    """Train ``LogprobAttnReconProgressiveCompressor`` with both auxes.
+
+    Loss per step::
+
+        L = L_SupCon(z) + λ_lp · L_lp(g_lp(z), ℓ) + Σ_d λ_attn · L_attn(g_d(z), A_d)
+
+    Mirrors :func:`train_contrastive_logprob_recon` — microbatch buffering,
+    atomic checkpoint save, snapshot pruning, optional infinite index
+    stream. Extends only the per-batch loss-assembly block by adding one
+    MSE term per active attention direction.
+
+    Parameters
+    ----------
+    recon_lambda, attn_recon_lambda : float or None
+        Override the corresponding lambdas on ``model``. Pass ``None`` to
+        use the model defaults.
+    """
+    _lambda_lp = float(recon_lambda) if recon_lambda is not None else model.recon_lambda
+    _lambda_attn = (
+        float(attn_recon_lambda)
+        if attn_recon_lambda is not None
+        else model.attn_recon_lambda
+    )
+
+    if steps_per_epoch_override is not None and not use_infinite_index_stream:
+        raise ValueError("steps_per_epoch_override requires use_infinite_index_stream=True")
+
+    base_dataset_len = None
+    if use_infinite_index_stream:
+        if not hasattr(train_dataset, "__len__"):
+            raise TypeError("use_infinite_index_stream=True requires train_dataset to have __len__")
+        base_dataset_len = len(train_dataset)
+        sub_batch_size = batch_size
+
+    def _call_model(m, x, layer_idx=None):
+        if layer_idx is None:
+            return m.forward_with_recon(x)
+        # LayerAware wrapper compatibility: inject layer_idx into encoder
+        # and then re-route through the aux decoders. Currently the F+K
+        # model does not wrap a layer-aware encoder, so this falls back.
+        try:
+            z = (
+                m.encoder(x, layer_idx=layer_idx)
+                if hasattr(m.encoder, "forward")
+                else m.encoder(x)
+            )
+            lp_pred = m.lp_decoder(z)
+            attn_pred = {
+                d: m.attn_decoders[m._DIRECTION_TO_KEY[d]](z)
+                for d in m._active_attn_dirs
+            }
+            return z, lp_pred, attn_pred
+        except TypeError:
+            return m.forward_with_recon(x)
+
+    assert batch_size % sub_batch_size == 0, "batch_size must be divisible by sub_batch_size"
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    model = model.to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    loss_fn = SupConLoss(
+        temperature=temperature,
+        ignore_label=ignore_label,
+        same_sample_weight=same_sample_weight,
+        same_class_weight=same_class_weight,
+    )
+
+    start_epoch = 0
+    best_loss = float("inf")
+
+    if resume_from is not None:
+        checkpoint_path = (
+            resume_from if os.path.isabs(resume_from) else os.path.join(checkpoint_dir, resume_from)
+        )
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Resume checkpoint not found: {checkpoint_path}")
+        ckpt = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        start_epoch = ckpt.get("epoch", 0) + 1
+        best_loss = ckpt.get("best_loss", float("inf"))
+        logger.info(f"Resumed training from epoch {start_epoch}")
+
+    is_iterable = isinstance(train_dataset, IterableDataset)
+    if use_infinite_index_stream and not is_iterable:
+        train_dataset = InfiniteIndexStream(
+            train_dataset,
+            shuffle=bool(infinite_stream_shuffle),
+            seed=int(infinite_stream_seed),
+        )
+        is_iterable = True
+    if is_iterable and balanced_sampling and use_labels:
+        logger.warning("Balanced sampling is not supported for iterable datasets; disabling sampler.")
+    sampler = (
+        _build_balanced_sampler(train_dataset)
+        if balanced_sampling and use_labels and not is_iterable
+        else None
+    )
+    use_persistent_workers = bool(persistent_workers and num_workers and num_workers > 0)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=sub_batch_size,
+        shuffle=(sampler is None and not is_iterable),
+        sampler=sampler,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=use_persistent_workers,
+        collate_fn=_contrastive_collate_with_logprob_attn,
+    )
+
+    steps_per_epoch = None
+    train_iter = None
+    if use_infinite_index_stream:
+        inferred = int(math.ceil(base_dataset_len / float(batch_size)))
+        steps_per_epoch = int(steps_per_epoch_override) if steps_per_epoch_override is not None else inferred
+        train_iter = iter(train_loader)
+
+    test_loader = None
+    if test_dataset is not None:
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=use_persistent_workers,
+            collate_fn=_contrastive_collate_with_logprob_attn,
+        )
+
+    from utils.progress import tqdm as _tqdm
+
+    for epoch in _tqdm(range(start_epoch, epochs), desc="Epochs"):
+        logger.info(f"Starting epoch {epoch + 1}/{epochs}")
+        model.train()
+
+        total_loss = total_supcon = total_recon_lp = 0.0
+        total_recon_attn = {"forward": 0.0, "backward": 0.0}
+        total_intra_cos = total_intra_inter = 0.0
+        n_batches = 0
+
+        if use_infinite_index_stream:
+            total_steps = steps_per_epoch
+            loop = _tqdm(range(total_steps), desc=f"Epoch {epoch + 1}/{epochs}", leave=False)
+        else:
+            try:
+                total_steps = len(train_loader)
+            except TypeError:
+                total_steps = None
+            loop = _tqdm(train_loader, desc=f"Epoch {epoch + 1}/{epochs}", leave=False)
+
+        buffer_views = []
+        buffer_view_indices = []
+        buffer_logprobs = []
+        buffer_attn = {"forward": [], "backward": []}
+        buffer_labels = [] if use_labels else None
+        buffer_sample_ids = [] if use_labels else None
+
+        i = 0
+        for _loop_item in loop:
+            i += 1
+            batch = next(train_iter) if use_infinite_index_stream else _loop_item
+
+            views = batch["views_activations"].to(device, non_blocking=True)
+            buffer_views.append(views)
+
+            if "view_indices" in batch:
+                buffer_view_indices.append(batch["view_indices"].to(device, non_blocking=True))
+
+            if "logprob" in batch:
+                buffer_logprobs.append(batch["logprob"].to(device, non_blocking=True))
+
+            for direction_key in ("forward", "backward"):
+                field = f"attention_{direction_key}"
+                if field in batch:
+                    buffer_attn[direction_key].append(
+                        batch[field].to(device, non_blocking=True)
+                    )
+
+            if use_labels:
+                labels = batch["halu"].to(device, non_blocking=True)
+                if labels.dim() == 0:
+                    labels = labels.unsqueeze(0)
+                elif labels.dim() > 1:
+                    labels = labels.view(-1)
+                buffer_labels.append(labels)
+
+                hashkeys = batch["hashkey"]
+                if isinstance(hashkeys, str):
+                    hashkeys = [hashkeys]
+                sample_ids = torch.tensor(
+                    [hash(hk) % 1_000_000 for hk in hashkeys], dtype=torch.long, device=device
+                )
+                buffer_sample_ids.append(sample_ids)
+
+            buffer_full = len(buffer_views) * sub_batch_size == batch_size
+            last_batch = total_steps is not None and i == total_steps
+
+            if buffer_full or last_batch:
+                views_full = torch.cat(buffer_views, dim=0)
+                view_idx_full = torch.cat(buffer_view_indices, dim=0) if buffer_view_indices else None
+                logprob_full = torch.cat(buffer_logprobs, dim=0) if buffer_logprobs else None
+                attn_full = {
+                    d: (torch.cat(buffer_attn[d], dim=0) if buffer_attn[d] else None)
+                    for d in ("forward", "backward")
+                }
+                buffer_views = []
+                buffer_view_indices = []
+                buffer_logprobs = []
+                buffer_attn = {"forward": [], "backward": []}
+
+                bsz, num_views, seq_len, hidden_dim = views_full.shape
+                x_flat = views_full.reshape(bsz * num_views, seq_len, hidden_dim)
+                view_idx_flat = (
+                    view_idx_full.reshape(bsz * num_views) if view_idx_full is not None else None
+                )
+
+                z_flat, lp_pred_flat, attn_pred_flat = _call_model(
+                    model, x_flat, layer_idx=view_idx_flat
+                )
+                z_views = z_flat.reshape(bsz, num_views, -1)
+
+                # --- SupCon ---
+                if use_labels:
+                    labels_full = torch.cat(buffer_labels, dim=0)
+                    sample_ids_full = torch.cat(buffer_sample_ids, dim=0)
+                    buffer_labels = []
+                    buffer_sample_ids = []
+                    supcon = loss_fn(z_views, labels=labels_full, sample_ids=sample_ids_full)
+                else:
+                    supcon = loss_fn(z_views)
+
+                # --- Logprob (F) recon ---
+                recon_lp = torch.zeros(1, device=device).squeeze()
+                lp_diag = {}
+                if logprob_full is not None and _lambda_lp > 0.0 and lp_pred_flat is not None:
+                    logprob_expanded = logprob_full.unsqueeze(1).expand(-1, num_views, -1)
+                    logprob_expanded = logprob_expanded.reshape(bsz * num_views, -1)
+                    nan_mask = logprob_expanded.isnan()
+                    if nan_mask.any():
+                        row_means = logprob_expanded.nanmean(dim=-1, keepdim=True)
+                        logprob_expanded = logprob_expanded.masked_fill(nan_mask, 0.0)
+                        logprob_expanded = logprob_expanded + nan_mask.float() * row_means
+                    recon_lp, lp_diag = model.recon_loss_lp(lp_pred_flat, logprob_expanded)
+
+                # --- Attention (K) recon per direction ---
+                recon_attn_terms = {}
+                attn_diag = {}
+                for direction in ("forward", "backward"):
+                    target = attn_full.get(direction)
+                    pred = attn_pred_flat.get(direction) if attn_pred_flat else None
+                    if (
+                        target is not None
+                        and pred is not None
+                        and _lambda_attn > 0.0
+                    ):
+                        # target: (B, K, F) — flatten views to (B*K, F)
+                        target_flat = target.reshape(bsz * num_views, -1)
+                        loss_d, diag_d = model.recon_loss_attn(pred, target_flat)
+                        recon_attn_terms[direction] = loss_d
+                        attn_diag[direction] = diag_d
+
+                recon_attn_sum = (
+                    sum(recon_attn_terms.values())
+                    if recon_attn_terms
+                    else torch.zeros(1, device=device).squeeze()
+                )
+
+                loss = supcon + _lambda_lp * recon_lp + _lambda_attn * recon_attn_sum
+
+                optimizer.zero_grad()
+                loss.backward()
+                if grad_clip_norm is not None and float(grad_clip_norm) > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), max_norm=float(grad_clip_norm)
+                    )
+                optimizer.step()
+
+                total_loss += loss.item()
+                total_supcon += supcon.item()
+                total_recon_lp += float(recon_lp)
+                for direction, l in recon_attn_terms.items():
+                    total_recon_attn[direction] += float(l)
+                total_intra_cos += intra_sample_cosine_mean(z_views)
+                total_intra_inter += intra_inter_margin(z_views)
+                n_batches += 1
+
+                avg_loss = total_loss / n_batches
+                loop.set_postfix(
+                    loss=avg_loss,
+                    supcon=total_supcon / n_batches,
+                    recon_lp=total_recon_lp / n_batches,
+                    recon_attn_fwd=total_recon_attn["forward"] / n_batches,
+                    recon_attn_bwd=total_recon_attn["backward"] / n_batches,
+                )
+
+        avg_loss = total_loss / max(1, n_batches)
+        avg_supcon = total_supcon / max(1, n_batches)
+        avg_recon_lp = total_recon_lp / max(1, n_batches)
+        avg_recon_attn = {d: total_recon_attn[d] / max(1, n_batches) for d in total_recon_attn}
+        avg_intra_cos = total_intra_cos / max(1, n_batches)
+        avg_intra_inter = total_intra_inter / max(1, n_batches)
+        print(
+            f"Epoch {epoch + 1}/{epochs} - Loss: {avg_loss:.4f} "
+            f"(SupCon={avg_supcon:.4f}, ReconLP={avg_recon_lp:.4f}, "
+            f"ReconAttn(fwd={avg_recon_attn['forward']:.4f}, "
+            f"bwd={avg_recon_attn['backward']:.4f})) "
+            f"- IntraCos: {avg_intra_cos:.4f} - IntraInterMargin: {avg_intra_inter:.4f}"
+        )
+
+        test_loss = float("inf")
+        test_intra_cos = test_intra_inter = 0.0
+        if test_loader is not None:
+            test_loss, test_intra_cos, test_intra_inter = evaluate(
+                model,
+                test_loader,
+                batch_size=batch_size,
+                loss_fn=loss_fn,
+                device=device,
+                sub_batch_size=sub_batch_size,
+                use_labels=use_labels,
+                ignore_label=ignore_label,
+            )
+            print(
+                f"Epoch {epoch + 1}/{epochs} - Test Loss: {test_loss:.4f} "
+                f"- Test IntraCos: {test_intra_cos:.4f} - Test IntraInterMargin: {test_intra_inter:.4f}"
+            )
+
+        is_last_epoch = epoch == epochs - 1
+        if (epoch + 1) % save_every == 0 or is_last_epoch:
+            checkpoint = {
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "train_loss": avg_loss,
+                "train_supcon": avg_supcon,
+                "train_recon_lp": avg_recon_lp,
+                "train_recon_attn_forward": avg_recon_attn["forward"],
+                "train_recon_attn_backward": avg_recon_attn["backward"],
+                "train_intra_cos": avg_intra_cos,
+                "train_intra_inter_margin": avg_intra_inter,
+                "test_loss": test_loss,
+                "test_intra_cos": test_intra_cos,
+                "test_intra_inter_margin": test_intra_inter,
+                "best_loss": min(best_loss, test_loss),
+                "temperature": temperature,
+                "lr": lr,
+                "recon_lambda": _lambda_lp,
+                "attn_recon_lambda": _lambda_attn,
+            }
+
+            last_path = os.path.join(checkpoint_dir, "contrastive_last.pt")
+            _atomic_torch_save(checkpoint, last_path)
+
+            _save_and_prune_snapshots(
+                checkpoint_dir=checkpoint_dir,
+                snapshot_prefix="contrastive",
+                epoch_one_indexed=epoch + 1,
+                checkpoint=checkpoint,
+                snapshot_every=snapshot_every,
+                snapshot_keep_last=snapshot_keep_last,
+                is_last_epoch=is_last_epoch,
+            )
+
+            if cleanup_legacy_checkpoints:
+                _cleanup_legacy_checkpoints(checkpoint_dir, keep_filenames={"contrastive_last.pt"})
+
+
 def train_halu_classifier(model, train_dataset, test_dataset=None, epochs=10, batch_size=512, lr=1e-4, device='cuda', num_workers=4, sub_batch_size=64,
                          checkpoint_dir='checkpoints', save_every=1, resume_from=None, persistent_workers=True,
                          cleanup_legacy_checkpoints: bool = True,
