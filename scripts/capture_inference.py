@@ -113,6 +113,10 @@ def _correct_list(task_module: Any, generation: str, sample: dict) -> bool:
 def _correct_nq(task_module: Any, generation: str, sample: dict) -> bool:
     """Adapter for NQ which has no module-level is_correct."""
     answer = sample["answer"]
+    # NQ loads via pandas read_csv; missing Answer cells become NaN floats.
+    # Treat absent gold as no-match (sample is automatically labeled hallucinated).
+    if not isinstance(answer, str):
+        return False
     return answer.lower() in generation.lower()
 
 
