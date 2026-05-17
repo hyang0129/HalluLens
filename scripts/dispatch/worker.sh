@@ -48,7 +48,16 @@ _cleanup() {
   pkill -KILL -P $$ 2>/dev/null
   echo "worker $WORKER_ID exiting (trap)."
 }
-trap _cleanup EXIT INT TERM
+# Why: after trap runs for SIGTERM/SIGINT, bash would otherwise resume from
+# the interrupted `wait`, see EXIT_CODE != 0, mark the current cell as failed,
+# and claim the NEXT pending cell. Killing a worker then double-fails: the
+# active cell + one more from pending. Set a flag and exit explicitly.
+_signal_cleanup_and_exit() {
+  _cleanup
+  exit 130
+}
+trap _cleanup EXIT
+trap _signal_cleanup_and_exit INT TERM
 
 echo "worker $WORKER_ID starting — dispatch_root=$DISPATCH_ROOT"
 
