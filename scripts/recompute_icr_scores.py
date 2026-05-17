@@ -79,6 +79,10 @@ def _init_worker(
         mode="r",
         shape=(n_alloc, num_layers, r_max, r_max),
     )
+    # Why max_response_len (S) not r_max (R): the writer allocates
+    # response_activations at (N, L+1, S, H) where S can exceed R (e.g. sciq
+    # smoketest has S=256, R=64). The ICR formula only needs the first R
+    # positions per layer; we slice those below.
     _MM_ACT = np.memmap(
         cell / "response_activations.npy",
         dtype=np.float16,
@@ -87,7 +91,11 @@ def _init_worker(
     )
     _R_MAX = r_max
     _NUM_LAYERS = num_layers
-    _RESPONSE_LENS = np.load(cell / "response_len.npy")
+    # response_len.npy is a raw int32 memmap (no .npy header) — see
+    # activation_logging/inference_capture_writer.py:215.
+    _RESPONSE_LENS = np.memmap(
+        cell / "response_len.npy", dtype=np.int32, mode="r", shape=(n_alloc,)
+    )
 
 
 def _compute_one(args: Tuple[int, int]) -> Tuple[int, np.ndarray]:
@@ -98,7 +106,11 @@ def _compute_one(args: Tuple[int, int]) -> Tuple[int, np.ndarray]:
     sample_idx, _row = args
     assert _MM_ATTN is not None and _MM_ACT is not None and _RESPONSE_LENS is not None
 
-    rlen = int(_RESPONSE_LENS[sample_idx])
+    # Clamp to r_max: attention is only captured for the first R response
+    # positions; any tokens beyond are implicitly truncated. This matches the
+    # worker's inline behavior (attention memmap is RxR regardless of how long
+    # the model actually generated).
+    rlen = min(int(_RESPONSE_LENS[sample_idx]), _R_MAX)
     if rlen <= 0:
         return sample_idx, np.zeros(_NUM_LAYERS, dtype=np.float32)
 
@@ -244,8 +256,11 @@ def main() -> int:
     # Write atomically: .tmp then rename, so a concurrent reader never sees a
     # half-written file. This matters because the capture worker may also be
     # writing icr_scores.npy at the same time on finalize.
-    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
-    np.save(str(tmp), out)
+    # Why open() + np.save(fh): np.save(str_path) appends ".npy" if missing,
+    # which breaks our .tmp suffix; passing a file object bypasses that.
+    tmp = out_path.with_name(out_path.name + ".tmp")
+    with open(tmp, "wb") as fh:
+        np.save(fh, out)
     tmp.replace(out_path)
     print(f"Wrote {out_path}  shape={out.shape}  dtype={out.dtype}", file=sys.stderr)
     return 0
