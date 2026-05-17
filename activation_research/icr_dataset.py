@@ -70,7 +70,7 @@ from torch.utils.data import Dataset
 
 def _make_split_indices(
     labels: np.ndarray,
-    split: Literal["train", "val", "test"],
+    split: Literal["train", "val", "test", "all"],
     val_fraction: float | None,
     random_seed: int,
 ) -> np.ndarray:
@@ -342,20 +342,24 @@ class ICRDataset(Dataset):
         Read mode.  "icr" and "memmap" return the same dict shape
         (interchangeable for the probe).  "memmap-raw" and "raw" return the
         raw-activation dict shape (for ablations).
-    split : {"train", "val", "test"}
-        Which partition to expose.
+    split : {"train", "val", "test", "all"}
+        Which partition to expose.  "all" bypasses the stratified split and
+        exposes every sample in the capture directory — intended for the
+        test-cell case where a separate capture directory holds only test
+        samples and no internal split is needed.
     val_fraction : float or None
         If provided, fraction of *total* samples reserved for val.
         None uses the ActivationParser three_way default (~10% of total).
+        Ignored when split="all".
     random_seed : int
-        RNG seed for the stratified split.
+        RNG seed for the stratified split.  Ignored when split="all".
     """
 
     def __init__(
         self,
         capture_dir: str | Path,
         mode: Literal["icr", "memmap", "memmap-raw", "raw"] = "icr",
-        split: Literal["train", "val", "test"] = "train",
+        split: Literal["train", "val", "test", "all"] = "train",
         val_fraction: float | None = None,
         random_seed: int = 42,
     ) -> None:
@@ -383,9 +387,16 @@ class ICRDataset(Dataset):
 
         self._mode = mode
         labels = self._backend.labels()
-        self._split_indices = _make_split_indices(
-            labels, split, val_fraction, random_seed
-        )
+
+        if split == "all":
+            # Bypass stratified split — expose every sample.  Intended for a
+            # separate test-cell capture directory where all samples are test
+            # data and an internal train/val/test split is not meaningful.
+            self._split_indices = np.arange(len(labels), dtype=np.int64)
+        else:
+            self._split_indices = _make_split_indices(
+                labels, split, val_fraction, random_seed
+            )
 
     def __len__(self) -> int:
         return len(self._split_indices)
