@@ -19,6 +19,9 @@ models/
 requirements2.txt
 requirements3.txt
 
+# Ad-hoc agent debugging scripts — never commit
+/.agent-work/
+
 # Log files
 logfile.log
 logfiledebug*.log
