@@ -16,5 +16,9 @@
     "activations_path": "shared/hotpotqa_qwen3_8b/activations.zarr",
     "eval_json": "output/hotpotqa/Qwen3-8B/eval_results_for_training.json",
     "raw_eval_jsonl": "output/hotpotqa/Qwen3-8B/raw_eval_res.jsonl"
+  },
+  "icr_capture": {
+    "train_dir": "shared/icr_capture/hotpotqa_train_Qwen3-8B_0-50000",
+    "test_dir": "shared/icr_capture/hotpotqa_test_Qwen3-8B"
   }
 }

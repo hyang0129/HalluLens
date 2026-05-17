@@ -16,5 +16,9 @@
     "activations_path": "shared/hotpotqa_llama_3_1_8b_instruct/activations.zarr",
     "eval_json": "output/hotpotqa/Llama-3.1-8B-Instruct/eval_results_for_training.json",
     "raw_eval_jsonl": "output/hotpotqa/Llama-3.1-8B-Instruct/raw_eval_res.jsonl"
+  },
+  "icr_capture": {
+    "train_dir": "shared/icr_capture/hotpotqa_train_Llama-3.1-8B-Instruct_0-50000",
+    "test_dir": "shared/icr_capture/hotpotqa_test_Llama-3.1-8B-Instruct"
   }
 }
