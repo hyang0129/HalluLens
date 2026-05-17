@@ -61,6 +61,7 @@ _MM_ACT: np.memmap | None = None
 _R_MAX: int = 0
 _NUM_LAYERS: int = 0
 _RESPONSE_LENS: np.ndarray | None = None
+_PROMPT_LENS: np.ndarray | None = None
 
 
 def _init_worker(
@@ -71,7 +72,7 @@ def _init_worker(
     max_response_len: int,
     hidden_dim: int,
 ) -> None:
-    global _MM_ATTN, _MM_ACT, _R_MAX, _NUM_LAYERS, _RESPONSE_LENS
+    global _MM_ATTN, _MM_ACT, _R_MAX, _NUM_LAYERS, _RESPONSE_LENS, _PROMPT_LENS
     cell = Path(cell_path)
     _MM_ATTN = np.memmap(
         cell / "response_attention.npy",
@@ -91,10 +92,15 @@ def _init_worker(
     )
     _R_MAX = r_max
     _NUM_LAYERS = num_layers
-    # response_len.npy is a raw int32 memmap (no .npy header) — see
-    # activation_logging/inference_capture_writer.py:215.
+    # response_len.npy and prompt_len.npy are raw int32 memmaps (no .npy header).
     _RESPONSE_LENS = np.memmap(
         cell / "response_len.npy", dtype=np.int32, mode="r", shape=(n_alloc,)
+    )
+    # prompt_len.npy: same layout as response_len.npy.  Used to compute the
+    # correct effective top-k: k = int(top_p * (prompt_len + response_len)),
+    # matching the upstream ICR Probe code (icr_score.py:226 in XavierZhang2002/ICR_Probe).
+    _PROMPT_LENS = np.memmap(
+        cell / "prompt_len.npy", dtype=np.int32, mode="r", shape=(n_alloc,)
     )
 
 
@@ -105,12 +111,14 @@ def _compute_one(args: Tuple[int, int]) -> Tuple[int, np.ndarray]:
     """
     sample_idx, _row = args
     assert _MM_ATTN is not None and _MM_ACT is not None and _RESPONSE_LENS is not None
+    assert _PROMPT_LENS is not None
 
     # Clamp to r_max: attention is only captured for the first R response
     # positions; any tokens beyond are implicitly truncated. This matches the
     # worker's inline behavior (attention memmap is RxR regardless of how long
     # the model actually generated).
     rlen = min(int(_RESPONSE_LENS[sample_idx]), _R_MAX)
+    plen = int(_PROMPT_LENS[sample_idx])
     if rlen <= 0:
         return sample_idx, np.zeros(_NUM_LAYERS, dtype=np.float32)
 
@@ -132,6 +140,7 @@ def _compute_one(args: Tuple[int, int]) -> Tuple[int, np.ndarray]:
             h_block_input=h_in,
             delta_h=delta_h,
             response_len=rlen,
+            prompt_len=plen,
         )
     return sample_idx, scores
 
