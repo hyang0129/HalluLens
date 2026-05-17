@@ -19,6 +19,17 @@ DISPATCH_ROOT="${DISPATCH_ROOT:-$PROJECT_ROOT/shared/icr_capture/_dispatch}"
 PYTHON="${PYTHON:-/mnt/home/hyang1/.local/share/mamba/envs/p311/bin/python}"
 CLI="$SCRIPT_DIR/_claim_cli.py"
 
+# Why: from_pretrained() makes a HEAD request to huggingface.co even when the
+# weights are cached locally — to validate the cache freshness. On nodes with
+# flaky outbound connectivity (we saw alphagpu04 stuck in
+# skb_wait_for_more_packets for 15+ min), this stalls the worker indefinitely.
+# All target models are already in NFS-shared ~/.cache/huggingface/, so we
+# disable the cache-freshness check. Set both env vars: HF_HUB_OFFLINE
+# governs huggingface_hub, TRANSFORMERS_OFFLINE governs transformers, and
+# transformers consults both depending on version.
+export TRANSFORMERS_OFFLINE=1
+export HF_HUB_OFFLINE=1
+
 WORKER_ID="${HOSTNAME}_$$_$RANDOM"
 CAPTURE_LOG="/tmp/capture_${WORKER_ID}.log"
 
