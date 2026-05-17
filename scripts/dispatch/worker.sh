@@ -62,6 +62,9 @@ while true; do
   TOP_K=$(        "$PYTHON" -c "import json,sys; d=json.load(open('$CELL_PATH')); print(d['top_k'])")
   N_SAMPLES=$(    "$PYTHON" -c "import json,sys; d=json.load(open('$CELL_PATH')); v=d['n_samples']; print('' if v is None else str(v))")
   BATCH_SIZE=$(   "$PYTHON" -c "import json,sys; d=json.load(open('$CELL_PATH')); print(d.get('batch_size', 1))")
+  IDX_START=$(    "$PYTHON" -c "import json,sys; d=json.load(open('$CELL_PATH')); v=d.get('index_start'); print('' if v is None else str(v))")
+  IDX_END=$(      "$PYTHON" -c "import json,sys; d=json.load(open('$CELL_PATH')); v=d.get('index_end'); print('' if v is None else str(v))")
+  SHUFFLE_SEED=$( "$PYTHON" -c "import json,sys; d=json.load(open('$CELL_PATH')); print(d.get('shuffle_seed', 0))")
 
   CAPTURE_ARGS=(
     --task        "$TASK"
@@ -77,6 +80,13 @@ while true; do
   if [ -n "$N_SAMPLES" ]; then
     CAPTURE_ARGS+=(--n-samples "$N_SAMPLES")
   fi
+  if [ -n "$IDX_START" ]; then
+    CAPTURE_ARGS+=(--index-start "$IDX_START")
+  fi
+  if [ -n "$IDX_END" ]; then
+    CAPTURE_ARGS+=(--index-end "$IDX_END")
+  fi
+  CAPTURE_ARGS+=(--shuffle-seed "$SHUFFLE_SEED")
 
   echo "worker $WORKER_ID: running capture_inference.py task=$TASK split=$SPLIT model=$MODEL"
   set +e

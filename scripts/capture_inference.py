@@ -450,7 +450,25 @@ def _run_capture(args: argparse.Namespace) -> int:
     if args.n_samples is not None:
         load_kwargs["n_samples"] = args.n_samples
     dataset = load_fn(**load_kwargs)
-    logger.info("Dataset size: %d", len(dataset))
+    logger.info("Dataset size (pre-slice): %d", len(dataset))
+
+    # Why: deterministic shuffle + index-range slice lets us subsample large
+    # train splits (>50k) without locking us out of capturing more later.
+    # Same seed every run → stable slice → a second run with [50000:100000]
+    # captures the next 50k from the same permutation, no overlap.
+    if args.index_start is not None or args.index_end is not None:
+        rng = np.random.default_rng(args.shuffle_seed)
+        perm = rng.permutation(len(dataset))
+        start = args.index_start if args.index_start is not None else 0
+        end = args.index_end if args.index_end is not None else len(dataset)
+        if start < 0 or end > len(dataset) or start >= end:
+            logger.error("invalid index range [%d, %d) for dataset of size %d",
+                         start, end, len(dataset))
+            return 1
+        sliced_indices = perm[start:end]
+        dataset = [dataset[int(i)] for i in sliced_indices]
+        logger.info("Sliced to [%d, %d) of shuffled dataset (seed=%d): %d samples",
+                    start, end, args.shuffle_seed, len(dataset))
 
     # Load model
     tokenizer, model = load_model_eager(args.model)
@@ -745,7 +763,21 @@ def main() -> int:
     parser.add_argument("--top-k", type=int, default=20,
                         help="Number of top-k alternative tokens to store per position.")
     parser.add_argument("--n-samples", type=int, default=None,
-                        help="Cap on samples (omit for full split).")
+                        help="Cap on samples (omit for full split). Applied by the task "
+                             "loader (always takes the first N) — for deterministic-shuffle "
+                             "subsampling that supports appending later, use --index-start / "
+                             "--index-end instead.")
+    parser.add_argument("--index-start", type=int, default=None,
+                        help="Start of the [start, end) slice of the deterministically "
+                             "shuffled dataset (seed --shuffle-seed). Used to subsample "
+                             "large splits in a way that lets us append the next slice later.")
+    parser.add_argument("--index-end", type=int, default=None,
+                        help="End of the [start, end) slice of the deterministically "
+                             "shuffled dataset.")
+    parser.add_argument("--shuffle-seed", type=int, default=0,
+                        help="Seed for the deterministic shuffle when --index-start / "
+                             "--index-end are used. Must stay constant across appendix runs "
+                             "of the same dataset for the slices to remain non-overlapping.")
     parser.add_argument("--step", choices=("capture", "eval-only"), default="capture",
                         help="capture (default): full GPU pipeline. "
                              "eval-only: re-run is_correct over existing generation.jsonl.")

@@ -95,6 +95,39 @@ def _dispatch_has_cell(dispatch_root: Path, cell_id: str) -> bool:
     return False
 
 
+def _slice_ranges_for_dataset(
+    expected_size: int | None,
+    cap: int | None,
+    out_base_dir: Path,
+    base_cell_id: str,
+) -> list[tuple[int | None, int | None]]:
+    """Return list of (start, end) slices to emit for this dataset.
+
+    Slice semantics:
+      - cap is None OR expected_size is None OR expected_size <= cap →
+        one cell with (None, None) = full dataset, no suffix in cell_id/out_dir.
+      - expected_size > cap → emit cells covering [0, cap), [cap, 2*cap), …
+        until expected_size is reached. Cells already-completed on disk
+        (out_dir/_{start}-{end} contains eval_results.json) are skipped so a
+        second invocation appends the next slice without re-queuing finished
+        ones.
+    """
+    if cap is None or expected_size is None or expected_size <= cap:
+        return [(None, None)]
+    ranges: list[tuple[int | None, int | None]] = []
+    start = 0
+    while start < expected_size:
+        end = min(start + cap, expected_size)
+        sub_id = f"{base_cell_id}_{start}-{end}"
+        sub_dir = out_base_dir / sub_id
+        if (sub_dir / "eval_results.json").exists():
+            start = end
+            continue
+        ranges.append((start, end))
+        start = end
+    return ranges
+
+
 def generate_manifest(
     dispatch_root: Path,
     out_base_dir: Path,
@@ -107,6 +140,8 @@ def generate_manifest(
     r_max: int = 64,
     top_k: int = 20,
     batch_size: int = 1,
+    cap: int | None = None,
+    shuffle_seed: int = 0,
 ) -> int:
     init_dispatch_dirs(dispatch_root)
     written = 0
@@ -116,38 +151,56 @@ def generate_manifest(
             slug = _model_slug(model)
             for logical_split in splits:
                 hf_split = _resolve_split(task, logical_split)
-                cell_id = f"{task}_{logical_split}_{slug}"
+                base_cell_id = f"{task}_{logical_split}_{slug}"
 
                 # Why: out_dir MUST include split — test/train have different N and
                 # InferenceCaptureWriter pre-allocates memmap rows at construction.
                 # Sharing one out_dir across splits would clobber on resume.
-                out_dir = out_base_dir / f"{task}_{logical_split}_{slug}"
-                cell_path = dispatch_root / "pending" / f"{cell_id}.json"
+                base_out_dir = out_base_dir / base_cell_id
+                expected_size = _EXPECTED_SIZES.get((task, hf_split))
 
-                if _dispatch_has_cell(dispatch_root, cell_id):
-                    continue
-
-                if n_samples is None and _cell_is_done(out_dir, task, hf_split):
-                    continue
-
-                cell = {
-                    "cell_id":         cell_id,
-                    "task":            task,
-                    "split":           hf_split,
-                    "model":           model,
-                    "out_dir":         str(out_dir).replace("\\", "/"),
-                    "n_samples":       n_samples,
-                    "max_prompt_len":  max_prompt_len,
-                    "max_response_len": max_response_len,
-                    "r_max":           r_max,
-                    "top_k":           top_k,
-                    "batch_size":      batch_size,
-                }
-                cell_path.write_text(
-                    json.dumps(cell, indent=2), encoding="utf-8"
+                ranges = _slice_ranges_for_dataset(
+                    expected_size, cap, out_base_dir, base_cell_id,
                 )
-                written += 1
-                print(f"  queued: {cell_id}")
+
+                for (idx_start, idx_end) in ranges:
+                    if idx_start is None and idx_end is None:
+                        cell_id = base_cell_id
+                        out_dir = base_out_dir
+                    else:
+                        cell_id = f"{base_cell_id}_{idx_start}-{idx_end}"
+                        out_dir = out_base_dir / cell_id
+
+                    cell_path = dispatch_root / "pending" / f"{cell_id}.json"
+
+                    if _dispatch_has_cell(dispatch_root, cell_id):
+                        continue
+
+                    if (n_samples is None and idx_start is None
+                            and _cell_is_done(out_dir, task, hf_split)):
+                        continue
+
+                    cell = {
+                        "cell_id":         cell_id,
+                        "task":            task,
+                        "split":           hf_split,
+                        "model":           model,
+                        "out_dir":         str(out_dir).replace("\\", "/"),
+                        "n_samples":       n_samples,
+                        "max_prompt_len":  max_prompt_len,
+                        "max_response_len": max_response_len,
+                        "r_max":           r_max,
+                        "top_k":           top_k,
+                        "batch_size":      batch_size,
+                        "index_start":     idx_start,
+                        "index_end":       idx_end,
+                        "shuffle_seed":    shuffle_seed,
+                    }
+                    cell_path.write_text(
+                        json.dumps(cell, indent=2), encoding="utf-8"
+                    )
+                    written += 1
+                    print(f"  queued: {cell_id}")
 
     return written
 
@@ -180,6 +233,17 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=1,
                         help="Number of samples per generate() call (default 1). "
                              "Pass 4 for Phase 1 HotpotQA grid.")
+    parser.add_argument("--cap", type=int, default=None,
+                        help="Per-cell sample cap (default: no cap). Splits whose "
+                             "expected size exceeds the cap are shuffled "
+                             "deterministically (seed=--shuffle-seed) and emitted as "
+                             "multiple [start, end) slice cells of size up to cap, e.g. "
+                             "0-50000, 50000-100000, .... Slices already complete on "
+                             "disk are skipped, so re-running with a larger cap appends.")
+    parser.add_argument("--shuffle-seed", type=int, default=0,
+                        help="Seed for the deterministic shuffle when --cap is set. "
+                             "Must stay constant across appendix runs of the same "
+                             "dataset for the slices to remain non-overlapping.")
     args = parser.parse_args()
 
     dispatch_root = Path(args.dispatch_root)
@@ -195,6 +259,8 @@ def main() -> int:
         r_max=args.r_max,
         top_k=args.top_k,
         batch_size=args.batch_size,
+        cap=args.cap,
+        shuffle_seed=args.shuffle_seed,
     )
     print(f"Done — {total} cells queued in {dispatch_root / 'pending'}")
     return 0
