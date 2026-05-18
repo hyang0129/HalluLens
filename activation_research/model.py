@@ -275,12 +275,21 @@ class LogprobAttnReconProgressiveCompressor(nn.Module):
         Layer offset between the rep's source layer ``ℓ`` and the prediction
         target layer ``ℓ ± k``. Consumed by the *dataset*, not the model —
         recorded here for config provenance only.
-    attn_target : {"stats", "coarse", "full"}
-        Decoder output type. Only ``"stats"`` is implemented in this PR;
-        ``"coarse"`` / ``"full"`` raise ``NotImplementedError``.
+    attn_target : {"stats", "full"}
+        Decoder output type:
+
+        - ``"stats"`` : 3 scalars per view (entropy, focal_frac, self_mass).
+        - ``"full"``  : full r_max × (r_max + 1) attention map per view (one
+          target layer per direction, with prompt-sink column).
+
+        ``"coarse"`` continues to raise ``NotImplementedError``.
     attn_num_stat_features : int
         Output dimension of the K decoder per direction when
         ``attn_target="stats"`` (default 3: entropy, focal_frac, self_mass).
+    attn_r_max : int
+        Maximum response length used in the capture (r_max from config).
+        Determines the full-target output width ``r_max × (r_max + 1)`` per view.
+        Ignored for ``"stats"``. Default 64.
     attn_recon_hidden_dim, attn_recon_lambda, attn_var_threshold
         K head hyperparameters. Lambda > 0 enables the head; set 0 to
         disable while keeping the decoder weights for inspection.
@@ -308,6 +317,7 @@ class LogprobAttnReconProgressiveCompressor(nn.Module):
         attn_offset_k: int = 4,
         attn_target: str = "stats",
         attn_num_stat_features: int = 3,
+        attn_r_max: int = 64,
         attn_recon_hidden_dim: int = 256,
         attn_recon_lambda: float = 1.0,
         attn_var_threshold: float = 1e-5,
@@ -325,11 +335,9 @@ class LogprobAttnReconProgressiveCompressor(nn.Module):
                 f"attn_target must be one of {self._VALID_TARGETS}, "
                 f"got {attn_target!r}"
             )
-        if attn_target != "stats":
-            # Reserved API — see spec §1 (out of scope).
+        if attn_target == "coarse":
             raise NotImplementedError(
-                f"attn_target={attn_target!r} is reserved for a follow-up PR; "
-                "only 'stats' is implemented today."
+                "attn_target='coarse' is not implemented; use 'stats' or 'full'."
             )
 
         self.recon_seq_len = int(recon_seq_len)
@@ -340,6 +348,7 @@ class LogprobAttnReconProgressiveCompressor(nn.Module):
         self.attn_offset_k = int(attn_offset_k)
         self.attn_target = attn_target
         self.attn_num_stat_features = int(attn_num_stat_features)
+        self.attn_r_max = int(attn_r_max)
         self.attn_recon_lambda = float(attn_recon_lambda)
         self.attn_var_threshold = float(attn_var_threshold)
 
@@ -370,12 +379,21 @@ class LogprobAttnReconProgressiveCompressor(nn.Module):
             active_dirs = (attn_direction,)
         self._active_attn_dirs = active_dirs
 
+        # Flat output dimension of each K decoder per target type.
+        # stats: one stat-vector per view → attn_num_stat_features scalars.
+        # full:  r_max × (r_max + 1) flat per view (one target layer per direction).
+        if attn_target == "stats":
+            _attn_out_dim = self.attn_num_stat_features
+        else:  # "full"
+            _attn_out_dim = self.attn_r_max * (self.attn_r_max + 1)
+        self._attn_out_dim = _attn_out_dim
+
         self.attn_decoders = nn.ModuleDict(
             {
                 self._DIRECTION_TO_KEY[d]: nn.Sequential(
                     nn.Linear(int(final_dim), int(attn_recon_hidden_dim)),
                     nn.GELU(),
-                    nn.Linear(int(attn_recon_hidden_dim), self.attn_num_stat_features),
+                    nn.Linear(int(attn_recon_hidden_dim), _attn_out_dim),
                 )
                 for d in active_dirs
             }
@@ -400,8 +418,11 @@ class LogprobAttnReconProgressiveCompressor(nn.Module):
         lp_pred : (B, recon_seq_len)
         attn_pred_by_direction : dict[str, Tensor]
             Keys are subset of ``{"forward", "backward"}``; empty when
-            ``attn_direction == "none"``. Each value has shape
-            ``(B, attn_num_stat_features)``.
+            ``attn_direction == "none"``. Shape per target type:
+
+            - ``"stats"`` : ``(B, attn_num_stat_features)``
+            - ``"full"``  : ``(B, r_max * (r_max + 1))`` (flat; reshape to
+              ``(B, r_max, r_max + 1)`` before loss computation)
         """
         z = self.encoder(x)
         lp_pred = self.lp_decoder(z)
@@ -446,20 +467,29 @@ class LogprobAttnReconProgressiveCompressor(nn.Module):
         attn_pred: torch.Tensor,
         attn_target: torch.Tensor,
     ):
-        """MSE reconstruction loss for one attention direction.
+        """Reconstruction loss for one attention direction.
 
-        ``attn_pred`` and ``attn_target`` have shape
-        ``(N, attn_num_stat_features)`` (N = batch size, flattened over
-        views by the trainer). NaN rows in ``attn_target`` (out-of-range
-        target layers, or samples with response_len == 0) are excluded
-        from the loss. If batch variance over non-NaN entries falls below
-        ``attn_var_threshold`` the loss is suppressed to zero.
+        Full target uses row-KL against the prompt-sink-augmented target so
+        each row is a proper distribution over (r_max response keys + 1 prompt sink).
+
+        ``attn_pred`` shape:
+
+        - ``"stats"`` : ``(N, attn_num_stat_features)`` — MSE over non-NaN cells.
+        - ``"full"``  : ``(N, r_max * (r_max + 1))`` flat logits — reshaped to
+          ``(N, r_max, r_max + 1)`` then row-KL against target probabilities.
+
+        NaN cells in ``attn_target`` (out-of-range layers, key-padding beyond
+        r_eff, or zero-length responses) are masked out. For ``"full"`` a query
+        row is valid iff its target has at least one finite cell and those cells
+        sum to approximately 1 (tolerance 1e-3, confirming prompt-sink was set).
+        Out-of-range layer targets are fully NaN and contribute 0 to the loss.
         """
         target = attn_target.float()
+        pred = attn_pred.float()
         nan_mask = torch.isnan(target)
 
         if nan_mask.all():
-            zero = torch.zeros(1, device=attn_pred.device).squeeze()
+            zero = torch.zeros(1, device=pred.device).squeeze()
             return zero, {
                 "attn_var": float("nan"),
                 "suppressed": True,
@@ -469,25 +499,91 @@ class LogprobAttnReconProgressiveCompressor(nn.Module):
         valid_target = target[~nan_mask]
         attn_var = float(valid_target.var())
         if attn_var < self.attn_var_threshold:
-            zero = torch.zeros(1, device=attn_pred.device).squeeze()
+            zero = torch.zeros(1, device=pred.device).squeeze()
             return zero, {
                 "attn_var": attn_var,
                 "suppressed": True,
                 "reason": "low-variance",
             }
 
-        # MSE only over non-NaN entries — replace NaNs in target with the
-        # corresponding prediction so the squared diff is zero (and excluded
-        # from gradient flow). This avoids per-row reductions.
-        target_filled = torch.where(nan_mask, attn_pred.detach(), target)
-        # Reduce as sum-of-squared-error over valid entries / count.
-        sq_err = (attn_pred - target_filled).pow(2)
+        if self.attn_target == "full":
+            return self._recon_loss_attn_full(pred, target, attn_var)
+
+        # stats: MSE over non-NaN entries.
+        # Replace NaNs in target with pred.detach() so sq-diff is 0 there.
+        target_filled = torch.where(nan_mask, pred.detach(), target)
+        sq_err = (pred - target_filled).pow(2)
         valid_count = (~nan_mask).sum().clamp(min=1)
         loss = sq_err.sum() / valid_count
         return loss, {
             "attn_var": attn_var,
             "suppressed": False,
             "valid_count": int(valid_count.item()),
+        }
+
+    def _recon_loss_attn_full(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        attn_var: float,
+    ):
+        """Row-KL loss for the full attention target.
+
+        ``pred``   : (N, r_max * (r_max + 1)) raw logits
+        ``target`` : (N, r_max * (r_max + 1)) probabilities with NaN padding
+
+        A query row is valid when its target finite cells sum to 1 ± 1e-3,
+        confirming prompt-sink augmentation was applied by the dataset. Rows
+        from out-of-range layers are fully NaN and are skipped.
+        """
+        r_max = self.attn_r_max
+        N = pred.shape[0]
+
+        pred_2d = pred.reshape(N, r_max, r_max + 1)       # (N, r_max, r_max+1)
+        target_2d = target.reshape(N, r_max, r_max + 1)   # (N, r_max, r_max+1)
+
+        # log_softmax over the key dimension (last dim) — turns raw logits into
+        # a log-distribution over (r_max response keys + 1 prompt-sink).
+        log_pred = F.log_softmax(pred_2d, dim=-1)          # (N, r_max, r_max+1)
+
+        eps = 1e-12
+        valid_rows = []
+        kl_terms = []
+
+        for n in range(N):
+            for q in range(r_max):
+                t_row = target_2d[n, q]        # (r_max+1,)
+                finite_mask = torch.isfinite(t_row)
+                if not finite_mask.any():
+                    continue
+                row_sum = t_row[finite_mask].sum()
+                # Only rows whose finite cells sum to ~1 are proper distributions.
+                if abs(float(row_sum) - 1.0) > 1e-3:
+                    continue
+                lp_row = log_pred[n, q]        # (r_max+1,)
+                # KL: sum over finite (valid) cells only.
+                # NaN cells (key-padding beyond r_eff) are excluded by the mask.
+                t_safe = t_row.clone()
+                t_safe[~finite_mask] = 0.0
+                lp_safe = lp_row.clone()
+                lp_safe[~finite_mask] = 0.0
+                kl = (t_safe * (torch.log(t_safe + eps) - lp_safe)).sum()
+                kl_terms.append(kl)
+                valid_rows.append(1)
+
+        if not valid_rows:
+            zero = torch.zeros(1, device=pred.device).squeeze()
+            return zero, {
+                "attn_var": attn_var,
+                "suppressed": True,
+                "reason": "no-valid-rows",
+            }
+
+        loss = torch.stack(kl_terms).mean()
+        return loss, {
+            "attn_var": attn_var,
+            "suppressed": False,
+            "valid_rows": len(valid_rows),
         }
 
 
