@@ -1808,6 +1808,225 @@ def run_icr_probe(
     return eval_metrics, predictions
 
 
+def run_act_vit(
+    ap,
+    dataset_cfg: dict,
+    method_cfg: dict,
+    experiment_cfg: dict,
+    output_dir: str,
+    device: str,
+    training_seed: int,
+    *,
+    test_ap=None,
+) -> tuple[dict, list[dict]]:
+    """Train and evaluate ACT-ViT (arXiv:2510.00296) on full activation tensors.
+
+    Treats the full (layers × response-tokens × hidden-dim) activation tensor
+    of each generation as an "image" and classifies it with a Vision Transformer.
+    Reads directly from icr_capture memmap directories.
+    """
+    import math
+
+    import torch
+    from sklearn.metrics import roc_auc_score
+    from torch.utils.data import DataLoader
+
+    from activation_research.act_vit import ACTViT, ACTViTConfig
+    from activation_research.act_vit_dataset import ACTViTDataset
+    from activation_research.memmap_activation_parser import MemmapActivationParser
+
+    train_cfg = method_cfg["training"]
+    model_params = method_cfg.get("model_params", {})
+
+    icr_cfg = dataset_cfg["icr_capture"]
+    split_seed = experiment_cfg.get("split_seed", 42)
+
+    # Build split indices from MemmapActivationParser (same pattern as other runners).
+    train_parser = MemmapActivationParser(
+        icr_cfg["train_dir"],
+        random_seed=split_seed,
+        split_strategy="three_way",
+    )
+    train_df = train_parser.df[train_parser.df["split"] == "train"]
+    val_df = train_parser.df[train_parser.df["split"] == "val"]
+    train_idx = train_df["sample_index"].values
+    val_idx = val_df["sample_index"].values
+
+    if test_ap is not None:
+        # test_ap is a MemmapActivationParser for the test capture
+        test_parser = MemmapActivationParser(
+            icr_cfg["test_dir"],
+            random_seed=split_seed,
+            split_strategy="none",
+        )
+    else:
+        test_parser = MemmapActivationParser(
+            icr_cfg["test_dir"],
+            random_seed=split_seed,
+            split_strategy="none",
+        )
+    test_df = test_parser.df
+    test_idx = test_df["sample_index"].values
+
+    train_ds = ACTViTDataset(icr_cfg["train_dir"], train_idx)
+    val_ds = ACTViTDataset(icr_cfg["train_dir"], val_idx)
+    test_ds = ACTViTDataset(icr_cfg["test_dir"], test_idx)
+
+    num_workers = experiment_cfg.get("num_workers", 4)
+    persistent_workers = experiment_cfg.get("persistent_workers", True) and num_workers > 0
+    batch_size = train_cfg["batch_size"]
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        persistent_workers=persistent_workers,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        persistent_workers=persistent_workers,
+    )
+
+    # Build model
+    cfg = ACTViTConfig(
+        input_dim=dataset_cfg["input_dim"],
+        L_p=model_params.get("L_p", 8),
+        N_p=model_params.get("N_p", 100),
+        patch_h=model_params.get("patch_h", 2),
+        patch_w=model_params.get("patch_w", 10),
+        d_adapter=model_params.get("d_adapter", 256),
+        d_model=model_params.get("d_model", 256),
+        num_heads=model_params.get("num_heads", 8),
+        depth=model_params.get("depth", 4),
+        mlp_ratio=model_params.get("mlp_ratio", 4.0),
+        dropout=model_params.get("dropout", 0.1),
+    )
+    model = ACTViT(cfg)
+
+    eval_device = torch.device(
+        device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    model.to(eval_device)
+
+    # Optimizer + cosine LR schedule
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=train_cfg.get("lr", 1e-4),
+        weight_decay=train_cfg.get("weight_decay", 1e-2),
+    )
+    max_epochs = train_cfg.get("max_epochs", 50)
+    total_steps = max_epochs * len(train_loader)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
+
+    # Artifact dir for checkpoints
+    artifact_dir = os.path.join(output_dir, "artifacts")
+    os.makedirs(artifact_dir, exist_ok=True)
+
+    loss_fn = torch.nn.BCEWithLogitsLoss()
+    best_val_auroc = -1.0
+    best_epoch = -1
+
+    for epoch in range(max_epochs):
+        model.train()
+        for batch in train_loader:
+            x = batch["activations"].to(eval_device)       # (B, L, N, D)
+            labels_b = batch["label"].float().to(eval_device)  # (B,)
+            logits = model(x).squeeze(1)                   # (B,)
+            loss = loss_fn(logits, labels_b)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+
+        # Validation AUROC
+        model.eval()
+        val_preds, val_labels = [], []
+        with torch.no_grad():
+            for batch in val_loader:
+                x = batch["activations"].to(eval_device)
+                logits = model(x).squeeze(1)
+                val_preds.append(torch.sigmoid(logits).cpu())
+                val_labels.append(batch["label"].cpu())
+
+        val_scores = torch.cat(val_preds).numpy()
+        val_lbls = torch.cat(val_labels).numpy()
+        if len(set(val_lbls.tolist())) >= 2:
+            val_auroc = float(roc_auc_score(val_lbls, val_scores))
+        else:
+            val_auroc = float("nan")
+
+        if not math.isnan(val_auroc) and val_auroc > best_val_auroc:
+            best_val_auroc = val_auroc
+            best_epoch = epoch
+            torch.save(
+                {"epoch": epoch, "model_state_dict": model.state_dict()},
+                os.path.join(artifact_dir, "best_checkpoint.pt"),
+            )
+
+        logger.debug(
+            f"[act_vit] epoch={epoch+1}/{max_epochs}  val_auroc={val_auroc:.4f}"
+        )
+
+    # Load best checkpoint (if any was saved)
+    best_ckpt = os.path.join(artifact_dir, "best_checkpoint.pt")
+    if os.path.exists(best_ckpt):
+        ckpt = torch.load(best_ckpt, map_location=eval_device, weights_only=True)
+        model.load_state_dict(ckpt["model_state_dict"])
+
+    torch.save(
+        {"model_state_dict": model.state_dict()},
+        os.path.join(artifact_dir, "final_weights.pt"),
+    )
+
+    # Test evaluation
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        persistent_workers=persistent_workers,
+    )
+    model.eval()
+    all_preds, all_labels = [], []
+    with torch.no_grad():
+        for batch in test_loader:
+            x = batch["activations"].to(eval_device)
+            logits = model(x).squeeze(1)
+            all_preds.append(torch.sigmoid(logits).cpu())
+            all_labels.append(batch["label"].cpu())
+
+    scores_np = torch.cat(all_preds).numpy()
+    labels_np = torch.cat(all_labels).numpy()
+    if len(set(labels_np.tolist())) >= 2:
+        auroc = float(roc_auc_score(labels_np, scores_np))
+    else:
+        auroc = float("nan")
+
+    eval_metrics = {
+        "method": method_cfg["name"],
+        "dataset": dataset_cfg["name"],
+        "seed": training_seed,
+        "split_seed": split_seed,
+        "n_train": len(train_ds),
+        "n_val": len(val_ds),
+        "n_test": len(test_ds),
+        "auroc": auroc,
+        "best_val_auroc": best_val_auroc,
+        "best_epoch": best_epoch,
+    }
+    predictions = [
+        {"example_id": i, "score_halu": float(s), "label_halu": int(l), "split": "test"}
+        for i, (s, l) in enumerate(zip(scores_np, labels_np))
+    ]
+
+    write_run_manifest(output_dir)
+    return eval_metrics, predictions
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -2464,6 +2683,11 @@ def main() -> None:
                         )
                     elif routine == "icr_probe":
                         eval_metrics, predictions = run_icr_probe(
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
+                            test_ap=test_ap,
+                        )
+                    elif routine == "act_vit":
+                        eval_metrics, predictions = run_act_vit(
                             ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
                         )
