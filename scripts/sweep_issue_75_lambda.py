@@ -166,11 +166,8 @@ def evaluate(model, train_ds_eval, test_ds_eval, eval_cfg, device, seed, output_
 
     from activation_research.metric_evaluator import MultiMetricHallucinationEvaluator
 
-    label_df = build_label_dataframe(
-        Path(train_ds_eval._cfg.get("__capture_dir__", "")) if hasattr(train_ds_eval, "_cfg") else Path("."),
-    )
-    # Build a fresh DataFrame from both splits via their stored meta — the
-    # dataset already loaded these; we re-read to keep evaluator decoupled.
+    # Build a label DataFrame from both splits' meta.jsonl — keeps the
+    # evaluator decoupled from the dataset's internal state.
     capture_train = Path(train_ds_eval._capture_dir)  # type: ignore[attr-defined]
     capture_test = Path(test_ds_eval._capture_dir)    # type: ignore[attr-defined]
     label_df = build_label_dataframe(capture_train, capture_test)
