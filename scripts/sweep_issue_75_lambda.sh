@@ -30,6 +30,7 @@ NUM_WORKERS="${SWEEP_NUM_WORKERS:-4}"
 # Smoketest overrides — leave unset for production runs.
 MAX_EPOCHS="${SWEEP_MAX_EPOCHS:-}"
 STEPS_PER_EPOCH="${SWEEP_STEPS_PER_EPOCH:-}"
+SUB_BATCH_SIZE="${SWEEP_SUB_BATCH_SIZE:-}"
 
 PYTHON=/mnt/home/hyang1/.local/share/mamba/envs/p311/bin/python
 LOG="/tmp/sweep_issue_75_${METHOD}.log"
@@ -57,6 +58,9 @@ if [ -n "$MAX_EPOCHS" ]; then
 fi
 if [ -n "$STEPS_PER_EPOCH" ]; then
     EXTRA_ARGS+=(--steps-per-epoch "$STEPS_PER_EPOCH")
+fi
+if [ -n "$SUB_BATCH_SIZE" ]; then
+    EXTRA_ARGS+=(--sub-batch-size "$SUB_BATCH_SIZE")
 fi
 
 "$PYTHON" scripts/sweep_issue_75_lambda.py \

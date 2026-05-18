@@ -63,6 +63,7 @@ def parse_args() -> argparse.Namespace:
     # should leave these unset and rely on the method config.
     p.add_argument("--max-epochs", type=int, default=None, help="Override training.max_epochs from the method config.")
     p.add_argument("--steps-per-epoch", type=int, default=None, help="Override training.steps_per_epoch_override.")
+    p.add_argument("--sub-batch-size", type=int, default=None, help="Override training.sub_batch_size from the method config.")
     return p.parse_args()
 
 
@@ -215,6 +216,7 @@ def run_one_dataset(
     num_workers: int, summary_csv: Path,
     max_epochs_override: int | None = None,
     steps_per_epoch_override: int | None = None,
+    sub_batch_size_override: int | None = None,
 ) -> dict:
     """Train + evaluate on one dataset. Returns a result dict; on failure raises."""
     method_name = method_cfg["name"]
@@ -285,13 +287,18 @@ def run_one_dataset(
         else train_cfg.get("steps_per_epoch_override")
     )
     t0 = time.time()
+    sub_batch_size = (
+        int(sub_batch_size_override)
+        if sub_batch_size_override is not None
+        else int(train_cfg.get("sub_batch_size", 64))
+    )
     train_contrastive_logprob_attn_recon(
         model=model,
         train_dataset=train_ds,
         test_dataset=val_ds,
         epochs=epochs,
         batch_size=int(train_cfg.get("batch_size", 512)),
-        sub_batch_size=int(train_cfg.get("sub_batch_size", 64)),
+        sub_batch_size=sub_batch_size,
         lr=float(train_cfg.get("lr", 1e-5)),
         temperature=float(train_cfg.get("temperature", 0.25)),
         device=device,
@@ -403,6 +410,7 @@ def main() -> int:
                 summary_csv=summary_csv,
                 max_epochs_override=args.max_epochs,
                 steps_per_epoch_override=args.steps_per_epoch,
+                sub_batch_size_override=args.sub_batch_size,
             )
             n_ok += 1
             logger.success(f"[{method_name}/{ds_name}] OK ({res.get('train_secs', '?')}s train, {res.get('eval_secs','?')}s eval)")
