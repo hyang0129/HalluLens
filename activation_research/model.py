@@ -496,6 +496,14 @@ class LogprobAttnReconProgressiveCompressor(nn.Module):
                 "reason": "all-nan",
             }
 
+        if self.attn_target == "full":
+            return self._recon_loss_attn_full(pred, target)
+
+        # Stats path: per-cell variance gate is meaningful here because the
+        # 3 stats scalars live on bounded, comparable scales (entropy ~ log r_max,
+        # focal_frac and self_mass in [0, 1]). Skipped for the full path where
+        # per-cell variance of probability mass values is a different beast and
+        # KL already returns zero gradient on degenerate (constant) targets.
         valid_target = target[~nan_mask]
         attn_var = float(valid_target.var())
         if attn_var < self.attn_var_threshold:
@@ -505,9 +513,6 @@ class LogprobAttnReconProgressiveCompressor(nn.Module):
                 "suppressed": True,
                 "reason": "low-variance",
             }
-
-        if self.attn_target == "full":
-            return self._recon_loss_attn_full(pred, target, attn_var)
 
         # stats: MSE over non-NaN entries.
         # Replace NaNs in target with pred.detach() so sq-diff is 0 there.
@@ -525,65 +530,62 @@ class LogprobAttnReconProgressiveCompressor(nn.Module):
         self,
         pred: torch.Tensor,
         target: torch.Tensor,
-        attn_var: float,
     ):
-        """Row-KL loss for the full attention target.
+        """Row-KL loss for the full attention target — fully vectorized.
 
         ``pred``   : (N, r_max * (r_max + 1)) raw logits
         ``target`` : (N, r_max * (r_max + 1)) probabilities with NaN padding
 
-        A query row is valid when its target finite cells sum to 1 ± 1e-3,
-        confirming prompt-sink augmentation was applied by the dataset. Rows
-        from out-of-range layers are fully NaN and are skipped.
+        Each query row is a distribution over (r_max response keys + 1 prompt
+        sink); a row is valid when its finite cells sum to 1 ± 1e-3. Invalid
+        keys are masked with ``-inf`` before ``log_softmax`` so the prediction
+        cannot place mass on padded positions, then masked to zero after to
+        keep ``0 * -inf`` from poisoning autograd. Invalid rows contribute
+        exactly zero to both the loss and to gradients.
         """
         r_max = self.attn_r_max
         N = pred.shape[0]
 
-        pred_2d = pred.reshape(N, r_max, r_max + 1)       # (N, r_max, r_max+1)
-        target_2d = target.reshape(N, r_max, r_max + 1)   # (N, r_max, r_max+1)
+        pred_2d = pred.reshape(N, r_max, r_max + 1)
+        target_2d = target.reshape(N, r_max, r_max + 1)
 
-        # log_softmax over the key dimension (last dim) — turns raw logits into
-        # a log-distribution over (r_max response keys + 1 prompt-sink).
-        log_pred = F.log_softmax(pred_2d, dim=-1)          # (N, r_max, r_max+1)
+        valid_mask = ~torch.isnan(target_2d)
 
-        eps = 1e-12
-        valid_rows = []
-        kl_terms = []
+        # -inf at padded keys → zero probability there after softmax.
+        masked_logits = pred_2d.masked_fill(~valid_mask, float("-inf"))
+        log_pred = F.log_softmax(masked_logits, dim=-1)
+        # Zero log_pred at invalid positions so target * log_pred can't yield
+        # 0 * -inf = NaN even though those cells get masked from kl_per_cell.
+        log_pred = log_pred.masked_fill(~valid_mask, 0.0)
 
-        for n in range(N):
-            for q in range(r_max):
-                t_row = target_2d[n, q]        # (r_max+1,)
-                finite_mask = torch.isfinite(t_row)
-                if not finite_mask.any():
-                    continue
-                row_sum = t_row[finite_mask].sum()
-                # Only rows whose finite cells sum to ~1 are proper distributions.
-                if abs(float(row_sum) - 1.0) > 1e-3:
-                    continue
-                lp_row = log_pred[n, q]        # (r_max+1,)
-                # KL: sum over finite (valid) cells only.
-                # NaN cells (key-padding beyond r_eff) are excluded by the mask.
-                t_safe = t_row.clone()
-                t_safe[~finite_mask] = 0.0
-                lp_safe = lp_row.clone()
-                lp_safe[~finite_mask] = 0.0
-                kl = (t_safe * (torch.log(t_safe + eps) - lp_safe)).sum()
-                kl_terms.append(kl)
-                valid_rows.append(1)
+        target_safe = torch.where(
+            valid_mask, target_2d, torch.zeros_like(target_2d)
+        )
+        log_target = torch.log(target_safe.clamp(min=1e-12))
 
-        if not valid_rows:
+        kl_per_cell = torch.where(
+            valid_mask,
+            target_safe * (log_target - log_pred),
+            torch.zeros_like(target_safe),
+        )
+        kl_per_row = kl_per_cell.sum(dim=-1)  # (N, r_max)
+
+        finite_count = valid_mask.sum(dim=-1)
+        row_sum = target_safe.sum(dim=-1)
+        row_valid = (finite_count > 0) & ((row_sum - 1.0).abs() < 1e-3)
+
+        n_valid = row_valid.sum()
+        if int(n_valid.item()) == 0:
             zero = torch.zeros(1, device=pred.device).squeeze()
             return zero, {
-                "attn_var": attn_var,
                 "suppressed": True,
                 "reason": "no-valid-rows",
             }
 
-        loss = torch.stack(kl_terms).mean()
+        loss = (kl_per_row * row_valid.float()).sum() / n_valid.float()
         return loss, {
-            "attn_var": attn_var,
             "suppressed": False,
-            "valid_rows": len(valid_rows),
+            "valid_rows": int(n_valid.item()),
         }
 
 
