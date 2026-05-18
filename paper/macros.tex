@@ -137,14 +137,14 @@
 % Utility: split comma-delimited pairs and triples into named macros.
 % --------------------------------------------------------------------------
 \def\hl@splittwo#1#2#3{%
-  \hl@splittwoaux#1,\@nil{#2}{#3}%
+  \hl@splittwoaux#1\@nil{#2}{#3}%
 }
 \def\hl@splittwoaux#1,#2\@nil#3#4{%
   \def#3{#1}\def#4{#2}%
 }
 
 \def\hl@splitthree#1#2#3#4{%
-  \hl@splitthreeaux#1,\@nil{#2}{#3}{#4}%
+  \hl@splitthreeaux#1\@nil{#2}{#3}{#4}%
 }
 \def\hl@splitthreeaux#1,#2,#3\@nil#4#5#6{%
   \def#4{#1}\def#5{#2}\def#6{#3}%

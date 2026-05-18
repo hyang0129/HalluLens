@@ -2,9 +2,9 @@
 % Demonstration section showing \result, \resdelta, and \resultCI usage.
 % All numeric literals in prose must resolve through citation macros.
 
-Hallucination remains a central challenge for deployed language models
-\citep{maynez2020faithfulness}. A model that confidently asserts false
-information undermines the trust required for real-world use.
+Hallucination remains a central challenge for deployed language models.
+A model that confidently asserts false information undermines the trust
+required for real-world use.
 
 We propose \textbf{HalluLens}, a probe-based detector that operates directly
 on intermediate layer activations, bypassing the need for external knowledge
@@ -26,7 +26,7 @@ on MMLU and
 \result{baseline_comparison}{sciq:icr_probe:auroc:mean}[3]
 on SciQ.
 The performance advantage over the SelfCheck baseline
-holds across all benchmarks (Table~\ref{tab:baseline}).
+holds across all benchmarks.
 
 \paragraph{Contributions.}
 We make the following contributions:
@@ -34,4 +34,4 @@ We make the following contributions:
     Llama-3.1 or Qwen3-8B backbone with no additional sampling overhead.
 (2) A reproducible benchmark suite covering six LLMsKnow tasks.
 (3) Open-source code and a paper build system ensuring all reported numbers
-    trace to a single CSV cell (Section~\ref{sec:reproducibility}).
+    trace to a single CSV cell.
