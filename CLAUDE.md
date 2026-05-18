@@ -2,9 +2,13 @@
 
 ## Paper Writing
 
-The EMNLP 2026 paper draft lives in `paper/`. When drafting, editing, or extending **paper content** (sections, outline, abstract, claims, tables, figures, bibliography), only read from and write to files inside `paper/`. Do not synthesize paper prose from `PAPER_ROADMAP.md`, `THEORETICAL_JUSTIFICATION.md`, `docs/planning/`, `results/`, or any other location unless the user explicitly names a source to pull from.
+The EMNLP 2026 paper draft lives in `paper/`. **When writing the paper, only reference files inside `paper/`, unless the user explicitly names a source outside it.** This applies to drafting, editing, or extending sections, outline, abstract, claims, tables, figures, and bibliography — and covers reading, citing, comparing against, or otherwise consulting external files, not just copying prose from them.
 
-Rationale: the roadmap, theory doc, and SOTA tracker are *planning material* written for collaborators, not reviewers. The user controls when and how content bridges from planning into the paper — auto-importing roadmap prose into the draft loses voice and short-circuits the editorial pass.
+Concretely: do not read `PAPER_ROADMAP.md`, `THEORETICAL_JUSTIFICATION.md`, `docs/planning/`, `results/`, the SOTA tracker, `README.md`, or any other location outside `paper/` when working on paper content. If a fact, number, or framing from outside `paper/` needs to land in the draft, the user will name the source explicitly.
+
+Rationale: the roadmap, theory doc, and SOTA tracker are *planning material* written for collaborators, not reviewers. The user controls when and how content bridges from planning into the paper — auto-importing or even tacitly cross-referencing that material loses voice and short-circuits the editorial pass.
+
+The single source of truth for numbers cited in the paper is `paper/data/*.csv` and `paper/generated/figures/*.numbers.csv`, accessed through the `\result`/`\resdelta`/`\resratio`/`\resultCI`/`\resultPM` macros defined in `paper/macros.tex`. See `paper/README.md` for the build pipeline.
 
 ## Project Overview
 
