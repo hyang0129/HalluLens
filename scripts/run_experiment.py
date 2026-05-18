@@ -139,6 +139,16 @@ def run_contrastive(
         input_dropout=method_cfg["model_params"].get("input_dropout", 0.3),
     )
 
+    # Build augmentation function if configured
+    aug_cfg = data_cfg.get("augmentations", None)
+    augment_fn = None
+    if aug_cfg:
+        from activation_research.augmentations import AugmentationComposer
+        augment_fn = AugmentationComposer(
+            augmentations=aug_cfg.get("ops", []),
+            asymmetric=aug_cfg.get("asymmetric", False),
+        )
+
     # Build trainer
     from activation_research.trainer import ContrastiveTrainer, ContrastiveTrainerConfig
 
@@ -170,7 +180,7 @@ def run_contrastive(
         snapshot_keep_last=3,
     )
 
-    trainer = ContrastiveTrainer(model, config=config)
+    trainer = ContrastiveTrainer(model, config=config, augment_fn=augment_fn)
     trainer.fit(train_dataset=train_ds, val_dataset=val_ds)
 
     # Save final weights
@@ -191,6 +201,9 @@ def run_contrastive(
     eval_loader = DataLoader(test_ds_target, batch_size=64, shuffle=False)
 
     model.eval()
+
+    # Read flip_auroc flag (used when ignore_label=0; see evaluation.py)
+    flip_auroc: bool = bool(eval_cfg.get("flip_auroc", False))
 
     # Build metrics list from config
     metrics_list: list = []
@@ -227,6 +240,7 @@ def run_contrastive(
         "method": method_cfg["name"],
         "dataset": dataset_cfg["name"],
         "seed": training_seed,
+        "flip_auroc": flip_auroc,
         "split_seed": experiment_cfg.get("split_seed", 42),
         "n_train": len(train_ds),
         "n_test": len(test_ds),

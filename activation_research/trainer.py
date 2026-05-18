@@ -600,7 +600,7 @@ class ContrastiveTrainer(Trainer):
     - Keeps checkpoint format broadly compatible (writes `contrastive_last.pt`).
     """
 
-    def __init__(self, model: torch.nn.Module, *, config: ContrastiveTrainerConfig):
+    def __init__(self, model: torch.nn.Module, *, config: ContrastiveTrainerConfig, augment_fn=None):
         self.contrastive_config = config
         if int(self.contrastive_config.num_views) < 2:
             raise ValueError("ContrastiveTrainerConfig.num_views must be >= 2")
@@ -614,9 +614,26 @@ class ContrastiveTrainer(Trainer):
         )
 
         self.best_loss: float = float("inf")
+        self.augment_fn = augment_fn
+        self._global_step: int = 0
 
     def training_step(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, Dict[str, float]]:
         views = batch["views_activations"].to(self.device, non_blocking=True)
+
+        if self.augment_fn is not None:
+            labels_for_aug = batch["halu"].to(self.device)
+            views = self.augment_fn(views, labels_for_aug)
+
+        # Cosine-similarity diagnostic for first 100 steps (pre-model, raw views)
+        extra_metrics: Dict[str, float] = {}
+        if self._global_step < 100:
+            _B, _K, _T, _H = views.shape
+            v0 = views[:, 0].reshape(_B, _T * _H)
+            v1 = views[:, 1].reshape(_B, _T * _H)
+            cos_sim = torch.nn.functional.cosine_similarity(v0, v1, dim=1).mean()
+            extra_metrics["aug_view_cosine"] = float(cos_sim)
+        self._global_step += 1
+
         batch_size, num_views, seq_len, hidden_dim = views.shape
         x_flat = views.reshape(batch_size * num_views, seq_len, hidden_dim)
 
@@ -650,7 +667,9 @@ class ContrastiveTrainer(Trainer):
         intra_cos = intra_sample_cosine_mean(z_views)
         intra_inter = intra_inter_margin(z_views)
 
-        return loss, {"intra_cos": float(intra_cos), "intra_inter_margin": float(intra_inter)}
+        metrics: Dict[str, float] = {"intra_cos": float(intra_cos), "intra_inter_margin": float(intra_inter)}
+        metrics.update(extra_metrics)
+        return loss, metrics
 
     def train_dataloader(self, train_dataset) -> DataLoader:
         dataset = train_dataset
