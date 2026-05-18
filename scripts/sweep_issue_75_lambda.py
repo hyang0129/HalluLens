@@ -58,6 +58,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", default=None, help="Default: runs/issue_75_lambda_sweep/{method_name}/seed_{seed}")
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--device", default="auto")
+    # Smoketest overrides — bypass the method config's epoch / step count for
+    # quick driver validation runs. Use sparingly; sweep production runs
+    # should leave these unset and rely on the method config.
+    p.add_argument("--max-epochs", type=int, default=None, help="Override training.max_epochs from the method config.")
+    p.add_argument("--steps-per-epoch", type=int, default=None, help="Override training.steps_per_epoch_override.")
     return p.parse_args()
 
 
@@ -211,6 +216,8 @@ def append_summary_row(summary_csv: Path, row: dict) -> None:
 def run_one_dataset(
     *, dataset_name: str, method_cfg: dict, seed: int, device: str, output_root: Path,
     num_workers: int, summary_csv: Path,
+    max_epochs_override: int | None = None,
+    steps_per_epoch_override: int | None = None,
 ) -> dict:
     """Train + evaluate on one dataset. Returns a result dict; on failure raises."""
     method_name = method_cfg["name"]
@@ -274,12 +281,18 @@ def run_one_dataset(
     # --- Train ---
     torch.manual_seed(seed)
     np.random.seed(seed)
+    epochs = int(max_epochs_override) if max_epochs_override is not None else int(train_cfg.get("max_epochs", 100))
+    steps_per_epoch = (
+        int(steps_per_epoch_override)
+        if steps_per_epoch_override is not None
+        else train_cfg.get("steps_per_epoch_override")
+    )
     t0 = time.time()
     train_contrastive_logprob_attn_recon(
         model=model,
         train_dataset=train_ds,
         test_dataset=val_ds,
-        epochs=int(train_cfg.get("max_epochs", 100)),
+        epochs=epochs,
         batch_size=int(train_cfg.get("batch_size", 512)),
         sub_batch_size=int(train_cfg.get("sub_batch_size", 64)),
         lr=float(train_cfg.get("lr", 1e-5)),
@@ -294,7 +307,7 @@ def run_one_dataset(
         use_infinite_index_stream=bool(train_cfg.get("use_infinite_index_stream", True)),
         infinite_stream_shuffle=True,
         infinite_stream_seed=int(seed),
-        steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+        steps_per_epoch_override=steps_per_epoch,
         balanced_sampling=bool(train_cfg.get("balanced_sampling", False)),
         grad_clip_norm=train_cfg.get("grad_clip_norm"),
     )
@@ -391,6 +404,8 @@ def main() -> int:
                 output_root=output_dir,
                 num_workers=int(args.num_workers),
                 summary_csv=summary_csv,
+                max_epochs_override=args.max_epochs,
+                steps_per_epoch_override=args.steps_per_epoch,
             )
             n_ok += 1
             logger.success(f"[{method_name}/{ds_name}] OK ({res.get('train_secs', '?')}s train, {res.get('eval_secs','?')}s eval)")

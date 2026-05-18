@@ -27,6 +27,9 @@ fi
 DATASETS="${SWEEP_DATASETS:-hotpotqa,popqa,nq,sciq,searchqa,mmlu}"
 SEED="${SWEEP_SEED:-0}"
 NUM_WORKERS="${SWEEP_NUM_WORKERS:-4}"
+# Smoketest overrides — leave unset for production runs.
+MAX_EPOCHS="${SWEEP_MAX_EPOCHS:-}"
+STEPS_PER_EPOCH="${SWEEP_STEPS_PER_EPOCH:-}"
 
 PYTHON=/mnt/home/hyang1/.local/share/mamba/envs/p311/bin/python
 LOG="/tmp/sweep_issue_75_${METHOD}.log"
@@ -48,12 +51,21 @@ echo "  output_dir=$OUTPUT_DIR"                                  | tee -a "$LOG"
 echo "  started=$(date)"                                         | tee -a "$LOG"
 echo "===================================================="     | tee -a "$LOG"
 
+EXTRA_ARGS=()
+if [ -n "$MAX_EPOCHS" ]; then
+    EXTRA_ARGS+=(--max-epochs "$MAX_EPOCHS")
+fi
+if [ -n "$STEPS_PER_EPOCH" ]; then
+    EXTRA_ARGS+=(--steps-per-epoch "$STEPS_PER_EPOCH")
+fi
+
 "$PYTHON" scripts/sweep_issue_75_lambda.py \
     --method-config "$CONFIG" \
     --datasets "$DATASETS" \
     --seed "$SEED" \
     --output-dir "$OUTPUT_DIR" \
     --num-workers "$NUM_WORKERS" \
+    "${EXTRA_ARGS[@]}" \
     2>&1 | tee -a "$LOG"
 
 rc=${PIPESTATUS[0]}
