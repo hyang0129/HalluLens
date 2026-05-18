@@ -20,6 +20,44 @@ Python 3.12 + pandas + matplotlib.
 
 ---
 
+## Submission target: EMNLP 2026 (ARR-routed)
+
+Built against the official [ACL style files](https://github.com/acl-org/acl-style-files).
+The `acl.sty` and `acl_natbib.bst` files are committed alongside `main.tex`.
+
+`main.tex` declares `\usepackage[review]{acl}` — the `review` option adds line
+numbers and the "Anonymous ACL submission" placeholder for blind review.
+**Drop the `[review]` option for the camera-ready.**
+
+### Page allowances (long paper)
+
+| Section | Limit | Counted? |
+|---|---|---|
+| Main body | 8 pages (review), 9 pages (camera-ready) | yes |
+| References | unlimited | no |
+| Appendices | unlimited | no |
+| Limitations | unlimited | no — **required, desk-reject if missing** |
+| Ethics Statement | unlimited | no — optional |
+| Acknowledgments | unlimited | no |
+
+The `Limitations` section (`\section*{Limitations}`, unnumbered) is mandatory
+and is scaffolded in `sections/99_limitations.tex`. Replace the placeholder
+before submission.
+
+### LaTeX dependencies
+
+`make paper` requires:
+
+```bash
+sudo apt-get install -y --no-install-recommends \
+    texlive-latex-base texlive-latex-recommended texlive-latex-extra \
+    texlive-fonts-extra texlive-science latexmk
+```
+
+`texlive-fonts-extra` is needed for `inconsolata.sty` (part of the ACL preamble).
+
+---
+
 ## Citation macros
 
 All macros are defined in `paper/macros.tex`. Values resolve at LaTeX build
