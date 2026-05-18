@@ -98,16 +98,15 @@ class ACTViTDataset(Dataset):
 
         # Load activation for this sample; shape (num_layers+1, R, D) fp16.
         # Drop the embedding layer (index 0) → (num_layers, R, D).
-        act_raw = self._acts[idx]          # (num_layers+1, R, D) fp16  — numpy memmap slice
-        act = np.array(act_raw, dtype=np.float32)   # copy out of memmap; cast to fp32
-        act = act[1:]                               # drop embedding layer → (L, R, D)
-        act_t = torch.from_numpy(act)              # (L, R, D)
+        act_raw = self._acts[idx]                  # (num_layers+1, R, D) fp16  — numpy memmap slice
+        act = np.array(act_raw[1:], dtype=np.float16)  # drop embed layer first, materialize off memmap, stay fp16
+        act_t = torch.from_numpy(act)              # (L, R, D) fp16 — ACTViT.forward casts to fp32 on GPU
 
         label = int(self._labels[idx])
         resp_len = int(self._resp_lens[idx])
 
         return {
-            "activations": act_t,       # Tensor (L, R, D) float32
+            "activations": act_t,       # Tensor (L, R, D) float16
             "label": label,              # int 0/1 (1 = hallucinated)
             "response_len": resp_len,    # int
         }
