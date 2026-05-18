@@ -16,5 +16,9 @@
     "activations_path": "shared/natural_questions_qwen3_8b/activations.zarr",
     "eval_json": "output/natural_questions/Qwen3-8B/eval_results_for_training.json",
     "raw_eval_jsonl": "output/natural_questions/Qwen3-8B/raw_eval_res.jsonl"
+  },
+  "icr_capture": {
+    "train_dir": "shared/icr_capture/natural_questions_train_Qwen3-8B",
+    "test_dir": "shared/icr_capture/natural_questions_test_Qwen3-8B"
   }
 }

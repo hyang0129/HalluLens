@@ -1,14 +1,11 @@
 {
-  "experiment_name": "baseline_comparison_searchqa",
-  "dataset": "searchqa",
+  "experiment_name": "baseline_comparison_sciq_memmap",
+  "dataset": "sciq_memmap",
   "methods": [
     "contrastive_logprob_recon",
     "linear_probe",
-    "token_entropy",
-    "logprob_baseline",
     "saplma",
-    "llmsknow_probe",
-    "icr_probe"
+    "llmsknow_probe"
   ],
   "split_seed": 42,
   "training_seeds": [

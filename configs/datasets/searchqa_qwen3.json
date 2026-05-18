@@ -16,5 +16,9 @@
     "activations_path": "shared/searchqa_train_qwen3_8b/activations.zarr",
     "eval_json": "output/searchqa_train/Qwen3-8B/eval_results.json",
     "raw_eval_jsonl": "output/searchqa_train/Qwen3-8B/raw_eval_res.jsonl"
+  },
+  "icr_capture": {
+    "train_dir": "shared/icr_capture/searchqa_train_Qwen3-8B_0-50000",
+    "test_dir": "shared/icr_capture/searchqa_test_Qwen3-8B"
   }
 }

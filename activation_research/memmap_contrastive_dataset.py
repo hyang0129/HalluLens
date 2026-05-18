@@ -170,6 +170,9 @@ class MemmapContrastiveDataset(Dataset):
         attention_summary: Literal["stats", "coarse", "full"] = "stats",
         attention_target_layer_offset_forward: Optional[int] = None,
         attention_target_layer_offset_backward: Optional[int] = None,
+        # Private overrides — used by MemmapActivationParser to inject pre-computed splits
+        _override_indices: Optional[np.ndarray] = None,
+        _override_split_name: Optional[str] = None,
     ) -> None:
         capture_dir = Path(capture_dir)
         if not capture_dir.exists():
@@ -312,6 +315,13 @@ class MemmapContrastiveDataset(Dataset):
                 labels, split, val_fraction, random_seed
             )
 
+        # Allow the parser to inject a pre-computed split (e.g. 90/10 train/val).
+        if _override_indices is not None:
+            self._split_indices = np.asarray(_override_indices, dtype=np.int64)
+
+        # Split name for .df property — prefer explicit override, fall back to the split arg.
+        self._split_name: str = _override_split_name if _override_split_name is not None else split
+
     # ------------------------------------------------------------------ #
     @staticmethod
     def _open_memmap(path: Path, shape: tuple, dtype) -> np.memmap:
@@ -322,6 +332,79 @@ class MemmapContrastiveDataset(Dataset):
     # ------------------------------------------------------------------ #
     def __len__(self) -> int:
         return int(len(self._split_indices))
+
+    # ------------------------------------------------------------------ #
+    @property
+    def df(self) -> "pd.DataFrame":
+        """DataFrame view of this split's samples.
+
+        Columns: prompt_hash (str), halu (int), split (str),
+                 sample_index (int), prompt_len (int), response_len (int).
+        len(dataset.df) == len(dataset).
+        """
+        import pandas as pd
+        prompt_hashes = []
+        halu_vals = []
+        sample_indices = []
+        prompt_lens = []
+        response_lens = []
+        for i in self._split_indices:
+            meta = self._meta[int(i)]
+            sample_row = int(self._valid_sample_indices[int(i)])
+            prompt_hashes.append(meta["prompt_hash"])
+            halu_vals.append(int(bool(meta["hallucinated"])))
+            sample_indices.append(sample_row)
+            prompt_lens.append(int(self._prompt_len[sample_row]))
+            response_lens.append(int(self._resp_len[sample_row]))
+        return pd.DataFrame({
+            "prompt_hash": prompt_hashes,
+            "halu": halu_vals,
+            "split": [self._split_name] * len(self._split_indices),
+            "sample_index": sample_indices,
+            "prompt_len": prompt_lens,
+            "response_len": response_lens,
+        })
+
+    @property
+    def cache(self) -> np.memmap:
+        """Full activation memmap (N_total, num_layers+1, max_resp, hidden_dim).
+        Exposed for _split_view compatibility — consumers must use _row_indices to locate split rows."""
+        return self._resp_act
+
+    @property
+    def labels(self) -> np.ndarray:
+        """int32 label array for this split's samples (halu=1, non-halu=0)."""
+        return np.array(
+            [int(bool(self._meta[int(i)]["hallucinated"])) for i in self._split_indices],
+            dtype=np.int32,
+        )
+
+    @property
+    def _row_indices(self) -> np.ndarray:
+        """Memmap row indices (into self.cache) for this split's samples.
+        Exposed for _split_view compatibility."""
+        return self._valid_sample_indices[self._split_indices]
+
+    # ------------------------------------------------------------------ #
+    def get_single_layer_dataset(self, layer_id: int):
+        """Return a SingleLayerDataset for one fixed layer (for linear_probe / saplma).
+
+        Reuses the existing SingleLayerDataset class backed by this memmap's
+        response_activations. layer_id is a model-layer index (position in dim-1
+        of response_activations.npy).
+        """
+        from activation_logging.activation_parser import SingleLayerDataset
+        labels_arr = self.labels
+        hashes = [self._meta[int(i)]["prompt_hash"] for i in self._split_indices]
+        row_idx = self._valid_sample_indices[self._split_indices]
+        return SingleLayerDataset(
+            cache=self._resp_act,
+            labels=labels_arr,
+            prompt_hashes=hashes,
+            layer_pos=layer_id,
+            layer_id=layer_id,
+            _row_indices=row_idx,
+        )
 
     # ------------------------------------------------------------------ #
     def _select_view_positions(self) -> List[int]:
