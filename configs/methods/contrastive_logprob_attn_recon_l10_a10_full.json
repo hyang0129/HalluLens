@@ -10,7 +10,7 @@
     "recon_lambda": 1.0,
     "logprob_var_threshold": 1e-4,
     "attn_direction": "both",
-    "attn_offset_k": 4,
+    "attn_offset_k": 1,
     "attn_target": "full",
     "attn_r_max": 64,
     "attn_recon_hidden_dim": 256,
@@ -40,8 +40,8 @@
     "response_logprobs_top_k": 20,
     "include_response_attention": true,
     "attention_summary": "full",
-    "attention_target_layer_offset_backward": 4,
-    "attention_target_layer_offset_forward": 4
+    "attention_target_layer_offset_backward": 1,
+    "attention_target_layer_offset_forward": 1
   },
   "evaluation": {
     "metrics": ["cosine", "mds", "knn"],
