@@ -87,12 +87,27 @@ __MAX_AGE__={max_age}
 __ME__=$(id -un)
 __ACTIVE__=$(ps -u "$__ME__" -o sid=,comm= | awk '$2 ~ /sshd/ {{print $1}}' | sort -u | tr '\\n' ' ')
 __TS__=$(date +%FT%T)
+# Find the user.slice pids cgroup — Empire uses cgroup v1 hybrid (pids in
+# its own hierarchy under /sys/fs/cgroup/pids/), v2 systems use a unified
+# hierarchy. Try both.
+__CG__=""
+for __p__ in "/sys/fs/cgroup/pids/user.slice/user-$(id -u).slice" \\
+             "/sys/fs/cgroup/user.slice/user-$(id -u).slice"; do
+  [ -f "$__p__/pids.current" ] && __CG__="$__p__" && break
+done
+__CUR__=$(cat "$__CG__/pids.current" 2>/dev/null || echo "?")
+__MAX__=$(cat "$__CG__/pids.max" 2>/dev/null || echo "?")
+__NPROC__=$(ps -u "$__ME__" --no-headers | wc -l)
+echo "$__TS__ heartbeat pids=$__CUR__/$__MAX__ procs=$__NPROC__"
 ps -u "$__ME__" -o pid=,sid=,etimes=,comm= | while read -r __p __s __a __c; do
   [ "$__a" -lt "$__MAX_AGE__" ] && continue
   case "$__c" in sshd|ssh-agent|gpg-agent|systemd*|tmux*|screen*) continue ;; esac
   case " $__ACTIVE__ " in *" $__s "*) continue ;; esac
   echo "$__TS__ reap pid=$__p sid=$__s age=${{__a}}s cmd=$__c"
+  # SIGTERM first; if the process is wedged (D state, stubborn), SIGKILL.
   kill "$__p" 2>/dev/null
+  sleep 0.2
+  kill -0 "$__p" 2>/dev/null && kill -9 "$__p" 2>/dev/null
 done
 """
 
@@ -231,6 +246,10 @@ def _run_daemon() -> None:
 
     lock = threading.Lock()
     last_activity = time.time()
+    # Initial reap fires immediately — gives a visible heartbeat in the
+    # log right after startup and clears any cgroup pressure before we
+    # start serving clients.
+    _reap(shell, lock, pexpect)
     last_reap = time.time()
 
     while True:
@@ -406,7 +425,7 @@ def _exec(shell, cmd: str, timeout: int, pexpect) -> tuple[str, int]:
     for line in cmd.split("\n"):
         shell.sendline(line.encode())
     # Capture last exit code, then emit sentinel.
-    shell.sendline(b"__rc=$?; printf '%s%d:END>>>\\n' '<<<EMPIRE_DONE_" +
+    shell.sendline(b"__rc=$?; printf '%s:%d:END>>>\\n' '<<<EMPIRE_DONE_" +
                    nonce.encode() + b"' \"$__rc\"")
 
     try:
@@ -419,7 +438,13 @@ def _exec(shell, cmd: str, timeout: int, pexpect) -> tuple[str, int]:
         try:
             shell.expect(pattern, timeout=10)
         except pexpect.TIMEOUT:
-            # Couldn't recover — bubble up so the daemon shuts down.
+            # Shell didn't respond to Ctrl-C either — it's wedged. Tear
+            # the SSH session down so the daemon exits its loop and the
+            # next client call gets a fresh daemon.
+            try:
+                shell.close(force=True)
+            except Exception:
+                pass
             raise pexpect.EOF("shell unresponsive after Ctrl-C")
         raise _Timeout(partial)
 
