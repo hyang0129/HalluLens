@@ -2,11 +2,9 @@
   "experiment_name": "baseline_comparison_popqa_memmap",
   "dataset": "popqa_memmap",
   "methods": [
-    "contrastive",
     "contrastive_logprob_recon",
     "linear_probe",
     "saplma",
-    "saplma_logprob_recon",
     "llmsknow_probe"
   ],
   "split_seed": 42,
