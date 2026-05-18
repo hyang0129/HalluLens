@@ -202,8 +202,10 @@ def run_contrastive(
 
     model.eval()
 
-    # Read flip_auroc flag (used when ignore_label=0; see evaluation.py)
+    # flip_auroc=True (ignore_label=0 configs): hallu is the compact cluster,
+    # so correct examples are the anomalies — pass outlier_class=0 to the evaluator.
     flip_auroc: bool = bool(eval_cfg.get("flip_auroc", False))
+    effective_outlier_class = 0 if flip_auroc else dataset_cfg.get("outlier_class", 1)
 
     # Build metrics list from config
     metrics_list: list = []
@@ -230,7 +232,7 @@ def run_contrastive(
         device=device,
         num_workers=experiment_cfg.get("num_workers", 4),
         persistent_workers=False,
-        outlier_class=dataset_cfg.get("outlier_class", 1),
+        outlier_class=effective_outlier_class,
     )
 
     ood_stats = evaluator.compute(eval_loader, model)
