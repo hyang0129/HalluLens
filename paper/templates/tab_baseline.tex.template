@@ -1,0 +1,28 @@
+% paper/templates/tab_baseline.tex.template
+% Generated table: baseline AUROC comparison across datasets.
+% Produced by build_numbers.py when make values is run.
+% Cite in main.tex with: \input{generated/tab_baseline}
+\begin{tabular}{lcc}
+\toprule
+Dataset & ICR-Probe AUROC & SelfCheck AUROC \\
+\midrule
+HotpotQA
+  & \result{baseline_comparison}{hotpotqa:icr_probe:auroc:mean}[3]
+  & \result{baseline_comparison}{hotpotqa:selfcheck:auroc:mean}[3] \\
+MMLU
+  & \result{baseline_comparison}{mmlu:icr_probe:auroc:mean}[3]
+  & \result{baseline_comparison}{mmlu:selfcheck:auroc:mean}[3] \\
+NatQ
+  & \result{baseline_comparison}{natural_questions:icr_probe:auroc:mean}[3]
+  & \result{baseline_comparison}{natural_questions:selfcheck:auroc:mean}[3] \\
+PopQA
+  & \result{baseline_comparison}{popqa:icr_probe:auroc:mean}[3]
+  & \result{baseline_comparison}{popqa:selfcheck:auroc:mean}[3] \\
+SciQ
+  & \result{baseline_comparison}{sciq:icr_probe:auroc:mean}[3]
+  & \result{baseline_comparison}{sciq:selfcheck:auroc:mean}[3] \\
+SearchQA
+  & \result{baseline_comparison}{searchqa:icr_probe:auroc:mean}[3]
+  & \result{baseline_comparison}{searchqa:selfcheck:auroc:mean}[3] \\
+\bottomrule
+\end{tabular}
