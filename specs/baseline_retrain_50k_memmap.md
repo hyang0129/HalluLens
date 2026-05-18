@@ -14,31 +14,31 @@ The re-trained cells are added to `results_table.json` **alongside** the existin
 
 ## 2. Scope
 
-### 2.1 In scope (Phase 1 of this issue)
+### 2.1 In scope
 
 - New `MemmapActivationParser` wrapper in `activation_logging/memmap_activation_parser.py` exposing the `ActivationParser` surface that the per-method runners in `scripts/run_experiment.py` depend on (`get_dataset(split, **kwargs)`, `df`, `split_strategy`). Delegates to `MemmapContrastiveDataset` (from #75) and to the two new sibling modes below.
 - New dataset modes covering the non-contrastive consumer shapes that #75 does not directly target:
   - `MemmapMultiLayerDataset` — deterministic ordered layers, returns `(num_layers, T, H)`. Mirrors `MultiLayerDeterministicDataset` at [activation_logging/activation_parser.py:435](activation_logging/activation_parser.py#L435).
-  - `MemmapSingleLayerView` — fixed-layer `(1, T, H)`. Mirrors `SingleLayerView` at [activation_logging/activation_parser.py:380](activation_logging/activation_parser.py#L380).
+  - `MemmapSingleLayerView` — fixed-layer `(1, T, H)`. Mirrors `SingleLayerDataset` at [activation_logging/activation_parser.py:397](activation_logging/activation_parser.py#L397).
   - These may be implemented as separate classes or folded into `MemmapContrastiveDataset` via a `mode="deterministic" / "single_layer"` parameter — whichever fits cleaner once #75's class is final. The spec is shape-driven, not file-layout-driven.
 - Backend dispatch in `scripts/run_experiment.py` at the four `ActivationParser(...)` construction sites (lines 2166, 2213, 2249, 2262): when the dataset config has `"backend": "memmap"` and an `"icr_capture"` block, construct `MemmapActivationParser` instead. Same per-method runners; no per-runner code change.
-- Phase 1 dataset configs (4 files): hotpotqa, natural_questions, each × Llama and Qwen3.
-- Phase 1 experiment configs (4 files): same coverage.
+- Dataset configs (11 new files): hotpotqa, natural_questions, mmlu (Llama only initially), popqa, sciq, searchqa — each × Llama and Qwen3 except where noted.
+- Experiment configs (11 new files): same coverage.
 - `scripts/results_table.py` extension to glob `runs/baseline_comparison_*_memmap/` and emit cells with a distinguishing key suffix.
 - Unit tests for the wrapper and the new dataset modes.
-- Phase 1 dispatch & verification plan.
+- Dispatch & verification plan.
 
-### 2.2 In scope (Phase 2 of this issue, executed after Phase 1 lands)
+### 2.2 Deferred follow-up (tracked in §14, no new spec work)
 
-- mmlu, popqa, sciq, searchqa memmap configs + re-training — as each dataset's icr_capture reaches a usable state.
-- Move SEP's hotpotqa training to read from icr_capture (one dataset; the other datasets SEP runs against are already < 50k or skipped).
+- `mmlu × Qwen3` dispatches once its capture caps (~37k of 50k as of 2026-05-17). Same configs/wiring, no new code.
+- SEP migration to read from icr_capture (time-boxed in §8.3).
 
 ### 2.3 Out of scope
 
 - New trained methods. Issue #75 owns the new contrastive+logprob+attn model.
 - SmolLM3 — no icr_capture data exists for any dataset on SmolLM3. SmolLM3 retains its zarr-trained cells. Re-capture is a separate operational task.
 - Sampling baselines (`token_entropy`, `logprob_baseline`, all `se_*`, all `selfcheck_*`, `p_true`) — they do not train on the data, so the cap does not change their scores.
-- Re-capturing missing or partial icr_capture data (popqa stub, sciq partial, mmlu Qwen3 in progress) — this PR consumes whatever icr_capture contains; it does not produce captures.
+- Re-capturing missing icr_capture data (mmlu × Qwen3 still in progress; everything else complete — see §4). This PR consumes whatever icr_capture contains; it does not produce captures.
 - Deleting old zarrs — they stay for as long as their cells remain in `results_table.json`.
 
 ## 3. Dependencies
@@ -92,7 +92,7 @@ From `configs/experiments/baseline_comparison_*.json`:
 | `token_entropy`            | no  | n/a | — |
 | `logprob_baseline`         | no  | n/a | — |
 
-Phase 1 training runs: 7 trained methods × 2 datasets × 2 models × 5 seeds = **140 runs** + SEP hotpotqa runs.
+Total trained runs: 7 trained methods × 11 ready cells × 5 seeds = **385 runs** + 4 SEP re-runs (hotpotqa × 2 models, mmlu × 2 models — see §8.3). `mmlu × Qwen3` adds 35 more runs once its capture caps.
 
 ## 6. New components
 
@@ -461,13 +461,13 @@ size. Affected (dataset × model) cells:
 |---|---|---|
 | hotpotqa | ✓ (90k → 50k) | ✓ (137k → 50k) |
 | mmlu | ✓ (94k → 50k) | ✓ (98k → 50k, deferred until cap) |
-| searchqa | ✓ (43k → 50k? — under cap actually; **no rerun**) | ✓ (same; **no rerun**) |
-| natural_questions, popqa, sciq | no — already under cap | no |
+| searchqa | ✗ (43k → 50k — memmap is larger; **no rerun**) | ✗ (same; **no rerun**) |
+| natural_questions, popqa, sciq | ✗ — already under cap | ✗ |
 
 Net SEP re-runs: hotpotqa Llama, hotpotqa Qwen3, mmlu Llama, mmlu Qwen3
-(deferred). searchqa is at the cap (49,959) but **was already at 42,783 in
-zarr** — the cap doesn't reduce it materially; ICR-fold-consistency may
-still warrant a rerun (see §13.7).
+(deferred). searchqa's memmap training set is **larger** than its zarr
+(49,959 vs 42,783), so the cap doesn't reduce it; ICR-fold-consistency may
+still warrant a rerun later (see §13.7).
 
 ```bash
 for model in meta-llama/Llama-3.1-8B-Instruct Qwen/Qwen3-8B; do
@@ -519,7 +519,7 @@ Synthesize a fake icr_capture directory (5 samples, num_layers=4, hidden_dim=8, 
 
 Cases:
 - `MemmapActivationParser(fake_dir, random_seed=42, split_strategy="three_way")` constructs without error.
-- `.df` returns a DataFrame with `prompt_hash`, `hallucinated`, `sample_index`, `prompt_len`, `response_len` columns; row count matches meta.jsonl line count.
+- `.df` returns a DataFrame with `prompt_hash`, `halu`, `split`, `sample_index`, `prompt_len`, `response_len` columns (per §6.2 contract); row count matches meta.jsonl line count.
 - `.get_dataset("train", num_views=2, relevant_layers=[1,2,3])` returns dataset whose `__getitem__(0)` dict has keys `{hashkey, halu, views_activations, view_indices}` and `views_activations.shape == (2, max_response_len, 8)`.
 - `.get_dataset("train", num_views=1, fixed_layer=2)` returns dataset with `views_activations.shape == (1, max_response_len, 8)` and `view_indices == [2]`.
 - `.get_dataset("train", deterministic=True, relevant_layers=[1,2,3])` returns `views_activations.shape == (3, max_response_len, 8)` and `view_indices == [1,2,3]`.
@@ -588,8 +588,8 @@ The work is complete when:
 |---|---|---|
 | `MemmapContrastiveDataset` (from #75) doesn't generalize to the non-contrastive method shapes; more modes than expected | medium | The pre-implementation audit (§6.1) lists every per-method runner's dataset consumption; any gap turns into an explicit mode added in this PR. |
 | `MultiMetricHallucinationEvaluator` consumes `df` columns the wrapper doesn't synthesize | medium | Grep the evaluator code, enumerate required columns, ensure `MemmapActivationParser.df` synthesizes all of them. Integration test in §10.3. |
-| AUROC drift between zarr- and memmap-trained baselines exceeds plausible bound (>0.10 per method) on Phase 1 | low–medium | If observed, freeze and diagnose before continuing. Likely causes: feature-distribution shift from new inference run, label flips, padding-contract mismatch. |
+| AUROC drift between zarr- and memmap-trained baselines exceeds plausible bound (>0.10 per method) on any cell | low–medium | If observed, freeze and diagnose before continuing. Likely causes: feature-distribution shift from new inference run, label flips, padding-contract mismatch. |
 | icr_capture per-sample ordering differs from the dataset iterator's order (so the new training data isn't the "first 50k" we expect for hotpotqa) | low | Verify on hotpotqa: read first 100 meta.jsonl entries, decode `prompt_hash` against the dataset iterator's first 100 prompts, confirm match. One-off check. |
 | HotpotQA Qwen3 capture inherited the 1472-blank-leading-rows anomaly from #72's motivation | low | The new writer's resume semantics + meta.jsonl authoritativeness should prevent this; verify `meta.jsonl` minimum `sample_index == 0` and all rows are contiguous in the smoketest. |
-| SEP migration takes longer than 1 day | medium | Time-box (§8.3). If non-trivial, hold SEP at zarr-trained for Phase 1, migrate in Phase 2 follow-up. |
+| SEP migration takes longer than 1 day | medium | Time-box (§8.3). If non-trivial, hold SEP at zarr-trained and mark cells `zarr-trained; SEP-migration-pending` in `results_table.json`. |
 | Old-zarr cells linger in `results_table.json` and confuse paper-side scripts that read it | low | Document the `dataset: foo` vs `dataset: foo_memmap` convention in §9 and in the paper's data-prep notes when written. |
