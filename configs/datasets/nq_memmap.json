@@ -1,0 +1,11 @@
+{
+  "name": "nq_memmap",
+  "model_name": "Llama-3.1-8B-Instruct",
+  "input_dim": 4096,
+  "backend": "memmap",
+  "outlier_class": 1,
+  "icr_capture": {
+    "train_dir": "shared/icr_capture/natural_questions_train_Llama-3.1-8B-Instruct",
+    "test_dir": "shared/icr_capture/natural_questions_test_Llama-3.1-8B-Instruct"
+  }
+}

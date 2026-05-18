@@ -1,0 +1,31 @@
+{
+  "experiment_name": "baseline_comparison_popqa_qwen3_memmap",
+  "dataset": "popqa_qwen3_memmap",
+  "methods": [
+    "contrastive",
+    "contrastive_logprob_recon",
+    "linear_probe",
+    "saplma",
+    "saplma_logprob_recon",
+    "llmsknow_probe"
+  ],
+  "split_seed": 42,
+  "training_seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs",
+  "split_seeds": [
+    42,
+    1,
+    2,
+    3,
+    4
+  ]
+}
