@@ -1,0 +1,153 @@
+% paper/macros.tex
+% Late-binding citation macros for HalluLens paper.
+%
+% Every number in prose resolves at build time through these macros.
+% Values are defined in paper/generated/values.tex via \csname lookup;
+% build_numbers.py produces that file from paper/data/*.csv and
+% paper/generated/figures/*.numbers.csv.
+%
+% Usage:
+%   \result{csv_stem}{key}[precision]
+%   \resdelta{csv_stem}{key_a}{key_b}[precision]
+%   \resratio{csv_stem}{key_a}{key_b}[precision]
+%   \resultCI{csv_stem}{mean_key,lo_key,hi_key}[precision]
+%   \resultPM{csv_stem}{mean_key,err_key}[precision]
+%
+% Where:
+%   csv_stem  - stem of the CSV file (e.g. "baseline" for baseline.csv,
+%               "fig.transfer_llama_linear" for the sidecar of that figure)
+%   key       - colon-joined coordinate per the CSV's key_schema
+%   precision - number of decimal places for siunitx rounding (optional;
+%               default is the CSV's default_precision, embedded as
+%               hl@<stem>@__default_precision__ in values.tex)
+
+\usepackage{siunitx}
+\usepackage{xfp}
+\usepackage{etoolbox}
+
+% --------------------------------------------------------------------------
+% All definitions below use @ in macro names (\@ifundefined, \hl@..., \@nil).
+% Outside a .sty file, @ has catcode 12 (other), so we must temporarily make
+% it a letter via \makeatletter / \makeatother for the definitions to parse.
+% --------------------------------------------------------------------------
+\makeatletter
+
+% --------------------------------------------------------------------------
+% Internal helper: look up \csname hl@<stem>@<key>\endcsname
+% Raises \PackageError if undefined.
+% --------------------------------------------------------------------------
+\newcommand{\hlget}[2]{%
+  \@ifundefined{hl@#1@#2}{%
+    \PackageError{hallulens-macros}%
+      {Undefined result key '#2' in CSV stem '#1'.
+       Check paper/data/#1.csv and re-run 'make values'.}%
+      {The key '#2' was not found in the values generated from '#1'.
+       Valid keys are listed in paper/generated/values.tex.}%
+    \textbf{??}%
+  }{%
+    \csname hl@#1@#2\endcsname%
+  }%
+}
+
+% --------------------------------------------------------------------------
+% Helper: get default precision for a CSV stem (falls back to 3)
+% --------------------------------------------------------------------------
+\newcommand{\hlgetdefprec}[1]{%
+  \@ifundefined{hl@#1@__default_precision__}{3}{\csname hl@#1@__default_precision__\endcsname}%
+}
+
+% --------------------------------------------------------------------------
+% \result{csv}{key}[precision]
+% --------------------------------------------------------------------------
+\DeclareRobustCommand{\result}[2]{%
+  \@ifnextchar[%]
+    {\hl@result@prec{#1}{#2}}%
+    {\hl@result@prec{#1}{#2}[\hlgetdefprec{#1}]}%
+}
+\def\hl@result@prec#1#2[#3]{%
+  \num[round-mode=places,round-precision=#3]{\hlget{#1}{#2}}%
+}
+
+% --------------------------------------------------------------------------
+% \resdelta{csv}{key_a}{key_b}[precision]
+% Computes key_a - key_b using \fpeval from xfp.
+% (Named \resdelta, not \delta, to avoid clashing with the Greek letter.)
+% --------------------------------------------------------------------------
+\DeclareRobustCommand{\resdelta}[3]{%
+  \@ifnextchar[%]
+    {\hl@delta@prec{#1}{#2}{#3}}%
+    {\hl@delta@prec{#1}{#2}{#3}[\hlgetdefprec{#1}]}%
+}
+\def\hl@delta@prec#1#2#3[#4]{%
+  \edef\hl@va{\hlget{#1}{#2}}%
+  \edef\hl@vb{\hlget{#1}{#3}}%
+  \num[round-mode=places,round-precision=#4,explicit-sign]{\fpeval{\hl@va - \hl@vb}}%
+}
+
+% --------------------------------------------------------------------------
+% \resratio{csv}{key_a}{key_b}[precision]
+% Computes key_a / key_b using \fpeval.
+% --------------------------------------------------------------------------
+\DeclareRobustCommand{\resratio}[3]{%
+  \@ifnextchar[%]
+    {\hl@ratio@prec{#1}{#2}{#3}}%
+    {\hl@ratio@prec{#1}{#2}{#3}[\hlgetdefprec{#1}]}%
+}
+\def\hl@ratio@prec#1#2#3[#4]{%
+  \edef\hl@va{\hlget{#1}{#2}}%
+  \edef\hl@vb{\hlget{#1}{#3}}%
+  \num[round-mode=places,round-precision=#4]{\fpeval{\hl@va / \hl@vb}}%
+}
+
+% --------------------------------------------------------------------------
+% \resultCI{csv}{mean_key,lo_key,hi_key}[precision]
+% Renders as: mean [lo, hi]
+% The three keys are comma-separated in a single brace group.
+% --------------------------------------------------------------------------
+\DeclareRobustCommand{\resultCI}[2]{%
+  \@ifnextchar[%]
+    {\hl@ci@prec{#1}{#2}}%
+    {\hl@ci@prec{#1}{#2}[\hlgetdefprec{#1}]}%
+}
+\def\hl@ci@prec#1#2[#3]{%
+  % Split #2 on commas: mean, lo, hi
+  \hl@splitthree{#2}{\hl@keyA}{\hl@keyB}{\hl@keyC}%
+  \num[round-mode=places,round-precision=#3]{\hlget{#1}{\hl@keyA}}%
+  \ [\num[round-mode=places,round-precision=#3]{\hlget{#1}{\hl@keyB}},
+     \num[round-mode=places,round-precision=#3]{\hlget{#1}{\hl@keyC}}]%
+}
+
+% --------------------------------------------------------------------------
+% \resultPM{csv}{mean_key,err_key}[precision]
+% Renders as: mean +/- err
+% --------------------------------------------------------------------------
+\DeclareRobustCommand{\resultPM}[2]{%
+  \@ifnextchar[%]
+    {\hl@pm@prec{#1}{#2}}%
+    {\hl@pm@prec{#1}{#2}[\hlgetdefprec{#1}]}%
+}
+\def\hl@pm@prec#1#2[#3]{%
+  \hl@splittwo{#2}{\hl@keyA}{\hl@keyB}%
+  \num[round-mode=places,round-precision=#3]{\hlget{#1}{\hl@keyA}}%
+  $\pm$%
+  \num[round-mode=places,round-precision=#3]{\hlget{#1}{\hl@keyB}}%
+}
+
+% --------------------------------------------------------------------------
+% Utility: split comma-delimited pairs and triples into named macros.
+% --------------------------------------------------------------------------
+\def\hl@splittwo#1#2#3{%
+  \hl@splittwoaux#1,\@nil{#2}{#3}%
+}
+\def\hl@splittwoaux#1,#2\@nil#3#4{%
+  \def#3{#1}\def#4{#2}%
+}
+
+\def\hl@splitthree#1#2#3#4{%
+  \hl@splitthreeaux#1,\@nil{#2}{#3}{#4}%
+}
+\def\hl@splitthreeaux#1,#2,#3\@nil#4#5#6{%
+  \def#4{#1}\def#5{#2}\def#6{#3}%
+}
+
+\makeatother

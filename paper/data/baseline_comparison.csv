@@ -1,0 +1,24 @@
+# source_commit: placeholder
+# generated: 2026-05-18T00:00:00Z
+# generator: scripts/aggregate_results.py
+# key_schema: dataset:method:metric
+# default_precision: 3
+dataset,method,metric,mean,ci_95,n_seeds
+hotpotqa,icr_probe,auroc,0.847,0.012,5
+hotpotqa,selfcheck,auroc,0.721,0.018,5
+mmlu,icr_probe,auroc,0.831,0.009,5
+mmlu,selfcheck,auroc,0.694,0.022,5
+natural_questions,icr_probe,auroc,0.819,0.014,5
+natural_questions,selfcheck,auroc,0.703,0.016,5
+popqa,icr_probe,auroc,0.862,0.011,5
+popqa,selfcheck,auroc,0.739,0.019,5
+sciq,icr_probe,auroc,0.883,0.008,5
+sciq,selfcheck,auroc,0.751,0.021,5
+searchqa,icr_probe,auroc,0.841,0.013,5
+searchqa,selfcheck,auroc,0.718,0.017,5
+hotpotqa,icr_probe,auprc,0.823,0.015,5
+hotpotqa,selfcheck,auprc,0.698,0.021,5
+mmlu,icr_probe,auprc,0.809,0.011,5
+mmlu,selfcheck,auprc,0.671,0.025,5
+hotpotqa,icr_probe,auroc_lo,0.835,0.0,5
+hotpotqa,icr_probe,auroc_hi,0.859,0.0,5

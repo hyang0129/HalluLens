@@ -1,0 +1,37 @@
+% paper/sections/01_intro.tex
+% Demonstration section showing \result, \resdelta, and \resultCI usage.
+% All numeric literals in prose must resolve through citation macros.
+
+Hallucination remains a central challenge for deployed language models
+\citep{maynez2020faithfulness}. A model that confidently asserts false
+information undermines the trust required for real-world use.
+
+We propose \textbf{HalluLens}, a probe-based detector that operates directly
+on intermediate layer activations, bypassing the need for external knowledge
+sources or multiple sampling passes.
+
+\paragraph{Main result.}
+Our ICR-probe achieves an AUROC of
+\result{baseline_comparison}{hotpotqa:icr_probe:auroc:mean}[3]
+on HotpotQA, a gain of
+\resdelta{baseline_comparison}{hotpotqa:icr_probe:auroc:mean}{hotpotqa:selfcheck:auroc:mean}[3]
+percentage points over SelfCheck (95\% CI
+\resultCI{baseline_comparison}{hotpotqa:icr_probe:auroc:mean,hotpotqa:icr_probe:auroc_lo:mean,hotpotqa:icr_probe:auroc_hi:mean}[3]).
+
+\paragraph{Generalization.}
+The probe was trained on HotpotQA and evaluated on five additional datasets
+without re-training, achieving a mean AUROC of
+\result{baseline_comparison}{mmlu:icr_probe:auroc:mean}[3]
+on MMLU and
+\result{baseline_comparison}{sciq:icr_probe:auroc:mean}[3]
+on SciQ.
+The performance advantage over the SelfCheck baseline
+holds across all benchmarks (Table~\ref{tab:baseline}).
+
+\paragraph{Contributions.}
+We make the following contributions:
+(1) A lightweight hallucination probe that runs at inference time on a
+    Llama-3.1 or Qwen3-8B backbone with no additional sampling overhead.
+(2) A reproducible benchmark suite covering six LLMsKnow tasks.
+(3) Open-source code and a paper build system ensuring all reported numbers
+    trace to a single CSV cell (Section~\ref{sec:reproducibility}).

@@ -3,6 +3,10 @@
 Usage:
     python scripts/aggregate_results.py --runs-dir runs/baseline_comparison_hotpotqa
     python scripts/aggregate_results.py --runs-dir runs/ --output results/summary.csv
+
+    # Also emit a paper/data/ CSV with the §3 header block:
+    python scripts/aggregate_results.py --runs-dir runs/ \\
+        --paper-output paper/data/baseline_comparison.csv
 """
 
 from __future__ import annotations
@@ -10,7 +14,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Add project root to path
@@ -82,11 +88,68 @@ def aggregate(records: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def get_head_commit() -> str:
+    """Return the current HEAD commit SHA (short), or 'unknown' on failure."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
+        )
+        return result.stdout.strip() if result.returncode == 0 else "unknown"
+    except FileNotFoundError:
+        return "unknown"
+
+
+def write_paper_csv(
+    summary: pd.DataFrame,
+    out_path: Path,
+    generator: str = "scripts/aggregate_results.py",
+) -> None:
+    """Write *summary* to *out_path* with the §3 header block.
+
+    The key_schema is ``dataset:method:metric`` matching the columns present.
+    This is an additional output path; existing CSV semantics are unchanged.
+    """
+    source_commit = get_head_commit()
+    generated = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    key_schema = "dataset:method:metric"
+    default_precision = 3
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    header_lines = [
+        f"# source_commit: {source_commit}",
+        f"# generated: {generated}",
+        f"# generator: {generator}",
+        f"# key_schema: {key_schema}",
+        f"# default_precision: {default_precision}",
+    ]
+
+    # Write header then CSV (without index)
+    with open(out_path, "w") as fh:
+        for line in header_lines:
+            fh.write(line + "\n")
+        summary.drop(columns=["formatted"], errors="ignore").to_csv(fh, index=False)
+
+    print(f"Paper CSV (with §3 header): {out_path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Aggregate experiment results")
     parser.add_argument("--runs-dir", required=True, help="Root directory of runs")
     parser.add_argument(
         "--output", default="results/summary.csv", help="Output CSV path"
+    )
+    parser.add_argument(
+        "--paper-output",
+        default=None,
+        help=(
+            "Optional additional output path in paper/data/ that includes the §3 "
+            "header block (e.g. paper/data/baseline_comparison.csv). "
+            "Does not change the primary --output CSV."
+        ),
     )
     args = parser.parse_args()
 
@@ -129,6 +192,10 @@ def main() -> None:
 
     # Print to stdout
     print("\n" + summary.to_string(index=False))
+
+    # Emit paper/data/ CSV with §3 header block (optional)
+    if args.paper_output:
+        write_paper_csv(summary, Path(args.paper_output))
 
 
 if __name__ == "__main__":

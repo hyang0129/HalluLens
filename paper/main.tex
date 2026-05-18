@@ -1,0 +1,43 @@
+% paper/main.tex
+% Minimal article wrapper for the HalluLens EMNLP 2026 paper.
+% Run: make paper
+%
+% This file inputs macros.tex (citation macro definitions),
+% generated/values.tex (CSV-derived \csname definitions),
+% and the prose sections.
+
+\documentclass[11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+% --- Citation infrastructure ---
+\input{macros}
+\input{generated/values}
+
+% --- Bibliography ---
+\usepackage{natbib}
+
+% --- Hyperlinks (load last) ---
+\usepackage[hidelinks]{hyperref}
+
+% --- Title ---
+\title{Detecting Hallucinations via Mutual Information Analysis\\
+       of Intermediate Layer Activations}
+\author{Anonymous}
+\date{2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\input{sections/00_abstract}
+\end{abstract}
+
+\section{Introduction}
+\input{sections/01_intro}
+
+\end{document}

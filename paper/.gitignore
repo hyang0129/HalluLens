@@ -1,0 +1,27 @@
+# paper/.gitignore
+#
+# Generated artifacts — never commit, always rebuilt from data/ + figures_src/.
+generated/
+
+# LaTeX byproducts
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.toc
+*.lof
+*.lot
+
+# Root-level PDF (built by latexmk from main.tex)
+main.pdf
+
+# Working copies of notebooks (per NOTEBOOK_WORKFLOW.md)
+*.ipynb
+
+# Python bytecode caches
+__pycache__/
+*.pyc
