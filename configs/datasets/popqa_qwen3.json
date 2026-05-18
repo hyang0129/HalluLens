@@ -16,5 +16,9 @@
     "activations_path": "shared/popqa_qwen3_8b/activations.zarr",
     "eval_json": "output/popqa/Qwen3-8B/eval_results.json",
     "raw_eval_jsonl": "output/popqa/Qwen3-8B/raw_eval_res.jsonl"
+  },
+  "icr_capture": {
+    "train_dir": "shared/icr_capture/popqa_train_Qwen3-8B",
+    "test_dir": "shared/icr_capture/popqa_test_Qwen3-8B"
   }
 }
