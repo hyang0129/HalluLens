@@ -16,5 +16,9 @@
     "activations_path": "shared/sciq_llama_3_1_8b_instruct/activations.zarr",
     "eval_json": "output/sciq/Llama-3.1-8B-Instruct/eval_results_for_training.json",
     "raw_eval_jsonl": "output/sciq/Llama-3.1-8B-Instruct/raw_eval_res.jsonl"
+  },
+  "icr_capture": {
+    "train_dir": "shared/icr_capture/sciq_train_Llama-3.1-8B-Instruct",
+    "test_dir": "shared/icr_capture/sciq_test_Llama-3.1-8B-Instruct"
   }
 }
