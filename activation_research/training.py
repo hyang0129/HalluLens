@@ -1387,9 +1387,9 @@ def train_contrastive_logprob_attn_recon(
 
                 total_loss += loss.item()
                 total_supcon += supcon.item()
-                total_recon_lp += float(recon_lp)
+                total_recon_lp += float(recon_lp.detach())
                 for direction, l in recon_attn_terms.items():
-                    total_recon_attn[direction] += float(l)
+                    total_recon_attn[direction] += float(l.detach())
                 total_intra_cos += intra_sample_cosine_mean(z_views)
                 total_intra_inter += intra_inter_margin(z_views)
                 n_batches += 1
