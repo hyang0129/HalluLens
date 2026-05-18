@@ -167,6 +167,61 @@ way, redirect pytest / script output to a log file on the remote node and
 poll the log via subsequent `jupyter_exec` or `tail` calls rather than
 holding an SSH stdout stream open.
 
+### Login-node shell: use `utils/empire_shell.py`, not bare ssh
+
+Bare `ssh empire-ai 'cmd'` is bad for two reasons:
+
+1. **Per-session cost.** Empire's login node spends ~60s on PAM / NFS /
+   `/etc/profile.d` for every new SSH channel — even with ControlMaster
+   reusing the TCP connection. So one-shot calls compound fast.
+2. **Stale-process accumulation.** Your `user.slice` has `TasksMax=512`
+   on `alpha1`. Orphaned bashes/ssh helpers from prior sessions linger
+   and starve `fork()`. Once `pids.current` hits 512, even `bash` can't
+   fork — the node is unusable for you until you reap orphans.
+
+Route all orchestration shell commands (`git`, `gh`, `squeue`,
+`gpu_dispatch.py`, file inspection) through **`utils/empire_shell.py`**,
+which keeps one SSH session warm via pexpect and feeds commands to it:
+
+```bash
+python utils/empire_shell.py 'squeue --me'
+python utils/empire_shell.py 'gh pr list'
+```
+
+Or programmatically:
+
+```python
+from utils.empire_shell import run
+res = run('squeue --me')
+print(res.stdout, res.exit_code)
+```
+
+After the first call pays the ~60s warm-up, every subsequent call is
+(network RTT + real command time).
+
+The daemon also runs a **5-min periodic reap** that kills your stale
+processes >30 min old. Allowlist (always spared): `sshd, ssh-agent,
+gpg-agent, systemd*, tmux*, screen*`, plus anything in the session of
+an active `sshd` (your live shells and the daemon's own remote bash).
+Reaps log to `/tmp/empire-shell-$USER.log` as `[reap]` entries.
+
+Daemon control:
+
+```bash
+python utils/empire_shell.py --status     # is daemon running?
+python utils/empire_shell.py --kill       # stop it
+python utils/empire_shell.py --logs       # see daemon + reap activity
+```
+
+**Bootstrap caveat.** If `pids.current` is already at 512/512, the
+daemon can't ssh in to launch. One-time manual orphan cleanup:
+
+```bash
+ssh empire-ai 'ps -u $USER --no-headers -o pid,ppid | awk "\$2==1 {print \$1}" | xargs -r kill'
+```
+
+Then start the daemon (any `empire_shell.py` call auto-spawns it).
+
 ### Claude Code GPU execution (REMOTE_GPU only)
 
 Claude Code can execute code directly on the GPU node without user intervention using `utils/jupyter_exec.py`, which connects via the Jupyter REST + WebSocket API.
