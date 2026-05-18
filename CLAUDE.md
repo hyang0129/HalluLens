@@ -371,16 +371,17 @@ Node identity in the registry is the `name` field (defaults to `hostname` when a
 - `alphagpu01-8888` → `http://alphagpu01:8888` (GPU 0 of that SLURM allocation)
 - `alphagpu01-8889` → `http://alphagpu01:8889` (a different physical GPU)
 
-Each logical node has its own `jupyter_url` and is dispatched to explicitly:
+Each logical node has its own `jupyter_url`. Dispatch is Jupyter by default:
 
 ```bash
-python scripts/gpu_dispatch.py run --jupyter --node alphagpu01-8888 -- bash my_job.sh
+python scripts/gpu_dispatch.py run --node alphagpu01-8888 bash my_job.sh
 ```
 
 Notes:
 - `--node` matches the logical `name`, not `hostname`.
-- These Jupyter-only entries have no SSH path enabled, so auto-selection (no `--node`) will not pick them — they must be addressed explicitly via `--jupyter --node <name>`.
-- `gpu_dispatch.py status` will probe each logical node via its own Jupyter URL and report the GPU it actually sees through its `CUDA_VISIBLE_DEVICES` mask.
+- **Jupyter is the default transport** for `run` / `status` / `kill`. Auto-select (no `--node`) probes all `jupyter_url`-configured nodes in parallel and picks the best one. Pass `--ssh` to force the legacy SSH path.
+- `gpu_dispatch.py status` probes each logical node via its own Jupyter URL and reports the GPU it actually sees through its `CUDA_VISIBLE_DEVICES` mask.
+- `gpu_dispatch.py jobs` no longer hangs: it routes per-job by recorded `dispatch_method`, uses a 5s probe timeout, and marks any job whose probe fails as `status=unknown` rather than blocking.
 
 ### Syncing Jupyter-only nodes from squeue
 
