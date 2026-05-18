@@ -171,8 +171,10 @@ def _git_info() -> dict[str, str]:
 # accidentally including run_size / hparams / etc.).
 _TRAINING_METRIC_KEYS = {
     "contrastive_logprob_recon": ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
+    "contrastive":               ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
     "linear_probe":               ("auroc",),
     "saplma":                     ("auroc",),
+    "saplma_logprob_recon":       ("auroc",),
     "llmsknow_probe":             ("auroc", "sweep_best_dev_auroc"),
     "multi_layer_linear_probe":   ("auroc",),
     "icr_probe":                  ("auroc",),
