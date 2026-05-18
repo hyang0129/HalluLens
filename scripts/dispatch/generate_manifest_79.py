@@ -45,6 +45,10 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from scripts.dispatch.claim import init_dispatch_dirs  # noqa: E402
+from scripts.experiment_utils import (  # noqa: E402
+    is_seeded_method,
+    load_experiment_config,
+)
 
 _DEFAULT_GLOB = "configs/experiments/baseline_comparison_*_memmap.json"
 
@@ -85,15 +89,36 @@ def generate_manifest(
 
     for cfg_path_str in cfg_paths:
         cfg_path = Path(cfg_path_str)
-        with cfg_path.open() as fh:
-            cfg = json.load(fh)
+        # Resolve method configs so we can filter out non-seeded methods.
+        # Non-seeded baselines (token_entropy, logprob_baseline) are pure-CPU
+        # numpy work and run once, not once-per-seed — they don't belong on the
+        # GPU worker queue. Run them directly via run_experiment.py instead.
+        cfg = load_experiment_config(str(cfg_path), project_root=str(_PROJECT_ROOT))
 
         experiment_name = cfg["experiment_name"]
         dataset = cfg["dataset"]
         cfg_methods = cfg.get("methods", [])
         cfg_seeds = cfg.get("training_seeds", [0, 1, 2, 3, 4])
+        method_configs = cfg.get("method_configs", {})
 
-        methods = [m for m in cfg_methods if method_filter is None or m in method_filter]
+        seeded_methods = []
+        skipped_non_seeded = []
+        for m in cfg_methods:
+            if method_filter is not None and m not in method_filter:
+                continue
+            mcfg = method_configs.get(m, {"training": None})
+            if is_seeded_method(mcfg):
+                seeded_methods.append(m)
+            else:
+                skipped_non_seeded.append(m)
+
+        if skipped_non_seeded:
+            print(
+                f"  {cfg_path.name}: skipping non-seeded methods "
+                f"{skipped_non_seeded} (run directly via run_experiment.py)"
+            )
+
+        methods = seeded_methods
         seeds = [s for s in cfg_seeds if seed_filter is None or s in seed_filter]
 
         # Project-relative path string for the cell payload.

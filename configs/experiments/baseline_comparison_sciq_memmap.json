@@ -4,6 +4,8 @@
   "methods": [
     "contrastive_logprob_recon",
     "linear_probe",
+    "token_entropy",
+    "logprob_baseline",
     "saplma",
     "llmsknow_probe"
   ],
