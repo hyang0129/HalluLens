@@ -157,7 +157,7 @@ def build_model(input_dim: int, model_params: dict) -> LogprobAttnReconProgressi
     )
 
 
-def evaluate(model, train_ds_eval, test_ds_eval, eval_cfg, device, seed, output_dir):
+def evaluate(model, train_ds_eval, test_ds_eval, eval_cfg, device, seed, output_dir, num_workers: int = 0):
     """Run MultiMetricHallucinationEvaluator over test_ds_eval using train_ds_eval as baseline.
 
     Builds a combined label DataFrame from both splits' meta.jsonl, then runs all metrics
@@ -173,8 +173,16 @@ def evaluate(model, train_ds_eval, test_ds_eval, eval_cfg, device, seed, output_
     capture_test = Path(test_ds_eval._capture_dir)    # type: ignore[attr-defined]
     label_df = build_label_dataframe(capture_train, capture_test)
 
-    train_loader = DataLoader(train_ds_eval, batch_size=int(eval_cfg.get("sub_batch_size", 64)), shuffle=False)
-    eval_loader = DataLoader(test_ds_eval, batch_size=int(eval_cfg.get("sub_batch_size", 64)), shuffle=False)
+    eval_sub_batch = int(eval_cfg.get("sub_batch_size", 64))
+    persistent = num_workers > 0
+    train_loader = DataLoader(
+        train_ds_eval, batch_size=eval_sub_batch, shuffle=False,
+        num_workers=num_workers, persistent_workers=persistent,
+    )
+    eval_loader = DataLoader(
+        test_ds_eval, batch_size=eval_sub_batch, shuffle=False,
+        num_workers=num_workers, persistent_workers=persistent,
+    )
 
     model.eval()
 
@@ -192,10 +200,10 @@ def evaluate(model, train_ds_eval, test_ds_eval, eval_cfg, device, seed, output_
         train_data_loader=train_loader,
         metrics=metrics_list,
         batch_size=int(eval_cfg.get("eval_batch_size", 256)),
-        sub_batch_size=int(eval_cfg.get("sub_batch_size", 64)),
+        sub_batch_size=eval_sub_batch,
         device=device,
-        num_workers=0,  # eval loaders don't benefit from workers and we want to keep memory low
-        persistent_workers=False,
+        num_workers=num_workers,
+        persistent_workers=persistent,
         outlier_class=1,
     )
 
@@ -327,7 +335,7 @@ def run_one_dataset(
     t1 = time.time()
     ood_stats = evaluate(
         model, eval_train_ds, eval_test_ds, eval_cfg, device=device, seed=seed,
-        output_dir=cell_dir,
+        output_dir=cell_dir, num_workers=num_workers,
     )
     eval_secs = time.time() - t1
     logger.info(f"[{method_name}/{dataset_name}] eval: {eval_secs:.0f}s")
