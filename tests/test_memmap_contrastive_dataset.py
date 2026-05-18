@@ -367,18 +367,170 @@ def test_view_determinism_with_fixed_layer(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# NotImplementedError on reserved summary modes
+# ValueError on invalid summary mode
 # ---------------------------------------------------------------------------
 
-def test_coarse_and_full_summary_raise_not_implemented(tmp_path):
+def test_invalid_attention_summary_raises(tmp_path):
     capture = _make_full_capture_dir(tmp_path, n_samples=5)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError):
         MemmapContrastiveDataset(
             capture, split="all", num_views=2,
-            include_response_attention=True, attention_summary="coarse",
+            include_response_attention=True, attention_summary="hexgrid",
         )
-    with pytest.raises(NotImplementedError):
-        MemmapContrastiveDataset(
-            capture, split="all", num_views=2,
-            include_response_attention=True, attention_summary="full",
-        )
+
+
+# ---------------------------------------------------------------------------
+# Coarse attention summary
+# ---------------------------------------------------------------------------
+
+def test_coarse_attention_summary_shape(tmp_path):
+    """Coarse target: (num_views, num_layers, 8, 8) per direction."""
+    capture = _make_full_capture_dir(tmp_path, n_samples=10)
+    nl = _SMALL_CFG["num_layers"]
+    ds = MemmapContrastiveDataset(
+        capture, split="all", num_views=2,
+        relevant_layers=[1, 2, 3, 4],
+        include_response_attention=True,
+        attention_summary="coarse",
+        attention_target_layer_offset_forward=1,
+        attention_target_layer_offset_backward=1,
+    )
+    sample = ds[0]
+    assert "attention_forward" in sample
+    assert "attention_backward" in sample
+    assert sample["attention_forward"].shape == (2, nl, 8, 8)
+    assert sample["attention_backward"].shape == (2, nl, 8, 8)
+    assert sample["attention_forward"].dtype == torch.float32
+
+
+def test_coarse_backward_only_emitted(tmp_path):
+    capture = _make_full_capture_dir(tmp_path, n_samples=10)
+    nl = _SMALL_CFG["num_layers"]
+    ds = MemmapContrastiveDataset(
+        capture, split="all", num_views=2,
+        relevant_layers=[1, 2, 3, 4],
+        include_response_attention=True,
+        attention_summary="coarse",
+        attention_target_layer_offset_backward=1,
+    )
+    sample = ds[0]
+    assert "attention_backward" in sample
+    assert "attention_forward" not in sample
+    assert sample["attention_backward"].shape == (2, nl, 8, 8)
+
+
+def test_coarse_no_nan_in_full_response(tmp_path):
+    """When all response tokens fill r_max, no NaN cells should appear in coarse."""
+    n = 6
+    r_max = _SMALL_CFG["r_max"]
+    # Set response_len = r_max so all cells are valid.
+    rls = np.full(n, r_max, dtype=np.int32)
+    capture = _make_full_capture_dir(tmp_path, n_samples=n, response_lengths=rls)
+    ds = MemmapContrastiveDataset(
+        capture, split="all", num_views=2,
+        relevant_layers=[1, 2, 3, 4],
+        include_response_attention=True,
+        attention_summary="coarse",
+        attention_target_layer_offset_backward=1,
+    )
+    sample = ds[0]
+    assert torch.isfinite(sample["attention_backward"]).all()
+
+
+def test_coarse_zero_response_yields_nan(tmp_path):
+    """response_len=0 → all NaN output for coarse."""
+    n = 4
+    rls = np.zeros(n, dtype=np.int32)
+    capture = _make_full_capture_dir(tmp_path, n_samples=n, response_lengths=rls)
+    ds = MemmapContrastiveDataset(
+        capture, split="all", num_views=1,
+        relevant_layers=[1],
+        fixed_layer=1,
+        include_response_attention=True,
+        attention_summary="coarse",
+        attention_target_layer_offset_backward=1,
+    )
+    sample = ds[0]
+    assert torch.isnan(sample["attention_backward"]).all()
+
+
+# ---------------------------------------------------------------------------
+# Full attention summary
+# ---------------------------------------------------------------------------
+
+def test_full_attention_summary_shape(tmp_path):
+    """Full target: (num_views, num_layers, r_max, r_max) per direction."""
+    capture = _make_full_capture_dir(tmp_path, n_samples=10)
+    nl = _SMALL_CFG["num_layers"]
+    rm = _SMALL_CFG["r_max"]
+    ds = MemmapContrastiveDataset(
+        capture, split="all", num_views=2,
+        relevant_layers=[1, 2, 3, 4],
+        include_response_attention=True,
+        attention_summary="full",
+        attention_target_layer_offset_forward=1,
+        attention_target_layer_offset_backward=1,
+    )
+    sample = ds[0]
+    assert "attention_forward" in sample
+    assert "attention_backward" in sample
+    assert sample["attention_forward"].shape == (2, nl, rm, rm)
+    assert sample["attention_backward"].shape == (2, nl, rm, rm)
+    assert sample["attention_forward"].dtype == torch.float32
+
+
+def test_full_backward_only_emitted(tmp_path):
+    capture = _make_full_capture_dir(tmp_path, n_samples=10)
+    nl = _SMALL_CFG["num_layers"]
+    rm = _SMALL_CFG["r_max"]
+    ds = MemmapContrastiveDataset(
+        capture, split="all", num_views=2,
+        relevant_layers=[1, 2, 3, 4],
+        include_response_attention=True,
+        attention_summary="full",
+        attention_target_layer_offset_backward=1,
+    )
+    sample = ds[0]
+    assert "attention_backward" in sample
+    assert "attention_forward" not in sample
+    assert sample["attention_backward"].shape == (2, nl, rm, rm)
+
+
+def test_full_out_of_response_cells_are_nan(tmp_path):
+    """Cells beyond r_eff must be NaN; cells within r_eff must be finite."""
+    n = 6
+    r_eff = 3  # shorter than r_max=6
+    rls = np.full(n, r_eff, dtype=np.int32)
+    capture = _make_full_capture_dir(tmp_path, n_samples=n, response_lengths=rls)
+    rm = _SMALL_CFG["r_max"]
+    ds = MemmapContrastiveDataset(
+        capture, split="all", num_views=1,
+        relevant_layers=[1],
+        fixed_layer=1,
+        include_response_attention=True,
+        attention_summary="full",
+        attention_target_layer_offset_backward=1,
+    )
+    sample = ds[0]
+    attn = sample["attention_backward"]  # (1, num_layers, r_max, r_max)
+    # All cells within r_eff × r_eff block must be finite.
+    assert torch.isfinite(attn[:, :, :r_eff, :r_eff]).all()
+    # Cells outside the block must be NaN.
+    assert torch.isnan(attn[:, :, r_eff:, :]).all()
+    assert torch.isnan(attn[:, :, :, r_eff:]).all()
+
+
+def test_full_zero_response_yields_nan(tmp_path):
+    n = 4
+    rls = np.zeros(n, dtype=np.int32)
+    capture = _make_full_capture_dir(tmp_path, n_samples=n, response_lengths=rls)
+    ds = MemmapContrastiveDataset(
+        capture, split="all", num_views=1,
+        relevant_layers=[1],
+        fixed_layer=1,
+        include_response_attention=True,
+        attention_summary="full",
+        attention_target_layer_offset_backward=1,
+    )
+    sample = ds[0]
+    assert torch.isnan(sample["attention_backward"]).all()
