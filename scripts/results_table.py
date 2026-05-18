@@ -243,13 +243,20 @@ def _dataset_from_config_name(cfg_name: str, model_label: str) -> str:
     return stem
 
 
-def collect_training_cells() -> list[dict]:
-    """One cell per (config, dataset, method, seed)."""
+def collect_training_cells(*, include_smollm3: bool = False) -> list[dict]:
+    """One cell per (config, dataset, method, seed).
+
+    SmolLM3 configs are excluded by default per PAPER_ROADMAP §5 (third-model
+    expansion is out of scope for this submission). Pass ``include_smollm3=True``
+    (or ``--include-smollm3`` on the CLI) to re-enable them.
+    """
     cells: list[dict] = []
     cfg_dir = PROJECT_ROOT / "configs" / "experiments"
     for cfg_path in sorted(cfg_dir.glob("baseline_comparison_*.json")):
         cfg = load_experiment_config(str(cfg_path), project_root=str(PROJECT_ROOT))
         model_label = _model_from_config_name(cfg_path.name)
+        if model_label == "SmolLM3" and not include_smollm3:
+            continue
         dataset_label = _dataset_from_config_name(cfg_path.name, model_label)
 
         specs = enumerate_runs(
@@ -631,10 +638,17 @@ def main() -> None:
         help="Directory to write results_table.json + results_table.csv "
              "(default: output/results_table/).",
     )
+    parser.add_argument(
+        "--include-smollm3",
+        action="store_true",
+        help="Include SmolLM3 training cells. Excluded by default since "
+             "SmolLM3 is out of scope per PAPER_ROADMAP §5; flip on to inspect "
+             "the cached SmolLM3 configs without losing the rest of the table.",
+    )
     args = parser.parse_args()
 
     cells: list[dict] = []
-    cells += collect_training_cells()
+    cells += collect_training_cells(include_smollm3=args.include_smollm3)
     cells += collect_sampling_cells()
     cells += collect_sep_cells()
     cells += collect_p_true_cells()
