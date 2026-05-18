@@ -1865,6 +1865,12 @@ def parse_args() -> argparse.Namespace:
         help="Override max_epochs for all methods (useful for quick testing)",
     )
     parser.add_argument(
+        "--steps-per-epoch",
+        type=int,
+        default=None,
+        help="Override steps_per_epoch_override for all methods (useful for quick testing)",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default=None,
@@ -1960,6 +1966,7 @@ def main() -> None:
         sys.exit(1)
 
     max_epochs_override = args.max_epochs
+    steps_per_epoch_override = args.steps_per_epoch
 
     # ---- Resolve device ----
     device = args.device or experiment_cfg.get("device", "auto")
@@ -2140,6 +2147,7 @@ def main() -> None:
 
         # Detect unified config format (has "train" and/or "test" sub-keys)
         has_train_test = "train" in dataset_cfg and isinstance(dataset_cfg["train"], dict)
+        backend = dataset_cfg.get("backend", "zarr")
 
         # Resolve per-seed split seeds. split_seeds[i] is the split_seed used for
         # training_seeds[i] in the *full* config list. Falls back to the single
@@ -2158,7 +2166,19 @@ def main() -> None:
         # Build the test ActivationParser once — the test set is constant across all
         # seeds (unified format: separate test zarr with split_strategy="none").
         test_ap = None
-        if has_train_test and "test" in dataset_cfg and isinstance(dataset_cfg["test"], dict):
+        if backend == "memmap":
+            from activation_research.memmap_activation_parser import MemmapActivationParser
+            logger.info(
+                f"Loading test MemmapActivationParser from: "
+                f"{dataset_cfg['icr_capture']['test_dir']}"
+            )
+            test_ap = MemmapActivationParser(
+                capture_dir=str(project_root / dataset_cfg["icr_capture"]["test_dir"]),
+                random_seed=global_split_seed,
+                split_strategy="none",
+                verbose=True,
+            )
+        elif has_train_test and "test" in dataset_cfg and isinstance(dataset_cfg["test"], dict):
             test_cfg = {**dataset_cfg, **dataset_cfg["test"]}
             _resolve_paths(test_cfg, project_root)
             test_eval_json = _build_eval_json(test_cfg)
@@ -2176,18 +2196,24 @@ def main() -> None:
         # ---- Smoketest: check the test cache once per dataset ----
         smoketest_params = None
         if args.smoketest_memmap_cache:
-            smoketest_params = _canonical_preload_params(
-                methods, _preloaded_method_cfgs, project_root
-            )
-            if smoketest_params is None:
-                logger.warning(
-                    f"[smoketest] {dataset_name}: no learned method found in "
-                    f"experiment — nothing to check (non-learned methods don't preload)."
+            if backend == "memmap":
+                logger.info(
+                    f"[smoketest] {dataset_name}: backend=memmap — "
+                    f"smoketest-memmap-cache not applicable, skipping"
                 )
-            elif test_ap is not None:
-                smoketest_results.append(
-                    _check_memmap_cache(test_ap, smoketest_params, f"{dataset_name}/test")
+            else:
+                smoketest_params = _canonical_preload_params(
+                    methods, _preloaded_method_cfgs, project_root
                 )
+                if smoketest_params is None:
+                    logger.warning(
+                        f"[smoketest] {dataset_name}: no learned method found in "
+                        f"experiment — nothing to check (non-learned methods don't preload)."
+                    )
+                elif test_ap is not None:
+                    smoketest_results.append(
+                        _check_memmap_cache(test_ap, smoketest_params, f"{dataset_name}/test")
+                    )
 
         # Non-learned methods (token_entropy, logprob_baseline) run once regardless
         # of how many seeds are in the sweep.
@@ -2237,8 +2263,20 @@ def main() -> None:
                 _split_seed_map.get(seed, global_split_seed) if _split_seed_map else global_split_seed
             )
 
-            # Build a fresh train ActivationParser for this fold's split.
-            if has_train_test:
+            # Build a fresh train parser for this fold's split.
+            if backend == "memmap":
+                from activation_research.memmap_activation_parser import MemmapActivationParser
+                logger.info(
+                    f"Loading train MemmapActivationParser (split_seed={actual_split_seed}) "
+                    f"from: {dataset_cfg['icr_capture']['train_dir']}"
+                )
+                ap = MemmapActivationParser(
+                    capture_dir=str(project_root / dataset_cfg["icr_capture"]["train_dir"]),
+                    random_seed=actual_split_seed,
+                    split_strategy="three_way",
+                    verbose=True,
+                )
+            elif has_train_test:
                 train_cfg = {**dataset_cfg, **dataset_cfg["train"]}
                 _resolve_paths(train_cfg, project_root)
                 train_eval_json = _build_eval_json(train_cfg)
@@ -2292,11 +2330,14 @@ def main() -> None:
                     with open(method_cfg_path) as f:
                         method_cfg = json.load(f)
 
-                # Apply max_epochs override
-                if max_epochs_override is not None and method_cfg.get("training"):
+                # Apply max_epochs / steps_per_epoch overrides
+                if (max_epochs_override is not None or steps_per_epoch_override is not None) and method_cfg.get("training"):
                     method_cfg = dict(method_cfg)  # shallow copy to avoid mutating cached
                     method_cfg["training"] = dict(method_cfg["training"])
-                    method_cfg["training"]["max_epochs"] = max_epochs_override
+                    if max_epochs_override is not None:
+                        method_cfg["training"]["max_epochs"] = max_epochs_override
+                    if steps_per_epoch_override is not None:
+                        method_cfg["training"]["steps_per_epoch_override"] = steps_per_epoch_override
 
                 from scripts.experiment_utils import is_seeded_method
 
