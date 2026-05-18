@@ -1877,12 +1877,15 @@ def run_act_vit(
     persistent_workers = experiment_cfg.get("persistent_workers", True) and num_workers > 0
     batch_size = train_cfg["batch_size"]
 
+    prefetch_factor = 4 if num_workers > 0 else None
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
         persistent_workers=persistent_workers,
+        pin_memory=True,
+        prefetch_factor=prefetch_factor,
     )
     val_loader = DataLoader(
         val_ds,
@@ -1890,6 +1893,8 @@ def run_act_vit(
         shuffle=False,
         num_workers=num_workers,
         persistent_workers=persistent_workers,
+        pin_memory=True,
+        prefetch_factor=prefetch_factor,
     )
 
     # Build model
@@ -1937,8 +1942,8 @@ def run_act_vit(
         epoch_t0 = time.time()
         step_t0 = time.time()
         for step_idx, batch in enumerate(train_loader):
-            x = batch["activations"].to(eval_device)       # (B, L, N, D)
-            labels_b = batch["label"].float().to(eval_device)  # (B,)
+            x = batch["activations"].to(eval_device, non_blocking=True)       # (B, L, N, D)
+            labels_b = batch["label"].float().to(eval_device, non_blocking=True)  # (B,)
             logits = model(x).squeeze(1)                   # (B,)
             loss = loss_fn(logits, labels_b)
             optimizer.zero_grad()
@@ -1961,7 +1966,7 @@ def run_act_vit(
         val_preds, val_labels = [], []
         with torch.no_grad():
             for batch in val_loader:
-                x = batch["activations"].to(eval_device)
+                x = batch["activations"].to(eval_device, non_blocking=True)
                 logits = model(x).squeeze(1)
                 val_preds.append(torch.sigmoid(logits).cpu())
                 val_labels.append(batch["label"].cpu())
