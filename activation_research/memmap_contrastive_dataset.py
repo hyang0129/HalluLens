@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 from activation_research.icr_dataset import _make_split_indices
@@ -175,11 +176,10 @@ class MemmapContrastiveDataset(Dataset):
         if not capture_dir.exists():
             raise FileNotFoundError(f"capture_dir not found: {capture_dir}")
 
-        if attention_summary != "stats":
-            # K2 ('coarse') and K3 ('full') are reserved API — see spec §5.1.
-            raise NotImplementedError(
-                f"attention_summary={attention_summary!r} is reserved for a "
-                "future PR; only 'stats' is implemented today."
+        if attention_summary not in ("stats", "coarse", "full"):
+            raise ValueError(
+                f"attention_summary must be 'stats', 'coarse', or 'full', "
+                f"got {attention_summary!r}"
             )
 
         # --- Config ---
@@ -240,6 +240,7 @@ class MemmapContrastiveDataset(Dataset):
 
         # --- Attention options ---
         self._include_attn = bool(include_response_attention)
+        self._attn_summary = str(attention_summary)
         self._attn_offset_fwd = (
             int(attention_target_layer_offset_forward)
             if attention_target_layer_offset_forward is not None
@@ -373,6 +374,69 @@ class MemmapContrastiveDataset(Dataset):
         return _compute_attn_stats(np.asarray(attn_block), rlen)
 
     # ------------------------------------------------------------------ #
+    def _attn_coarse_for_all_layers(self, sample_row: int) -> np.ndarray:
+        """Return coarse (8×8) binned attention for all num_layers, one sample.
+
+        Returns
+        -------
+        ndarray (num_layers, 8, 8) float32
+            Each layer's r_eff × r_eff valid block is binned into 8×8 via
+            adaptive average pooling. Cells beyond r_eff are NaN-filled so
+            the loss can exclude them via masking. When r_eff == 0 the entire
+            layer matrix is NaN.
+        """
+        rlen = int(self._resp_len[sample_row])
+        r_eff = min(rlen, self._r_max)
+
+        out = np.full((self._num_layers, 8, 8), np.nan, dtype=np.float32)
+        if r_eff <= 0:
+            return out
+
+        # Read all layers at once — one memmap row.
+        attn_all = np.array(
+            self._resp_attn[sample_row], dtype=np.float32
+        )  # (num_layers, r_max, r_max)
+
+        # Bin via adaptive average pooling (CPU, via torch).
+        # Pool only the valid r_eff × r_eff block; the remainder is padding
+        # zeros from the capture writer and must not pollute the average.
+        valid_block = torch.from_numpy(
+            attn_all[:, :r_eff, :r_eff]
+        )  # (num_layers, r_eff, r_eff)
+        valid_block = valid_block.unsqueeze(0)  # (1, num_layers, r_eff, r_eff) for pool2d
+
+        # F.adaptive_avg_pool2d expects (N, C, H, W); treat layers as channels.
+        pooled = F.adaptive_avg_pool2d(valid_block, (8, 8))  # (1, num_layers, 8, 8)
+        out[:] = pooled.squeeze(0).numpy()
+        return out  # (num_layers, 8, 8) — all cells are valid (no NaN needed)
+
+    # ------------------------------------------------------------------ #
+    def _attn_full_for_all_layers(self, sample_row: int) -> np.ndarray:
+        """Return full (r_max × r_max) attention for all num_layers, one sample.
+
+        Returns
+        -------
+        ndarray (num_layers, r_max, r_max) float32
+            The raw attention block. Cells at positions (i, j) where either
+            i >= r_eff or j >= r_eff are NaN-filled (variable-length masking).
+            When r_eff == 0 the entire output is NaN.
+        """
+        rlen = int(self._resp_len[sample_row])
+        r_eff = min(rlen, self._r_max)
+
+        out = np.full((self._num_layers, self._r_max, self._r_max), np.nan, dtype=np.float32)
+        if r_eff <= 0:
+            return out
+
+        attn_all = np.array(
+            self._resp_attn[sample_row], dtype=np.float32
+        )  # (num_layers, r_max, r_max)
+
+        # Copy the valid r_eff × r_eff block; everything outside stays NaN.
+        out[:, :r_eff, :r_eff] = attn_all[:, :r_eff, :r_eff]
+        return out  # (num_layers, r_max, r_max)
+
+    # ------------------------------------------------------------------ #
     def _get_logprob_fields(self, sample_row: int) -> Dict[str, torch.Tensor]:
         target_len = self._pad_length
         target_top_k = self._target_top_k
@@ -466,24 +530,46 @@ class MemmapContrastiveDataset(Dataset):
 
         # --- Attention summary fields (Mechanism K) ---
         if self._include_attn:
-            if self._attn_offset_fwd is not None:
-                stats_fwd = np.stack(
-                    [
-                        self._attn_stats_for_layer(sample_row, m + self._attn_offset_fwd)
-                        for m in view_model_layers
-                    ],
-                    axis=0,
-                )  # (K, _ATTN_STAT_DIM)
-                sample["attention_forward"] = torch.from_numpy(stats_fwd)
+            if self._attn_summary == "stats":
+                if self._attn_offset_fwd is not None:
+                    stats_fwd = np.stack(
+                        [
+                            self._attn_stats_for_layer(sample_row, m + self._attn_offset_fwd)
+                            for m in view_model_layers
+                        ],
+                        axis=0,
+                    )  # (K, _ATTN_STAT_DIM)
+                    sample["attention_forward"] = torch.from_numpy(stats_fwd)
 
-            if self._attn_offset_bwd is not None:
-                stats_bwd = np.stack(
-                    [
-                        self._attn_stats_for_layer(sample_row, m - self._attn_offset_bwd)
-                        for m in view_model_layers
-                    ],
-                    axis=0,
-                )  # (K, _ATTN_STAT_DIM)
-                sample["attention_backward"] = torch.from_numpy(stats_bwd)
+                if self._attn_offset_bwd is not None:
+                    stats_bwd = np.stack(
+                        [
+                            self._attn_stats_for_layer(sample_row, m - self._attn_offset_bwd)
+                            for m in view_model_layers
+                        ],
+                        axis=0,
+                    )  # (K, _ATTN_STAT_DIM)
+                    sample["attention_backward"] = torch.from_numpy(stats_bwd)
+
+            elif self._attn_summary == "coarse":
+                # Coarse: all num_layers attention layers, binned to 8×8.
+                # Shape per view: (num_layers, 8, 8). Stacked: (K, num_layers, 8, 8).
+                # The offset fields are unused for coarse/full — we emit all layers.
+                coarse = self._attn_coarse_for_all_layers(sample_row)  # (num_layers, 8, 8)
+                stacked = np.stack([coarse] * len(view_model_layers), axis=0)  # (K, num_layers, 8, 8)
+                if self._attn_offset_fwd is not None:
+                    sample["attention_forward"] = torch.from_numpy(stacked)
+                if self._attn_offset_bwd is not None:
+                    sample["attention_backward"] = torch.from_numpy(stacked)
+
+            elif self._attn_summary == "full":
+                # Full: all num_layers attention layers, r_max × r_max each.
+                # Shape per view: (num_layers, r_max, r_max). Stacked: (K, num_layers, r_max, r_max).
+                full = self._attn_full_for_all_layers(sample_row)  # (num_layers, r_max, r_max)
+                stacked = np.stack([full] * len(view_model_layers), axis=0)  # (K, num_layers, r_max, r_max)
+                if self._attn_offset_fwd is not None:
+                    sample["attention_forward"] = torch.from_numpy(stacked)
+                if self._attn_offset_bwd is not None:
+                    sample["attention_backward"] = torch.from_numpy(stacked)
 
         return sample
