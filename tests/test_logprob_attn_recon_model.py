@@ -36,15 +36,22 @@ def test_invalid_target_raises():
         )
 
 
-def test_coarse_and_full_targets_not_implemented():
+def test_coarse_target_not_implemented():
+    # 'coarse' is permanently out of scope (issue #82).
     with pytest.raises(NotImplementedError):
         LogprobAttnReconProgressiveCompressor(
             input_dim=128, final_dim=64, attn_target="coarse",
         )
-    with pytest.raises(NotImplementedError):
-        LogprobAttnReconProgressiveCompressor(
-            input_dim=128, final_dim=64, attn_target="full",
-        )
+
+
+def test_full_target_succeeds():
+    # 'full' is implemented in this PR — must not raise.
+    m = LogprobAttnReconProgressiveCompressor(
+        input_dim=128, final_dim=64, attn_target="full", attn_r_max=6,
+        attn_direction="both",
+    )
+    assert m.attn_target == "full"
+    assert m._attn_out_dim == 6 * 7  # r_max * (r_max + 1)
 
 
 def test_active_directions_dispatch():
@@ -245,3 +252,182 @@ def test_attn_recon_partial_nan_excluded_from_loss():
     # 3 valid entries, sum sq err = 3, mean = 1.0
     assert abs(float(loss) - 1.0) < 1e-5
     assert diag["valid_count"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Full attention target (issue #82)
+# ---------------------------------------------------------------------------
+
+def _make_full_model(r_max=4, direction="both"):
+    return LogprobAttnReconProgressiveCompressor(
+        input_dim=128, final_dim=64,
+        attn_target="full",
+        attn_r_max=r_max,
+        attn_direction=direction,
+        attn_var_threshold=1e-12,
+    )
+
+
+def _make_full_target(batch=2, r_max=4, r_eff=3):
+    """Build a synthetic (batch, r_max, r_max+1) target with prompt-sink augmentation."""
+    import math
+    target = torch.full((batch, r_max, r_max + 1), float("nan"))
+    for b in range(batch):
+        for q in range(r_eff):
+            # Uniform distribution over r_eff response keys.
+            val = 1.0 / r_eff
+            target[b, q, :r_eff] = val
+            # Prompt-sink: leftover mass (here zero — rows already sum to 1).
+            # Add a small sink mass so the test is more realistic.
+            resp_sum = r_eff * val
+            target[b, q, :r_eff] = target[b, q, :r_eff] * 0.8
+            target[b, q, r_max] = 1.0 - float(target[b, q, :r_eff].sum())
+    return target.reshape(batch, r_max * (r_max + 1))
+
+
+def test_full_target_constructor_succeeds():
+    m = _make_full_model(r_max=6)
+    assert m.attn_target == "full"
+    assert m._attn_out_dim == 6 * 7
+
+
+def test_full_decoder_output_shape_both_directions():
+    r_max = 4
+    m = _make_full_model(r_max=r_max, direction="both")
+    x = torch.randn(3, 6, 128)
+    z, lp_pred, attn_pred = m.forward_with_recon(x)
+    assert z.shape == (3, 64)
+    assert set(attn_pred.keys()) == {"forward", "backward"}
+    assert attn_pred["forward"].shape == (3, r_max * (r_max + 1))
+    assert attn_pred["backward"].shape == (3, r_max * (r_max + 1))
+
+
+def test_full_decoder_output_shape_forward_only():
+    r_max = 4
+    m = _make_full_model(r_max=r_max, direction="forward")
+    x = torch.randn(2, 5, 128)
+    _, _, attn_pred = m.forward_with_recon(x)
+    assert set(attn_pred.keys()) == {"forward"}
+    assert attn_pred["forward"].shape == (2, r_max * (r_max + 1))
+
+
+def test_full_kl_loss_finite_no_nan_grads():
+    """KL loss must be finite and produce non-NaN gradients."""
+    r_max, r_eff = 4, 3
+    m = _make_full_model(r_max=r_max)
+    x = torch.randn(2, 6, 128, requires_grad=False)
+    _, _, attn_pred = m.forward_with_recon(x)
+
+    target = _make_full_target(batch=2, r_max=r_max, r_eff=r_eff)
+
+    loss, diag = m.recon_loss_attn(attn_pred["forward"], target)
+    assert torch.isfinite(loss), f"loss is not finite: {loss}"
+    assert not diag["suppressed"]
+
+    loss.backward()
+    for name, p in m.attn_decoders["fwd"].named_parameters():
+        assert p.grad is not None, f"param {name} has no grad"
+        assert torch.isfinite(p.grad).all(), f"param {name} has NaN grad"
+
+
+def test_full_kl_loss_out_of_range_layer_zero_loss():
+    """Full-NaN target (out-of-range layer) must contribute 0 loss, no grad."""
+    r_max = 4
+    m = _make_full_model(r_max=r_max)
+    x = torch.randn(2, 6, 128)
+    _, _, attn_pred = m.forward_with_recon(x)
+
+    # Full-NaN target simulates an out-of-range layer.
+    target = torch.full((2, r_max * (r_max + 1)), float("nan"))
+    loss, diag = m.recon_loss_attn(attn_pred["forward"], target)
+    assert float(loss) == 0.0
+    assert diag["suppressed"]
+
+
+def test_full_kl_loss_backward_direction():
+    """KL loss for the backward decoder must also run cleanly."""
+    r_max, r_eff = 4, 3
+    m = _make_full_model(r_max=r_max)
+    x = torch.randn(2, 6, 128)
+    _, _, attn_pred = m.forward_with_recon(x)
+
+    target = _make_full_target(batch=2, r_max=r_max, r_eff=r_eff)
+    loss, diag = m.recon_loss_attn(attn_pred["backward"], target)
+    assert torch.isfinite(loss)
+    assert not diag["suppressed"]
+
+
+def test_stats_target_loss_still_mse():
+    """Stats path must still use MSE after this PR (regression check)."""
+    m = LogprobAttnReconProgressiveCompressor(
+        input_dim=128, final_dim=64, attn_direction="backward",
+        attn_var_threshold=1e-8, attn_target="stats",
+    )
+    pred = torch.tensor([[1.0, 2.0, 3.0], [0.0, 0.0, 0.0]], dtype=torch.float32)
+    target = torch.tensor(
+        [[2.0, 3.0, 4.0],
+         [float("nan"), float("nan"), float("nan")]],
+    )
+    loss, diag = m.recon_loss_attn(pred, target)
+    assert abs(float(loss) - 1.0) < 1e-5
+    assert diag["valid_count"] == 3
+
+
+def test_full_round_trip_forward_backward_step(tmp_path):
+    """Smoke: tiny synthetic capture → dataset → full model → fwd + bwd step."""
+    import sys, os
+    sys.path.insert(0, str(os.path.join(os.path.dirname(__file__), "..")))
+    from tests.test_memmap_contrastive_dataset import _make_full_capture_dir, _SMALL_CFG
+    from activation_research.memmap_contrastive_dataset import MemmapContrastiveDataset
+
+    r_max = _SMALL_CFG["r_max"]          # 6
+    capture = _make_full_capture_dir(tmp_path, n_samples=5)
+
+    ds = MemmapContrastiveDataset(
+        capture, split="all", num_views=2,
+        relevant_layers=[1, 2, 3],
+        include_response_attention=True,
+        attention_summary="full",
+        attention_target_layer_offset_forward=1,
+        attention_target_layer_offset_backward=1,
+    )
+
+    m = LogprobAttnReconProgressiveCompressor(
+        input_dim=_SMALL_CFG["hidden_dim"],
+        final_dim=64,
+        attn_target="full",
+        attn_r_max=r_max,
+        attn_direction="both",
+        attn_var_threshold=1e-12,
+    )
+    opt = torch.optim.Adam(m.parameters(), lr=1e-3)
+
+    # Build a small batch manually (no DataLoader needed).
+    samples = [ds[i] for i in range(3)]
+    # Stack views_activations: (B, K, max_resp, hidden_dim)
+    acts = torch.stack([s["views_activations"] for s in samples])   # (3, 2, mr, hd)
+    attn_fwd = torch.stack([s["attention_forward"] for s in samples])   # (3, 2, r_max, r_max+1)
+    attn_bwd = torch.stack([s["attention_backward"] for s in samples])
+
+    B, K = acts.shape[:2]
+    # Flatten (B, K) → (B*K) for encoder.
+    acts_flat = acts.reshape(B * K, *acts.shape[2:])    # (6, mr, hd)
+    _, _, attn_pred = m.forward_with_recon(acts_flat)
+
+    # Flatten targets to (N, r_max * (r_max+1)).
+    attn_fwd_flat = attn_fwd.reshape(B * K, r_max * (r_max + 1))
+    attn_bwd_flat = attn_bwd.reshape(B * K, r_max * (r_max + 1))
+
+    loss_fwd, _ = m.recon_loss_attn(attn_pred["forward"], attn_fwd_flat)
+    loss_bwd, _ = m.recon_loss_attn(attn_pred["backward"], attn_bwd_flat)
+    loss = loss_fwd + loss_bwd
+
+    opt.zero_grad()
+    loss.backward()
+    opt.step()
+
+    # Every decoder parameter must have a finite gradient.
+    for direction_key in ("fwd", "bwd"):
+        for name, p in m.attn_decoders[direction_key].named_parameters():
+            assert p.grad is not None, f"attn_decoders[{direction_key}].{name} has no grad"
+            assert torch.isfinite(p.grad).all(), f"NaN grad in attn_decoders[{direction_key}].{name}"

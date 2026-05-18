@@ -370,15 +370,199 @@ def test_view_determinism_with_fixed_layer(tmp_path):
 # NotImplementedError on reserved summary modes
 # ---------------------------------------------------------------------------
 
-def test_coarse_and_full_summary_raise_not_implemented(tmp_path):
+def test_coarse_summary_raises_not_implemented(tmp_path):
+    # 'coarse' is permanently out of scope (issue #82).
     capture = _make_full_capture_dir(tmp_path, n_samples=5)
     with pytest.raises(NotImplementedError):
         MemmapContrastiveDataset(
             capture, split="all", num_views=2,
             include_response_attention=True, attention_summary="coarse",
         )
-    with pytest.raises(NotImplementedError):
-        MemmapContrastiveDataset(
-            capture, split="all", num_views=2,
-            include_response_attention=True, attention_summary="full",
+
+
+# ---------------------------------------------------------------------------
+# Full attention target (issue #82)
+# ---------------------------------------------------------------------------
+
+def test_full_summary_construction_succeeds(tmp_path):
+    capture = _make_full_capture_dir(tmp_path, n_samples=5)
+    ds = MemmapContrastiveDataset(
+        capture, split="all", num_views=2,
+        relevant_layers=[1, 2, 3],
+        include_response_attention=True,
+        attention_summary="full",
+        attention_target_layer_offset_forward=1,
+        attention_target_layer_offset_backward=1,
+    )
+    assert len(ds) == 5
+
+
+def test_full_target_shape(tmp_path):
+    r_max = _SMALL_CFG["r_max"]          # 6
+    capture = _make_full_capture_dir(tmp_path, n_samples=5)
+    ds = MemmapContrastiveDataset(
+        capture, split="all", num_views=2,
+        relevant_layers=[1, 2, 3],
+        include_response_attention=True,
+        attention_summary="full",
+        attention_target_layer_offset_forward=1,
+        attention_target_layer_offset_backward=1,
+    )
+    sample = ds[0]
+    assert sample["attention_forward"].shape == (2, r_max, r_max + 1)
+    assert sample["attention_backward"].shape == (2, r_max, r_max + 1)
+
+
+def test_full_target_valid_rows_sum_to_one(tmp_path):
+    """Valid query rows must sum to exactly 1 over r_eff response keys + sink."""
+    r_max = _SMALL_CFG["r_max"]              # 6
+    r_eff = 8                                # default response_length from fixture
+    r_eff = min(r_eff, r_max)               # capped at r_max = 6
+
+    capture = _make_full_capture_dir(tmp_path, n_samples=5)
+    ds = MemmapContrastiveDataset(
+        capture, split="all", num_views=1,
+        relevant_layers=[2],
+        fixed_layer=2,
+        include_response_attention=True,
+        attention_summary="full",
+        attention_target_layer_offset_forward=1,
+    )
+    sample = ds[0]
+    attn = sample["attention_forward"][0]    # (r_max, r_max + 1)
+
+    for q in range(r_eff):
+        row = attn[q]
+        finite = row[torch.isfinite(row)]
+        row_sum = float(finite.sum())
+        assert abs(row_sum - 1.0) < 1e-4, f"row {q} sums to {row_sum}, expected 1.0"
+
+
+def test_full_target_out_of_range_query_rows_are_nan(tmp_path):
+    """Query rows beyond r_eff must be entirely NaN."""
+    r_max = _SMALL_CFG["r_max"]              # 6
+    r_eff = min(8, r_max)                    # = 6 (fixture default response_len=8)
+
+    capture = _make_full_capture_dir(tmp_path, n_samples=5)
+    ds = MemmapContrastiveDataset(
+        capture, split="all", num_views=1,
+        relevant_layers=[2],
+        fixed_layer=2,
+        include_response_attention=True,
+        attention_summary="full",
+        attention_target_layer_offset_forward=1,
+    )
+    sample = ds[0]
+    attn = sample["attention_forward"][0]    # (r_max, r_max + 1)
+
+    # rows [r_eff, r_max) must be NaN — when r_eff == r_max there are none
+    for q in range(r_eff, r_max):
+        assert torch.isnan(attn[q]).all(), f"row {q} should be fully NaN"
+
+
+def test_full_target_key_padding_columns_are_nan(tmp_path):
+    """Key-padding columns [r_eff, r_max) within valid rows must be NaN."""
+    r_max = _SMALL_CFG["r_max"]              # 6
+    r_eff = min(8, r_max)                    # = 6, so no key-padding columns here
+
+    # Use a short response length to actually have padding columns.
+    capture = _make_full_capture_dir(
+        tmp_path, n_samples=5, response_lengths=np.full(5, 3, dtype=np.int32)
+    )
+    ds = MemmapContrastiveDataset(
+        capture, split="all", num_views=1,
+        relevant_layers=[2],
+        fixed_layer=2,
+        include_response_attention=True,
+        attention_summary="full",
+        attention_target_layer_offset_forward=1,
+    )
+    sample = ds[0]
+    attn = sample["attention_forward"][0]    # (r_max, r_max + 1)
+    r_eff_actual = 3
+
+    for q in range(r_eff_actual):
+        # Columns [r_eff_actual, r_max) should be NaN; column r_max (sink) is finite.
+        for col in range(r_eff_actual, r_max):
+            assert torch.isnan(attn[q, col]), f"col {col} in row {q} should be NaN"
+        assert torch.isfinite(attn[q, r_max]), f"sink col in row {q} should be finite"
+
+
+def test_full_target_prompt_sink_value(tmp_path):
+    """Prompt-sink column must equal 1 - sum(response_key_cells) per row."""
+    r_max = _SMALL_CFG["r_max"]
+    r_eff = 3
+
+    capture = _make_full_capture_dir(
+        tmp_path, n_samples=5, response_lengths=np.full(5, r_eff, dtype=np.int32)
+    )
+    ds = MemmapContrastiveDataset(
+        capture, split="all", num_views=1,
+        relevant_layers=[2],
+        fixed_layer=2,
+        include_response_attention=True,
+        attention_summary="full",
+        attention_target_layer_offset_forward=1,
+    )
+    sample = ds[0]
+    attn = sample["attention_forward"][0]    # (r_max, r_max + 1)
+
+    for q in range(r_eff):
+        resp_sum = float(attn[q, :r_eff].sum())
+        sink = float(attn[q, r_max])
+        assert abs(sink - (1.0 - resp_sum)) < 1e-4, (
+            f"row {q}: sink={sink:.6f}, 1-resp_sum={1-resp_sum:.6f}"
+        )
+
+
+def test_full_target_out_of_range_layer_yields_full_nan(tmp_path):
+    """Backward offset from layer 0 exceeds range → full-NaN target."""
+    r_max = _SMALL_CFG["r_max"]
+    capture = _make_full_capture_dir(tmp_path, n_samples=5)
+    ds = MemmapContrastiveDataset(
+        capture, split="all", num_views=1,
+        relevant_layers=[0],
+        fixed_layer=0,
+        include_response_attention=True,
+        attention_summary="full",
+        attention_target_layer_offset_backward=2,  # target layer = 0 - 2 = -2
+    )
+    sample = ds[0]
+    assert sample["attention_backward"].shape == (1, r_max, r_max + 1)
+    assert torch.isnan(sample["attention_backward"]).all()
+
+
+def test_stats_path_regression_after_full_pr(tmp_path):
+    """Stats path must produce the same values as direct _compute_attn_stats call."""
+    capture = _make_full_capture_dir(tmp_path, n_samples=10)
+
+    # fixed_layer + num_views=1 → view layer is always layer 2; no random sampling.
+    ds = MemmapContrastiveDataset(
+        capture, split="all", num_views=1,
+        relevant_layers=[2],
+        fixed_layer=2,
+        include_response_attention=True,
+        attention_summary="stats",
+        attention_target_layer_offset_backward=1,   # target layer = 2 - 1 = 1
+        attention_target_layer_offset_forward=1,    # target layer = 2 + 1 = 3
+        random_seed=42,
+    )
+
+    for meta_i in range(5):
+        sample_row = int(ds._valid_sample_indices[meta_i])
+        expected_fwd = ds._attn_stats_for_layer(sample_row, model_layer=3)
+        expected_bwd = ds._attn_stats_for_layer(sample_row, model_layer=1)
+
+        item = ds[meta_i]
+        # shape (1, _ATTN_STAT_DIM) — squeeze the view dim.
+        got_fwd = item["attention_forward"][0].numpy()
+        got_bwd = item["attention_backward"][0].numpy()
+
+        np.testing.assert_array_equal(
+            got_fwd, expected_fwd,
+            err_msg=f"stats forward mismatch at meta_i={meta_i}",
+        )
+        np.testing.assert_array_equal(
+            got_bwd, expected_bwd,
+            err_msg=f"stats backward mismatch at meta_i={meta_i}",
         )
