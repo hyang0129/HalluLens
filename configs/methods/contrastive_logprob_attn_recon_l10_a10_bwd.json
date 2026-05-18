@@ -9,7 +9,7 @@
     "recon_hidden_dim": 256,
     "recon_lambda": 1.0,
     "logprob_var_threshold": 1e-4,
-    "attn_direction": "bwd",
+    "attn_direction": "backward",
     "attn_offset_k": 1,
     "attn_target": "stats",
     "attn_num_stat_features": 3,
