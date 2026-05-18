@@ -30,6 +30,7 @@ import os
 import platform
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # Add project root to path
@@ -1930,9 +1931,12 @@ def run_act_vit(
     best_val_auroc = -1.0
     best_epoch = -1
 
+    log_every = 50
     for epoch in range(max_epochs):
         model.train()
-        for batch in train_loader:
+        epoch_t0 = time.time()
+        step_t0 = time.time()
+        for step_idx, batch in enumerate(train_loader):
             x = batch["activations"].to(eval_device)       # (B, L, N, D)
             labels_b = batch["label"].float().to(eval_device)  # (B,)
             logits = model(x).squeeze(1)                   # (B,)
@@ -1941,6 +1945,16 @@ def run_act_vit(
             loss.backward()
             optimizer.step()
             scheduler.step()
+
+            if (step_idx + 1) % log_every == 0:
+                window_s = time.time() - step_t0
+                ms_per_step = 1000.0 * window_s / log_every
+                samples_per_sec = (log_every * batch_size) / window_s
+                logger.info(
+                    f"[act_vit] epoch={epoch+1}/{max_epochs} step={step_idx+1}/{len(train_loader)} "
+                    f"ms/step={ms_per_step:.0f} samp/s={samples_per_sec:.0f} loss={loss.item():.4f}"
+                )
+                step_t0 = time.time()
 
         # Validation AUROC
         model.eval()
@@ -1967,8 +1981,9 @@ def run_act_vit(
                 os.path.join(artifact_dir, "best_checkpoint.pt"),
             )
 
-        logger.debug(
-            f"[act_vit] epoch={epoch+1}/{max_epochs}  val_auroc={val_auroc:.4f}"
+        epoch_wall_s = time.time() - epoch_t0
+        logger.info(
+            f"[act_vit] epoch={epoch+1}/{max_epochs}  val_auroc={val_auroc:.4f}  wall={epoch_wall_s:.0f}s"
         )
 
     # Load best checkpoint (if any was saved)
