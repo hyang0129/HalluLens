@@ -178,11 +178,11 @@ class MemmapContrastiveDataset(Dataset):
         if not capture_dir.exists():
             raise FileNotFoundError(f"capture_dir not found: {capture_dir}")
 
-        if attention_summary != "stats":
-            # K2 ('coarse') and K3 ('full') are reserved API — see spec §5.1.
+        if attention_summary not in ("stats", "full"):
+            # 'coarse' is reserved — no plans to implement it (issue #82 comment).
             raise NotImplementedError(
-                f"attention_summary={attention_summary!r} is reserved for a "
-                "future PR; only 'stats' is implemented today."
+                f"attention_summary={attention_summary!r} is not implemented; "
+                "supported values: 'stats', 'full'."
             )
 
         # --- Config ---
@@ -243,6 +243,7 @@ class MemmapContrastiveDataset(Dataset):
 
         # --- Attention options ---
         self._include_attn = bool(include_response_attention)
+        self._attn_summary = str(attention_summary)
         self._attn_offset_fwd = (
             int(attention_target_layer_offset_forward)
             if attention_target_layer_offset_forward is not None
@@ -456,6 +457,44 @@ class MemmapContrastiveDataset(Dataset):
         return _compute_attn_stats(np.asarray(attn_block), rlen)
 
     # ------------------------------------------------------------------ #
+    def _attn_full_for_layer(self, sample_row: int, model_layer: int) -> torch.Tensor:
+        """Return full attention at one target layer with prompt-sink augmentation.
+
+        The stored response_attention rows sum to 1 − (mass on prompt keys)
+        because only the response-to-response slice is captured. We recover the
+        lost prompt mass as a single extra "sink" column so each valid query row
+        sums to exactly 1 over r_eff response keys + 1 prompt-sink cell.
+
+        Returns
+        -------
+        Tensor (r_max, r_max + 1) float32
+            Rows 0..r_eff-1 have finite values in columns [0, r_eff) (response
+            keys) and column r_max (prompt sink). Columns [r_eff, r_max) within
+            valid rows are NaN (key padding). Rows r_eff..r_max-1 are entirely
+            NaN. Out-of-range model_layer → full-NaN tensor.
+        """
+        r_max = self._r_max
+        out = torch.full((r_max, r_max + 1), float("nan"), dtype=torch.float32)
+
+        if model_layer < 0 or model_layer >= self._num_layers:
+            return out  # out-of-range layer → full NaN, contributes 0 to loss
+
+        rlen = int(self._resp_len[sample_row])
+        r_eff = min(rlen, r_max)
+        if r_eff <= 0:
+            return out
+
+        # fp16 → fp32 to avoid accumulation error when summing for the sink column
+        raw = torch.from_numpy(
+            np.array(self._resp_attn[sample_row, model_layer], dtype=np.float32)
+        )  # (r_max, r_max)
+
+        out[:r_eff, :r_eff] = raw[:r_eff, :r_eff]
+        # Prompt sink: mass not captured in the response-to-response slice.
+        out[:r_eff, r_max] = (1.0 - out[:r_eff, :r_eff].nansum(dim=-1)).clamp_(min=0.0)
+        return out
+
+    # ------------------------------------------------------------------ #
     def _get_logprob_fields(self, sample_row: int) -> Dict[str, torch.Tensor]:
         target_len = self._pad_length
         target_top_k = self._target_top_k
@@ -549,24 +588,48 @@ class MemmapContrastiveDataset(Dataset):
 
         # --- Attention summary fields (Mechanism K) ---
         if self._include_attn:
-            if self._attn_offset_fwd is not None:
-                stats_fwd = np.stack(
-                    [
-                        self._attn_stats_for_layer(sample_row, m + self._attn_offset_fwd)
-                        for m in view_model_layers
-                    ],
-                    axis=0,
-                )  # (K, _ATTN_STAT_DIM)
-                sample["attention_forward"] = torch.from_numpy(stats_fwd)
+            if self._attn_summary == "stats":
+                if self._attn_offset_fwd is not None:
+                    stats_fwd = np.stack(
+                        [
+                            self._attn_stats_for_layer(sample_row, m + self._attn_offset_fwd)
+                            for m in view_model_layers
+                        ],
+                        axis=0,
+                    )  # (K, _ATTN_STAT_DIM)
+                    sample["attention_forward"] = torch.from_numpy(stats_fwd)
 
-            if self._attn_offset_bwd is not None:
-                stats_bwd = np.stack(
-                    [
-                        self._attn_stats_for_layer(sample_row, m - self._attn_offset_bwd)
-                        for m in view_model_layers
-                    ],
-                    axis=0,
-                )  # (K, _ATTN_STAT_DIM)
-                sample["attention_backward"] = torch.from_numpy(stats_bwd)
+                if self._attn_offset_bwd is not None:
+                    stats_bwd = np.stack(
+                        [
+                            self._attn_stats_for_layer(sample_row, m - self._attn_offset_bwd)
+                            for m in view_model_layers
+                        ],
+                        axis=0,
+                    )  # (K, _ATTN_STAT_DIM)
+                    sample["attention_backward"] = torch.from_numpy(stats_bwd)
+
+            else:  # "full"
+                # Single target layer per (view k, direction d): view_indices[k] ± offset.
+                # Shape per view: (r_max, r_max + 1). Stacked: (K, r_max, r_max + 1).
+                if self._attn_offset_fwd is not None:
+                    full_fwd = torch.stack(
+                        [
+                            self._attn_full_for_layer(sample_row, m + self._attn_offset_fwd)
+                            for m in view_model_layers
+                        ],
+                        dim=0,
+                    )  # (K, r_max, r_max + 1)
+                    sample["attention_forward"] = full_fwd
+
+                if self._attn_offset_bwd is not None:
+                    full_bwd = torch.stack(
+                        [
+                            self._attn_full_for_layer(sample_row, m - self._attn_offset_bwd)
+                            for m in view_model_layers
+                        ],
+                        dim=0,
+                    )  # (K, r_max, r_max + 1)
+                    sample["attention_backward"] = full_bwd
 
         return sample
