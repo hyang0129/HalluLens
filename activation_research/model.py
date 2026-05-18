@@ -242,6 +242,255 @@ class LogprobReconProgressiveCompressor(nn.Module):
         return loss, {"logprob_var": logprob_var, "suppressed": False}
 
 
+class LogprobAttnReconProgressiveCompressor(nn.Module):
+    """ProgressiveCompressor with combined logprob (Mechanism F) + attention
+    summary (Mechanism K) auxiliary reconstruction heads.
+
+    Spec: ``specs/issue_75_combined_logprob_attn_recon.md``.
+
+    Training objective assembled by ``train_contrastive_logprob_attn_recon``::
+
+        L = L_SupCon(z)
+          + λ_lp   · L_recon_logprob(g_lp(z), ℓ)
+          + Σ_d λ_attn · L_recon_attn(g_attn^d(z), A_d)
+
+    where ``d`` iterates over the configured attention direction(s).
+
+    Inference path (``forward(x)``) is identical to ``ProgressiveCompressor``:
+    both auxiliary decoders are discarded. F-only and K-only fall out as
+    ``recon_lambda=0`` / ``attn_recon_lambda=0`` special cases. Setting
+    ``attn_direction="none"`` makes this class behave as a strict superset of
+    ``LogprobReconProgressiveCompressor``.
+
+    Parameters
+    ----------
+    input_dim, final_dim, dropout, input_dropout, normalize_input
+        Forwarded to the inner ``ProgressiveCompressor``.
+    recon_seq_len, recon_hidden_dim, recon_lambda, logprob_var_threshold
+        F head — same semantics as ``LogprobReconProgressiveCompressor``.
+    attn_direction : {"forward", "backward", "both", "none"}
+        Which attention-reconstruction heads to instantiate. ``"none"``
+        disables K entirely.
+    attn_offset_k : int
+        Layer offset between the rep's source layer ``ℓ`` and the prediction
+        target layer ``ℓ ± k``. Consumed by the *dataset*, not the model —
+        recorded here for config provenance only.
+    attn_target : {"stats", "coarse", "full"}
+        Decoder output type. Only ``"stats"`` is implemented in this PR;
+        ``"coarse"`` / ``"full"`` raise ``NotImplementedError``.
+    attn_num_stat_features : int
+        Output dimension of the K decoder per direction when
+        ``attn_target="stats"`` (default 3: entropy, focal_frac, self_mass).
+    attn_recon_hidden_dim, attn_recon_lambda, attn_var_threshold
+        K head hyperparameters. Lambda > 0 enables the head; set 0 to
+        disable while keeping the decoder weights for inspection.
+    """
+
+    _VALID_DIRECTIONS = ("forward", "backward", "both", "none")
+    _VALID_TARGETS = ("stats", "coarse", "full")
+    # Internal ModuleDict keys cannot use "forward" (collides with nn.Module.forward).
+    _DIRECTION_TO_KEY = {"forward": "fwd", "backward": "bwd"}
+
+    def __init__(
+        self,
+        input_dim: int = 4096,
+        final_dim: int = 512,
+        dropout: float = 0.1,
+        input_dropout: float = 0.2,
+        normalize_input: bool = False,
+        # F head
+        recon_seq_len: int = 64,
+        recon_hidden_dim: int = 256,
+        recon_lambda: float = 1.0,
+        logprob_var_threshold: float = 1e-4,
+        # K head
+        attn_direction: str = "backward",
+        attn_offset_k: int = 4,
+        attn_target: str = "stats",
+        attn_num_stat_features: int = 3,
+        attn_recon_hidden_dim: int = 256,
+        attn_recon_lambda: float = 1.0,
+        attn_var_threshold: float = 1e-5,
+    ):
+        super().__init__()
+
+        attn_direction = str(attn_direction).lower()
+        if attn_direction not in self._VALID_DIRECTIONS:
+            raise ValueError(
+                f"attn_direction must be one of {self._VALID_DIRECTIONS}, "
+                f"got {attn_direction!r}"
+            )
+        if attn_target not in self._VALID_TARGETS:
+            raise ValueError(
+                f"attn_target must be one of {self._VALID_TARGETS}, "
+                f"got {attn_target!r}"
+            )
+        if attn_target != "stats":
+            # Reserved API — see spec §1 (out of scope).
+            raise NotImplementedError(
+                f"attn_target={attn_target!r} is reserved for a follow-up PR; "
+                "only 'stats' is implemented today."
+            )
+
+        self.recon_seq_len = int(recon_seq_len)
+        self.recon_lambda = float(recon_lambda)
+        self.logprob_var_threshold = float(logprob_var_threshold)
+
+        self.attn_direction = attn_direction
+        self.attn_offset_k = int(attn_offset_k)
+        self.attn_target = attn_target
+        self.attn_num_stat_features = int(attn_num_stat_features)
+        self.attn_recon_lambda = float(attn_recon_lambda)
+        self.attn_var_threshold = float(attn_var_threshold)
+
+        self.encoder = ProgressiveCompressor(
+            input_dim=int(input_dim),
+            final_dim=int(final_dim),
+            dropout=float(dropout),
+            input_dropout=float(input_dropout),
+            normalize_input=bool(normalize_input),
+        )
+
+        # F decoder
+        self.lp_decoder = nn.Sequential(
+            nn.Linear(int(final_dim), int(recon_hidden_dim)),
+            nn.GELU(),
+            nn.Linear(int(recon_hidden_dim), self.recon_seq_len),
+        )
+
+        # K decoders — one per active direction, none when attn_direction="none".
+        # The public direction names are "forward" / "backward", but ModuleDict
+        # cannot use "forward" as a key because it collides with nn.Module.forward.
+        # Internal storage uses "fwd" / "bwd"; we expose helpers to translate.
+        if attn_direction == "none":
+            active_dirs: tuple[str, ...] = ()
+        elif attn_direction == "both":
+            active_dirs = ("forward", "backward")
+        else:
+            active_dirs = (attn_direction,)
+        self._active_attn_dirs = active_dirs
+
+        self.attn_decoders = nn.ModuleDict(
+            {
+                self._DIRECTION_TO_KEY[d]: nn.Sequential(
+                    nn.Linear(int(final_dim), int(attn_recon_hidden_dim)),
+                    nn.GELU(),
+                    nn.Linear(int(attn_recon_hidden_dim), self.attn_num_stat_features),
+                )
+                for d in active_dirs
+            }
+        )
+
+    # ------------------------------------------------------------------ #
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Standard inference forward — identical to ``ProgressiveCompressor``.
+
+        Auxiliary decoders are not called. ``x: (B, L, input_dim)``,
+        returns ``(B, final_dim)``.
+        """
+        return self.encoder(x)
+
+    # ------------------------------------------------------------------ #
+    def forward_with_recon(self, x: torch.Tensor):
+        """Forward pass returning both auxiliary predictions.
+
+        Returns
+        -------
+        z : (B, final_dim)
+        lp_pred : (B, recon_seq_len)
+        attn_pred_by_direction : dict[str, Tensor]
+            Keys are subset of ``{"forward", "backward"}``; empty when
+            ``attn_direction == "none"``. Each value has shape
+            ``(B, attn_num_stat_features)``.
+        """
+        z = self.encoder(x)
+        lp_pred = self.lp_decoder(z)
+        attn_pred = {
+            d: self.attn_decoders[self._DIRECTION_TO_KEY[d]](z)
+            for d in self._active_attn_dirs
+        }
+        return z, lp_pred, attn_pred
+
+    # ------------------------------------------------------------------ #
+    def recon_loss_lp(
+        self,
+        logprob_pred: torch.Tensor,
+        logprob_target: torch.Tensor,
+    ):
+        """MSE reconstruction loss for the logprob (F) head.
+
+        Identical contract to ``LogprobReconProgressiveCompressor.recon_loss``:
+        NaN-mask + variance-threshold suppression + linear-interpolation
+        resample to ``recon_seq_len``.
+        """
+        target = logprob_target.float()
+        logprob_var = float(target.var())
+        if logprob_var < self.logprob_var_threshold:
+            zero = torch.zeros(1, device=logprob_pred.device).squeeze()
+            return zero, {"logprob_var": logprob_var, "suppressed": True}
+
+        if target.shape[-1] != self.recon_seq_len:
+            target = F.interpolate(
+                target.unsqueeze(1),
+                size=self.recon_seq_len,
+                mode="linear",
+                align_corners=False,
+            ).squeeze(1)
+
+        loss = F.mse_loss(logprob_pred, target)
+        return loss, {"logprob_var": logprob_var, "suppressed": False}
+
+    # ------------------------------------------------------------------ #
+    def recon_loss_attn(
+        self,
+        attn_pred: torch.Tensor,
+        attn_target: torch.Tensor,
+    ):
+        """MSE reconstruction loss for one attention direction.
+
+        ``attn_pred`` and ``attn_target`` have shape
+        ``(N, attn_num_stat_features)`` (N = batch size, flattened over
+        views by the trainer). NaN rows in ``attn_target`` (out-of-range
+        target layers, or samples with response_len == 0) are excluded
+        from the loss. If batch variance over non-NaN entries falls below
+        ``attn_var_threshold`` the loss is suppressed to zero.
+        """
+        target = attn_target.float()
+        nan_mask = torch.isnan(target)
+
+        if nan_mask.all():
+            zero = torch.zeros(1, device=attn_pred.device).squeeze()
+            return zero, {
+                "attn_var": float("nan"),
+                "suppressed": True,
+                "reason": "all-nan",
+            }
+
+        valid_target = target[~nan_mask]
+        attn_var = float(valid_target.var())
+        if attn_var < self.attn_var_threshold:
+            zero = torch.zeros(1, device=attn_pred.device).squeeze()
+            return zero, {
+                "attn_var": attn_var,
+                "suppressed": True,
+                "reason": "low-variance",
+            }
+
+        # MSE only over non-NaN entries — replace NaNs in target with the
+        # corresponding prediction so the squared diff is zero (and excluded
+        # from gradient flow). This avoids per-row reductions.
+        target_filled = torch.where(nan_mask, attn_pred.detach(), target)
+        # Reduce as sum-of-squared-error over valid entries / count.
+        sq_err = (attn_pred - target_filled).pow(2)
+        valid_count = (~nan_mask).sum().clamp(min=1)
+        loss = sq_err.sum() / valid_count
+        return loss, {
+            "attn_var": attn_var,
+            "suppressed": False,
+            "valid_count": int(valid_count.item()),
+        }
+
+
 class LastLayerHaluClassifier(nn.Module):
     """
     Transformer-based classifier for hallucination detection using last layer activations.

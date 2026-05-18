@@ -16,5 +16,9 @@
     "activations_path": "shared/natural_questions_llama_3_1_8b_instruct/activations.zarr",
     "eval_json": "output/natural_questions/Llama-3.1-8B-Instruct/eval_results_for_training.json",
     "raw_eval_jsonl": "output/natural_questions/Llama-3.1-8B-Instruct/raw_eval_res.jsonl"
+  },
+  "icr_capture": {
+    "train_dir": "shared/icr_capture/natural_questions_train_Llama-3.1-8B-Instruct",
+    "test_dir": "shared/icr_capture/natural_questions_test_Llama-3.1-8B-Instruct"
   }
 }
