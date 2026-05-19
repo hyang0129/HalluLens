@@ -1906,6 +1906,12 @@ def parse_args() -> argparse.Namespace:
         help="Override device (cuda, cpu, auto)",
     )
     parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Override output_dir from the experiment config (useful for directing output to local NVMe)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the run plan (expected/complete/failed/pending) and exit without executing",
@@ -2004,7 +2010,7 @@ def main() -> None:
     logger.info(f"Device: {device}")
 
 
-    output_base = experiment_cfg.get("output_dir", "runs")
+    output_base = args.output_dir or experiment_cfg.get("output_dir", "runs")
     exp_name = experiment_cfg.get("experiment_name", "default")
     split_strategy = experiment_cfg.get("split_strategy", "two_way")
 
