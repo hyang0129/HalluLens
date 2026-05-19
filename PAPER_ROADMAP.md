@@ -148,12 +148,12 @@ GPU time is the binding constraint, not student time. Order matters.
 | 2 | Llama remaining seeds (×4) × 7 datasets × 3 trained methods | Cheap once activations are cached; CPU-feasible-ish but GPU faster | ~1–2 days |
 | 3 | Qwen seeds × 7 × 3 methods | Starts as soon as job 1 produces each dataset's activations | ~2–3 days |
 | 4 | P(true) inference on both models × 6 datasets — see [#50](https://github.com/hyang0129/HalluLens/issues/50) | Independent of training jobs; can interleave. Output-space only, so it can run on any free GPU regardless of activation-cache state. | ~1 day |
-| 5 | Sampling-based baselines bundle (SE + SelfCheckGPT + SEP-SE) on 5 free-form datasets × both models — see [#49](https://github.com/hyang0129/HalluLens/issues/49). SEP-binary then trained for free on 6 datasets from cached activations. | One K=10 sampling pass yields inputs for 4 baselines (SearchQA capped 5k train / 10k test). Output-space only, so it can run on any free GPU regardless of activation-cache state. | ~25–30 GPU-hr full / ~12–15 GPU-hr Llama-only |
+| 5 | Sampling-based baselines bundle (SE + SelfCheckGPT + SEP-SE) on 5 free-form datasets × both models — see [#49](https://github.com/hyang0129/HalluLens/issues/49). | One K=10 sampling pass yields inputs for SE + SelfCheckGPT; SEP-SE then trained for free on the same datasets from cached activations (SearchQA capped 5k train / 10k test). Output-space only, so it can run on any free GPU regardless of activation-cache state. | ~25–30 GPU-hr full / ~12–15 GPU-hr Llama-only |
 | 6 | Ablations (loss decomposition, layer-pair) | All on cached activations | <1 day |
 
 Use `scripts/gpu_dispatch.py` for batch dispatch, `resume=True` everywhere. **Never submit or kill SLURM jobs without explicit approval** (per CLAUDE.md).
 
-If GPU access slips by >3 days at any stage, cut #49's sampling-pass scope in this order: (1) drop SearchQA from #49 entirely (largest single dataset), (2) drop Qwen3-8B for SE + SelfCheckGPT + SEP-SE (Llama-only), (3) drop SciQ from the sampling-based methods, (4) drop SelfCheckGPT-BERTScore + n-gram (keep SelfCheckGPT-NLI). Then cut Qwen ablations. **Never cut SEP-binary** — it has no sampling cost and runs from cached activations. **Never cut the Qwen full seed sweep** — losing the second-model story is worse than losing sampling-based baselines.
+If GPU access slips by >3 days at any stage, cut #49's sampling-pass scope in this order: (1) drop SearchQA from #49 entirely (largest single dataset), (2) drop Qwen3-8B for SE + SelfCheckGPT + SEP-SE (Llama-only), (3) drop SciQ from the sampling-based methods, (4) drop SelfCheckGPT-BERTScore + n-gram (keep SelfCheckGPT-NLI). Then cut Qwen ablations. **Never cut SEP-SE** — it has no sampling cost (runs from cached activations) and is the single-pass bridge to the K=10 sampling cluster. **Never cut the Qwen full seed sweep** — losing the second-model story is worse than losing sampling-based baselines.
 
 ---
 
@@ -174,7 +174,7 @@ Tables/figures owners (each is a single deliverable):
 - **Transfer matrix:** Heatmap of off-diagonal AUROC.
 - **Ablation table:** Loss decomposition + layer-pair sweep.
 - **Calibration figure:** Reliability diagrams for one dataset per model.
-- **Compute-matched comparison:** AUROC per forward-pass count across covered datasets. K=1 cluster: ours, linear probe, SAPLMA, SEP-binary, SEP-SE, P(true). K=10 cluster: semantic entropy (length-normalized), SelfCheckGPT-NLI. One panel per dataset (5 free-form datasets; MMLU gets the K=1 cluster only).
+- **Compute-matched comparison:** AUROC per forward-pass count across covered datasets. K=1 cluster: ours, linear probe, SAPLMA, SEP-SE, P(true). K=10 cluster: semantic entropy (length-normalized), SelfCheckGPT-NLI. One panel per dataset (5 free-form datasets; MMLU gets the K=1 cluster only).
 
 ---
 
@@ -184,7 +184,7 @@ Tables/figures owners (each is a single deliverable):
 |---|---|---|
 | Qwen results materially weaker than Llama | medium | Reframe as "model-family-dependent" honestly; Movies-style root-cause; this is a finding, not a failure — but it changes the abstract |
 | SE or SelfCheckGPT-NLI beats us at 10× compute on its 5 datasets | medium | Pivot framing to compute-matched: ours wins per-FLOP. Theory still holds. |
-| **SEP-binary** (genuinely compute-matched linear probe) beats us on some datasets | medium | This would be a real threat, not a per-FLOP escape hatch — SEP-binary uses the same forward-pass count and the same training data as our linear probe baseline. Mitigation depends on outcome: if SEP-binary < contrastive across the board, this is a strong positive. If SEP-binary ≈ contrastive, the contribution must rest on transfer (§4 item 5) + ablations + the SAPLMA gap. Decide on data, not in advance. |
+| **SEP-SE** (Kossen's SE-target probe, single-pass) beats us on some datasets at K=1 compute | medium | Genuine threat for the §5.3 compute-matched panel — SEP-SE uses the same forward-pass count as our method. Mitigation depends on outcome: if SEP-SE < contrastive across the board, this is a strong positive. If SEP-SE ≈ contrastive, the contribution must rest on transfer (§4 item 5) + ablations + the SAPLMA gap + the multi-model story. Decide on data, not in advance. *(Previously listed here as "SEP-binary"; that variant was a confabulation — never implemented, not in Kossen — purged 2026-05-19.)* |
 | GPU node reclamation interrupts long Qwen inference | medium | `resume=True` everywhere; Zarr checkpointing; dispatch with `gpu_dispatch.py` not raw SSH |
 | Movies anomaly is genuine ("contrastive prior hurts on small entity-domain datasets") | medium | Own it in §6 limitations + a one-paragraph diagnosis. This actually strengthens the paper if framed as bounded scope. |
 | Multi-seed CIs reveal that contrastive vs. multi-layer probe gap is not significant on some datasets | medium-high | Headline becomes "consistent improvement at matched parameter count + transfer + Movies-style insight," not "always wins." Pre-commit to AUROC + AUPRC + win-rate-across-seeds reporting. |

@@ -64,7 +64,7 @@ See [methods_outline.md](methods_outline.md) for the full subsection breakdown. 
 - **Baselines.** Three classes:
   1. Output-space scalar: logprob, token entropy, P(true).
   2. Activation-space probes: single-layer linear probe (the "obvious" baseline), SAPLMA (~11M-param MLP, established literature baseline).
-  3. Sampling-based: SE (length-normalized headline + discrete supplementary), SelfCheckGPT (NLI headline + BERTScore + n-gram supplementary), SEP-SE (Kossen probe-on-SE), SEP-binary (probe on binary label, free byproduct).
+  3. Sampling-based: SE (length-normalized headline + discrete supplementary), SelfCheckGPT (NLI headline + BERTScore + n-gram supplementary), SEP-SE (Kossen probe-on-SE).
   - Note the deliberate omission: multi-layer linear probe is in §[ablations] only — it underperforms the single-layer probe and is reported to motivate the learned compression.
 - **Metrics.** AUROC (headline), AUPRC (paired in main table), ECE + FPR@95 + bootstrap 95% CIs in supplementary tables.
 - **Compute budget summary** (1–2 sentences; full breakdown in appendix).
@@ -75,7 +75,7 @@ See [methods_outline.md](methods_outline.md) for the full subsection breakdown. 
 
 - **5.1 Headline table.** AUROC ± 95% CI for every (model, dataset, method) cell. State which cells the contrastive method wins, by how much, and where it does not.
 - **5.2 Headline figure.** Per-dataset AUROC bars, both models, baseline cluster vs. ours.
-- **5.3 Compute-matched comparison.** AUROC vs. forward-pass count. K=1 cluster: ours, linear probe, SAPLMA, SEP-binary, SEP-SE, P(true). K=10 cluster: SE (length-normalized), SelfCheckGPT-NLI. One panel per dataset for the 5 free-form datasets; MMLU shows K=1 cluster only.
+- **5.3 Compute-matched comparison.** AUROC vs. forward-pass count. K=1 cluster: ours, linear probe, SAPLMA, SEP-SE, P(true). K=10 cluster: SE (length-normalized), SelfCheckGPT-NLI. One panel per dataset for the 5 free-form datasets; MMLU shows K=1 cluster only.
 - **5.4 Calibration.** Reliability diagrams for one dataset per model. ECE in the main table.
 
 Numbers freeze before this section is written. Until then, table/figure slots are reserved but blank.
@@ -102,7 +102,7 @@ Numbers freeze before this section is written. Until then, table/figure slots ar
 ## 8. Discussion (~0.5 page)
 
 - **Where the method works.** Mid-to-late layers, both model families, free-form QA + multi-choice MMLU.
-- **Where it doesn't.** Whatever the data shows — call it out honestly. (See roadmap §9 risk register for the live candidates: Qwen weaker than Llama, SEP-binary parity, etc. Update this section after numbers freeze.)
+- **Where it doesn't.** Whatever the data shows — call it out honestly. (See roadmap §9 risk register for the live candidates: Qwen weaker than Llama, SEP-SE parity at K=1, etc. Update this section after numbers freeze.)
 - **What the layer-pair concentration result means.** Brief — full theoretical argument in the appendix.
 
 ---
@@ -161,5 +161,5 @@ Each section below should eventually have its own file. Naming convention: `NN_s
 These need an explicit decision before §3 prose starts:
 
 1. **Theory as §3 subsection vs. its own section.** Currently §3.3 holds 3–4 sentences with full derivation in appendix. Alternative: dedicated §3 Theory section before Method (would shift everything down). Decision needed.
-2. **Where does SEP-binary land in §5?** It's compute-matched with our linear probe and is the genuine threat per the risk register. Options: (a) in the main table alongside linear probe, (b) as a dedicated subsection 5.5. Decision needed.
+2. ~~**Where does SEP-binary land in §5?**~~ **Removed 2026-05-19** — SEP-binary was a confabulation propagated from an earlier outline-writer agent. It is not in Kossen et al. 2024 and is not implemented (see [`tasks/sampling_baselines/sep.py:6`](tasks/sampling_baselines/sep.py#L6)). What we actually run is SEP-SE; it lands in the §5.3 compute-matched K=1 cluster as already specified.
 3. **Headline framing if Qwen is materially weaker than Llama.** Per risk register, this changes the abstract. Don't pre-commit; check before week 3.

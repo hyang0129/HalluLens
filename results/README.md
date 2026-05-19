@@ -37,18 +37,19 @@ The single source of truth for cell-level completion is `python scripts/results_
 **Methods in this family:**
 - **Semantic entropy** — Farquhar et al. *Nature* 2024. Length-normalized variant is headline; discrete variant supplementary.
 - **SelfCheckGPT** — Manakul et al. EMNLP 2023. NLI variant is headline; BERTScore and n-gram variants supplementary.
-- **SEP-SE** — Kossen et al. 2024. Linear probe on activations trained to predict length-normalized SE. Bridges K=10 → K=1.
-- **SEP-binary** — Same activations, target = binary hallucination label, full train split. Genuinely compute-matched against `linear_probe`; no sampling cost once K=10 pass exists for SEP-SE.
+- **SEP-SE** — Kossen et al. 2024. Linear probe on activations trained to predict length-normalized SE. Evaluated as a hallucination detector via AUROC against binary halu labels on test. Bridges K=10 → K=1 at single-forward-pass inference cost.
 
-**Scope.** 5 free-form datasets (HotpotQA, NQ, PopQA, SciQ, SearchQA) for SE / SelfCheckGPT / SEP-SE — MMLU excluded because NLI clustering degenerates on single-letter answer tokens. SEP-binary covers 6 datasets (MMLU included — it's activation-space). 2 models (Llama, Qwen3). SearchQA capped at 5k train / 10k test items to bound GPU. SEP-SE trained on 5k stratified train subset per (dataset, model).
+**Note (purged 2026-05-19).** Earlier drafts of this README listed a "SEP-binary" method (logistic probe on halu labels directly). That method was confabulated by an earlier writing-agent and was never implemented; see [`tasks/sampling_baselines/sep.py:6`](../tasks/sampling_baselines/sep.py#L6) ("SEP-binary … is not [implemented]"). It is also not present in Kossen et al. 2024 — their probe target is the SE score, not the halu label. Only SEP-SE is real and run.
 
-**Where the data lives.** Sampling pass outputs in `output/sampling/` (see issue #49); SEP-* training runs live alongside family (1) under `runs/baseline_comparison_*/.../{sep_se,sep_binary}/`.
+**Scope.** 5 free-form datasets (HotpotQA, NQ, PopQA, SciQ, SearchQA) for SE / SelfCheckGPT / SEP-SE — MMLU excluded because NLI clustering degenerates on single-letter answer tokens. 2 models (Llama, Qwen3). SearchQA capped at 5k train / 10k test items to bound GPU. SEP-SE trained on 5k stratified train subset per (dataset, model).
 
-**Paper role.** Compute-matched comparison panel — one panel per free-form dataset: K=1 cluster (ours, linear probe, SAPLMA, SEP-binary, SEP-SE, P(true)) vs. K=10 cluster (SE-length-norm, SelfCheckGPT-NLI). Not in the headline AUROC table.
+**Where the data lives.** Sampling pass outputs in `output/sampling/` (see issue #49); SEP-SE training runs live alongside family (1) under `runs/baseline_comparison_*/.../sep_se/`.
+
+**Paper role.** Compute-matched comparison panel — one panel per free-form dataset: K=1 cluster (ours, linear probe, SAPLMA, SEP-SE, P(true)) vs. K=10 cluster (SE-length-norm, SelfCheckGPT-NLI). Not in the headline AUROC table.
 
 **Reviewer concern this family answers.** "Didn't compare to the strongest sampling-based baselines / didn't compare per-FLOP."
 
-**Why separated from family (1).** Mixing K=1 and K=10 numbers in the same AUROC column invites the reviewer to read it as "ours loses to SE on dataset X" when the right comparison is per-compute. SEP-binary is the bridge that makes the comparison fair without throwing away the sampling results.
+**Why separated from family (1).** Mixing K=1 and K=10 numbers in the same AUROC column invites the reviewer to read it as "ours loses to SE on dataset X" when the right comparison is per-compute. SEP-SE is the single-forward-pass bridge: it recovers the SE signal from one forward pass, so the K=1 cluster includes a method designed to approximate K=10 SE.
 
 ---
 
