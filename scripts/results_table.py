@@ -229,7 +229,7 @@ def _merge_extended_metrics(run_dir: Path, metrics: dict[str, float]) -> None:
 
 
 def _model_from_config_name(cfg_name: str) -> str:
-    stem = cfg_name.removesuffix(".json")
+    stem = cfg_name.removesuffix(".json").removesuffix("_memmap")
     if stem.endswith("_qwen3"):
         return "Qwen3-8B"
     if stem.endswith("_smollm3"):
