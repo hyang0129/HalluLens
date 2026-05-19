@@ -38,7 +38,11 @@ export HF_HUB_OFFLINE=1
 # timing out at 60s without.
 export CUDA_MPS_PIPE_DIRECTORY=/no/such/path
 
-WORKER_ID="${HOSTNAME}_$$_$RANDOM"
+# Why: $HOSTNAME only names the physical node (alphagpu17), which collides
+# when two Jupyter slices of the same node both run workers. gpu_dispatch.py
+# injects $DISPATCH_NODE with the full slice name (alphagpu17-8888) on the
+# --jupyter path; fall back to $HOSTNAME for ssh dispatches without it.
+WORKER_ID="${DISPATCH_NODE:-$HOSTNAME}_$$_$RANDOM"
 CAPTURE_LOG="/tmp/capture_${WORKER_ID}.log"
 
 # Why: the previous trap only killed $HB_PID, so a SIGTERM to this script left

@@ -439,7 +439,15 @@ def dispatch_job_jupyter(
     log_file = f"shared/logs/{job_id}.log"
     abs_log = f"{node.project_root}/{log_file}"
     log_dir = str(Path(abs_log).parent)
-    inner_cmd = f"cd {node.project_root} && {command}"
+    # Why: workers on different Jupyter slices of the same physical node
+    # (alphagpu17-8881 vs alphagpu17-8888) were indistinguishable in claim
+    # dirs because $HOSTNAME only resolves the physical node. Inject the
+    # full slice name so worker.sh / worker_79.sh can build a WORKER_ID
+    # that includes the port.
+    inner_cmd = (
+        f"cd {node.project_root} && "
+        f"DISPATCH_NODE={shlex.quote(node.name)} {command}"
+    )
 
     code = (
         f"import subprocess, pathlib\n"

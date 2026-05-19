@@ -45,7 +45,11 @@ export MKL_NUM_THREADS=8
 export OPENBLAS_NUM_THREADS=8
 export NUMEXPR_NUM_THREADS=8
 
-WORKER_ID="${HOSTNAME}_$$_$RANDOM"
+# Why: $HOSTNAME only names the physical node (alphagpu17), which collides
+# when two Jupyter slices of the same node both run workers. gpu_dispatch.py
+# injects $DISPATCH_NODE with the full slice name (alphagpu17-8888) on the
+# --jupyter path; fall back to $HOSTNAME for ssh dispatches without it.
+WORKER_ID="${DISPATCH_NODE:-$HOSTNAME}_$$_$RANDOM"
 RUN_LOG="/tmp/issue_79_${WORKER_ID}.log"
 
 # Signal handling — mirror worker.sh. Without forwarding SIGTERM to the
