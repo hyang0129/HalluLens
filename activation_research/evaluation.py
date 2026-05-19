@@ -185,12 +185,12 @@ def evaluate(
 def mahalanobis_ood_stats_multilayer(train_records, test_records, layers):
     """
     Calculate Mahalanobis OOD statistics for multiple layers.
-    
+
     Args:
         train_records: List of training records containing layer embeddings
         test_records: List of test records containing layer embeddings
         layers: List of layer indices to analyze
-        
+
     Returns:
         dict: Contains per-layer stats and aggregated stats
     """
@@ -241,14 +241,14 @@ def mahalanobis_ood_stats_multilayer(train_records, test_records, layers):
             'mahalanobis_std_ood': ood_dists.std().item(),
             'mahalanobis_auroc': roc_auc_score(test_labels, dists.numpy())
         }
-    
+
     # Compute aggregated stats using average distance across layers
     avg_dists = torch.stack(list(layer_dists.values())).mean(dim=0)
     test_labels = torch.tensor([r['halu'] for r in test_records], dtype=torch.int32).squeeze()
-    
+
     id_dists_avg = avg_dists[test_labels == 0]
     ood_dists_avg = avg_dists[test_labels == 1]
-    
+
     aggregated_stats = {
         'mahalanobis_mean_id': id_dists_avg.mean().item(),
         'mahalanobis_std_id': id_dists_avg.std().item(),

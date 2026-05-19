@@ -37,6 +37,19 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+# When HALLULENS_SHARED_DIR is set, paths starting with "shared/" in dataset
+# configs are resolved against that directory instead of project_root. Lets a
+# worktree checkout point at the canonical 20TB shared data dir without
+# symlinking or modifying configs. Unset → existing behavior unchanged.
+_shared_root_override = os.environ.get("HALLULENS_SHARED_DIR")
+
+
+def _resolve_shared(rel_path: str) -> str:
+    if _shared_root_override and rel_path.startswith("shared/"):
+        return str(Path(_shared_root_override) / rel_path[len("shared/"):])
+    return str(project_root / rel_path)
+
+
 import torch
 from loguru import logger
 
@@ -140,6 +153,16 @@ def run_contrastive(
         input_dropout=method_cfg["model_params"].get("input_dropout", 0.3),
     )
 
+    # Build augmentation function if configured
+    aug_cfg = data_cfg.get("augmentations", None)
+    augment_fn = None
+    if aug_cfg:
+        from activation_research.augmentations import AugmentationComposer
+        augment_fn = AugmentationComposer(
+            augmentations=aug_cfg.get("ops", []),
+            asymmetric=aug_cfg.get("asymmetric", False),
+        )
+
     # Build trainer
     from activation_research.trainer import ContrastiveTrainer, ContrastiveTrainerConfig
 
@@ -171,7 +194,7 @@ def run_contrastive(
         snapshot_keep_last=3,
     )
 
-    trainer = ContrastiveTrainer(model, config=config)
+    trainer = ContrastiveTrainer(model, config=config, augment_fn=augment_fn)
     trainer.fit(train_dataset=train_ds, val_dataset=val_ds)
 
     # Save final weights
@@ -192,6 +215,11 @@ def run_contrastive(
     eval_loader = DataLoader(test_ds_target, batch_size=64, shuffle=False)
 
     model.eval()
+
+    # flip_auroc=True (ignore_label=0 configs): hallu is the compact cluster,
+    # so correct examples are the anomalies — pass outlier_class=0 to the evaluator.
+    flip_auroc: bool = bool(eval_cfg.get("flip_auroc", False))
+    effective_outlier_class = 0 if flip_auroc else dataset_cfg.get("outlier_class", 1)
 
     # Build metrics list from config
     metrics_list: list = []
@@ -218,7 +246,7 @@ def run_contrastive(
         device=device,
         num_workers=experiment_cfg.get("num_workers", 4),
         persistent_workers=False,
-        outlier_class=dataset_cfg.get("outlier_class", 1),
+        outlier_class=effective_outlier_class,
     )
 
     ood_stats = evaluator.compute(eval_loader, model)
@@ -228,6 +256,7 @@ def run_contrastive(
         "method": method_cfg["name"],
         "dataset": dataset_cfg["name"],
         "seed": training_seed,
+        "flip_auroc": flip_auroc,
         "split_seed": experiment_cfg.get("split_seed", 42),
         "n_train": len(train_ds),
         "n_test": len(test_ds),
@@ -2126,6 +2155,12 @@ def parse_args() -> argparse.Namespace:
         help="Override device (cuda, cpu, auto)",
     )
     parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Override output_dir from the experiment config (useful for directing output to local NVMe)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the run plan (expected/complete/failed/pending) and exit without executing",
@@ -2224,7 +2259,7 @@ def main() -> None:
     logger.info(f"Device: {device}")
 
 
-    output_base = experiment_cfg.get("output_dir", "runs")
+    output_base = args.output_dir or experiment_cfg.get("output_dir", "runs")
     exp_name = experiment_cfg.get("experiment_name", "default")
     split_strategy = experiment_cfg.get("split_strategy", "two_way")
 
@@ -2422,7 +2457,7 @@ def main() -> None:
                 f"{dataset_cfg['icr_capture']['test_dir']}"
             )
             test_ap = MemmapActivationParser(
-                capture_dir=str(project_root / dataset_cfg["icr_capture"]["test_dir"]),
+                capture_dir=_resolve_shared(dataset_cfg["icr_capture"]["test_dir"]),
                 random_seed=global_split_seed,
                 split_strategy="none",
                 verbose=True,
@@ -2520,7 +2555,7 @@ def main() -> None:
                     f"from: {dataset_cfg['icr_capture']['train_dir']}"
                 )
                 ap = MemmapActivationParser(
-                    capture_dir=str(project_root / dataset_cfg["icr_capture"]["train_dir"]),
+                    capture_dir=_resolve_shared(dataset_cfg["icr_capture"]["train_dir"]),
                     random_seed=actual_split_seed,
                     split_strategy="three_way",
                     verbose=True,
