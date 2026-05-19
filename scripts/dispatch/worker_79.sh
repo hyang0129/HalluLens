@@ -128,13 +128,28 @@ while true; do
   RUN_PID=""
   set -e
 
-  if [ "$EXIT_CODE" -eq 0 ]; then
+  # Why: run_experiment.py has historically exited 0 on internal failure paths
+  # without writing eval_metrics.json (e.g. silent fallthroughs in
+  # contrastive_logprob_recon / llmsknow_probe). Trusting the exit code alone
+  # let ~67 cells get marked done with no metrics on disk. Guard with a
+  # post-run existence check on output_check so a silent skip becomes a
+  # failed cell instead of a phantom completion.
+  if [ "$EXIT_CODE" -eq 0 ] && [ -f "$ABS_OUTPUT" ]; then
     "$PYTHON" "$CLI" complete \
       --root "$DISPATCH_ROOT" \
       --worker-id "$WORKER_ID" \
       --cell "$CELL_PATH"
     N_DONE=$(( N_DONE + 1 ))
     echo "worker_79 $WORKER_ID: completed $CELL_PATH"
+  elif [ "$EXIT_CODE" -eq 0 ]; then
+    echo "worker_79 $WORKER_ID: exit=0 but $OUTPUT_CHECK missing — treating as FAIL"
+    printf '%s\n' "exit_code=0 but output_check missing: $OUTPUT_CHECK" >> "$RUN_LOG"
+    "$PYTHON" "$CLI" fail \
+      --root "$DISPATCH_ROOT" \
+      --worker-id "$WORKER_ID" \
+      --cell "$CELL_PATH" \
+      --err-file "$RUN_LOG"
+    N_FAIL=$(( N_FAIL + 1 ))
   else
     "$PYTHON" "$CLI" fail \
       --root "$DISPATCH_ROOT" \

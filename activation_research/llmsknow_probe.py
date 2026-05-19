@@ -191,9 +191,20 @@ def sweep_locations(
     best_layer_idx = best_flat // T
     best_token_pos = best_flat % T
 
+    # Why: a length mismatch between relevant_layers (config-derived names) and
+    # L=full_cache.shape[1] (cache dimension) is technically an upstream bug,
+    # but it crashed sweep_locations *after* the sweep finished and the result
+    # was valid — turning a logging issue into 37 lost cell completions. Guard
+    # the layer-name lookup so the function can still return its result.
+    if best_layer_idx < len(relevant_layers):
+        best_layer_name = str(relevant_layers[best_layer_idx])
+    else:
+        best_layer_name = (
+            f"<unknown — len(relevant_layers)={len(relevant_layers)} < L={L}>"
+        )
     logger.info(
         f"sweep_locations: selected layer_idx={best_layer_idx} "
-        f"(layer={relevant_layers[best_layer_idx]}), "
+        f"(layer={best_layer_name}), "
         f"token_pos={best_token_pos}, "
         f"dev AUROC={sweep_auroc[best_layer_idx, best_token_pos]:.4f}"
     )

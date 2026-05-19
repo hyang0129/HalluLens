@@ -1641,10 +1641,20 @@ def run_llmsknow_probe(
     # Save sweep results
     artifacts_dir = os.path.join(output_dir, "artifacts")
     np.save(os.path.join(artifacts_dir, "sweep_auroc_matrix.npy"), sweep_matrix)
+    # Why: best_layer_idx is in [0, L) where L = cache.shape[1]. The dataset
+    # is supposed to have L == len(relevant_layers), but a slicing mismatch
+    # upstream can yield L > len(relevant_layers), which crashed the run
+    # mid-flight. Fall back to None when the layer id is unknown so the cell
+    # still produces eval_metrics.json instead of silently failing.
+    best_layer_id = (
+        int(relevant_layers[best_layer_idx])
+        if best_layer_idx < len(relevant_layers)
+        else None
+    )
     sweep_summary = {
         "relevant_layers": relevant_layers,
         "best_layer_idx": int(best_layer_idx),
-        "best_layer": int(relevant_layers[best_layer_idx]),
+        "best_layer": best_layer_id,
         "best_token_pos": int(best_token_pos),
         "best_dev_auroc": float(np.nanmax(sweep_matrix)) if not np.all(np.isnan(sweep_matrix)) else float("nan"),
     }
@@ -1672,7 +1682,7 @@ def run_llmsknow_probe(
         "n_train": len(train_ds),
         "n_test": len(test_ds),
         "auroc": float(auroc),
-        "selected_layer": int(relevant_layers[best_layer_idx]),
+        "selected_layer": best_layer_id,
         "selected_token_pos": int(best_token_pos),
         "sweep_best_dev_auroc": float(sweep_summary["best_dev_auroc"]),
     }
