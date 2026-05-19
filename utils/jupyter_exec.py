@@ -92,14 +92,15 @@ class JupyterExecutor:
     # Auth
     # ------------------------------------------------------------------
 
-    def login(self):
-        login_page = self.session.get(f"{self.base_url}/login")
+    def login(self, http_timeout: float = 15.0):
+        login_page = self.session.get(f"{self.base_url}/login", timeout=http_timeout)
         login_page.raise_for_status()
         xsrf = self.session.cookies.get("_xsrf", "")
         resp = self.session.post(
             f"{self.base_url}/login",
             data={"password": self.password, "_xsrf": xsrf},
             allow_redirects=True,
+            timeout=http_timeout,
         )
         resp.raise_for_status()
         self._cookie_str = "; ".join(f"{k}={v}" for k, v in self.session.cookies.items())
@@ -109,21 +110,23 @@ class JupyterExecutor:
     # Kernel management
     # ------------------------------------------------------------------
 
-    def start_kernel(self, name: str = "p311") -> str:
+    def start_kernel(self, name: str = "p311", http_timeout: float = 15.0) -> str:
         """Start a new kernel and return its ID."""
         resp = self.session.post(
             f"{self.base_url}/api/kernels",
             json={"name": name},
             headers={"X-XSRFToken": self._xsrf_token},
+            timeout=http_timeout,
         )
         resp.raise_for_status()
         return resp.json()["id"]
 
-    def stop_kernel(self, kernel_id: str):
+    def stop_kernel(self, kernel_id: str, http_timeout: float = 15.0):
         """Shut down a kernel by ID."""
         self.session.delete(
             f"{self.base_url}/api/kernels/{kernel_id}",
             headers={"X-XSRFToken": self._xsrf_token},
+            timeout=http_timeout,
         )
 
     # ------------------------------------------------------------------
@@ -154,6 +157,7 @@ class JupyterExecutor:
                 "Cookie": self._cookie_str,
                 "X-XSRFToken": self._xsrf_token,
             },
+            timeout=timeout,
         )
         try:
             return self._execute_on_ws(ws, code, timeout)
