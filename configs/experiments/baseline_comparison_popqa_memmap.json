@@ -8,7 +8,8 @@
     "logprob_baseline",
     "saplma",
     "llmsknow_probe",
-    "icr_probe"
+    "icr_probe",
+    "act_vit"
   ],
   "split_seed": 42,
   "training_seeds": [

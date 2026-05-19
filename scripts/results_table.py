@@ -178,6 +178,7 @@ _TRAINING_METRIC_KEYS = {
     "llmsknow_probe":             ("auroc", "sweep_best_dev_auroc"),
     "multi_layer_linear_probe":   ("auroc",),
     "icr_probe":                  ("auroc",),
+    "act_vit":                    ("auroc",),
     "token_entropy":              ("mean_entropy_auroc", "mean_logprob_auroc",
                                    "min_logprob_auroc"),
     "logprob_baseline":           ("mean_logprob_auroc", "perplexity_auroc",
