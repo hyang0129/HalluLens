@@ -75,6 +75,31 @@
   url       = {https://arxiv.org/abs/2310.06824}
 }
 
+@inproceedings{zhang2025icr,
+  title     = {{ICR} Probe: Tracking Hidden State Dynamics for Reliable Hallucination Detection in {LLM}s},
+  author    = {Zhang, Zhenliang and Hu, Xinyu and Zhang, Huixuan and Zhang, Junzhe and Wan, Xiaojun},
+  booktitle = {Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (ACL)},
+  year      = {2025},
+  url       = {https://arxiv.org/abs/2507.16488}
+}
+
+@article{suresh2025clap,
+  title   = {Cross-Layer Attention Probing for Fine-Grained Hallucination Detection},
+  author  = {Suresh, Malavika and Aljundi, Rahaf and Nkisi-Orji, Ikechukwu and Wiratunga, Nirmalie},
+  journal = {arXiv preprint arXiv:2509.09700},
+  year    = {2025},
+  note    = {To appear at the TRUST-AI Workshop, ECAI 2025},
+  url     = {https://arxiv.org/abs/2509.09700}
+}
+
+@inproceedings{barshalom2025actvit,
+  title     = {Beyond Token Probes: Hallucination Detection via Activation Tensors with {ACT}-{ViT}},
+  author    = {Bar-Shalom, Guy and Frasca, Fabrizio and Galron, Yaniv and Ziser, Yftah and Maron, Haggai},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2025},
+  url       = {https://arxiv.org/abs/2510.00296}
+}
+
 % =============================================================================
 % §2.2 Hallucination detection
 % =============================================================================
@@ -147,4 +172,77 @@
   booktitle = {Proceedings of the 2021 Conference on Empirical Methods in Natural Language Processing (EMNLP)},
   year      = {2021},
   url       = {https://aclanthology.org/2021.emnlp-main.552/}
+}
+
+% --- Adjacent machinery for the §2.3 broad-novelty footnote ---
+% These are the closest related techniques in *different problem settings*
+% (cross-network distillation, within-layer augmented-view contrast), cited
+% to support the "to our knowledge" hedge on the broad novelty claim.
+
+@inproceedings{tian2020crd,
+  title     = {Contrastive Representation Distillation},
+  author    = {Tian, Yonglong and Krishnan, Dilip and Isola, Phillip},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2020},
+  url       = {https://openreview.net/forum?id=SkgpBJrtvS}
+}
+
+@inproceedings{sun2020codir,
+  title     = {Contrastive Distillation on Intermediate Representations for Language Model Compression},
+  author    = {Sun, Siqi and Gan, Zhe and Fang, Yuwei and Cheng, Yu and Wang, Shuohang and Liu, Jingjing},
+  booktitle = {Proceedings of the 2020 Conference on Empirical Methods in Natural Language Processing (EMNLP)},
+  year      = {2020},
+  url       = {https://aclanthology.org/2020.emnlp-main.36/}
+}
+
+@inproceedings{zhang2022cds,
+  title     = {Contrastive Deep Supervision},
+  author    = {Zhang, Linfeng and Chen, Xin and Zhang, Junbo and Dong, Runpei and Ma, Kaisheng},
+  booktitle = {European Conference on Computer Vision (ECCV)},
+  year      = {2022},
+  url       = {https://arxiv.org/abs/2207.05306}
+}
+
+% =============================================================================
+% §3 Method — supervised contrastive loss + information-theoretic argument
+% =============================================================================
+
+@inproceedings{khosla2020supcon,
+  title     = {Supervised Contrastive Learning},
+  author    = {Khosla, Prannay and Teterwak, Piotr and Wang, Chen and Sarna, Aaron and Tian, Yonglong and Isola, Phillip and Maschinot, Aaron and Liu, Ce and Krishnan, Dilip},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2020},
+  url       = {https://arxiv.org/abs/2004.11362}
+}
+
+@inproceedings{poole2019variational,
+  title     = {On Variational Bounds of Mutual Information},
+  author    = {Poole, Ben and Ozair, Sherjil and van den Oord, Aaron and Alemi, Alexander A. and Tucker, George},
+  booktitle = {International Conference on Machine Learning (ICML)},
+  year      = {2019},
+  url       = {https://arxiv.org/abs/1905.06922}
+}
+
+@inproceedings{wang2021understanding,
+  title     = {Understanding the Behaviour of Contrastive Loss},
+  author    = {Wang, Feng and Liu, Huaping},
+  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
+  year      = {2021},
+  url       = {https://arxiv.org/abs/2012.09740}
+}
+
+@inproceedings{tishby2015deep,
+  title     = {Deep Learning and the Information Bottleneck Principle},
+  author    = {Tishby, Naftali and Zaslavsky, Noga},
+  booktitle = {IEEE Information Theory Workshop (ITW)},
+  year      = {2015},
+  url       = {https://arxiv.org/abs/1503.02406}
+}
+
+@inproceedings{hjelm2019deepinfomax,
+  title     = {Learning Deep Representations by Mutual Information Estimation and Maximization},
+  author    = {Hjelm, R. Devon and Fedorov, Alex and Lavoie-Marchildon, Samuel and Grewal, Karan and Bachman, Phil and Trischler, Adam and Bengio, Yoshua},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2019},
+  url       = {https://arxiv.org/abs/1808.06670}
 }

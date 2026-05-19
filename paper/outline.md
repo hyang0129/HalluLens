@@ -32,28 +32,26 @@ Structural skeleton only. Each section lists what the prose will cover, not the 
 
 ## 2. Related Work (~0.75 page)
 
-Three subsections, each ~3–4 references:
+Detailed outline in [02_related_work.md](02_related_work.md). Summary structure (three subsections, ~3–4 references each):
 
-- **2.1 Activation probing for LLM behavior.** Linear probes, SAPLMA, probing literature broadly. Set up our method as a *learned* extension of probing rather than a replacement.
-- **2.2 Hallucination detection.** Output-space methods: logprob / entropy / P(true) (Kadavath); sampling-based: semantic entropy (Farquhar), SelfCheckGPT (Manakul); probe-on-uncertainty hybrids: SEP (Kossen).
-- **2.3 Contrastive representation learning.** SimCLR, InfoNCE, and why self-supervised contrastive losses on intermediate activations is a non-obvious use of the framework — the views here are layer pairs, not data augmentations.
+- **2.1 Activation probing for LLM behavior.** Linear probes (Alain & Bengio), SAPLMA single-layer MLP (Azaria & Mitchell), ICR Probe per-layer-scalar MLP (Zhang et al. 2025), CLAP cross-layer attention (Suresh et al. 2025), ACT-ViT full-tensor ViT (Bar-Shalom et al. 2025), plus residual-stream truth-direction evidence (ITI, Marks & Tegmark). Sets our method up as a *learned* extension of probing rather than a replacement.
+- **2.2 Hallucination detection.** Output-space scalars (Kadavath), multi-sample consistency (semantic entropy — Farquhar; SelfCheckGPT — Manakul), probe-on-uncertainty hybrid (SEP-SE — Kossen), retrieval-augmented checking scoped out (FActScore — Min).
+- **2.3 Contrastive representation learning.** SimCLR (Chen et al.), InfoNCE (van den Oord et al.), SimCSE (Gao et al.); broad-novelty claim ships hedged with a footnote crediting CRD/CoDIR/CDS as adjacent machinery in different problem settings. Views here are layer pairs, not data augmentations or different networks.
 
 End the section with one sentence positioning our work relative to the three threads.
 
 ---
 
-## 3. Method (~1.5–2 pages)
+## 3. Method (~2 pages)
 
-See [methods_outline.md](methods_outline.md) for the full subsection breakdown. Summary structure:
+Detailed outline in [03_method.md](03_method.md), which supersedes `methods_outline.md` and `theory_outline.md`. Summary structure:
 
 - 3.1 Problem setup + notation
-- 3.2 Activation extraction (layer band, token position, caching)
-- 3.3 Contrastive compression architecture (`ProgressiveCompressor`, layer-pair views)
-- 3.4 Training objective (SimCLR + logprob-recon)
-- 3.5 Inference scoring (KNN headline; cosine, Mahalanobis as ablations)
-- 3.6 Implementation details
+- 3.2 Why a learned cross-layer compression can carry the signal — the information-theoretic argument (folded in, not a standalone theory section)
+- 3.3 What we built — supervised contrastive over layer pairs with logprob reconstruction (`ProgressiveCompressor`, layer-pair views, asymmetric `ignore_label` SupCon, logprob-recon auxiliary, KNN/cosine/Mahalanobis scorers, implementation summary)
+- 3.4 What the method predicts — the 2×2 attribution table (SupCon-asymm × recon) with four pre-committed outcome-conditional framings
 
-**Brief theoretical framing** (~3–4 sentences) lives inside §3.3. Full derivation of the cross-layer-coherence argument is in the appendix.
+**Theoretical framing** is §3.2 (~half the section), with the full information-bound derivation in Appendix A. Budget is slightly above the original 1.5–2 page target because the theory is absorbed in-section; if the page budget binds, §3.4 collapses first into a single paragraph forwarding to §7.1.
 
 ---
 
@@ -140,11 +138,12 @@ Each section below should eventually have its own file. Naming convention: `NN_s
 | File | Status | Owner |
 |---|---|---|
 | `outline.md` | ✅ this file | — |
-| `methods_outline.md` | ✅ done | — |
+| `methods_outline.md` | ⚠️ superseded by `03_method.md` (delete after final review) | — |
+| `theory_outline.md` | ⚠️ superseded by `03_method.md` §3.2 (delete after final review) | — |
 | `00_abstract.md` | pending | freeze last |
 | `01_introduction.md` | pending | week 1 |
-| `02_related_work.md` | pending | week 2 (uses SOTA tracker *with permission*) |
-| `03_method.md` | pending | week 2 (expand from methods_outline.md) |
+| `02_related_work.md` | ✅ outline materialized (prose pending) | week 2 |
+| `03_method.md` | ✅ outline materialized (prose pending; depends on §3.2 pending bib + Figure 1 source) | week 2 |
 | `04_experimental_setup.md` | pending | week 2 |
 | `05_results.md` | pending | week 3 (after numbers freeze) |
 | `06_transfer.md` | pending | week 3 |
@@ -158,8 +157,14 @@ Each section below should eventually have its own file. Naming convention: `NN_s
 
 ## Open structural questions
 
-These need an explicit decision before §3 prose starts:
-
-1. **Theory as §3 subsection vs. its own section.** Currently §3.3 holds 3–4 sentences with full derivation in appendix. Alternative: dedicated §3 Theory section before Method (would shift everything down). Decision needed.
+1. ~~**Theory as §3 subsection vs. its own section.**~~ **Resolved 2026-05-19** — folded into §3 as §3.2 (information-theoretic argument), not promoted to a standalone Theory section. Rationale: the load-bearing theoretical move is short, structurally inseparable from the architecture, and the 8-page EMNLP main paper does not have room for a dedicated theory section. Full information-bound derivation lives in Appendix A. See [`03_method.md`](03_method.md) structural-decision header. Soft commit revisable post-internal-review.
 2. ~~**Where does SEP-binary land in §5?**~~ **Removed 2026-05-19** — SEP-binary was a confabulation propagated from an earlier outline-writer agent. It is not in Kossen et al. 2024 and is not implemented (see [`tasks/sampling_baselines/sep.py:6`](tasks/sampling_baselines/sep.py#L6)). What we actually run is SEP-SE; it lands in the §5.3 compute-matched K=1 cluster as already specified.
 3. **Headline framing if Qwen is materially weaker than Llama.** Per risk register, this changes the abstract. Don't pre-commit; check before week 3.
+4. **§2.3 novelty-claim level — broad / medium / narrow.** Resolved 2026-05-19 to **broad with hedging** (see `02_related_work.md` §2.3 framing-level decision). Reviewer-rebuttal fallback to medium then narrow is documented there. Abstract and §1 contribution claims must be drafted to the broad level once §3 / §5 freeze.
+5. **§3.4 attribution headline — locked when #66 (SupCon-asymm only) and #67 (SAPLMA + recon) land.** Until then, §3.4 prose is the *menu* of four outcome-conditional framings. The headline framing of §3 and the abstract cannot finalize until these resolve. See [`03_method.md`](03_method.md) §3.4.
+
+---
+
+## Bibliography state (as of 2026-05-19)
+
+All §2 anchor citations and §3 load-bearing citations are in [`references.bib`](references.bib). Most recent additions: `khosla2020supcon`, `poole2019variational`, `wang2021understanding`, `tishby2015deep`, `hjelm2019deepinfomax` (all five for §3.2/§3.3, human-approved 2026-05-19 from the verification pass in [`03_method.md`](03_method.md) pending-approval section). The only candidates that are *not* in `references.bib` are the four §2 optionals (Hewitt & Manning, Tenney et al., Ji et al., Lewis et al. RAG) — verified 2026-05-19, defer insertion until a draft surfaces a gap.
