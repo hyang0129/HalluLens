@@ -8,6 +8,8 @@ Concretely: do not read `PAPER_ROADMAP.md`, `THEORETICAL_JUSTIFICATION.md`, `doc
 
 The single source of truth for numbers cited in the paper is `paper/data/*.csv` and `paper/generated/figures/*.numbers.csv`, accessed through the `\result`/`\resdelta`/`\resratio`/`\resultCI`/`\resultPM` macros defined in `paper/macros.tex`. See `paper/README.md` for the build pipeline.
 
+**Never edit `paper/references.bib` directly** — add citations in the relevant outline/section file with enough context for a human to verify, and wait for explicit human approval before any `.bib` insertion (agents hallucinate references).
+
 ## Project Overview
 
 Research codebase for detecting hallucinations in LLMs via mutual information analysis of intermediate layer activations. Pairs contrastive representation learning with benchmark evaluation (PreciseWikiQA, LLMsKnow).
