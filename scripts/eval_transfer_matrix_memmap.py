@@ -18,6 +18,9 @@ Usage:
   # Full run (both models, resume-safe):
   python scripts/eval_transfer_matrix_memmap.py --model-slugs llama --resume
   python scripts/eval_transfer_matrix_memmap.py --model-slugs qwen3 --resume
+
+  # Single-cell mode (used by worker_89.sh / cell worker dispatch):
+  python scripts/eval_transfer_matrix_memmap.py --cell-json <path/to/cell.json>
 """
 
 import argparse
@@ -152,6 +155,96 @@ def aggregate_results(output_dir: str) -> None:
     print(f"[aggregate] Wrote {summary_path}")
 
 
+def run_cell_json(cell_json_path: str, output_dir: str | None = None) -> int:
+    """Evaluate a single transfer matrix cell from a dispatch cell JSON.
+
+    Cell JSON shape (produced by generate_manifest_89.py):
+      {
+        "cell_id":            str   — unique cell identifier
+        "source_dataset":     str   — bare dataset name, e.g. "hotpotqa"
+        "target_dataset":     str   — bare dataset name, e.g. "mmlu"
+        "method":             str
+        "model_slug":         str   — "llama" or "qwen3"
+        "seed":               int
+        "source_run_dir":     str   — project-relative path to seed_* run dir
+        "source_dataset_cfg": str   — project-relative path to configs/datasets/*.json
+        "target_dataset_cfg": str   — project-relative path to configs/datasets/*.json
+        "output_check":       str   — project-relative path; written on success
+        "relevant_layers":    list[int]
+        "probe_layer":        int
+      }
+
+    Returns 0 on success (ok or single_class), 1 on error.
+    """
+    project_root = Path(__file__).parent.parent
+
+    with open(cell_json_path) as f:
+        cell = json.load(f)
+
+    cell_id = cell["cell_id"]
+    output_check = project_root / cell["output_check"]
+
+    if output_check.exists():
+        print(f"[{cell_id}] output exists — skipping")
+        return 0
+
+    src_cfg_path = project_root / cell["source_dataset_cfg"]
+    tgt_cfg_path = project_root / cell["target_dataset_cfg"]
+    if not src_cfg_path.exists():
+        print(f"[{cell_id}] source dataset config not found: {src_cfg_path}", file=sys.stderr)
+        return 1
+    if not tgt_cfg_path.exists():
+        print(f"[{cell_id}] target dataset config not found: {tgt_cfg_path}", file=sys.stderr)
+        return 1
+
+    with open(src_cfg_path) as f:
+        src_dataset_cfg = json.load(f)
+    with open(tgt_cfg_path) as f:
+        tgt_dataset_cfg = json.load(f)
+
+    source_run_dir = str(project_root / cell["source_run_dir"])
+
+    try:
+        result = evaluate_transfer_cell(
+            source_run_dir=source_run_dir,
+            source_dataset_cfg=src_dataset_cfg,
+            target_dataset_cfg=tgt_dataset_cfg,
+            method=cell["method"],
+            relevant_layers=cell["relevant_layers"],
+            probe_layer=cell["probe_layer"],
+            device="cpu",
+            training_seed=cell["seed"],
+        )
+    except Exception as exc:
+        print(f"[{cell_id}] error: {exc}", file=sys.stderr)
+        return 1
+
+    result.update({
+        "source_dataset": cell["source_dataset"],
+        "target_dataset": cell["target_dataset"],
+        "method": cell["method"],
+        "seed": cell["seed"],
+        "model_slug": cell["model_slug"],
+        "cell_id": cell_id,
+    })
+
+    out_path = output_check if output_dir is None else (
+        Path(output_dir) / cell["model_slug"] / f"{cell_id}.json"
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w") as f:
+        json.dump(result, f, indent=2)
+
+    auroc = result.get("auroc")
+    status = result.get("status", "?")
+    if isinstance(auroc, float) and not np.isnan(auroc):
+        print(f"[{cell_id}] status={status} auroc={auroc:.4f}")
+    else:
+        print(f"[{cell_id}] status={status} auroc={auroc}")
+
+    return 0 if result.get("status") in ("ok", "single_class") else 1
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Evaluate cross-dataset transfer matrix on memmap checkpoints (issue #89)"
@@ -200,7 +293,16 @@ def main() -> None:
         "--resume", action="store_true",
         help="Skip cells where the per-cell JSON already exists",
     )
+    parser.add_argument(
+        "--cell-json", default=None, metavar="FILE",
+        help="Single-cell mode: evaluate one cell from a dispatch cell JSON "
+             "(produced by scripts/dispatch/generate_manifest_89.py). "
+             "All other args are ignored when this is set.",
+    )
     args = parser.parse_args()
+
+    if args.cell_json is not None:
+        raise SystemExit(run_cell_json(args.cell_json, output_dir=args.output_dir))
 
     relevant_layers = parse_layer_range(args.relevant_layers)
 
