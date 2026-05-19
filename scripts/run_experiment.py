@@ -36,6 +36,19 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+# When HALLULENS_SHARED_DIR is set, paths starting with "shared/" in dataset
+# configs are resolved against that directory instead of project_root. Lets a
+# worktree checkout point at the canonical 20TB shared data dir without
+# symlinking or modifying configs. Unset → existing behavior unchanged.
+_shared_root_override = os.environ.get("HALLULENS_SHARED_DIR")
+
+
+def _resolve_shared(rel_path: str) -> str:
+    if _shared_root_override and rel_path.startswith("shared/"):
+        return str(Path(_shared_root_override) / rel_path[len("shared/"):])
+    return str(project_root / rel_path)
+
+
 import torch
 from loguru import logger
 
@@ -2189,7 +2202,7 @@ def main() -> None:
                 f"{dataset_cfg['icr_capture']['test_dir']}"
             )
             test_ap = MemmapActivationParser(
-                capture_dir=str(project_root / dataset_cfg["icr_capture"]["test_dir"]),
+                capture_dir=_resolve_shared(dataset_cfg["icr_capture"]["test_dir"]),
                 random_seed=global_split_seed,
                 split_strategy="none",
                 verbose=True,
@@ -2287,7 +2300,7 @@ def main() -> None:
                     f"from: {dataset_cfg['icr_capture']['train_dir']}"
                 )
                 ap = MemmapActivationParser(
-                    capture_dir=str(project_root / dataset_cfg["icr_capture"]["train_dir"]),
+                    capture_dir=_resolve_shared(dataset_cfg["icr_capture"]["train_dir"]),
                     random_seed=actual_split_seed,
                     split_strategy="three_way",
                     verbose=True,
