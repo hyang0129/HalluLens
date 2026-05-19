@@ -1,5 +1,6 @@
 development
 .env
+.venv/
 
 # Shared data directory (large files, not synced) — symlink to ../shared
 shared
