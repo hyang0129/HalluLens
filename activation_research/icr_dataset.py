@@ -198,6 +198,28 @@ class _MemmapMode:
                 if line:
                     meta_rows.append(json.loads(line))
 
+        # icr_scores.npy — eager load (small: ~1.4 MB / 10k samples).
+        # Loaded before filtering meta_rows so we can clip to the actual
+        # scores array size (guards against partial captures and
+        # restart-appended duplicate rows in meta.jsonl).
+        scores_path = capture_dir / "icr_scores.npy"
+        if not scores_path.exists():
+            raise FileNotFoundError(f"icr_scores.npy not found: {scores_path}")
+        self._icr_scores = np.load(scores_path)  # (n_samples, num_layers) fp32
+
+        scores_n = self._icr_scores.shape[0]
+        bad = [r for r in meta_rows if r["sample_index"] >= scores_n]
+        if bad:
+            import warnings
+            warnings.warn(
+                f"{capture_dir}: dropping {len(bad)} meta row(s) whose "
+                f"sample_index >= icr_scores size ({scores_n}). "
+                "The capture is incomplete for these samples.",
+                UserWarning,
+                stacklevel=4,
+            )
+            meta_rows = [r for r in meta_rows if r["sample_index"] < scores_n]
+
         # Why: only rows listed in meta.jsonl were fully committed. Pre-allocated
         # rows beyond meta.jsonl's sample_indices may be zero-filled garbage from
         # a partial write or pre-allocation; they must never be reachable.
@@ -206,12 +228,6 @@ class _MemmapMode:
         )
         self._meta = meta_rows
         self._valid_sample_indices = valid_sample_indices
-
-        # icr_scores.npy — eager load (small: ~1.4 MB / 10k samples)
-        scores_path = capture_dir / "icr_scores.npy"
-        if not scores_path.exists():
-            raise FileNotFoundError(f"icr_scores.npy not found: {scores_path}")
-        self._icr_scores = np.load(scores_path)  # (n_samples, num_layers) fp32
 
         # Large arrays — keep as memmap (no full RAM load)
         def _mm(name: str, shape: tuple, dtype) -> np.memmap:
