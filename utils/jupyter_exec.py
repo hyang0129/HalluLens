@@ -136,6 +136,7 @@ class JupyterExecutor:
         kernel_id: Optional[str] = None,
         timeout: float = DEFAULT_TIMEOUT,
         stream_stdout: bool = False,
+        keep_kernel: bool = False,
     ) -> ExecResult:
         """Execute *code* on the remote kernel and return collected outputs.
 
@@ -145,9 +146,11 @@ class JupyterExecutor:
         if not self._cookie_str:
             self.login()
 
-        owned = kernel_id is None
-        if owned:
+        owned = kernel_id is None and not keep_kernel
+        if kernel_id is None:
             kernel_id = self.start_kernel("p311")
+            if keep_kernel:
+                print(f"[jupyter_exec] started persistent kernel {kernel_id}", file=sys.stderr, flush=True)
 
         ws = websocket.create_connection(
             f"{self.ws_base}/api/kernels/{kernel_id}/channels",
@@ -263,6 +266,9 @@ def _main():
     parser.add_argument("--password", default=DEFAULT_PASSWORD)
     parser.add_argument("--kernel", help="Specific kernel ID (default: auto-select idle)")
     parser.add_argument("--stream", action="store_true", help="Print stdout/stderr as it arrives (live)")
+    parser.add_argument("--keep-kernel", action="store_true",
+                        help="Do not auto-stop the kernel on exit. The kernel keeps running "
+                             "if this process is killed (e.g. SSH disconnect). Use for long jobs.")
     args = parser.parse_args()
 
     if args.file:
@@ -274,7 +280,8 @@ def _main():
         code = sys.stdin.read()
 
     jup = JupyterExecutor(base_url=args.url, password=args.password)
-    result = jup.run(code, kernel_id=args.kernel, timeout=args.timeout, stream_stdout=args.stream)
+    result = jup.run(code, kernel_id=args.kernel, timeout=args.timeout,
+                     stream_stdout=args.stream, keep_kernel=args.keep_kernel)
     if not args.stream:
         print(str(result), end="")
     sys.exit(0 if result.status == "ok" else 1)
