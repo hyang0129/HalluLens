@@ -8,27 +8,29 @@ for Jupyter dispatch).
 Usage:
     python scripts/gpu_dispatch.py status
     python scripts/gpu_dispatch.py run [--node HOST] [--desc DESC] [--min-vram GB] COMMAND...
-    python scripts/gpu_dispatch.py run --jupyter --node HOST COMMAND...
     python scripts/gpu_dispatch.py jobs [--all]
     python scripts/gpu_dispatch.py kill JOB_ID
 
-Jupyter dispatch (opt-in, no silent fallback):
-    Some nodes may be SSH-unreachable but accessible via a Jupyter server
-    (e.g. new nodes where NFS/PAM is not yet provisioned). To dispatch to
-    such a node, pass --jupyter to the run subcommand:
+Transport (Jupyter is the default):
+    All node interactions — health probes, dispatch, status, kill — go
+    through each node's already-allocated Jupyter kernel by default.
+    The login node spends ~60s per SSH channel on PAM/profile setup and
+    leaks orphan processes against the user.slice TasksMax=512 cap, so
+    we avoid it entirely for dispatch work.
 
-        python scripts/gpu_dispatch.py run --jupyter --node alphagpu16 bash scripts/my_job.sh
+    Pass --ssh on `status` or `run` to force the legacy SSH path. Useful
+    only for debugging or for nodes that genuinely have no jupyter_url.
+    `kill` routes per-job based on each job's recorded dispatch_method.
 
-    --jupyter is REQUIRED to use the Jupyter path. SSH failure does NOT
-    auto-fall back to Jupyter. The node must have `jupyter_url` set in
-    configs/nodes.json for --jupyter to work.
+    Auto-select (no --node on `run`) probes all jupyter_url-configured
+    nodes in parallel via Jupyter, then picks the best by free VRAM and
+    current job count. Nodes without jupyter_url are skipped from the
+    Jupyter pool — add their endpoint via `sync-jupyter` or pass --ssh.
 
-    For `status`, nodes with `jupyter_url` configured are probed via Jupyter
-    when SSH is unreachable (health-check only, no dispatch side effects).
-
-    Job tracking (manifest, jobs, kill) works the same for both dispatch
-    methods. Jupyter-dispatched jobs are marked with dispatch_method=jupyter
-    in the manifest; `kill` routes to Jupyter automatically for those jobs.
+    Job tracking remains transport-agnostic. Jupyter-dispatched jobs are
+    marked with dispatch_method=jupyter in the manifest; `jobs` and
+    `kill` route per-job from that field. Probe failures on `jobs` mark
+    the job status as "unknown" rather than blocking (5s SSH timeout).
 """
 
 import argparse
@@ -632,7 +634,10 @@ def refresh_job_statuses(
 
     changed = False
 
-    # SSH jobs: check via SSH (one probe per hostname, not per logical node)
+    # SSH jobs: check via SSH (one probe per hostname, not per logical node).
+    # Tight timeout (5s) — the login node can be slow/wedged, and `jobs` must
+    # never hang. On any failure, mark each affected job's status as
+    # "unknown" so the caller sees that the probe didn't conclude.
     for hostname, job_list in ssh_by_host.items():
         if hostname not in hostname_seen:
             continue
@@ -641,7 +646,7 @@ def refresh_job_statuses(
             result = ssh_run(
                 hostname,
                 f"ps -p {','.join(pids)} -o pid= 2>/dev/null || true",
-                timeout=ssh_timeout + 5,
+                timeout=5,
             )
             alive_pids = set()
             for line in result.stdout.strip().splitlines():
@@ -654,12 +659,20 @@ def refresh_job_statuses(
                     jobs[idx].status = "finished"
                     changed = True
         except (subprocess.TimeoutExpired, Exception):
-            pass
+            for idx, _ in job_list:
+                if jobs[idx].status == "running":
+                    jobs[idx].status = "unknown"
+                    changed = True
 
-    # Jupyter jobs: check via Jupyter API (one probe per logical node)
+    # Jupyter jobs: check via Jupyter API (one probe per logical node).
+    # Same failure semantics — mark "unknown" if the probe fails.
     for node_name, job_list in jupyter_by_name.items():
         node = name_map.get(node_name)
         if node is None or not node.jupyter_url:
+            for idx, _ in job_list:
+                if jobs[idx].status == "running":
+                    jobs[idx].status = "unknown"
+                    changed = True
             continue
         pids = [str(j.pid) for _, j in job_list]
         try:
@@ -683,7 +696,10 @@ def refresh_job_statuses(
                     jobs[idx].status = "finished"
                     changed = True
         except Exception:
-            pass
+            for idx, _ in job_list:
+                if jobs[idx].status == "running":
+                    jobs[idx].status = "unknown"
+                    changed = True
 
     if changed:
         save_manifest(manifest_path, jobs)
@@ -708,52 +724,47 @@ def cmd_status(args: argparse.Namespace) -> None:
         if job.status == "running":
             running_counts[job.node_name] = running_counts.get(job.node_name, 0) + 1
 
-    # Probe nodes for health. Nodes with jupyter_url are probed via Jupyter
-    # first because the kernel runs inside the SLURM cgroup and so nvidia-smi
-    # only sees the GPU actually allocated to that logical port. SSH on a
-    # multi-GPU host returns every physical GPU and the parser only keeps the
-    # first one, so the reading would belong to whichever GPU happens to be
-    # index 0 — usually not the one our job is on.
+    # Default transport is Jupyter (the login node is unreliable for SSH).
+    # --ssh forces SSH-only probes for backward compatibility / debugging.
+    # When Jupyter is the default, a node without jupyter_url is probed via
+    # SSH as a last resort; failures are reported as "unreachable" with no
+    # silent SSH fallback for nodes that DO have jupyter_url.
+    use_ssh = getattr(args, "ssh", False)
     statuses: dict = {}
-    jupyter_first = [n for n in nodes if n.jupyter_url]
-    ssh_only = [n for n in nodes if not n.jupyter_url]
 
-    if jupyter_first:
-        with ThreadPoolExecutor(max_workers=max(1, len(jupyter_first))) as pool:
+    if use_ssh:
+        with ThreadPoolExecutor(max_workers=max(1, len(nodes))) as pool:
             futures = {
-                pool.submit(check_node_health_jupyter, node): node
-                for node in jupyter_first
+                pool.submit(check_node_health, node, ssh_timeout): node
+                for node in nodes
             }
             for future in as_completed(futures):
                 node = futures[future]
                 statuses[node.name] = future.result()
+    else:
+        jupyter_capable = [n for n in nodes if n.jupyter_url]
+        ssh_only = [n for n in nodes if not n.jupyter_url]
 
-    if ssh_only:
-        with ThreadPoolExecutor(max_workers=max(1, len(ssh_only))) as pool:
-            futures = {
-                pool.submit(check_node_health, node, ssh_timeout): node
-                for node in ssh_only
-            }
-            for future in as_completed(futures):
-                node = futures[future]
-                statuses[node.name] = future.result()
+        if jupyter_capable:
+            with ThreadPoolExecutor(max_workers=max(1, len(jupyter_capable))) as pool:
+                futures = {
+                    pool.submit(check_node_health_jupyter, node): node
+                    for node in jupyter_capable
+                }
+                for future in as_completed(futures):
+                    node = futures[future]
+                    statuses[node.name] = future.result()
 
-    # SSH fallback for jupyter_url nodes whose Jupyter probe failed.
-    ssh_fallback = [
-        n for n in jupyter_first
-        if not statuses[n.name].reachable
-    ]
-    if ssh_fallback:
-        with ThreadPoolExecutor(max_workers=max(1, len(ssh_fallback))) as pool:
-            futures = {
-                pool.submit(check_node_health, node, ssh_timeout): node
-                for node in ssh_fallback
-            }
-            for future in as_completed(futures):
-                node = futures[future]
-                result = future.result()
-                if result.reachable:
-                    statuses[node.name] = result
+        # Nodes lacking jupyter_url fall back to SSH on a per-node basis.
+        if ssh_only:
+            with ThreadPoolExecutor(max_workers=max(1, len(ssh_only))) as pool:
+                futures = {
+                    pool.submit(check_node_health, node, ssh_timeout): node
+                    for node in ssh_only
+                }
+                for future in as_completed(futures):
+                    node = futures[future]
+                    statuses[node.name] = future.result()
 
     header = f"{'NODE':<20} {'GPU':<18} {'VRAM USED/TOTAL':<18} {'GPU UTIL':<10} {'OUR JOBS':<10} {'STATUS':<12}"
     print(header)
@@ -801,21 +812,59 @@ def cmd_run(args: argparse.Namespace) -> None:
     else:
         target_nodes = nodes
 
-    if args.jupyter:
-        # Jupyter dispatch: explicit opt-in, no SSH health check, no fallback
-        if not args.node:
-            print("Error: --jupyter requires --node (auto-select not supported for Jupyter dispatch)", file=sys.stderr)
-            sys.exit(1)
-        selected = target_nodes[0]
-        if not selected.jupyter_url:
+    # Transport selection: Jupyter is the default (the cluster's login node
+    # is unreliable for SSH; Jupyter goes directly to the GPU node's
+    # already-allocated kernel). Pass --ssh to opt back to SSH. The old
+    # --jupyter flag is accepted but is now a no-op (Jupyter is default).
+    use_ssh = getattr(args, "ssh", False)
+
+    if not use_ssh:
+        # Jupyter dispatch (default). Probe candidate nodes via Jupyter in
+        # parallel, then either honor --node or auto-select.
+        jupyter_candidates = [n for n in target_nodes if n.jupyter_url]
+        if not jupyter_candidates:
             print(
-                f"Error: node '{selected.name}' has no jupyter_url in configs/nodes.json. "
-                "Add it to use --jupyter.",
+                "Error: no candidate nodes have jupyter_url configured. "
+                "Either add jupyter_url entries to configs/nodes.json "
+                "(run `gpu_dispatch.py sync-jupyter`) or pass --ssh to "
+                "dispatch via SSH.",
                 file=sys.stderr,
             )
             sys.exit(1)
 
-        # Still enforce the manifest-based busy guard, unless explicitly overridden
+        statuses: dict = {}
+        with ThreadPoolExecutor(max_workers=max(1, len(jupyter_candidates))) as pool:
+            futures = {
+                pool.submit(check_node_health_jupyter, node): node
+                for node in jupyter_candidates
+            }
+            for future in as_completed(futures):
+                node = futures[future]
+                statuses[node.name] = future.result()
+
+        if args.node:
+            ns = statuses.get(args.node)
+            if ns is None or not ns.reachable:
+                err = ns.error if ns else "unknown"
+                print(
+                    f"Error: node '{args.node}' is unreachable via Jupyter ({err}). "
+                    f"Pass --ssh to try the SSH path.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            selected = jupyter_candidates[0]
+        else:
+            selected = select_best_node(
+                jupyter_candidates, manifest, statuses, min_vram_gb=args.min_vram
+            )
+            if selected is None:
+                print(
+                    "Error: no suitable Jupyter-reachable node available",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            ns = statuses[selected.name]
+
         running = sum(1 for j in manifest if j.status == "running" and j.node_name == selected.name)
         if running >= selected.max_concurrent_jobs and not args.force_concurrent:
             print(
@@ -824,12 +873,6 @@ def cmd_run(args: argparse.Namespace) -> None:
                 "or pass --force-concurrent to dispatch a co-tenant (e.g. a CPU-only side job).",
                 file=sys.stderr,
             )
-            sys.exit(1)
-
-        # Probe via Jupyter to show current GPU state (informational)
-        ns = check_node_health_jupyter(selected)
-        if not ns.reachable:
-            print(f"Error: Jupyter health check failed for '{selected.name}': {ns.error}", file=sys.stderr)
             sys.exit(1)
 
         if args.min_vram and ns.gpu_mem_total_mb and ns.gpu_mem_used_mb:
@@ -845,7 +888,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         job = dispatch_job_jupyter(selected, command, description, config)
 
     else:
-        # SSH dispatch (default)
+        # SSH dispatch (--ssh opt-out from Jupyter default).
         statuses: dict = {}
         with ThreadPoolExecutor(max_workers=max(1, len(target_nodes))) as pool:
             futures = {
@@ -864,7 +907,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 if target_nodes[0].jupyter_url:
                     print(
                         f"Hint: this node has jupyter_url configured. "
-                        f"Use --jupyter to dispatch via Jupyter instead.",
+                        f"Drop --ssh to dispatch via Jupyter instead.",
                         file=sys.stderr,
                     )
                 sys.exit(1)
@@ -1035,7 +1078,12 @@ def main():
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # status
-    subparsers.add_parser("status", help="Check GPU node health")
+    status_parser = subparsers.add_parser("status", help="Check GPU node health")
+    status_parser.add_argument(
+        "--ssh",
+        action="store_true",
+        help="Force SSH probes instead of the default Jupyter probes.",
+    )
 
     # run
     run_parser = subparsers.add_parser("run", help="Dispatch a job to a GPU node")
@@ -1043,13 +1091,18 @@ def main():
     run_parser.add_argument("--desc", help="Job description")
     run_parser.add_argument("--min-vram", type=float, help="Minimum free VRAM in GB")
     run_parser.add_argument(
-        "--jupyter",
+        "--ssh",
         action="store_true",
         help=(
-            "Dispatch via Jupyter API instead of SSH. "
-            "Requires --node and jupyter_url in configs/nodes.json. "
-            "Never falls back silently — if Jupyter fails, the command fails."
+            "Dispatch via SSH (legacy). The default is Jupyter, which goes "
+            "directly to the GPU node's already-allocated kernel and avoids "
+            "the login node entirely."
         ),
+    )
+    run_parser.add_argument(
+        "--jupyter",
+        action="store_true",
+        help=argparse.SUPPRESS,  # deprecated no-op (Jupyter is now the default)
     )
     run_parser.add_argument(
         "--force-concurrent",

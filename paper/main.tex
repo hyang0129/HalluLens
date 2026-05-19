@@ -1,0 +1,53 @@
+% paper/main.tex
+% EMNLP 2026 long-paper submission (ARR-routed).
+% Uses the official ACL style (acl.sty); review option masks author
+% identity during peer review. Drop "review" for the camera-ready.
+
+\documentclass[11pt]{article}
+
+% ACL submission style. Drop the [review] option for the camera-ready.
+\usepackage[review]{acl}
+
+\usepackage{times}
+\usepackage{latexsym}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{microtype}
+\usepackage{inconsolata}
+\usepackage{graphicx}
+
+% --- Citation infrastructure (single-source-of-truth numbers from CSVs) ---
+\input{macros}
+\input{generated/values}
+
+\title{Detecting Hallucinations via Mutual Information Analysis
+       of Intermediate Layer Activations}
+
+\author{Anonymous Submission}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\input{sections/00_abstract}
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+\input{sections/01_intro}
+
+\section*{Limitations}
+\input{sections/99_limitations}
+
+% \section*{Ethics Statement}
+% \input{sections/99_ethics}
+
+% Bibliography: enable once references.bib has entries.
+% \bibliography{references}
+
+% \appendix
+% \section{Example Appendix}
+% \label{sec:appendix}
+% \input{sections/appendix_A}
+
+\end{document}
