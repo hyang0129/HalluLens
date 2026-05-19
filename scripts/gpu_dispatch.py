@@ -567,11 +567,12 @@ def _build_squeue_node_entry(alloc: dict, defaults: dict) -> dict:
 
 
 def sync_jupyter_nodes(config_path: Path, dry_run: bool = False) -> dict:
-    """Reconcile squeue-derived Jupyter entries in nodes.json with live SLURM state.
+    """Reconcile nodes.json with live SLURM state.
 
-    Removes every entry with source="squeue" and re-adds one per RUNNING
-    `jupyter_*_<port>` allocation reported by `squeue --me`. SSH-only and
-    hybrid (SSH+Jupyter) entries are left untouched.
+    Replaces the entire node list with one entry per RUNNING `jupyter_*_<port>`
+    allocation reported by `squeue --me`. Legacy bare-hostname SSH-only entries
+    and stale squeue-sourced entries are both dropped — the live SLURM state
+    is the source of truth.
 
     Returns a summary dict: {added, removed, kept, allocations, written}.
     """
@@ -580,9 +581,7 @@ def sync_jupyter_nodes(config_path: Path, dry_run: bool = False) -> dict:
 
     defaults = raw.get("defaults", {})
     existing = raw.get("nodes", [])
-    managed_old = [n for n in existing if n.get("source") == "squeue"]
-    unmanaged = [n for n in existing if n.get("source") != "squeue"]
-    old_names = {n.get("name") or n.get("hostname") for n in managed_old}
+    old_names = {n.get("name") or n.get("hostname") for n in existing}
 
     allocations = discover_jupyter_allocations()
     new_entries = [_build_squeue_node_entry(a, defaults) for a in allocations]
@@ -592,7 +591,7 @@ def sync_jupyter_nodes(config_path: Path, dry_run: bool = False) -> dict:
     removed = sorted(old_names - new_names)
     kept = sorted(new_names & old_names)
 
-    raw["nodes"] = unmanaged + new_entries
+    raw["nodes"] = new_entries
 
     written = False
     if not dry_run:
@@ -741,34 +740,27 @@ def cmd_status(args: argparse.Namespace) -> None:
     statuses: dict = {}
 
     if use_ssh:
-        with ThreadPoolExecutor(max_workers=max(1, len(nodes))) as pool:
+        probed_nodes = nodes
+        with ThreadPoolExecutor(max_workers=max(1, len(probed_nodes))) as pool:
             futures = {
                 pool.submit(check_node_health, node, ssh_timeout): node
-                for node in nodes
+                for node in probed_nodes
             }
             for future in as_completed(futures):
                 node = futures[future]
                 statuses[node.name] = future.result()
     else:
-        jupyter_capable = [n for n in nodes if n.jupyter_url]
-        ssh_only = [n for n in nodes if not n.jupyter_url]
-
-        if jupyter_capable:
-            with ThreadPoolExecutor(max_workers=max(1, len(jupyter_capable))) as pool:
+        # Jupyter-only path: skip nodes without jupyter_url entirely. Legacy
+        # SSH-only entries in nodes.json are noise — the login node can't
+        # reliably reach bare hostnames without a fresh SLURM allocation, and
+        # probing them just burns the SSH timeout per node. Pass --ssh to
+        # force the legacy behavior.
+        probed_nodes = [n for n in nodes if n.jupyter_url]
+        if probed_nodes:
+            with ThreadPoolExecutor(max_workers=max(1, len(probed_nodes))) as pool:
                 futures = {
                     pool.submit(check_node_health_jupyter, node): node
-                    for node in jupyter_capable
-                }
-                for future in as_completed(futures):
-                    node = futures[future]
-                    statuses[node.name] = future.result()
-
-        # Nodes lacking jupyter_url fall back to SSH on a per-node basis.
-        if ssh_only:
-            with ThreadPoolExecutor(max_workers=max(1, len(ssh_only))) as pool:
-                futures = {
-                    pool.submit(check_node_health, node, ssh_timeout): node
-                    for node in ssh_only
+                    for node in probed_nodes
                 }
                 for future in as_completed(futures):
                     node = futures[future]
@@ -778,7 +770,7 @@ def cmd_status(args: argparse.Namespace) -> None:
     print(header)
     print("-" * len(header))
 
-    for node in nodes:
+    for node in probed_nodes:
         ns = statuses.get(node.name)
         if ns is None or not ns.reachable:
             print(f"{node.name:<20} {'-':<18} {'-':<18} {'-':<10} {'-':<10} {'unreachable':<12}")
