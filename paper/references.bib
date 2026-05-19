@@ -1,0 +1,127 @@
+% References for the HalluLens paper.
+%
+% Bibliography style: acl_natbib.bst (configured in main.tex).
+% Enable in main.tex by uncommenting `\bibliography{references}`.
+%
+% Entries grouped by the §2 subsection they anchor. Add new entries near the
+% group they belong to; keep keys lowercase-author-year for consistency.
+
+% =============================================================================
+% §2.1 Activation probing for LLM behavior
+% =============================================================================
+
+@inproceedings{alain2017understanding,
+  title     = {Understanding intermediate layers using linear classifier probes},
+  author    = {Alain, Guillaume and Bengio, Yoshua},
+  booktitle = {International Conference on Learning Representations (ICLR) Workshop},
+  year      = {2017},
+  url       = {https://arxiv.org/abs/1610.01644}
+}
+
+@article{belinkov2019analysis,
+  title   = {Analysis Methods in Neural Language Processing: A Survey},
+  author  = {Belinkov, Yonatan and Glass, James},
+  journal = {Transactions of the Association for Computational Linguistics},
+  volume  = {7},
+  pages   = {49--72},
+  year    = {2019},
+  doi     = {10.1162/tacl_a_00254}
+}
+
+@inproceedings{azaria2023internal,
+  title     = {The Internal State of an {LLM} Knows When It's Lying},
+  author    = {Azaria, Amos and Mitchell, Tom},
+  booktitle = {Findings of the Association for Computational Linguistics: EMNLP 2023},
+  year      = {2023},
+  url       = {https://aclanthology.org/2023.findings-emnlp.68/}
+}
+
+@inproceedings{li2023iti,
+  title     = {Inference-Time Intervention: Eliciting Truthful Answers from a Language Model},
+  author    = {Li, Kenneth and Patel, Oam and Vi{\'e}gas, Fernanda and Pfister, Hanspeter and Wattenberg, Martin},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2023},
+  url       = {https://arxiv.org/abs/2306.03341}
+}
+
+@inproceedings{marks2024geometry,
+  title     = {The Geometry of Truth: Emergent Linear Structure in Large Language Model Representations of True/False Datasets},
+  author    = {Marks, Samuel and Tegmark, Max},
+  booktitle = {Conference on Language Modeling (COLM)},
+  year      = {2024},
+  url       = {https://arxiv.org/abs/2310.06824}
+}
+
+% =============================================================================
+% §2.2 Hallucination detection
+% =============================================================================
+
+@article{kadavath2022language,
+  title   = {Language Models (Mostly) Know What They Know},
+  author  = {Kadavath, Saurav and Conerly, Tom and Askell, Amanda and Henighan, Tom and Drain, Dawn and Perez, Ethan and Schiefer, Nicholas and Hatfield-Dodds, Zac and DasSarma, Nova and Tran-Johnson, Eli and others},
+  journal = {arXiv preprint arXiv:2207.05221},
+  year    = {2022},
+  url     = {https://arxiv.org/abs/2207.05221}
+}
+
+@article{farquhar2024semantic,
+  title   = {Detecting hallucinations in large language models using semantic entropy},
+  author  = {Farquhar, Sebastian and Kossen, Jannik and Kuhn, Lorenz and Gal, Yarin},
+  journal = {Nature},
+  volume  = {630},
+  pages   = {625--630},
+  year    = {2024},
+  doi     = {10.1038/s41586-024-07421-0}
+}
+
+@inproceedings{manakul2023selfcheckgpt,
+  title     = {{SelfCheckGPT}: Zero-Resource Black-Box Hallucination Detection for Generative Large Language Models},
+  author    = {Manakul, Potsawee and Liusie, Adian and Gales, Mark},
+  booktitle = {Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing (EMNLP)},
+  year      = {2023},
+  url       = {https://aclanthology.org/2023.emnlp-main.557/}
+}
+
+@inproceedings{kossen2024semantic,
+  title     = {Semantic Entropy Probes: Robust and Cheap Hallucination Detection in {LLM}s},
+  author    = {Kossen, Jannik and Han, Jiatong and Razzak, Muhammed and Schut, Lisa and Malik, Shreshth and Gal, Yarin},
+  booktitle = {arXiv preprint arXiv:2406.15927},
+  year      = {2024},
+  url       = {https://arxiv.org/abs/2406.15927}
+}
+
+@inproceedings{min2023factscore,
+  title     = {{FActScore}: Fine-grained Atomic Evaluation of Factual Precision in Long Form Text Generation},
+  author    = {Min, Sewon and Krishna, Kalpesh and Lyu, Xinxi and Lewis, Mike and Yih, Wen-tau and Koh, Pang Wei and Iyyer, Mohit and Zettlemoyer, Luke and Hajishirzi, Hannaneh},
+  booktitle = {Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing (EMNLP)},
+  year      = {2023},
+  url       = {https://aclanthology.org/2023.emnlp-main.741/}
+}
+
+% =============================================================================
+% §2.3 Contrastive representation learning
+% =============================================================================
+
+@inproceedings{chen2020simclr,
+  title     = {A Simple Framework for Contrastive Learning of Visual Representations},
+  author    = {Chen, Ting and Kornblith, Simon and Norouzi, Mohammad and Hinton, Geoffrey},
+  booktitle = {International Conference on Machine Learning (ICML)},
+  year      = {2020},
+  url       = {https://arxiv.org/abs/2002.05709}
+}
+
+@article{oord2018cpc,
+  title   = {Representation Learning with Contrastive Predictive Coding},
+  author  = {van den Oord, Aaron and Li, Yazhe and Vinyals, Oriol},
+  journal = {arXiv preprint arXiv:1807.03748},
+  year    = {2018},
+  url     = {https://arxiv.org/abs/1807.03748}
+}
+
+@inproceedings{gao2021simcse,
+  title     = {{SimCSE}: Simple Contrastive Learning of Sentence Embeddings},
+  author    = {Gao, Tianyu and Yao, Xingcheng and Chen, Danqi},
+  booktitle = {Proceedings of the 2021 Conference on Empirical Methods in Natural Language Processing (EMNLP)},
+  year      = {2021},
+  url       = {https://aclanthology.org/2021.emnlp-main.552/}
+}
