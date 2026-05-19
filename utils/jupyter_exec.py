@@ -135,6 +135,7 @@ class JupyterExecutor:
         code: str,
         kernel_id: Optional[str] = None,
         timeout: float = DEFAULT_TIMEOUT,
+        stream_stdout: bool = False,
     ) -> ExecResult:
         """Execute *code* on the remote kernel and return collected outputs.
 
@@ -156,13 +157,13 @@ class JupyterExecutor:
             },
         )
         try:
-            return self._execute_on_ws(ws, code, timeout)
+            return self._execute_on_ws(ws, code, timeout, stream_stdout=stream_stdout)
         finally:
             ws.close()
             if owned:
                 self.stop_kernel(kernel_id)
 
-    def _execute_on_ws(self, ws, code: str, timeout: float) -> ExecResult:
+    def _execute_on_ws(self, ws, code: str, timeout: float, stream_stdout: bool = False) -> ExecResult:
         msg_id = str(uuid.uuid4())
         ws.send(json.dumps({
             "header": {
@@ -206,10 +207,17 @@ class JupyterExecutor:
                 continue
 
             if mtype == "stream":
+                text = content.get("text", "")
                 if content.get("name") == "stdout":
-                    result.stdout += content.get("text", "")
+                    result.stdout += text
+                    if stream_stdout:
+                        sys.stdout.write(text)
+                        sys.stdout.flush()
                 else:
-                    result.stderr += content.get("text", "")
+                    result.stderr += text
+                    if stream_stdout:
+                        sys.stderr.write(text)
+                        sys.stderr.flush()
 
             elif mtype in ("display_data", "execute_result"):
                 result.outputs.append(content.get("data", {}))
@@ -254,6 +262,7 @@ def _main():
     parser.add_argument("--url", default=DEFAULT_BASE_URL)
     parser.add_argument("--password", default=DEFAULT_PASSWORD)
     parser.add_argument("--kernel", help="Specific kernel ID (default: auto-select idle)")
+    parser.add_argument("--stream", action="store_true", help="Print stdout/stderr as it arrives (live)")
     args = parser.parse_args()
 
     if args.file:
@@ -265,8 +274,9 @@ def _main():
         code = sys.stdin.read()
 
     jup = JupyterExecutor(base_url=args.url, password=args.password)
-    result = jup.run(code, kernel_id=args.kernel, timeout=args.timeout)
-    print(str(result), end="")
+    result = jup.run(code, kernel_id=args.kernel, timeout=args.timeout, stream_stdout=args.stream)
+    if not args.stream:
+        print(str(result), end="")
     sys.exit(0 if result.status == "ok" else 1)
 
 
