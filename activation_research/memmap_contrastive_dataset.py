@@ -177,6 +177,7 @@ class MemmapContrastiveDataset(Dataset):
         capture_dir = Path(capture_dir)
         if not capture_dir.exists():
             raise FileNotFoundError(f"capture_dir not found: {capture_dir}")
+        self._capture_dir = capture_dir
 
         if attention_summary not in ("stats", "full"):
             # 'coarse' is reserved — no plans to implement it (issue #82 comment).
@@ -404,6 +405,44 @@ class MemmapContrastiveDataset(Dataset):
             layer_pos=layer_id,
             layer_id=layer_id,
             _row_indices=row_idx,
+        )
+
+    # ------------------------------------------------------------------ #
+    def slice_layers(
+        self,
+        layers: List[int],
+        num_views: Optional[int] = None,
+    ) -> "MemmapContrastiveDataset":
+        """Return a new dataset restricted to a subset of model layers.
+
+        Shares the underlying memmaps — no data is copied. The returned
+        dataset exposes the same split as the caller (injected via
+        ``_override_indices``), so train/test alignment is preserved.
+
+        Args:
+            layers: Model-layer indices to keep (must be within
+                ``[0, num_layers+1)``).
+            num_views: Views to sample per item. Defaults to
+                ``len(layers)`` so all selected layers are used.
+        """
+        if num_views is None:
+            num_views = len(layers)
+        return MemmapContrastiveDataset(
+            self._capture_dir,
+            split="all",  # _override_indices below replaces this
+            num_views=num_views,
+            relevant_layers=layers,
+            fixed_layer=None,
+            view_sampling_with_replacement=self._view_with_replacement,
+            include_response_logprobs=self._include_lp,
+            response_logprobs_top_k=self._target_top_k,
+            pad_length=self._pad_length,
+            include_response_attention=self._include_attn,
+            attention_summary=self._attn_summary,
+            attention_target_layer_offset_forward=self._attn_offset_fwd,
+            attention_target_layer_offset_backward=self._attn_offset_bwd,
+            _override_indices=self._split_indices,
+            _override_split_name=self._split_name,
         )
 
     # ------------------------------------------------------------------ #
