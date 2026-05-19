@@ -93,26 +93,16 @@ Before running any code, determine the execution context:
 
 **Are you on a local machine (not on Empire AI)?**
 - No GPU is available locally — do not attempt to launch vLLM servers or run training.
-- To run GPU work, go through the Empire AI cluster: use `utils/empire_shell.py` for login-node orchestration and `gpu_dispatch.py` to dispatch jobs to GPU nodes.
+- To run GPU work, go through the Empire AI cluster: SSH to the login node for orchestration and use `gpu_dispatch.py` to dispatch jobs to GPU nodes.
 
-### MANDATORY: access Empire AI via `utils/empire_shell.py`, never bare ssh
+### Accessing Empire AI via SSH
 
-**Do not run `ssh empire-ai 'cmd'` directly.** Every bare SSH call costs ~60s of login overhead and accumulates orphan processes that exhaust `TasksMax=512`, making the node unusable. All shell commands to the Empire AI login node — `git`, `gh`, `squeue`, `gpu_dispatch.py`, file inspection — must go through `utils/empire_shell.py`, which keeps a single warm session:
+Use `ssh empire-ai 'cmd'` for all login-node commands. The SSH config (`~/.ssh/config`) has `ControlMaster auto` + `ControlPersist 60m`, so the first connection opens a multiplexed socket and subsequent calls reuse it with minimal overhead:
 
 ```bash
-python utils/empire_shell.py 'squeue --me'
-python utils/empire_shell.py 'gh pr list'
+ssh empire-ai 'squeue --me'
+ssh empire-ai 'cd ~/LLM_research/HalluLens && python scripts/results_table.py'
 ```
-
-Or programmatically:
-
-```python
-from utils.empire_shell import run
-res = run('squeue --me')
-print(res.stdout, res.exit_code)
-```
-
-Daemon control: `--status`, `--kill`, `--logs`.
 
 ### Claude Code GPU execution (REMOTE_GPU only)
 
