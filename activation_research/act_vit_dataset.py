@@ -82,8 +82,24 @@ class ACTViTDataset(Dataset):
                     labels.append(int(bool(obj["hallucinated"])))
         self._labels = np.array(labels, dtype=np.int32)
 
-        # Store the index subset.
-        self._indices = np.asarray(indices, dtype=np.int64)
+        # meta.jsonl may have fewer committed rows than config.json's n_samples
+        # (e.g. partial capture or interrupted write). Clip indices to the
+        # number of rows that actually have labels so __getitem__ never goes
+        # out of bounds.
+        effective_n = len(self._labels)
+        raw_indices = np.asarray(indices, dtype=np.int64)
+        valid_mask = raw_indices < effective_n
+        if not valid_mask.all():
+            import warnings
+            n_dropped = int((~valid_mask).sum())
+            warnings.warn(
+                f"{self._capture_dir}: dropping {n_dropped} index/indices "
+                f">= meta.jsonl row count ({effective_n}); "
+                "capture is incomplete for these samples.",
+                UserWarning,
+                stacklevel=2,
+            )
+        self._indices = raw_indices[valid_mask]
 
         # Record shape metadata (dropping embedding layer → L transformer layers).
         self.num_layers = num_layers_plus1 - 1
