@@ -730,6 +730,7 @@ def train_contrastive_logprob_recon(
     infinite_stream_seed: int = 0,
     steps_per_epoch_override: int = None,
     grad_clip_norm: float = None,
+    augment_fn=None,
 ):
     """Train a ``LogprobReconProgressiveCompressor`` with auxiliary logprob reconstruction.
 
@@ -928,6 +929,34 @@ def train_contrastive_logprob_recon(
                 buffer_view_indices = []
                 buffer_logprobs = []
 
+                # Assemble labels before augmentation (mixup needs them)
+                labels_full = None
+                sample_ids_full = None
+                if use_labels:
+                    labels_full = torch.cat(buffer_labels, dim=0)
+                    sample_ids_full = torch.cat(buffer_sample_ids, dim=0)
+                    buffer_labels = []
+                    buffer_sample_ids = []
+
+                if augment_fn is not None:
+                    _aug_labels = labels_full if labels_full is not None else torch.zeros(
+                        views_full.shape[0], device=device, dtype=torch.long
+                    )
+                    if n_batches == 0:
+                        _pre = torch.nn.functional.cosine_similarity(
+                            views_full[:, 0].reshape(views_full.shape[0], -1),
+                            views_full[:, 1].reshape(views_full.shape[0], -1),
+                            dim=1,
+                        ).mean()
+                    views_full = augment_fn(views_full, _aug_labels)
+                    if n_batches == 0:
+                        _post = torch.nn.functional.cosine_similarity(
+                            views_full[:, 0].reshape(views_full.shape[0], -1),
+                            views_full[:, 1].reshape(views_full.shape[0], -1),
+                            dim=1,
+                        ).mean()
+                        logger.info(f"aug_view_cosine: pre={_pre:.4f} post={_post:.4f} delta={_post - _pre:.4f}")
+
                 bsz, num_views, seq_len, hidden_dim = views_full.shape
                 x_flat = views_full.reshape(bsz * num_views, seq_len, hidden_dim)
                 view_idx_flat = view_idx_full.reshape(bsz * num_views) if view_idx_full is not None else None
@@ -937,10 +966,6 @@ def train_contrastive_logprob_recon(
 
                 # SupCon loss
                 if use_labels:
-                    labels_full = torch.cat(buffer_labels, dim=0)
-                    sample_ids_full = torch.cat(buffer_sample_ids, dim=0)
-                    buffer_labels = []
-                    buffer_sample_ids = []
                     supcon = loss_fn(z_views, labels=labels_full, sample_ids=sample_ids_full)
                 else:
                     supcon = loss_fn(z_views)

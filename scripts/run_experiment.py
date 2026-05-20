@@ -320,40 +320,59 @@ def run_contrastive_logprob_recon(
         "cuda" if torch.cuda.is_available() else "cpu"
     )
 
+    # Training-skip resume: if final_weights.pt already exists, load and skip training.
+    checkpoint_dir = os.path.join(output_dir, "artifacts")
+    final_weights_path = os.path.join(checkpoint_dir, "final_weights.pt")
+    training_skipped = os.path.exists(final_weights_path)
+    if training_skipped:
+        logger.info(f"final_weights.pt found — skipping training, loading weights for eval")
+        ckpt = torch.load(final_weights_path, map_location=train_device)
+        model.load_state_dict(ckpt["model_state_dict"])
+
+    aug_cfg = data_cfg.get("augmentations", None)
+    augment_fn = None
+    if aug_cfg:
+        from activation_research.augmentations import AugmentationComposer
+        augment_fn = AugmentationComposer(
+            augmentations=aug_cfg.get("ops", []),
+            asymmetric=aug_cfg.get("asymmetric", False),
+        )
+
     from activation_research.training import train_contrastive_logprob_recon
 
-    checkpoint_dir = os.path.join(output_dir, "artifacts")
-    train_contrastive_logprob_recon(
-        model=model,
-        train_dataset=train_ds,
-        test_dataset=val_ds,
-        epochs=train_cfg["max_epochs"],
-        batch_size=train_cfg["batch_size"],
-        lr=train_cfg["lr"],
-        temperature=train_cfg["temperature"],
-        device=train_device,
-        num_workers=experiment_cfg.get("num_workers", 4),
-        sub_batch_size=train_cfg.get("sub_batch_size", 64),
-        checkpoint_dir=checkpoint_dir,
-        save_every=1,
-        snapshot_every=10,
-        snapshot_keep_last=3,
-        use_labels=train_cfg.get("use_labels", False),
-        ignore_label=train_cfg.get("ignore_label", -1),
-        persistent_workers=experiment_cfg.get("persistent_workers", True),
-        recon_lambda=model_params.get("recon_lambda", 1.0),
-        use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", True),
-        infinite_stream_shuffle=True,
-        infinite_stream_seed=training_seed,
-        steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
-        balanced_sampling=train_cfg.get("balanced_sampling", False),
-        grad_clip_norm=train_cfg.get("grad_clip_norm"),
-    )
+    if not training_skipped:
+        train_contrastive_logprob_recon(
+            model=model,
+            train_dataset=train_ds,
+            test_dataset=val_ds,
+            epochs=train_cfg["max_epochs"],
+            batch_size=train_cfg["batch_size"],
+            lr=train_cfg["lr"],
+            temperature=train_cfg["temperature"],
+            device=train_device,
+            num_workers=experiment_cfg.get("num_workers", 4),
+            sub_batch_size=train_cfg.get("sub_batch_size", 64),
+            checkpoint_dir=checkpoint_dir,
+            save_every=1,
+            snapshot_every=10,
+            snapshot_keep_last=3,
+            use_labels=train_cfg.get("use_labels", False),
+            ignore_label=train_cfg.get("ignore_label", -1),
+            persistent_workers=experiment_cfg.get("persistent_workers", True),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", True),
+            infinite_stream_shuffle=True,
+            infinite_stream_seed=training_seed,
+            steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+            balanced_sampling=train_cfg.get("balanced_sampling", False),
+            grad_clip_norm=train_cfg.get("grad_clip_norm"),
+            augment_fn=augment_fn,
+        )
 
-    torch.save(
-        {"model_state_dict": model.state_dict()},
-        os.path.join(output_dir, "artifacts", "final_weights.pt"),
-    )
+        torch.save(
+            {"model_state_dict": model.state_dict()},
+            os.path.join(output_dir, "artifacts", "final_weights.pt"),
+        )
 
     # OOD evaluation on target layers
     from torch.utils.data import DataLoader
@@ -383,6 +402,9 @@ def run_contrastive_logprob_recon(
         else:
             metrics_list.append(m)
 
+    flip_auroc: bool = bool(eval_cfg.get("flip_auroc", False))
+    effective_outlier_class = 0 if flip_auroc else dataset_cfg.get("outlier_class", 1)
+
     evaluator = MultiMetricHallucinationEvaluator(
         activation_parser_df=eval_ap.df,
         train_data_loader=train_loader,
@@ -392,7 +414,7 @@ def run_contrastive_logprob_recon(
         device=train_device,
         num_workers=experiment_cfg.get("num_workers", 4),
         persistent_workers=False,
-        outlier_class=dataset_cfg.get("outlier_class", 1),
+        outlier_class=effective_outlier_class,
     )
 
     ood_stats = evaluator.compute(eval_loader, model)
@@ -401,6 +423,7 @@ def run_contrastive_logprob_recon(
         "method": method_cfg["name"],
         "dataset": dataset_cfg["name"],
         "seed": training_seed,
+        "flip_auroc": flip_auroc,
         "split_seed": experiment_cfg.get("split_seed", 42),
         "n_train": len(train_ds),
         "n_test": len(test_ds),
