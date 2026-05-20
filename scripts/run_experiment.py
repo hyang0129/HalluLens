@@ -434,6 +434,223 @@ def run_contrastive_logprob_recon(
     return eval_metrics, predictions
 
 
+def run_contrastive_logprob_recon_twin(
+    ap,
+    dataset_cfg: dict,
+    method_cfg: dict,
+    experiment_cfg: dict,
+    output_dir: str,
+    device: str,
+    training_seed: int,
+    test_ap=None,
+) -> tuple[dict, list[dict]]:
+    """Train two independent LogprobReconProgressiveCompressor heads and evaluate with TwinConcatModel.
+
+    head_a is trained with ignore_label=1 (truth=class, single-cluster on truth).
+    head_b is trained with ignore_label=0 (hallu=class, single-cluster on hallu).
+    At eval, embeddings from both heads are concatenated and evaluated with
+    mahalanobis and knn metrics only (cosine is not meaningful on the concatenated space).
+    """
+    data_cfg = method_cfg["data"]
+    train_cfg = method_cfg["training"]
+    eval_cfg = method_cfg["evaluation"]
+
+    relevant_layers = parse_layer_range(data_cfg["relevant_layers"])
+    target_layers = data_cfg["target_layers"]
+
+    ds_kwargs = dict(
+        relevant_layers=relevant_layers,
+        num_views=data_cfg.get("num_views", 2),
+        pad_length=data_cfg.get("pad_length", 63),
+        preload=data_cfg.get("preload", True),
+        include_response_logprobs=True,
+        response_logprobs_top_k=data_cfg.get("response_logprobs_top_k", 20),
+        check_ram=False,
+    )
+
+    train_ds = ap.get_dataset("train", **ds_kwargs)
+    eval_ap = test_ap if test_ap is not None else ap
+    test_ds = eval_ap.get_dataset("test", **ds_kwargs)
+
+    has_val = ap.split_strategy == "three_way"
+    val_ds = ap.get_dataset("val", **ds_kwargs) if has_val else test_ds
+
+    from activation_research.model import LogprobReconProgressiveCompressor, TwinConcatModel
+    from activation_research.training import train_contrastive_logprob_recon
+
+    model_params = method_cfg.get("model_params", {})
+    final_dim = model_params.get("final_dim", 512)
+
+    train_device = device if device != "auto" else (
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+
+    head_a_dir = os.path.join(output_dir, "artifacts", "head_a")
+    head_b_dir = os.path.join(output_dir, "artifacts", "head_b")
+    head_a_weights = os.path.join(head_a_dir, "final_weights.pt")
+    head_b_weights = os.path.join(head_b_dir, "final_weights.pt")
+
+    # Build head_a (ignore_label=1: truth forms the compact cluster)
+    head_a = LogprobReconProgressiveCompressor(
+        input_dim=dataset_cfg["input_dim"],
+        final_dim=final_dim,
+        input_dropout=model_params.get("input_dropout", 0.3),
+        recon_seq_len=model_params.get("recon_seq_len", 64),
+        recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+        recon_lambda=model_params.get("recon_lambda", 1.0),
+        logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
+    )
+
+    # Build head_b (ignore_label=0: hallu forms the compact cluster)
+    head_b = LogprobReconProgressiveCompressor(
+        input_dim=dataset_cfg["input_dim"],
+        final_dim=final_dim,
+        input_dropout=model_params.get("input_dropout", 0.3),
+        recon_seq_len=model_params.get("recon_seq_len", 64),
+        recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+        recon_lambda=model_params.get("recon_lambda", 1.0),
+        logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
+    )
+
+    # Resume / train head_a
+    if os.path.exists(head_a_weights):
+        logger.info("head_a final_weights.pt found — skipping training, loading weights for eval")
+        ckpt = torch.load(head_a_weights, map_location=train_device)
+        head_a.load_state_dict(ckpt["model_state_dict"])
+    else:
+        os.makedirs(head_a_dir, exist_ok=True)
+        train_contrastive_logprob_recon(
+            model=head_a,
+            train_dataset=train_ds,
+            test_dataset=val_ds,
+            epochs=train_cfg["max_epochs"],
+            batch_size=train_cfg["batch_size"],
+            lr=train_cfg["lr"],
+            temperature=train_cfg["temperature"],
+            device=train_device,
+            num_workers=experiment_cfg.get("num_workers", 4),
+            sub_batch_size=train_cfg.get("sub_batch_size", 64),
+            checkpoint_dir=head_a_dir,
+            save_every=1,
+            snapshot_every=10,
+            snapshot_keep_last=3,
+            use_labels=True,
+            ignore_label=1,
+            persistent_workers=experiment_cfg.get("persistent_workers", True),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", True),
+            infinite_stream_shuffle=True,
+            infinite_stream_seed=training_seed,
+            steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+            balanced_sampling=train_cfg.get("balanced_sampling", False),
+            grad_clip_norm=train_cfg.get("grad_clip_norm"),
+            augment_fn=None,
+        )
+        torch.save(
+            {"model_state_dict": head_a.state_dict()},
+            head_a_weights,
+        )
+
+    # Resume / train head_b
+    if os.path.exists(head_b_weights):
+        logger.info("head_b final_weights.pt found — skipping training, loading weights for eval")
+        ckpt = torch.load(head_b_weights, map_location=train_device)
+        head_b.load_state_dict(ckpt["model_state_dict"])
+    else:
+        os.makedirs(head_b_dir, exist_ok=True)
+        train_contrastive_logprob_recon(
+            model=head_b,
+            train_dataset=train_ds,
+            test_dataset=val_ds,
+            epochs=train_cfg["max_epochs"],
+            batch_size=train_cfg["batch_size"],
+            lr=train_cfg["lr"],
+            temperature=train_cfg["temperature"],
+            device=train_device,
+            num_workers=experiment_cfg.get("num_workers", 4),
+            sub_batch_size=train_cfg.get("sub_batch_size", 64),
+            checkpoint_dir=head_b_dir,
+            save_every=1,
+            snapshot_every=10,
+            snapshot_keep_last=3,
+            use_labels=True,
+            ignore_label=0,
+            persistent_workers=experiment_cfg.get("persistent_workers", True),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", True),
+            infinite_stream_shuffle=True,
+            infinite_stream_seed=training_seed,
+            steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+            balanced_sampling=train_cfg.get("balanced_sampling", False),
+            grad_clip_norm=train_cfg.get("grad_clip_norm"),
+            augment_fn=None,
+        )
+        torch.save(
+            {"model_state_dict": head_b.state_dict()},
+            head_b_weights,
+        )
+
+    # Wrap both heads in TwinConcatModel for eval
+    twin_model = TwinConcatModel(head_a=head_a, head_b=head_b)
+    twin_model.eval()
+
+    # OOD evaluation on target layers — mahalanobis and knn only (no cosine)
+    from torch.utils.data import DataLoader
+    from activation_research.metric_evaluator import MultiMetricHallucinationEvaluator
+
+    train_ds_target = train_ds.slice_layers(target_layers)
+    test_ds_target = test_ds.slice_layers(target_layers)
+
+    train_loader = DataLoader(train_ds_target, batch_size=64, shuffle=False)
+    eval_loader = DataLoader(test_ds_target, batch_size=64, shuffle=False)
+
+    metrics_list: list = []
+    for m in eval_cfg["metrics"]:
+        if m == "knn":
+            knn_params = dict(eval_cfg.get("knn_params", {}))
+            knn_params["sample_seed"] = training_seed
+            metrics_list.append(
+                {
+                    "metric": "knn",
+                    "kwargs": knn_params,
+                    "train_selection": "all",
+                }
+            )
+        else:
+            metrics_list.append(m)
+
+    flip_auroc: bool = bool(eval_cfg.get("flip_auroc", False))
+    effective_outlier_class = 0 if flip_auroc else dataset_cfg.get("outlier_class", 1)
+
+    evaluator = MultiMetricHallucinationEvaluator(
+        activation_parser_df=eval_ap.df,
+        train_data_loader=train_loader,
+        metrics=metrics_list,
+        batch_size=eval_cfg.get("eval_batch_size", 256),
+        sub_batch_size=eval_cfg.get("sub_batch_size", 64),
+        device=train_device,
+        num_workers=experiment_cfg.get("num_workers", 4),
+        persistent_workers=False,
+        outlier_class=effective_outlier_class,
+    )
+
+    ood_stats = evaluator.compute(eval_loader, twin_model)
+
+    eval_metrics: dict = {
+        "method": method_cfg["name"],
+        "dataset": dataset_cfg["name"],
+        "seed": training_seed,
+        "flip_auroc": flip_auroc,
+        "split_seed": experiment_cfg.get("split_seed", 42),
+        "n_train": len(train_ds),
+        "n_test": len(test_ds),
+    }
+    eval_metrics.update(ood_stats)
+
+    predictions: list[dict] = []
+    return eval_metrics, predictions
+
+
 def run_linear_probe(
     ap,
     dataset_cfg: dict,
@@ -2220,6 +2437,398 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def run_contrastive_logprob_recon_twin(
+    ap,
+    dataset_cfg: dict,
+    method_cfg: dict,
+    experiment_cfg: dict,
+    output_dir: str,
+    device: str,
+    training_seed: int,
+    test_ap=None,
+) -> tuple[dict, list[dict]]:
+    """Train two asymmetric LogprobReconProgressiveCompressor heads (H7-H10).
+
+    head_a: trained with ignore_label=1  → truth forms the compact cluster.
+    head_b: trained with ignore_label=0  → hallu forms the compact cluster.
+
+    At eval time, per-head embeddings are saved to .npy files under
+    {output_dir}/artifacts/embeddings/ and a suite of post-hoc combination
+    strategies (H7-H10) is computed directly from those numpy arrays.
+    """
+    import numpy as np
+    from sklearn.neighbors import NearestNeighbors
+
+    from activation_research.evaluation import inference_embeddings
+    from activation_research.metrics import (
+        _binary_outlier_labels,
+        _record_embedding,
+        _safe_auroc,
+        knn_ood_stats,
+        mahalanobis_ood_stats,
+    )
+    from activation_research.model import (
+        LogprobReconProgressiveCompressor,
+        TwinConcatModel,
+    )
+    from activation_research.training import train_contrastive_logprob_recon
+
+    data_cfg = method_cfg["data"]
+    train_cfg = method_cfg["training"]
+    eval_cfg = method_cfg["evaluation"]
+
+    relevant_layers = parse_layer_range(data_cfg["relevant_layers"])
+    target_layers = data_cfg["target_layers"]
+
+    ds_kwargs = dict(
+        relevant_layers=relevant_layers,
+        num_views=data_cfg.get("num_views", 2),
+        pad_length=data_cfg.get("pad_length", 63),
+        preload=data_cfg.get("preload", True),
+        include_response_logprobs=True,
+        response_logprobs_top_k=data_cfg.get("response_logprobs_top_k", 20),
+        check_ram=False,
+    )
+
+    train_ds = ap.get_dataset("train", **ds_kwargs)
+    eval_ap = test_ap if test_ap is not None else ap
+    test_ds = eval_ap.get_dataset("test", **ds_kwargs)
+
+    has_val = ap.split_strategy == "three_way"
+    val_ds = ap.get_dataset("val", **ds_kwargs) if has_val else test_ds
+
+    model_params = method_cfg.get("model_params", {})
+    train_device = device if device != "auto" else (
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+
+    aug_cfg = data_cfg.get("augmentations", None)
+    augment_fn = None
+    if aug_cfg:
+        from activation_research.augmentations import AugmentationComposer
+
+        augment_fn = AugmentationComposer(
+            augmentations=aug_cfg.get("ops", []),
+            asymmetric=aug_cfg.get("asymmetric", False),
+        )
+
+    checkpoint_dir = os.path.join(output_dir, "artifacts")
+
+    def _build_head():
+        return LogprobReconProgressiveCompressor(
+            input_dim=dataset_cfg["input_dim"],
+            final_dim=model_params.get("final_dim", 512),
+            input_dropout=model_params.get("input_dropout", 0.3),
+            recon_seq_len=model_params.get("recon_seq_len", 64),
+            recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
+        )
+
+    def _train_head(head, ignore_label: int, ckpt_suffix: str) -> None:
+        ckpt_path = os.path.join(checkpoint_dir, f"final_weights_{ckpt_suffix}.pt")
+        if os.path.exists(ckpt_path):
+            logger.info(
+                f"{ckpt_path} found — skipping training for head_{ckpt_suffix}"
+            )
+            ckpt = torch.load(ckpt_path, map_location=train_device)
+            head.load_state_dict(ckpt["model_state_dict"])
+            return
+        train_contrastive_logprob_recon(
+            model=head,
+            train_dataset=train_ds,
+            test_dataset=val_ds,
+            epochs=train_cfg["max_epochs"],
+            batch_size=train_cfg["batch_size"],
+            lr=train_cfg["lr"],
+            temperature=train_cfg["temperature"],
+            device=train_device,
+            num_workers=experiment_cfg.get("num_workers", 4),
+            sub_batch_size=train_cfg.get("sub_batch_size", 64),
+            checkpoint_dir=checkpoint_dir,
+            save_every=1,
+            snapshot_every=10,
+            snapshot_keep_last=3,
+            use_labels=train_cfg.get("use_labels", False),
+            ignore_label=ignore_label,
+            persistent_workers=experiment_cfg.get("persistent_workers", True),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", True),
+            infinite_stream_shuffle=True,
+            infinite_stream_seed=training_seed,
+            steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+            balanced_sampling=train_cfg.get("balanced_sampling", False),
+            grad_clip_norm=train_cfg.get("grad_clip_norm"),
+            augment_fn=augment_fn,
+        )
+        torch.save(
+            {"model_state_dict": head.state_dict()},
+            ckpt_path,
+        )
+
+    head_a = _build_head()
+    head_b = _build_head()
+
+    _train_head(head_a, ignore_label=1, ckpt_suffix="a")
+    _train_head(head_b, ignore_label=0, ckpt_suffix="b")
+
+    # Build TwinConcatModel (kept for save/load compatibility).
+    twin_model = TwinConcatModel(head_a, head_b)
+    twin_model.eval()
+
+    # ------------------------------------------------------------------
+    # Per-head embedding inference + .npy cache
+    # ------------------------------------------------------------------
+    emb_dir = os.path.join(checkpoint_dir, "embeddings")
+    os.makedirs(emb_dir, exist_ok=True)
+
+    paths = {
+        "train_za": os.path.join(emb_dir, "train_za.npy"),
+        "train_zb": os.path.join(emb_dir, "train_zb.npy"),
+        "test_za": os.path.join(emb_dir, "test_za.npy"),
+        "test_zb": os.path.join(emb_dir, "test_zb.npy"),
+        "train_labels": os.path.join(emb_dir, "train_labels.npy"),
+        "test_labels": os.path.join(emb_dir, "test_labels.npy"),
+    }
+    all_cached = all(os.path.exists(p) for p in paths.values())
+
+    if all_cached:
+        logger.info("All .npy embedding files found — loading from cache.")
+        train_za = np.load(paths["train_za"])
+        train_zb = np.load(paths["train_zb"])
+        test_za = np.load(paths["test_za"])
+        test_zb = np.load(paths["test_zb"])
+        train_labels = np.load(paths["train_labels"])
+        test_labels = np.load(paths["test_labels"])
+    else:
+        logger.info("Running per-head inference to build embedding cache.")
+        train_ds_target = train_ds.slice_layers(target_layers)
+        test_ds_target = test_ds.slice_layers(target_layers)
+
+        # Build label lookup dicts from the activation-parser dataframes.
+        train_label_lookup = (
+            ap.df.set_index("prompt_hash")["halu"].to_dict()
+        )
+        test_label_lookup = (
+            eval_ap.df.set_index("prompt_hash")["halu"].to_dict()
+        )
+
+        def _run_inference(head, ds):
+            head.eval()
+            records = inference_embeddings(
+                model=head,
+                dataset=ds,
+                batch_size=eval_cfg.get("eval_batch_size", 256),
+                sub_batch_size=eval_cfg.get("sub_batch_size", 64),
+                device=train_device,
+                num_workers=experiment_cfg.get("num_workers", 4),
+                persistent_workers=False,
+            )
+            return records
+
+        def _to_arrays(records, label_lookup):
+            zs, lbls = [], []
+            for r in records:
+                hk = r["hashkey"]
+                if hk not in label_lookup:
+                    continue
+                z = _record_embedding(r).float().numpy()
+                zs.append(z)
+                lbls.append(int(label_lookup[hk]))
+            return (
+                np.stack(zs, axis=0).astype(np.float32),
+                np.array(lbls, dtype=np.int32),
+            )
+
+        train_recs_a = _run_inference(head_a, train_ds_target)
+        train_recs_b = _run_inference(head_b, train_ds_target)
+        test_recs_a = _run_inference(head_a, test_ds_target)
+        test_recs_b = _run_inference(head_b, test_ds_target)
+
+        train_za, train_labels = _to_arrays(train_recs_a, train_label_lookup)
+        train_zb, _ = _to_arrays(train_recs_b, train_label_lookup)
+        test_za, test_labels = _to_arrays(test_recs_a, test_label_lookup)
+        test_zb, _ = _to_arrays(test_recs_b, test_label_lookup)
+
+        np.save(paths["train_za"], train_za)
+        np.save(paths["train_zb"], train_zb)
+        np.save(paths["test_za"], test_za)
+        np.save(paths["test_zb"], test_zb)
+        np.save(paths["train_labels"], train_labels)
+        np.save(paths["test_labels"], test_labels)
+        logger.info(
+            f"Saved embeddings: train={train_za.shape}, test={test_za.shape}"
+        )
+
+    # ------------------------------------------------------------------
+    # Build eval config
+    # ------------------------------------------------------------------
+    flip_auroc: bool = bool(eval_cfg.get("flip_auroc", False))
+    effective_outlier_class = 0 if flip_auroc else dataset_cfg.get("outlier_class", 1)
+
+    knn_params_cfg = dict(eval_cfg.get("knn_params", {}))
+    knn_k = int(knn_params_cfg.get("k", 50))
+    knn_metric = str(knn_params_cfg.get("metric", "euclidean"))
+    knn_calibrate_k = bool(knn_params_cfg.get("calibrate_k", False))
+    knn_k_candidates = knn_params_cfg.get("k_candidates", None)
+    knn_max_train_size = int(knn_params_cfg.get("max_train_size", 200000))
+
+    # ------------------------------------------------------------------
+    # Main metrics: KNN + Mahalanobis on concat space via synthetic records
+    # ------------------------------------------------------------------
+    train_z_concat = np.concatenate([train_za, train_zb], axis=1)
+    test_z_concat = np.concatenate([test_za, test_zb], axis=1)
+
+    def _make_records(arr, labels):
+        return [
+            {"z1": torch.from_numpy(arr[i]).float(), "halu": int(labels[i])}
+            for i in range(len(labels))
+        ]
+
+    train_records_concat = _make_records(train_z_concat, train_labels)
+    test_records_concat = _make_records(test_z_concat, test_labels)
+
+    knn_stats = knn_ood_stats(
+        train_records=train_records_concat,
+        test_records=test_records_concat,
+        outlier_class=effective_outlier_class,
+        k=knn_k,
+        metric=knn_metric,
+        train_label_filter="all",
+        calibrate_k=knn_calibrate_k,
+        k_candidates=knn_k_candidates,
+        max_train_size=knn_max_train_size,
+        sample_seed=training_seed,
+    )
+
+    maha_stats = mahalanobis_ood_stats(
+        train_records=train_records_concat,
+        test_records=test_records_concat,
+        outlier_class=effective_outlier_class,
+        train_label_filter="id_only",
+    )
+
+    # ------------------------------------------------------------------
+    # H7: KNN distance ensemble (simple average of per-head distances)
+    # ------------------------------------------------------------------
+    binary_labels = (test_labels == int(effective_outlier_class)).astype(np.int32)
+
+    n_neighbors_h7 = min(knn_k, len(train_za))
+    nn_a = NearestNeighbors(n_neighbors=n_neighbors_h7, metric=knn_metric)
+    nn_a.fit(train_za)
+    dists_a, _ = nn_a.kneighbors(test_za)
+
+    nn_b = NearestNeighbors(n_neighbors=n_neighbors_h7, metric=knn_metric)
+    nn_b.fit(train_zb)
+    dists_b, _ = nn_b.kneighbors(test_zb)
+
+    ensemble_scores = (dists_a.mean(axis=1) + dists_b.mean(axis=1)) / 2.0
+    h7_auroc = _safe_auroc(binary_labels, ensemble_scores)
+
+    # ------------------------------------------------------------------
+    # H8: per-class KNN recall in three spaces
+    # ------------------------------------------------------------------
+    def _knn_recall(train_arr, test_arr, train_lbls, test_lbls, k, metric):
+        nn = NearestNeighbors(n_neighbors=min(k, len(train_arr)), metric=metric)
+        nn.fit(train_arr)
+        _, indices = nn.kneighbors(test_arr)
+        # majority vote
+        neighbor_labels = train_lbls[indices]  # (N_test, k)
+        preds = (neighbor_labels.sum(axis=1) > (k / 2)).astype(np.int32)
+        recalls = {}
+        for cls in (0, 1):
+            mask = test_lbls == cls
+            if mask.sum() == 0:
+                recalls[cls] = float("nan")
+            else:
+                recalls[cls] = float((preds[mask] == cls).mean())
+        return recalls
+
+    h8_concat = _knn_recall(
+        train_z_concat, test_z_concat, train_labels, test_labels, knn_k, knn_metric
+    )
+    h8_head_a = _knn_recall(
+        train_za, test_za, train_labels, test_labels, knn_k, knn_metric
+    )
+    h8_head_b = _knn_recall(
+        train_zb, test_zb, train_labels, test_labels, knn_k, knn_metric
+    )
+
+    # ------------------------------------------------------------------
+    # H9: whitened ensemble (per-head distances normalised by their std)
+    # ------------------------------------------------------------------
+    std_a = float(dists_a.mean(axis=1).std()) + 1e-8
+    std_b = float(dists_b.mean(axis=1).std()) + 1e-8
+    whitened_scores = dists_a.mean(axis=1) / std_a + dists_b.mean(axis=1) / std_b
+    h9_auroc = _safe_auroc(binary_labels, whitened_scores)
+
+    # ------------------------------------------------------------------
+    # H10: element-wise sum space
+    # ------------------------------------------------------------------
+    train_z_sum = train_za + train_zb
+    test_z_sum = test_za + test_zb
+
+    train_records_sum = _make_records(train_z_sum, train_labels)
+    test_records_sum = _make_records(test_z_sum, test_labels)
+
+    knn_sum_stats = knn_ood_stats(
+        train_records=train_records_sum,
+        test_records=test_records_sum,
+        outlier_class=effective_outlier_class,
+        k=knn_k,
+        metric=knn_metric,
+        train_label_filter="all",
+        calibrate_k=knn_calibrate_k,
+        k_candidates=knn_k_candidates,
+        max_train_size=knn_max_train_size,
+        sample_seed=training_seed,
+    )
+    h10_knn_sum_auroc = float(knn_sum_stats.get("knn_auroc", float("nan")))
+
+    try:
+        maha_sum_stats = mahalanobis_ood_stats(
+            train_records=train_records_sum,
+            test_records=test_records_sum,
+            outlier_class=effective_outlier_class,
+            train_label_filter="id_only",
+        )
+        h10_maha_sum_auroc = float(maha_sum_stats.get("mahalanobis_auroc", float("nan")))
+    except Exception:
+        h10_maha_sum_auroc = float("nan")
+
+    # ------------------------------------------------------------------
+    # Assemble eval_metrics
+    # ------------------------------------------------------------------
+    eval_metrics: dict = {
+        "method": method_cfg["name"],
+        "dataset": dataset_cfg["name"],
+        "seed": training_seed,
+        "flip_auroc": flip_auroc,
+        "split_seed": experiment_cfg.get("split_seed", 42),
+        "n_train": len(train_labels),
+        "n_test": len(test_labels),
+    }
+    eval_metrics.update(knn_stats)
+    eval_metrics.update(maha_stats)
+
+    eval_metrics["h7_knn_ensemble_auroc"] = float(h7_auroc)
+
+    eval_metrics["h8_recall_class0_concat"] = h8_concat[0]
+    eval_metrics["h8_recall_class1_concat"] = h8_concat[1]
+    eval_metrics["h8_recall_class0_head_a"] = h8_head_a[0]
+    eval_metrics["h8_recall_class1_head_a"] = h8_head_a[1]
+    eval_metrics["h8_recall_class0_head_b"] = h8_head_b[0]
+    eval_metrics["h8_recall_class1_head_b"] = h8_head_b[1]
+
+    eval_metrics["h9_whitened_ensemble_auroc"] = float(h9_auroc)
+
+    eval_metrics["h10_knn_sum_auroc"] = h10_knn_sum_auroc
+    eval_metrics["h10_maha_sum_auroc"] = h10_maha_sum_auroc
+
+    predictions: list[dict] = []
+    return eval_metrics, predictions
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -2735,6 +3344,11 @@ def main() -> None:
                         )
                     elif routine == "contrastive_logprob_recon":
                         eval_metrics, predictions = run_contrastive_logprob_recon(
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
+                            test_ap=test_ap,
+                        )
+                    elif routine == "contrastive_logprob_recon_twin":
+                        eval_metrics, predictions = run_contrastive_logprob_recon_twin(
                             ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
                         )
