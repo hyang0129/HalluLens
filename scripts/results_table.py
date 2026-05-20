@@ -308,6 +308,75 @@ def collect_training_cells(*, include_smollm3: bool = False) -> list[dict]:
     return cells
 
 
+def collect_ablation_cells() -> list[dict]:
+    """One cell per (config, dataset, method, seed) for non-baseline experiments.
+
+    Picks up every experiment config that is NOT a ``baseline_comparison_*``
+    file (aug_grid, channel_dropout_ablation, twin_grid, sharedtrunk_grid,
+    unlabeled_ablation, and any future ablation prefixes). Cells carry
+    ``kind="ablation"`` so they are excluded from the main table by default
+    and can be accessed by passing ``--include-ablations``.
+
+    Dataset label is read directly from ``cfg["dataset"]`` (always present and
+    authoritative) rather than being parsed from the filename, which avoids the
+    brittle prefix-stripping that ``collect_training_cells`` needs for
+    ``baseline_comparison_*`` names.
+    """
+    cells: list[dict] = []
+    cfg_dir = PROJECT_ROOT / "configs" / "experiments"
+    for cfg_path in sorted(cfg_dir.glob("*.json")):
+        if cfg_path.name.startswith("baseline_comparison_"):
+            continue
+        cfg = load_experiment_config(str(cfg_path), project_root=str(PROJECT_ROOT))
+        model_label = _model_from_config_name(cfg_path.name)
+        dataset_label = cfg.get("dataset", cfg_path.stem)
+
+        specs = enumerate_runs(
+            cfg,
+            output_base=cfg.get("output_dir", "runs"),
+            project_root=str(PROJECT_ROOT),
+        )
+        for spec in specs:
+            run_dir = Path(spec.run_dir)
+            status = classify_run(str(run_dir))
+            metrics: dict[str, float] = {}
+            if status == RunStatus.COMPLETE:
+                with open(run_dir / "eval_metrics.json") as f:
+                    eval_data = json.load(f)
+                allowed = _TRAINING_METRIC_KEYS.get(spec.method_name, ())
+                for k in allowed:
+                    v = eval_data.get(k)
+                    if isinstance(v, (int, float)) and np.isfinite(v):
+                        metrics[k] = float(v)
+                _merge_extended_metrics(run_dir, metrics)
+
+            cells.append({
+                "key": {
+                    "dataset":    dataset_label,
+                    "model":      model_label,
+                    "method":     spec.method_name,
+                    "seed":       spec.seed,
+                    "experiment": cfg.get("experiment_name", cfg_path.stem),
+                },
+                "kind": "ablation",
+                "status": status.value,
+                "metrics": metrics,
+                "expected_rows": None,
+                "actual_rows": None,
+                "paths": {
+                    "run_dir":      _rel(run_dir),
+                    "eval_metrics": _rel(run_dir / "eval_metrics.json"),
+                    "eval_metrics_extended": (
+                        _rel(run_dir / "eval_metrics_extended.json")
+                        if (run_dir / "eval_metrics_extended.json").exists()
+                        else None
+                    ),
+                    "config": _rel(cfg_path),
+                },
+            })
+    return cells
+
+
 def _expected_sampling_rows(ds: str, mid: str, split: str, gen_n: int) -> int:
     if split == "train":
         idx_path = subset_index_path(ds, mid)
@@ -629,7 +698,7 @@ def _summary(cells: list[dict]) -> str:
         d[c["status"]] = d.get(c["status"], 0) + 1
         d["total"] = d.get("total", 0) + 1
     lines = ["Summary:"]
-    for kind in ("training", "sampling", "sep", "p_true"):
+    for kind in ("training", "ablation", "sampling", "sep", "p_true"):
         d = by_kind.get(kind, {})
         if not d:
             continue
@@ -661,10 +730,20 @@ def main() -> None:
              "SmolLM3 is out of scope per PAPER_ROADMAP §5; flip on to inspect "
              "the cached SmolLM3 configs without losing the rest of the table.",
     )
+    parser.add_argument(
+        "--include-ablations",
+        action="store_true",
+        help="Include ablation experiment cells (aug_grid, channel_dropout_ablation, "
+             "twin_grid, sharedtrunk_grid, unlabeled_ablation, etc.). Excluded by "
+             "default so the main table stays clean. Ablation cells carry "
+             "kind='ablation' and an extra 'experiment' key for grouping.",
+    )
     args = parser.parse_args()
 
     cells: list[dict] = []
     cells += collect_training_cells(include_smollm3=args.include_smollm3)
+    if args.include_ablations:
+        cells += collect_ablation_cells()
     cells += collect_sampling_cells()
     cells += collect_sep_cells()
     cells += collect_p_true_cells()
