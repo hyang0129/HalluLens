@@ -161,9 +161,12 @@ def _build_datasets(cfg: dict):
     include_response_logprobs = data_cfg.get("include_response_logprobs", False)
     random_seed = data_cfg.get("random_seed", split_seed)
 
+    # Match production eval (run_experiment.py:477-489): num_views=2 → both views
+    # are forwarded through the model and averaged via knn_ood_stats's z_views.mean(0).
+    # Using num_views=1 here drops half the signal and the sanity check fails.
     common_kwargs = dict(
         relevant_layers=relevant_layers,
-        num_views=1,  # eval mode — no augmentation
+        num_views=data_cfg.get("num_views", 2),
         pad_length=pad_length,
         include_response_logprobs=include_response_logprobs,
     )
@@ -176,7 +179,7 @@ def _build_datasets(cfg: dict):
         verbose=False,
     )
     train_ds_full = train_ap.get_dataset("train", **common_kwargs)
-    train_ds = train_ds_full.slice_layers(target_layers, num_views=1)
+    train_ds = train_ds_full.slice_layers(target_layers)
 
     # Test parser (none split — all rows as test)
     test_ap = MemmapActivationParser(
@@ -186,7 +189,7 @@ def _build_datasets(cfg: dict):
         verbose=False,
     )
     test_ds_full = test_ap.get_dataset("test", **common_kwargs)
-    test_ds = test_ds_full.slice_layers(target_layers, num_views=1)
+    test_ds = test_ds_full.slice_layers(target_layers)
 
     return train_ds, test_ds
 
@@ -214,14 +217,22 @@ def _extract_embeddings(
     trunk_list, zA_list, zB_list, label_list = [], [], [], []
 
     for batch in loader:
-        # batch["views_activations"] has shape (B, num_views, seq_len, hidden_dim)
-        # with num_views=1 → squeeze to (B, seq_len, hidden_dim)
-        x = batch["views_activations"]
-        if x.dim() == 4:
-            x = x.squeeze(1)  # (B, seq_len, hidden_dim)
-        x = x.to(device).float()
+        # batch["views_activations"] has shape (B, num_views, seq_len, hidden_dim).
+        # Match production eval: forward each view separately, then mean over views
+        # (knn_ood_stats does z_views.mean(0); we replicate it explicitly here so
+        # downstream LOO-NN distances also use the reduced embeddings).
+        x = batch["views_activations"].to(device).float()
+        if x.dim() == 3:
+            x = x.unsqueeze(1)  # promote (B, L, D) → (B, 1, L, D)
+        bsz, num_views, seq_len, hidden = x.shape
+        x_flat = x.reshape(bsz * num_views, seq_len, hidden)
 
-        trunk_z, z_A, z_B, _ = model.forward_with_heads(x)
+        trunk_flat, zA_flat, zB_flat, _ = model.forward_with_heads(x_flat)
+
+        # Reshape back to (B, num_views, dim) and mean over views.
+        trunk_z = trunk_flat.reshape(bsz, num_views, -1).mean(dim=1)
+        z_A = zA_flat.reshape(bsz, num_views, -1).mean(dim=1)
+        z_B = zB_flat.reshape(bsz, num_views, -1).mean(dim=1)
 
         trunk_list.append(trunk_z.cpu().float().numpy())
         zA_list.append(z_A.cpu().float().numpy())
