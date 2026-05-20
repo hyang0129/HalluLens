@@ -1,0 +1,17 @@
+{
+  "experiment_name": "twin_grid_nq_qwen3_memmap",
+  "dataset": "nq_qwen3_memmap",
+  "methods": [
+    "contrastive_logprob_recon_c0",
+    "contrastive_logprob_recon_c1",
+    "contrastive_logprob_recon_c2",
+    "contrastive_logprob_recon_c3"
+  ],
+  "split_seed": 42,
+  "training_seeds": [0],
+  "split_seeds": [42],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs"
+}
