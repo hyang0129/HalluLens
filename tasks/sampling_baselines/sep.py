@@ -143,6 +143,14 @@ def layer_sweep_sep_se(
         y_se = np.array([se_by_row[int(r)] for r in valid_idx], dtype=np.float32)
         y_bin = train_labels_full[valid_idx]
 
+        # Drop rows whose SE value is NaN (undefined SE for some generation patterns)
+        finite = np.isfinite(y_se)
+        if not finite.all():
+            X, valid_idx, y_se, y_bin = X[finite], valid_idx[finite], y_se[finite], y_bin[finite]
+        if len(X) == 0:
+            print("no finite SE rows — skipped")
+            continue
+
         try:
             X_tr, X_va, ys_tr, _ys_va, _yb_tr, yb_va = train_test_split(
                 X, y_se, y_bin, test_size=val_frac, stratify=y_bin, random_state=seed
@@ -212,6 +220,11 @@ def run_sep(
     X_train = X_train[keep]
     train_valid_idx = train_valid_idx[keep]
     y_se = np.array([se_by_row[int(r)] for r in train_valid_idx], dtype=np.float32)
+
+    # Drop rows whose SE value is NaN
+    finite = np.isfinite(y_se)
+    if not finite.all():
+        X_train, train_valid_idx, y_se = X_train[finite], train_valid_idx[finite], y_se[finite]
 
     if len(X_train) == 0:
         raise RuntimeError(

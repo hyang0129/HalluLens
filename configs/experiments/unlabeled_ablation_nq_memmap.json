@@ -1,0 +1,14 @@
+{
+  "experiment_name": "unlabeled_ablation_nq_memmap",
+  "dataset": "nq_memmap",
+  "methods": [
+    "contrastive_logprob_recon_c0"
+  ],
+  "split_seed": 42,
+  "training_seeds": [0],
+  "split_seeds": [42],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs"
+}

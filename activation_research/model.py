@@ -242,6 +242,23 @@ class LogprobReconProgressiveCompressor(nn.Module):
         return loss, {"logprob_var": logprob_var, "suppressed": False}
 
 
+class TwinConcatModel(nn.Module):
+    """Two independent projection heads whose embeddings are concatenated at eval time.
+
+    head_a is trained with ignore_label=1 (truth=class).
+    head_b is trained with ignore_label=0 (hallu=class).
+    forward() returns torch.cat([head_a(x), head_b(x)], dim=-1).
+    """
+
+    def __init__(self, head_a: nn.Module, head_b: nn.Module):
+        super().__init__()
+        self.head_a = head_a
+        self.head_b = head_b
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.cat([self.head_a(x), self.head_b(x)], dim=-1)
+
+
 class LogprobAttnReconProgressiveCompressor(nn.Module):
     """ProgressiveCompressor with combined logprob (Mechanism F) + attention
     summary (Mechanism K) auxiliary reconstruction heads.
