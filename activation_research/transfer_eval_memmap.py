@@ -391,7 +391,7 @@ def _resolve_probe_layer(run_dir: str, run_config: dict) -> int:
     if os.path.exists(eval_metrics_path):
         with open(eval_metrics_path) as f:
             em = json.load(f)
-        if "selected_layer" in em:
+        if em.get("selected_layer") is not None:
             return int(em["selected_layer"])
     method_data = run_config.get("method", {}).get("data", {})
     if "probe_layer" in method_data:
