@@ -1,0 +1,17 @@
+{
+  "experiment_name": "sharedtrunk_grid_nq_llama_memmap",
+  "dataset": "nq_memmap",
+  "methods": [
+    "contrastive_logprob_recon_d1a",
+    "contrastive_logprob_recon_d1b",
+    "contrastive_logprob_recon_d2a",
+    "contrastive_logprob_recon_d2b"
+  ],
+  "split_seed": 42,
+  "training_seeds": [0],
+  "split_seeds": [42],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs"
+}
