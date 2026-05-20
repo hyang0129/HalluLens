@@ -100,15 +100,12 @@ while true; do
 
   echo "worker_79 $WORKER_ID: claimed $CELL_PATH"
 
-  EXPERIMENT=$( "$PYTHON" -c "import json; d=json.load(open('$CELL_PATH')); print(d['experiment_config'])")
-  METHOD=$(     "$PYTHON" -c "import json; d=json.load(open('$CELL_PATH')); print(d['method'])")
-  SEED=$(       "$PYTHON" -c "import json; d=json.load(open('$CELL_PATH')); print(d['seed'])")
+  TASK_TYPE=$(  "$PYTHON" -c "import json; d=json.load(open('$CELL_PATH')); print(d.get('task_type','train'))")
   OUTPUT_CHECK=$("$PYTHON" -c "import json; d=json.load(open('$CELL_PATH')); print(d['output_check'])")
 
   ABS_OUTPUT="$PROJECT_ROOT/$OUTPUT_CHECK"
 
-  # Resume semantics — if eval_metrics.json already exists, mark complete
-  # without re-running. Cheap idempotency for sweeps re-queued mid-run.
+  # Resume semantics — if output already exists, mark complete without re-running.
   if [ -f "$ABS_OUTPUT" ]; then
     echo "worker_79 $WORKER_ID: output exists at $OUTPUT_CHECK — marking done."
     "$PYTHON" "$CLI" complete \
@@ -119,25 +116,32 @@ while true; do
     continue
   fi
 
-  echo "worker_79 $WORKER_ID: running experiment=$EXPERIMENT method=$METHOD seed=$SEED"
   set +e
-  "$PYTHON" "$PROJECT_ROOT/scripts/run_experiment.py" \
-      --experiment "$PROJECT_ROOT/$EXPERIMENT" \
-      --methods    "$METHOD" \
-      --seeds      "$SEED" \
-      > "$RUN_LOG" 2>&1 &
+  if [ "$TASK_TYPE" = "transfer_eval" ]; then
+    echo "worker_79 $WORKER_ID: transfer_eval cell=$(basename $CELL_PATH .json)"
+    "$PYTHON" "$PROJECT_ROOT/scripts/eval_transfer_matrix_memmap.py" \
+        --cell-json "$CELL_PATH" \
+        > "$RUN_LOG" 2>&1 &
+  else
+    EXPERIMENT=$( "$PYTHON" -c "import json; d=json.load(open('$CELL_PATH')); print(d['experiment_config'])")
+    METHOD=$(     "$PYTHON" -c "import json; d=json.load(open('$CELL_PATH')); print(d['method'])")
+    SEED=$(       "$PYTHON" -c "import json; d=json.load(open('$CELL_PATH')); print(d['seed'])")
+    echo "worker_79 $WORKER_ID: running experiment=$EXPERIMENT method=$METHOD seed=$SEED"
+    "$PYTHON" "$PROJECT_ROOT/scripts/run_experiment.py" \
+        --experiment "$PROJECT_ROOT/$EXPERIMENT" \
+        --methods    "$METHOD" \
+        --seeds      "$SEED" \
+        > "$RUN_LOG" 2>&1 &
+  fi
   RUN_PID=$!
   wait "$RUN_PID"
   EXIT_CODE=$?
   RUN_PID=""
   set -e
 
-  # Why: run_experiment.py has historically exited 0 on internal failure paths
-  # without writing eval_metrics.json (e.g. silent fallthroughs in
-  # contrastive_logprob_recon / llmsknow_probe). Trusting the exit code alone
-  # let ~67 cells get marked done with no metrics on disk. Guard with a
-  # post-run existence check on output_check so a silent skip becomes a
-  # failed cell instead of a phantom completion.
+  # Why: both run_experiment.py and eval_transfer_matrix_memmap.py have exited 0
+  # on internal failure paths without writing output. Guard with post-run
+  # existence check so a silent skip becomes a failed cell, not a phantom completion.
   if [ "$EXIT_CODE" -eq 0 ] && [ -f "$ABS_OUTPUT" ]; then
     "$PYTHON" "$CLI" complete \
       --root "$DISPATCH_ROOT" \

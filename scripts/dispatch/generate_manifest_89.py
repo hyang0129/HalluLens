@@ -191,6 +191,7 @@ def generate_manifest(
 
             cell = {
                 "cell_id": cell_id,
+                "task_type": "transfer_eval",
                 "source_dataset": bare_src,
                 "target_dataset": tgt_ds,
                 "method": run["method"],
