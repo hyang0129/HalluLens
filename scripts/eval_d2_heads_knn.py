@@ -340,19 +340,35 @@ def _ensemble_stats(
     scale_A: float,
     scale_B: float,
     test_labels: np.ndarray,
+    *,
+    head_a_auroc: float,
+    head_b_auroc: float,
     outlier_class: int = 1,
 ) -> dict:
     """Compute ensemble AUROC and summary stats.
 
-    Ensemble score = (d_A / scale_A + d_B / scale_B) / 2
-    where scale_X = mean(train_nn_distances_X) so each head contributes equally.
+    Each head's normalised distance is signed so it contributes in the
+    "higher = more OOD" direction. Heads trained with opposite
+    ``ignore_label`` produce distance vectors that point in opposite
+    directions (Head A with ``ignore_label=1`` makes halu=1 samples
+    farther; Head B with ``ignore_label=0`` makes halu=1 samples
+    closer). Combining them naively cancels signal — sign by AUROC
+    before summing so both contribute constructively.
+
+        sign_X = +1 if head_X_auroc >= 0.5 else -1
+        d_ensemble = (sign_A * d_A / scale_A + sign_B * d_B / scale_B) / 2
     """
     if scale_A <= 0:
         scale_A = 1.0
     if scale_B <= 0:
         scale_B = 1.0
 
-    d_ensemble = (dists_A / scale_A + dists_B / scale_B) / 2.0
+    sign_A = 1.0 if head_a_auroc >= 0.5 else -1.0
+    sign_B = 1.0 if head_b_auroc >= 0.5 else -1.0
+
+    d_ensemble = (
+        sign_A * (dists_A / scale_A) + sign_B * (dists_B / scale_B)
+    ) / 2.0
 
     binary_labels = (test_labels == int(outlier_class)).astype(np.int32)
     auroc = float(_safe_auroc(binary_labels, d_ensemble))
@@ -374,6 +390,8 @@ def _ensemble_stats(
         "std_id": float(id_scores.std().item()) if id_scores.numel() else float("nan"),
         "mean_ood": float(ood_scores.mean().item()) if ood_scores.numel() else float("nan"),
         "std_ood": float(ood_scores.std().item()) if ood_scores.numel() else float("nan"),
+        "sign_a": float(sign_A),
+        "sign_b": float(sign_B),
     }
 
 
@@ -476,7 +494,10 @@ def eval_run(
     scale_B = head_b_stats.get("train_nn_mean", 1.0)
 
     ens_stats = _ensemble_stats(
-        dists_A, dists_B, scale_A, scale_B, test_labels, outlier_class=outlier_class,
+        dists_A, dists_B, scale_A, scale_B, test_labels,
+        head_a_auroc=float(head_a_stats.get("knn_auroc", float("nan"))),
+        head_b_auroc=float(head_b_stats.get("knn_auroc", float("nan"))),
+        outlier_class=outlier_class,
     )
 
     # ---- Build output ----
