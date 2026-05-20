@@ -392,6 +392,7 @@ def run_contrastive_logprob_recon(
         if m == "knn":
             knn_params = dict(eval_cfg.get("knn_params", {}))
             knn_params["sample_seed"] = training_seed
+            knn_params["include_per_sample"] = True
             metrics_list.append(
                 {
                     "metric": "knn",
@@ -419,6 +420,9 @@ def run_contrastive_logprob_recon(
 
     ood_stats = evaluator.compute(eval_loader, model)
 
+    knn_scores_arr = ood_stats.pop("knn_scores", None)
+    knn_labels_arr = ood_stats.pop("knn_labels", None)
+
     eval_metrics: dict = {
         "method": method_cfg["name"],
         "dataset": dataset_cfg["name"],
@@ -431,6 +435,11 @@ def run_contrastive_logprob_recon(
     eval_metrics.update(ood_stats)
 
     predictions: list[dict] = []
+    if knn_scores_arr is not None and knn_labels_arr is not None:
+        predictions = [
+            {"example_id": i, "score_halu": float(s), "label_halu": int(l)}
+            for i, (s, l) in enumerate(zip(knn_scores_arr, knn_labels_arr))
+        ]
     return eval_metrics, predictions
 
 
@@ -2833,6 +2842,11 @@ def main() -> None:
         return result
 
     # ---- Main loop ----
+    # Track per-seed failures so the process can exit non-zero at the end.
+    # Worker dispatch relies on exit code AND output-file existence to decide
+    # done vs failed, and a multi-seed invocation must not silently succeed
+    # when an earlier seed errored.
+    had_failures = 0
     for dataset_name in datasets:
         # Load dataset config (use pre-loaded if available, else load from configs/)
         if dataset_name in _preloaded_dataset_cfgs:
@@ -3075,10 +3089,20 @@ def main() -> None:
 
                 # Resume check — skip only when eval_metrics.json exists AND there is
                 # no run_error.json (which would indicate the prior result was degenerate).
+                # For methods that also produce per-sample predictions.csv, require both
+                # files; otherwise a prior run that wrote only eval_metrics.json (issue #107)
+                # would be falsely treated as complete.
                 eval_metrics_path = os.path.join(run_dir, "eval_metrics.json")
+                pred_path = os.path.join(run_dir, "predictions.csv")
                 run_error_path = os.path.join(run_dir, "run_error.json")
                 prior_error = os.path.exists(run_error_path)
-                if os.path.exists(eval_metrics_path) and not args.force:
+                routine_for_skip = method_cfg.get("routine", method_cfg["name"])
+                needs_predictions = routine_for_skip in {
+                    "contrastive_logprob_recon",
+                    "contrastive_logprob_recon_twin",
+                }
+                have_predictions = (not needs_predictions) or os.path.exists(pred_path)
+                if os.path.exists(eval_metrics_path) and have_predictions and not args.force:
                     if prior_error:
                         logger.warning(
                             f"Found both eval_metrics.json and run_error.json for "
@@ -3092,6 +3116,11 @@ def main() -> None:
                         if not is_learned:
                             completed_nonlearned.add(method_name)
                         continue
+                elif os.path.exists(eval_metrics_path) and needs_predictions and not have_predictions:
+                    logger.info(
+                        f"{method_name} seed={effective_seed}: eval_metrics.json present but "
+                        f"predictions.csv missing — re-running eval to write predictions."
+                    )
 
                 os.makedirs(run_dir, exist_ok=True)
                 os.makedirs(os.path.join(run_dir, "artifacts"), exist_ok=True)
@@ -3199,9 +3228,11 @@ def main() -> None:
                         logger.warning(f"Unknown routine: {routine}, skipping")
                         continue
 
-                    # Write eval_metrics.json
-                    with open(eval_metrics_path, "w") as f:
-                        json.dump(eval_metrics, f, indent=2)
+                    # Write eval_metrics.json — preserve original mtime when re-running
+                    # only to backfill predictions.csv (values would be identical).
+                    if not os.path.exists(eval_metrics_path) or args.force:
+                        with open(eval_metrics_path, "w") as f:
+                            json.dump(eval_metrics, f, indent=2)
 
                     # Write predictions.csv
                     if predictions:
@@ -3215,6 +3246,15 @@ def main() -> None:
 
                     if not is_learned:
                         completed_nonlearned.add(method_name)
+
+                    # Free per-seed GPU/CPU state before the next iteration —
+                    # multi-seed invocations load a different checkpoint each pass
+                    # and stale CUDA allocations can pile up.
+                    import gc as _gc
+
+                    _gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
                 except Exception:
                     import traceback
@@ -3231,6 +3271,7 @@ def main() -> None:
                             f,
                             indent=2,
                         )
+                    had_failures += 1
 
     if args.smoketest_memmap_cache:
         n_total = len(smoketest_results)
@@ -3245,6 +3286,11 @@ def main() -> None:
         sys.exit(0 if n_miss == 0 else 1)
 
     logger.info("Experiment complete.")
+    if had_failures:
+        logger.error(
+            f"Experiment finished with {had_failures} per-seed failure(s) — exiting with code 1."
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":
