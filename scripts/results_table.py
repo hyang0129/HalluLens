@@ -36,6 +36,14 @@ Cells with status != complete still appear (with empty metric/value) so the
 table doubles as the coverage view — `audit_coverage.py` is now redundant
 modulo presentation.
 
+Also always emits a filtered view for the §7.1 loss-decomposition ablation:
+
+  loss_decomposition_table.{json,csv} — same schema as above, restricted to
+    the 2x2 of {contrastive, contrastive_logprob_recon, saplma,
+    saplma_logprob_recon}. Cells are duplicates of the corresponding rows in
+    results_table.{json,csv} (still kind="training"), re-emitted here so the
+    ablation can be loaded without scanning the full table.
+
 Usage:
     python scripts/results_table.py              # writes output/results_table/*
     python scripts/results_table.py --out-dir DIR
@@ -88,6 +96,20 @@ SAMPLING_MODELS = [
     "meta-llama/Llama-3.1-8B-Instruct",
     "Qwen/Qwen3-8B",
 ]
+
+# Methods that make up the §7.1 loss-decomposition 2x2:
+#   contrastive            → contrastive_logprob_recon   (adds logprob-recon to contrastive)
+#   saplma                 → saplma_logprob_recon        (adds logprob-recon to SAPLMA)
+# All four come from baseline_comparison_* configs and so are already produced
+# by collect_training_cells(); we just re-emit a filtered view to a separate
+# output file (loss_decomposition_table.{json,csv}) so the ablation is easy to
+# slice without polluting the main table.
+LOSS_DECOMPOSITION_METHODS = (
+    "contrastive",
+    "contrastive_logprob_recon",
+    "saplma",
+    "saplma_logprob_recon",
+)
 
 # Optional sklearn (preferred); fall back to numpy Mann–Whitney AUROC.
 try:
@@ -667,6 +689,23 @@ def cells_to_long_rows(cells: list[dict]) -> list[dict]:
     return rows
 
 
+def _filter_loss_decomposition(cells: list[dict]) -> list[dict]:
+    """Pick out the §7.1 loss-decomposition 2x2 cells from a cells list.
+
+    Filters to training-kind cells whose method is in
+    ``LOSS_DECOMPOSITION_METHODS``. The cell dicts are returned unchanged
+    (still ``kind="training"``) — these methods are bona-fide training runs
+    that double as the ablation pivot; tagging them differently would also
+    remove ``contrastive_logprob_recon`` from the main table, which it
+    headlines.
+    """
+    return [
+        c for c in cells
+        if c["kind"] == "training"
+        and c["key"]["method"] in LOSS_DECOMPOSITION_METHODS
+    ]
+
+
 def write_outputs(cells: list[dict], out_dir: Path) -> tuple[Path, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     json_path = out_dir / "results_table.json"
@@ -682,6 +721,40 @@ def write_outputs(cells: list[dict], out_dir: Path) -> tuple[Path, Path]:
         json.dump(payload, f, indent=2, default=str)
 
     rows = cells_to_long_rows(cells)
+    with open(csv_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+    return json_path, csv_path
+
+
+def write_loss_decomposition_outputs(cells: list[dict], out_dir: Path) -> tuple[Path, Path]:
+    """Write the §7.1 loss-decomposition view to its own pair of files.
+
+    Mirrors ``write_outputs`` but filters to the 2x2 methods. Emitted under
+    ``out_dir`` as ``loss_decomposition_table.{json,csv}`` so consumers can
+    load just the ablation without scanning the full table.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = out_dir / "loss_decomposition_table.json"
+    csv_path  = out_dir / "loss_decomposition_table.csv"
+
+    subset = _filter_loss_decomposition(cells)
+
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "git": _git_info(),
+        "view": "loss_decomposition",
+        "methods": list(LOSS_DECOMPOSITION_METHODS),
+        "cells": subset,
+    }
+    with open(json_path, "w") as f:
+        json.dump(payload, f, indent=2, default=str)
+
+    rows = cells_to_long_rows(subset)
     with open(csv_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
         w.writeheader()
@@ -751,8 +824,17 @@ def main() -> None:
     json_path, csv_path = write_outputs(cells, args.out_dir)
     print(f"Wrote {json_path}")
     print(f"Wrote {csv_path}")
+
+    ld_json, ld_csv = write_loss_decomposition_outputs(cells, args.out_dir)
+    print(f"Wrote {ld_json}")
+    print(f"Wrote {ld_csv}")
+
     print()
     print(_summary(cells))
+    ld_cells = _filter_loss_decomposition(cells)
+    ld_complete = sum(1 for c in ld_cells if c["status"] == "complete")
+    print(f"  loss_decomposition (view) {ld_complete}/{len(ld_cells)} complete  "
+          f"({len(LOSS_DECOMPOSITION_METHODS)} methods)")
     if not _HAS_SKLEARN:
         print()
         print("(note: sklearn not available — AUROC computed with numpy "
