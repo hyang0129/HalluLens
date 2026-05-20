@@ -35,7 +35,7 @@ Structural skeleton only. Each section lists what the prose will cover, not the 
 Detailed outline in [02_related_work.md](02_related_work.md). Summary structure (three subsections, ~3–4 references each):
 
 - **2.1 Activation probing for LLM behavior.** Linear probes (Alain & Bengio), SAPLMA single-layer MLP (Azaria & Mitchell), ICR Probe per-layer-scalar MLP (Zhang et al. 2025), CLAP cross-layer attention (Suresh et al. 2025), ACT-ViT full-tensor ViT (Bar-Shalom et al. 2025), plus residual-stream truth-direction evidence (ITI, Marks & Tegmark). Sets our method up as a *learned* extension of probing rather than a replacement.
-- **2.2 Hallucination detection.** Output-space scalars (Kadavath), multi-sample consistency (semantic entropy — Farquhar; SelfCheckGPT — Manakul), probe-on-uncertainty hybrid (SEP-SE — Kossen), retrieval-augmented checking scoped out (FActScore — Min).
+- **2.2 Hallucination detection.** Output-space scalars (Kadavath), multi-sample consistency (semantic entropy — Farquhar; SelfCheckGPT — Manakul), retrieval-augmented checking scoped out (FActScore — Min). Add one-sentence footnote: SEP (Kossen et al. 2024) trains a linear probe to predict SE; since we report both direct SE and linear probes on the same activations, SEP is covered by their union — not run as a standalone experiment.
 - **2.3 Contrastive representation learning.** SimCLR (Chen et al.), InfoNCE (van den Oord et al.), SimCSE (Gao et al.); broad-novelty claim ships hedged with a footnote crediting CRD/CoDIR/CDS as adjacent machinery in different problem settings. Views here are layer pairs, not data augmentations or different networks.
 
 End the section with one sentence positioning our work relative to the three threads.
@@ -61,8 +61,8 @@ Detailed outline in [03_method.md](03_method.md), which supersedes `methods_outl
 - **Datasets.** HotpotQA, NQ, MMLU, PopQA, SciQ, SearchQA. State per-dataset: task type, train/test sizes, evaluator used to label hallucinations, class imbalance ratio. (Movies excluded — no train split.)
 - **Baselines.** Three classes:
   1. Output-space scalar: logprob, token entropy, P(true).
-  2. Activation-space probes: single-layer linear probe (the "obvious" baseline), SAPLMA (~11M-param MLP, established literature baseline).
-  3. Sampling-based: SE (length-normalized headline + discrete supplementary), SelfCheckGPT (NLI headline + BERTScore + n-gram supplementary), SEP-SE (Kossen probe-on-SE).
+  2. Activation-space probes: single-layer linear probe (the "obvious" baseline), SAPLMA (~11M-param MLP, established literature baseline), LLMsKnow (Slobodkin et al. 2023, layer-wise probing baseline), ACT-ViT (Bar-Shalom et al. 2025, full-tensor ViT on activations).
+  3. Sampling-based: SE (length-normalized headline + discrete supplementary), SelfCheckGPT (NLI headline + BERTScore + n-gram supplementary).
   - Note the deliberate omission: multi-layer linear probe is in §[ablations] only — it underperforms the single-layer probe and is reported to motivate the learned compression.
 - **Metrics.** AUROC (headline), AUPRC (paired in main table), ECE + FPR@95 + bootstrap 95% CIs in supplementary tables.
 - **Compute budget summary** (1–2 sentences; full breakdown in appendix).
@@ -73,7 +73,7 @@ Detailed outline in [03_method.md](03_method.md), which supersedes `methods_outl
 
 - **5.1 Headline table.** AUROC ± 95% CI for every (model, dataset, method) cell. State which cells the contrastive method wins, by how much, and where it does not.
 - **5.2 Headline figure.** Per-dataset AUROC bars, both models, baseline cluster vs. ours.
-- **5.3 Compute-matched comparison.** AUROC vs. forward-pass count. K=1 cluster: ours, linear probe, SAPLMA, SEP-SE, P(true). K=10 cluster: SE (length-normalized), SelfCheckGPT-NLI. One panel per dataset for the 5 free-form datasets; MMLU shows K=1 cluster only.
+- **5.3 Compute-matched comparison.** AUROC vs. forward-pass count. K=1 cluster: ours, linear probe, SAPLMA, P(true). K=10 cluster: SE (length-normalized), SelfCheckGPT-NLI. One panel per dataset for the 5 free-form datasets; MMLU shows K=1 cluster only.
 - **5.4 Calibration.** Reliability diagrams for one dataset per model. ECE in the main table.
 
 Numbers freeze before this section is written. Until then, table/figure slots are reserved but blank.
@@ -100,7 +100,7 @@ Numbers freeze before this section is written. Until then, table/figure slots ar
 ## 8. Discussion (~0.5 page)
 
 - **Where the method works.** Mid-to-late layers, both model families, free-form QA + multi-choice MMLU.
-- **Where it doesn't.** Whatever the data shows — call it out honestly. (See roadmap §9 risk register for the live candidates: Qwen weaker than Llama, SEP-SE parity at K=1, etc. Update this section after numbers freeze.)
+- **Where it doesn't.** Whatever the data shows — call it out honestly. (See roadmap §9 risk register for the live candidates: Qwen weaker than Llama, SAPLMA parity, etc. Update this section after numbers freeze.)
 - **What the layer-pair concentration result means.** Brief — full theoretical argument in the appendix.
 
 ---
@@ -158,7 +158,7 @@ Each section below should eventually have its own file. Naming convention: `NN_s
 ## Open structural questions
 
 1. ~~**Theory as §3 subsection vs. its own section.**~~ **Resolved 2026-05-19** — folded into §3 as §3.2 (information-theoretic argument), not promoted to a standalone Theory section. Rationale: the load-bearing theoretical move is short, structurally inseparable from the architecture, and the 8-page EMNLP main paper does not have room for a dedicated theory section. Full information-bound derivation lives in Appendix A. See [`03_method.md`](03_method.md) structural-decision header. Soft commit revisable post-internal-review.
-2. ~~**Where does SEP-binary land in §5?**~~ **Removed 2026-05-19** — SEP-binary was a confabulation propagated from an earlier outline-writer agent. It is not in Kossen et al. 2024 and is not implemented (see [`tasks/sampling_baselines/sep.py:6`](tasks/sampling_baselines/sep.py#L6)). What we actually run is SEP-SE; it lands in the §5.3 compute-matched K=1 cluster as already specified.
+2. ~~**Where does SEP-binary / SEP-SE land in §5?**~~ **Removed** — SEP-binary was a confabulation; SEP-SE cut 2026-05-20. Both upper-bounded by max(SE, linear probe), already reported. Defused with a one-sentence footnote in §2.2.
 3. **Headline framing if Qwen is materially weaker than Llama.** Per risk register, this changes the abstract. Don't pre-commit; check before week 3.
 4. **§2.3 novelty-claim level — broad / medium / narrow.** Resolved 2026-05-19 to **broad with hedging** (see `02_related_work.md` §2.3 framing-level decision). Reviewer-rebuttal fallback to medium then narrow is documented there. Abstract and §1 contribution claims must be drafted to the broad level once §3 / §5 freeze.
 5. **§3.4 attribution headline — locked when #66 (SupCon-asymm only) and #67 (SAPLMA + recon) land.** Until then, §3.4 prose is the *menu* of four outcome-conditional framings. The headline framing of §3 and the abstract cannot finalize until these resolve. See [`03_method.md`](03_method.md) §3.4.

@@ -1,6 +1,7 @@
 """
-ACT-ViT: Vision Transformer over full (layers × tokens × hidden) activation tensors.
-Paper: arXiv:2510.00296 (Bar-Shalom et al.)
+ACT-ViT implementation — Vision Transformer over full (layers × tokens × hidden) activation tensors.
+Paper: "Beyond Token Probes: Hallucination Detection via Activation Tensors with ACT-ViT,"
+Bar-Shalom, Frasca, Galron, Ziser, Maron, NeurIPS 2025 (arXiv:2510.00296).
 
 Treats the full activation tensor of a generation (L × N × D) as an "image"
 and classifies it with a Vision Transformer. Max-pools in the (L, N) spatial

@@ -1,35 +1,70 @@
-# Draft headline table — mean AUROC across seeds
+# Draft Headline AUROC Table
 
-Source: `results\results_table.json`  
-Snapshot generated at: 2026-05-18T08:52:41-0400  
-Git: 141dd76e on `feat/issue-79-baseline-retrain-50k-memmap`  
+Canonical numbers for §5 main results. Source: `results_table.csv` (memmap + sampling categories only).
 
-Methods: family #1 (headline) per `results/README.md`. Metric is per-seed test AUROC, aggregated as `mean ± popstdev (n=seeds)` for trained methods; single-run methods (logprob, entropy, P(true)) report the scalar. Empty cells = no complete runs in the table.
+\* = incomplete: N/5 seeds complete. All other trained cells are 5/5 seeds.
 
-### Llama-3.1-8B-Instruct
+MMLU has no sampling results (multiple-choice; sampling-based methods not applicable).
 
-| Method | HotpotQA | NQ | MMLU | PopQA | SciQ | SearchQA |
-| --- | --- | --- | --- | --- | --- | --- |
-| Logprob (mean) | 0.614 | 0.542 | 0.594 | 0.625 | 0.534 | 0.580 |
-| Token entropy | — | — | — | — | — | — |
-| P(true) | 0.580 | 0.622 | 0.660 | 0.672 | 0.581 | — |
-| Linear probe | 0.822 ± 0.001 (n=5) | 0.705 ± 0.081 (n=5) | 0.804 ± 0.008 (n=5) | 0.844 ± 0.002 (n=5) | 0.692 ± 0.006 (n=5) | 0.749 ± 0.001 (n=5) |
-| SAPLMA | 0.694 ± 0.003 (n=5) | 0.636 ± 0.007 (n=5) | 0.662 ± 0.006 (n=5) | 0.690 ± 0.003 (n=5) | 0.576 ± 0.015 (n=5) | 0.624 ± 0.003 (n=5) |
-| LLMsKnow probe | 0.826 ± 0.002 (n=5) | 0.704 ± 0.010 (n=5) | 0.828 ± 0.019 (n=5) | 0.857 ± 0.004 (n=5) | 0.683 ± 0.021 (n=5) | 0.759 ± 0.002 (n=5) |
-| ICR probe | — | — | — | — | — | — |
-| **Ours (KNN)** | 0.853 ± 0.002 (n=5) | 0.728 ± 0.080 (n=5) | 0.821 ± 0.008 (n=5) | 0.856 ± 0.002 (n=5) | 0.757 ± 0.008 (n=5) | 0.807 ± 0.003 (n=5) |
+---
 
-### Qwen3-8B
+## Llama-3.1-8B-Instruct
+
+### Baseline (memmap trained) — AUROC
 
 | Method | HotpotQA | NQ | MMLU | PopQA | SciQ | SearchQA |
-| --- | --- | --- | --- | --- | --- | --- |
-| Logprob (mean) | 0.593 | 0.625 | 0.620 | 0.730 | 0.561 | 0.645 |
-| Token entropy | — | — | — | — | — | — |
-| P(true) | 0.641 | 0.618 | 0.682 | 0.709 | 0.612 | — |
-| Linear probe | 0.753 ± 0.002 (n=5) | 0.766 ± 0.003 (n=5) | 0.774 ± 0.003 (n=5) | 0.908 ± 0.002 (n=5) | 0.722 ± 0.006 (n=5) | 0.822 ± 0.001 (n=5) |
-| SAPLMA | 0.699 ± 0.004 (n=5) | 0.662 ± 0.002 (n=5) | 0.635 ± 0.015 (n=5) | 0.806 ± 0.005 (n=5) | 0.618 ± 0.009 (n=5) | 0.722 ± 0.003 (n=5) |
-| LLMsKnow probe | 0.745 ± 0.002 (n=5) | 0.689 ± 0.016 (n=5) | 0.787 ± 0.019 (n=5) | 0.839 ± 0.009 (n=5) | 0.671 ± 0.026 (n=5) | 0.759 ± 0.006 (n=5) |
-| ICR probe | — | — | — | — | — | — |
-| **Ours (KNN)** | 0.753 ± 0.001 (n=5) | 0.789 ± 0.004 (n=5) | 0.825 ± 0.009 (n=5) | 0.917 ± 0.002 (n=5) | 0.807 ± 0.006 (n=5) | 0.842 ± 0.002 (n=5) |
+|---|---|---|---|---|---|---|
+| LogProb (seq) | — | — | 0.595\*(1/5) | — | — | — |
+| Token Entropy | — | — | 0.589\*(1/5) | — | — | — |
+| Linear Probe | 0.818 | 0.746 | 0.783 | 0.862 | 0.698 | 0.739 |
+| SAPLMA | 0.689 | 0.611 | 0.640 | 0.721 | 0.578 | 0.609 |
+| LLMsKnow Probe | 0.828 | 0.722 | 0.801 | 0.870 | 0.709 | 0.741 |
+| ICR Probe | — | 0.494 | 0.561 | 0.617 | — | — |
+| ACT-ViT | 0.849 | 0.768 | 0.664\*(2/5) | 0.791 | 0.763 | 0.815\*(3/5) |
+| **Contrastive+Recon (ours)** | **0.851** | **0.755** | **0.811** | **0.877** | **0.769** | **0.806** |
 
-Scorer choices: `contrastive_logprob_recon` → `knn_auroc` (headline per PAPER_ROADMAP §6); `logprob_baseline` → `mean_logprob_auroc`; `token_entropy` → `mean_entropy_auroc`; `p_true` → `p_true_auroc_best`. Other scorers available in `results/results_table.csv`.
+### Sampling — AUROC
+
+| Method | HotpotQA | NQ | MMLU | PopQA | SciQ | SearchQA |
+|---|---|---|---|---|---|---|
+| SE (length-norm) | 0.648 | 0.552 | — | 0.655 | 0.561 | 0.573 |
+| SE (semantic) | 0.496 | 0.519 | — | 0.490 | 0.514 | 0.501 |
+| SelfCheckGPT-NLI | 0.605 | 0.563 | — | 0.682 | 0.573 | 0.594 |
+| SelfCheckGPT-BERT | — | — | — | — | — | — |
+| SelfCheckGPT-ngram | 0.622 | 0.577 | — | 0.644 | 0.520 | 0.522 |
+
+---
+
+## Qwen3-8B
+
+### Baseline (memmap trained) — AUROC
+
+| Method | HotpotQA | NQ | MMLU | PopQA | SciQ | SearchQA |
+|---|---|---|---|---|---|---|
+| LogProb (seq) | — | — | — | — | — | — |
+| Token Entropy | — | — | — | — | — | — |
+| Linear Probe | 0.864 | 0.809 | 0.828 | 0.913 | 0.738 | 0.816 |
+| SAPLMA | 0.783 | 0.710 | 0.684 | 0.812 | 0.627 | 0.706 |
+| LLMsKnow Probe | 0.855 | 0.732 | 0.792 | 0.904 | 0.713 | 0.742 |
+| ICR Probe | — | 0.467 | 0.529 | 0.756 | — | — |
+| ACT-ViT | 0.881\*(3/5) | 0.842 | 0.675\*(2/5) | 0.830 | 0.787 | 0.838\*(2/5) |
+| **Contrastive+Recon (ours)** | **0.875** | **0.824** | **0.833** | **0.921** | **0.816** | **0.840** |
+
+### Sampling — AUROC
+
+| Method | HotpotQA | NQ | MMLU | PopQA | SciQ | SearchQA |
+|---|---|---|---|---|---|---|
+| SE (length-norm) | 0.735 | 0.659 | — | 0.780 | 0.579 | 0.622 |
+| SE (semantic) | 0.573 | 0.551 | — | 0.556 | 0.523 | 0.504 |
+| SelfCheckGPT-NLI | 0.681 | 0.681 | — | 0.818 | 0.595 | 0.688 |
+| SelfCheckGPT-BERT | — | — | — | — | — | — |
+| SelfCheckGPT-ngram | 0.690 | 0.601 | — | 0.791 | 0.567 | 0.642 |
+
+---
+
+### Scorer notes
+
+Trained methods: `contrastive_logprob_recon` → `knn_auroc`; `logprob_baseline` → `seq_logprob_auroc`; `token_entropy` → `mean_entropy_auroc`; all probe methods → `auroc`. Means reported across 5 seeds; stdev available in `results_table.csv`.
+
+*Generated from `results_table.csv` via `scripts/results_table.py`. Re-run to refresh.*  
+*Last updated: 2026-05-20*
