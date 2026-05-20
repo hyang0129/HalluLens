@@ -81,6 +81,10 @@ bash scripts/download_data.sh
 | JSON+NPY | Medium scale, human-readable metadata | ~5-10GB per 100 inferences |
 | LMDB   | Maximum storage efficiency | |
 
+## Node / GPU Status
+
+When the user asks what's running on the cluster, what each node is doing, GPU utilization, or dispatch job status, follow the instructions in `docs/reference/GPU_DISPATCH_STATUS.md`. That doc covers how to gather SLURM allocations, the dispatch job manifest, worker_79 claimed cells, and per-node GPU processes, and how to correlate them into a categorized report (worker_79 cells · direct dispatch · idle).
+
 ## Where Are You Running?
 
 Before running any code, determine the execution context:
