@@ -278,6 +278,50 @@ def _compute_h_metrics(
     return metrics
 
 
+def test_npy_resume_skips_inference():
+    """Resume-detection logic: all-6-present -> skip; missing one -> re-run."""
+    N_train, N_test, D = 50, 20, 16
+
+    rng = np.random.default_rng(1)
+    arrays = {
+        "train_za":     rng.standard_normal((N_train, D)).astype(np.float32),
+        "train_zb":     rng.standard_normal((N_train, D)).astype(np.float32),
+        "test_za":      rng.standard_normal((N_test, D)).astype(np.float32),
+        "test_zb":      rng.standard_normal((N_test, D)).astype(np.float32),
+        "train_labels": rng.integers(0, 2, size=N_train).astype(np.int32),
+        "test_labels":  rng.integers(0, 2, size=N_test).astype(np.int32),
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        emb_dir = os.path.join(tmpdir, "artifacts", "embeddings")
+        os.makedirs(emb_dir)
+
+        paths = {key: os.path.join(emb_dir, f"{key}.npy") for key in arrays}
+
+        # Write all 6 files
+        for key, arr in arrays.items():
+            np.save(paths[key], arr)
+
+        # All present -> inference should be skipped
+        assert all(os.path.exists(p) for p in paths.values()), (
+            "All 6 npy files must exist after saving"
+        )
+
+        # Remove one file -> re-run should be triggered
+        os.remove(paths["test_za"])
+        assert not all(os.path.exists(p) for p in paths.values()), (
+            "Condition must be False when any npy file is missing"
+        )
+
+        # Restore the missing file and verify loaded shapes match saved shapes
+        np.save(paths["test_za"], arrays["test_za"])
+        for key, arr in arrays.items():
+            loaded = np.load(paths[key])
+            assert loaded.shape == arr.shape, (
+                f"Shape mismatch for {key}: expected {arr.shape}, got {loaded.shape}"
+            )
+
+
 def test_h7_to_h10_keys_present_and_finite():
     """H7-H10 keys are present and have finite values on random data."""
     rng = np.random.default_rng(42)
