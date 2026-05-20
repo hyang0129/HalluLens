@@ -2,6 +2,7 @@
   "experiment_name": "sharedtrunk_grid_sciq_qwen3_memmap",
   "dataset": "sciq_qwen3_memmap",
   "methods": [
+    "contrastive_logprob_recon_c0",
     "contrastive_logprob_recon_d2a",
     "contrastive_logprob_recon_d2b"
   ],
