@@ -138,21 +138,19 @@ def test_build_then_score_equals_evaluate_cell(fake_run_dir: Path, tmp_path: Pat
     """build_source_scorer + score_on_target must produce the same result dict
     that evaluate_transfer_cell would return for the same (method, src, tgt) triple.
     """
-    from activation_research.transfer_eval_memmap import (
-        build_source_scorer,
-        evaluate_transfer_cell,
-        score_on_target,
-    )
+    import activation_research.transfer_eval_memmap as _tm
 
     expected = dict(_OK_RESULT)
 
     with (
-        patch(
-            "activation_research.transfer_eval_memmap.evaluate_transfer_cell",
+        patch.object(
+            _tm,
+            "evaluate_transfer_cell",
             return_value=expected,
         ) as mock_eval,
-        patch(
-            "activation_research.transfer_eval_memmap.build_source_scorer",
+        patch.object(
+            _tm,
+            "build_source_scorer",
             return_value={
                 "method": "saplma",
                 "split_seed": 42,
@@ -161,13 +159,14 @@ def test_build_then_score_equals_evaluate_cell(fake_run_dir: Path, tmp_path: Pat
                 "device": "cpu",
             },
         ) as mock_build,
-        patch(
-            "activation_research.transfer_eval_memmap.score_on_target",
+        patch.object(
+            _tm,
+            "score_on_target",
             return_value=expected,
         ) as mock_score,
     ):
         # Path A: evaluate_transfer_cell directly.
-        result_direct = evaluate_transfer_cell(
+        result_direct = _tm.evaluate_transfer_cell(
             source_run_dir=str(fake_run_dir),
             source_dataset_cfg=_SRC_CFG,
             target_dataset_cfg=_TGT_CFG_HOTPOTQA,
@@ -179,7 +178,7 @@ def test_build_then_score_equals_evaluate_cell(fake_run_dir: Path, tmp_path: Pat
         )
 
         # Path B: build_source_scorer → score_on_target.
-        scorer = build_source_scorer(
+        scorer = _tm.build_source_scorer(
             method="saplma",
             source_run_dir=str(fake_run_dir),
             source_dataset_cfg=_SRC_CFG,
@@ -187,7 +186,7 @@ def test_build_then_score_equals_evaluate_cell(fake_run_dir: Path, tmp_path: Pat
             training_seed=0,
             device="cpu",
         )
-        result_batched = score_on_target(
+        result_batched = _tm.score_on_target(
             scorer=scorer,
             target_dataset_cfg=_TGT_CFG_HOTPOTQA,
         )
@@ -455,6 +454,7 @@ def test_generate_manifest_batch_shape(fake_runs_dir: Path, tmp_path: Path):
         seed_filter=[0],
         relevant_layers=list(range(14, 30)),
         skip_existing=False,
+        project_root=fake_runs_dir,
     )
 
     pending = list((dispatch_root / "pending").glob("*.json"))
@@ -509,6 +509,7 @@ def test_task_type_field_present(fake_runs_dir: Path, tmp_path: Path):
         seed_filter=[0],
         relevant_layers=list(range(14, 30)),
         skip_existing=False,
+        project_root=fake_runs_dir,
     )
 
     for cell_json in (dispatch_root / "pending").glob("*.json"):

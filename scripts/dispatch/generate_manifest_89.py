@@ -119,6 +119,7 @@ def generate_manifest(
     seed_filter: list[int] | None,
     relevant_layers: list[int],
     skip_existing: bool,
+    project_root: Path = _PROJECT_ROOT,
 ) -> int:
     init_dispatch_dirs(dispatch_root)
     written = 0
@@ -167,7 +168,7 @@ def generate_manifest(
         probe_layers: dict[str, int] = {}
         for method, run in method_runs.items():
             try:
-                rel_run_dir = str(Path(run["run_dir"]).relative_to(_PROJECT_ROOT))
+                rel_run_dir = str(Path(run["run_dir"]).relative_to(project_root))
             except ValueError:
                 rel_run_dir = run["run_dir"]
             source_run_dirs[method] = rel_run_dir
@@ -181,7 +182,10 @@ def generate_manifest(
             cfg_path = configs_dir / "datasets" / f"{cfg_name}.json"
             if cfg_path.exists():
                 tgt_ds_list.append(tgt_ds)
-                tgt_cfg_map[tgt_ds] = str(cfg_path.relative_to(_PROJECT_ROOT))
+                try:
+                    tgt_cfg_map[tgt_ds] = str(cfg_path.relative_to(project_root))
+                except ValueError:
+                    tgt_cfg_map[tgt_ds] = str(cfg_path)
             else:
                 print(f"  [warn] Target config not found: {cfg_path} — skipping {tgt_ds}/{model_slug}")
 
@@ -189,13 +193,21 @@ def generate_manifest(
             print(f"  [warn] No target configs found for {cell_id} — skipping")
             continue
 
-        output_check = str(
-            (output_dir / model_slug / f"{bare_src}__{seed}.done")
-            .relative_to(_PROJECT_ROOT)
-        )
+        try:
+            output_check = str(
+                (output_dir / model_slug / f"{bare_src}__{seed}.done")
+                .relative_to(project_root)
+            )
+        except ValueError:
+            output_check = str(output_dir / model_slug / f"{bare_src}__{seed}.done")
 
-        if skip_existing and (_PROJECT_ROOT / output_check).exists():
+        if skip_existing and (project_root / output_check).exists():
             continue
+
+        try:
+            src_cfg_rel = str(src_cfg_path.relative_to(project_root))
+        except ValueError:
+            src_cfg_rel = str(src_cfg_path)
 
         cell = {
             "cell_id": cell_id,
@@ -204,7 +216,7 @@ def generate_manifest(
             "model_slug": model_slug,
             "seed": seed,
             "source_run_dirs": source_run_dirs,
-            "source_dataset_cfg": str(src_cfg_path.relative_to(_PROJECT_ROOT)),
+            "source_dataset_cfg": src_cfg_rel,
             "target_datasets": tgt_ds_list,
             "target_dataset_cfgs": tgt_cfg_map,
             "probe_layers": probe_layers,
