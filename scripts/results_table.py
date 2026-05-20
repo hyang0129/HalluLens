@@ -79,6 +79,7 @@ from tasks.p_true.paths import (  # noqa: E402
     DATASETS as PTRUE_DATASETS,
     MODELS as PTRUE_MODELS,
     ptrue_scores_path,
+    resolve_split_paths as ptrue_resolve_split_paths,
 )
 
 SCHEMA_VERSION = 1
@@ -488,7 +489,13 @@ def collect_p_true_cells() -> list[dict]:
     for mid in PTRUE_MODELS:
         for ds in PTRUE_DATASETS:
             p = ptrue_scores_path(ds, mid, "test")
-            gen_n = _count_lines(generation_jsonl(ds, mid, "test"))
+            # Use the canonical dataset config (via tasks.p_true.paths) so the
+            # Issue #60 searchqa train/test flip is honored — sampling_baselines'
+            # directory-name convention points at the wrong split for searchqa.
+            ptrue_split = ptrue_resolve_split_paths(ds, mid, "test")
+            gen_path = ptrue_split["generation_jsonl"]
+            eval_path = ptrue_split["eval_json"]
+            gen_n = _count_lines(gen_path)
             actual = _count_lines(p)
 
             if gen_n < 0:
@@ -502,7 +509,13 @@ def collect_p_true_cells() -> list[dict]:
 
             metrics: dict[str, float] = {}
             if status == "complete":
-                labels = _load_hallu_labels(ds, mid, "test")
+                # Load labels from the config-resolved eval_json (handles the
+                # searchqa split flip — see comment on gen_path above).
+                if eval_path.exists():
+                    with open(eval_path) as f:
+                        labels = np.array(json.load(f)["halu_test_res"], dtype=int)
+                else:
+                    labels = None
                 if labels is not None:
                     by_row = _load_jsonl_by_row(p)
                     fwd_scores, fwd_lbls = [], []
@@ -542,8 +555,8 @@ def collect_p_true_cells() -> list[dict]:
                 "actual_rows": actual if actual >= 0 else None,
                 "paths": {
                     "scores":     _rel(p),
-                    "generation": _rel(generation_jsonl(ds, mid, "test")),
-                    "labels":     _rel(eval_results_json(ds, mid, "test")),
+                    "generation": _rel(gen_path),
+                    "labels":     _rel(eval_path),
                 },
             })
     return cells
