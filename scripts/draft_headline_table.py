@@ -2,13 +2,12 @@
 """Draft main paper headline table — mean AUROC per method per dataset.
 
 Reads results/results_table.json (snapshot from scripts/results_table.py) and
-emits a markdown table for each model with methods as rows and datasets as
-columns. Aggregates over training seeds. Designed for paper-section drafting,
-not for live monitoring — re-run scripts/results_table.py and snapshot first.
+emits a sectioned markdown table (Baseline + Sampling) for each model. Re-run
+scripts/results_table.py first to refresh the snapshot.
 
 Usage:
     python scripts/draft_headline_table.py                       # stdout
-    python scripts/draft_headline_table.py -o results/headline.md
+    python scripts/draft_headline_table.py -o results/draft_headline_table.md
 """
 from __future__ import annotations
 
@@ -21,22 +20,27 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_JSON = PROJECT_ROOT / "results" / "results_table.json"
 
-# Family #1 (headline) methods. Order = paper table order: competitors first,
-# our method last. The metric_key column picks the headline scorer for each
-# method (see PAPER_ROADMAP §6).
-HEADLINE_METHODS = [
-    # (method_id_in_json, display_label, kind, metric_key)
-    ("logprob_baseline",          "Logprob (mean)",        "training", "mean_logprob_auroc"),
-    ("token_entropy",             "Token entropy",         "training", "mean_entropy_auroc"),
-    ("p_true",                    "P(true)",               "p_true",   "p_true_auroc_best"),
-    ("linear_probe",              "Linear probe",          "training", "auroc"),
-    ("saplma",                    "SAPLMA",                "training", "auroc"),
-    ("llmsknow_probe",            "LLMsKnow probe",        "training", "auroc"),
-    ("icr_probe",                 "ICR probe",             "training", "auroc"),
-    ("contrastive_logprob_recon", "**Ours (KNN)**",        "training", "knn_auroc"),
+# (method_id_in_json, display_label, kind, metric_key)
+BASELINE_METHODS = [
+    ("logprob_baseline",          "LogProb (seq)",                "training", "seq_logprob_auroc"),
+    ("token_entropy",             "Token Entropy",                "training", "mean_entropy_auroc"),
+    ("p_true",                    "P(true)",                      "p_true",   "p_true_auroc_best"),
+    ("linear_probe",              "Linear Probe",                 "training", "auroc"),
+    ("saplma",                    "SAPLMA",                       "training", "auroc"),
+    ("llmsknow_probe",            "LLMsKnow Probe",               "training", "auroc"),
+    ("icr_probe",                 "ICR Probe",                    "training", "auroc"),
+    ("act_vit",                   "ACT-ViT",                      "training", "auroc"),
+    ("contrastive_logprob_recon", "**Contrastive+Recon (ours)**", "training", "knn_auroc"),
 ]
 
-# Headline datasets (excludes *_memmap dupes from the issue #79 re-ingestion).
+SAMPLING_METHODS = [
+    ("se_length_normalized", "SE (length-norm)",    "sampling", "auroc"),
+    ("se_semantic_entropy",  "SE (semantic)",        "sampling", "auroc"),
+    ("selfcheck_nli",        "SelfCheckGPT-NLI",    "sampling", "auroc"),
+    ("selfcheck_bertscore",  "SelfCheckGPT-BERT",   "sampling", "auroc"),
+    ("selfcheck_ngram",      "SelfCheckGPT-ngram",  "sampling", "auroc"),
+]
+
 HEADLINE_DATASETS = ["hotpotqa", "nq", "mmlu", "popqa", "sciq", "searchqa"]
 DATASET_LABELS = {
     "hotpotqa": "HotpotQA",
@@ -52,7 +56,8 @@ MODELS = ["Llama-3.1-8B-Instruct", "Qwen3-8B"]
 def collect(cells: list[dict]) -> dict:
     """key = (model, method_id, dataset) -> list of (seed, auroc)"""
     bucket: dict[tuple, list[tuple]] = defaultdict(list)
-    method_keys = {m[0]: (m[2], m[3]) for m in HEADLINE_METHODS}
+    all_methods = BASELINE_METHODS + SAMPLING_METHODS
+    method_keys = {m[0]: (m[2], m[3]) for m in all_methods}
     for c in cells:
         if c["status"] != "complete":
             continue
@@ -80,24 +85,39 @@ def render_cell(values: list[float]) -> str:
     if len(values) == 1:
         return f"{values[0]:.3f}"
     mu = statistics.mean(values)
-    sd = statistics.pstdev(values)
-    return f"{mu:.3f} ± {sd:.3f} (n={len(values)})"
+    n_complete = len(values)
+    if n_complete < 5:
+        return f"{mu:.3f}\\*({n_complete}/5)"
+    return f"{mu:.3f}"
 
 
-def render_table(model: str, bucket: dict) -> str:
+def render_section(title: str, methods: list, model: str, bucket: dict) -> list[str]:
     out = []
-    out.append(f"### {model}")
+    out.append(f"### {title} — AUROC")
     out.append("")
     header = ["Method"] + [DATASET_LABELS[d] for d in HEADLINE_DATASETS]
     out.append("| " + " | ".join(header) + " |")
-    out.append("| " + " | ".join(["---"] * len(header)) + " |")
-    for method_id, label, _kind, _metric in HEADLINE_METHODS:
+    out.append("|" + "|".join(["---"] * len(header)) + "|")
+    for method_id, label, _kind, _metric in methods:
         row = [label]
         for ds in HEADLINE_DATASETS:
             vals = [v for _, v in bucket.get((model, method_id, ds), [])]
             row.append(render_cell(vals))
         out.append("| " + " | ".join(row) + " |")
-    return "\n".join(out)
+    return out
+
+
+def render_model_block(model: str, bucket: dict) -> list[str]:
+    out = []
+    out.append(f"## {model}")
+    out.append("")
+    out.extend(render_section("Baseline (memmap trained)", BASELINE_METHODS, model, bucket))
+    out.append("")
+    out.extend(render_section("Sampling", SAMPLING_METHODS, model, bucket))
+    out.append("")
+    out.append("---")
+    out.append("")
+    return out
 
 
 def main() -> None:
@@ -111,29 +131,37 @@ def main() -> None:
         data = json.load(f)
     bucket = collect(data["cells"])
 
-    sections = [
-        "# Draft headline table — mean AUROC across seeds",
+    today = data.get("generated_at", "?")[:10]
+    lines = [
+        "# Draft Headline AUROC Table",
         "",
-        f"Source: `{args.results_json.relative_to(PROJECT_ROOT) if args.results_json.is_absolute() else args.results_json}`  ",
-        f"Snapshot generated at: {data.get('generated_at','?')}  ",
-        f"Git: {data.get('git', {}).get('commit','?')[:8]} on `{data.get('git', {}).get('branch','?')}`  ",
+        "Canonical numbers for §5 main results. "
+        f"Source: `results_table.csv` (memmap + sampling categories only).",
         "",
-        "Methods: family #1 (headline) per `results/README.md`. Metric is "
-        "per-seed test AUROC, aggregated as `mean ± popstdev (n=seeds)` for "
-        "trained methods; single-run methods (logprob, entropy, P(true)) "
-        "report the scalar. Empty cells = no complete runs in the table.",
+        "\\* = incomplete: N/5 seeds complete. All other trained cells are 5/5 seeds.",
+        "",
+        "MMLU has no sampling results (multiple-choice; sampling-based methods not applicable).",
+        "",
+        "---",
         "",
     ]
     for model in MODELS:
-        sections.append(render_table(model, bucket))
-        sections.append("")
-    sections.append(
-        "Scorer choices: `contrastive_logprob_recon` → `knn_auroc` (headline "
-        "per PAPER_ROADMAP §6); `logprob_baseline` → `mean_logprob_auroc`; "
-        "`token_entropy` → `mean_entropy_auroc`; `p_true` → `p_true_auroc_best`. "
-        "Other scorers available in `results/results_table.csv`."
-    )
-    text = "\n".join(sections) + "\n"
+        lines.extend(render_model_block(model, bucket))
+
+    lines += [
+        "### Scorer notes",
+        "",
+        "Trained methods: `contrastive_logprob_recon` → `knn_auroc`; "
+        "`logprob_baseline` → `seq_logprob_auroc`; "
+        "`token_entropy` → `mean_entropy_auroc`; `p_true` → `p_true_auroc_best`; "
+        "all probe/sampling methods → `auroc`. "
+        "Means reported across 5 seeds; stdev available in `results_table.csv`.",
+        "",
+        "*Generated from `results_table.csv` via `scripts/draft_headline_table.py`. Re-run to refresh.*  ",
+        f"*Last updated: {today}*",
+    ]
+
+    text = "\n".join(lines) + "\n"
 
     if args.out:
         args.out.write_text(text, encoding="utf-8")

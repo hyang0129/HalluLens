@@ -16,6 +16,7 @@ MMLU has no sampling results (multiple-choice; sampling-based methods not applic
 |---|---|---|---|---|---|---|
 | LogProb (seq) | — | — | 0.595\*(1/5) | — | — | — |
 | Token Entropy | — | — | 0.589\*(1/5) | — | — | — |
+| P(true) | 0.580 | 0.622 | 0.660 | 0.672 | 0.581 | 0.610 |
 | Linear Probe | 0.818 | 0.746 | 0.783 | 0.862 | 0.698 | 0.739 |
 | SAPLMA | 0.689 | 0.611 | 0.640 | 0.721 | 0.578 | 0.609 |
 | LLMsKnow Probe | 0.828 | 0.722 | 0.801 | 0.870 | 0.709 | 0.741 |
@@ -43,6 +44,7 @@ MMLU has no sampling results (multiple-choice; sampling-based methods not applic
 |---|---|---|---|---|---|---|
 | LogProb (seq) | — | — | — | — | — | — |
 | Token Entropy | — | — | — | — | — | — |
+| P(true) | 0.641 | 0.618 | 0.682 | 0.709 | 0.612 | 0.706 |
 | Linear Probe | 0.864 | 0.809 | 0.828 | 0.913 | 0.738 | 0.816 |
 | SAPLMA | 0.783 | 0.710 | 0.684 | 0.812 | 0.627 | 0.706 |
 | LLMsKnow Probe | 0.855 | 0.732 | 0.792 | 0.904 | 0.713 | 0.742 |
