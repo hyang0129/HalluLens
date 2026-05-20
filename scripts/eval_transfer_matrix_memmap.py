@@ -42,7 +42,7 @@ from activation_research.transfer_eval_memmap import (
 )
 
 DATASETS = ["hotpotqa", "mmlu", "nq", "popqa", "sciq", "searchqa"]
-METHODS = ["contrastive_logprob_recon", "saplma", "llmsknow_probe"]
+METHODS = ["contrastive_logprob_recon", "saplma", "llmsknow_probe", "act_vit"]
 MODEL_SLUGS = ["llama", "qwen3"]
 
 
@@ -407,6 +407,19 @@ def main() -> None:
             })
 
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+            # Per-sample (score_halu, label_halu) live under _scores/_labels in the
+            # cell dict; pull them out into a sidecar CSV so downstream stats (e.g.
+            # AUPR, calibration) can be recomputed without re-running the cell.
+            sample_scores = result.pop("_scores", None)
+            sample_labels = result.pop("_labels", None)
+            if sample_scores is not None and sample_labels is not None:
+                preds_path = output_path[:-len(".json")] + ".predictions.csv"
+                with open(preds_path, "w") as pf:
+                    pf.write("example_id,score_halu,label_halu\n")
+                    for i, (s, l) in enumerate(zip(sample_scores, sample_labels)):
+                        pf.write(f"{i},{float(s):.10f},{int(l)}\n")
+
             with open(output_path, "w") as f:
                 json.dump(result, f, indent=2)
 

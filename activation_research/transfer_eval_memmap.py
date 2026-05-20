@@ -22,7 +22,7 @@ from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader
 
 from activation_research.memmap_activation_parser import MemmapActivationParser
-from activation_research.metrics import knn_ood_stats, mahalanobis_ood_stats
+from activation_research.metric_evaluator import MultiMetricHallucinationEvaluator
 from activation_research.model import LogprobReconProgressiveCompressor, SimpleHaluClassifier
 
 
@@ -30,6 +30,7 @@ from activation_research.model import LogprobReconProgressiveCompressor, SimpleH
 _CHECKPOINT_PREFERRED = {
     "contrastive_logprob_recon": "contrastive_last.pt",
     "saplma": "linear_probe_last.pt",
+    "act_vit": "best_checkpoint.pt",
 }
 _CHECKPOINT_FALLBACK = "final_weights.pt"
 
@@ -37,19 +38,36 @@ _CHECKPOINT_FALLBACK = "final_weights.pt"
 _LLMSKNOW_ARTIFACT = "sweep_summary.json"
 
 
-def _build_memmap_parser(capture_dir: str, random_seed: int = 0) -> MemmapActivationParser:
+def _parse_layer_spec(spec) -> list:
+    """Accepts '14-29', '22,26', a list of ints, or None (→ default 14-29)."""
+    if spec is None:
+        return list(range(14, 30))
+    if isinstance(spec, list):
+        return [int(x) for x in spec]
+    s = str(spec)
+    if "-" in s and "," not in s:
+        start, end = s.split("-", 1)
+        return list(range(int(start), int(end) + 1))
+    return [int(x) for x in s.split(",")]
+
+
+def _build_memmap_parser(
+    capture_dir: str,
+    random_seed: int = 0,
+    split_strategy: str = "none",
+) -> MemmapActivationParser:
     """Construct a MemmapActivationParser over an icr_capture directory.
 
-    split_strategy="none" is used for both train and test capture dirs at
-    transfer time.  For the source-train reference set this returns the whole
-    50k, which is the Mahalanobis/KNN reference corpus the spec requires.
-    Using the per-seed 90% subset would couple the transfer number to the
-    training fold; the full 50k is fold-independent.
+    Source-train references use split_strategy="three_way" with random_seed equal
+    to the source run's split_seed, so the diagonal sanity cell trains on the
+    exact same 90% subset the in-dist run did. Target-test references use
+    split_strategy="none" to expose all rows of the test capture, matching the
+    in-dist eval path (run_experiment builds the test parser the same way).
     """
     return MemmapActivationParser(
         capture_dir=capture_dir,
         random_seed=random_seed,
-        split_strategy="none",
+        split_strategy=split_strategy,
         verbose=False,
     )
 
@@ -91,6 +109,14 @@ def load_checkpoint_model(
         params.update(model_params)
         model = SimpleHaluClassifier(**params)
 
+    elif method == "act_vit":
+        from activation_research.act_vit import ACTViT, ACTViTConfig
+
+        params = dict(input_dim=input_dim)
+        params.update(model_params)
+        cfg = ACTViTConfig(**params)
+        model = ACTViT(cfg)
+
     else:
         raise ValueError(f"load_checkpoint_model: unsupported method '{method}'")
 
@@ -108,6 +134,9 @@ def get_embeddings_contrastive(
     device: str = "cpu",
     batch_size: int = 128,
     num_workers: int = 4,
+    split_strategy: str = "none",
+    split: str = "test",
+    random_seed: int = 0,
 ) -> list:
     """Embed all samples in a capture dir using the contrastive model.
 
@@ -120,9 +149,11 @@ def get_embeddings_contrastive(
     but the MemmapContrastiveDataset caches dataset-level metadata keyed on the full
     kwarg set; mismatching would open a second cache file unnecessarily.
     """
-    ap = _build_memmap_parser(capture_dir)
+    ap = _build_memmap_parser(
+        capture_dir, random_seed=random_seed, split_strategy=split_strategy,
+    )
     ds = ap.get_dataset(
-        "test",
+        split,
         relevant_layers=relevant_layers,
         num_views=1,
         pad_length=63,
@@ -210,11 +241,55 @@ def get_scores_probe(
     return np.concatenate(all_scores), np.concatenate(all_labels)
 
 
+def _score_act_vit(
+    model: torch.nn.Module,
+    *,
+    tgt_test_dir: str,
+    split_seed: int,
+    device: str = "cpu",
+    batch_size: int = 64,
+    num_workers: int = 0,
+) -> tuple:
+    """Forward an ACT-ViT model over a target test capture, return (scores, labels).
+
+    Mirrors run_experiment.run_act_vit's test-eval block: builds ACTViTDataset over
+    the test capture's full row set (split_strategy="none") and computes sigmoid
+    scores per sample.
+    """
+    from activation_research.act_vit_dataset import ACTViTDataset
+
+    tgt_parser = _build_memmap_parser(
+        tgt_test_dir, random_seed=split_seed, split_strategy="none",
+    )
+    test_idx = tgt_parser.df["sample_index"].values
+    test_ds = ACTViTDataset(tgt_test_dir, test_idx)
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        persistent_workers=False,
+    )
+    model = model.to(device)
+    model.eval()
+    all_preds, all_labels = [], []
+    with torch.no_grad():
+        for batch in test_loader:
+            x = batch["activations"].to(device)
+            logits = model(x).squeeze(1)
+            all_preds.append(torch.sigmoid(logits).cpu().numpy())
+            all_labels.append(batch["label"].cpu().numpy())
+    scores = np.concatenate(all_preds).astype(np.float32)
+    labels = np.concatenate(all_labels).astype(np.int32)
+    return scores, labels
+
+
 def score_llmsknow_transfer(
     source_run_dir: str,
     src_train_dir: str,
     tgt_test_dir: str,
     training_seed: int,
+    split_seed: int,
     run_config: Optional[dict] = None,
 ) -> tuple:
     """Refit the LLMsKnow LogReg on source-train and score target-test.
@@ -231,10 +306,12 @@ def score_llmsknow_transfer(
     with open(os.path.join(artifacts_dir, "sweep_summary.json")) as f:
         sweep_summary = json.load(f)
 
-    # best_layer and best_token_pos are model-layer ID and token position.
-    # At transfer time we request exactly this one layer, so layer_idx into the
-    # dataset's layer axis is always 0.
-    best_layer: int = int(sweep_summary["best_layer"])
+    # MemmapActivationParser.get_dataset returns the full-L cache regardless of
+    # `relevant_layers`. The in-dist sweep_locations writes best_layer_idx as the
+    # absolute index into that cache's L axis (see llmsknow_probe.sweep_locations
+    # and run_experiment.run_llmsknow_probe — both pass best_layer_idx, not the
+    # model-layer name, into train_final_probe). We must do the same here.
+    best_layer_idx: int = int(sweep_summary["best_layer_idx"])
     best_token_pos: int = int(sweep_summary["best_token_pos"])
 
     # Regularisation settings — from source run config if available, else defaults.
@@ -247,10 +324,16 @@ def score_llmsknow_transfer(
     # Source-train: all 50k rows (split_strategy="none" → _split_view gives all).
     # We request include_response_logprobs=True to match the cache fingerprint from
     # the original run_llmsknow_probe call (see run_experiment.py:1608-1618).
-    src_ap = _build_memmap_parser(src_train_dir, random_seed=training_seed)
+    # Source-train: same 90% subset the in-dist run used.
+    # split_strategy="three_way" + random_seed=split_seed reproduces the
+    # stratified split from training time (see run_experiment.py — the train
+    # parser is built with these args and get_dataset("train") returns the
+    # in-dist training rows).
+    src_ap = _build_memmap_parser(
+        src_train_dir, random_seed=split_seed, split_strategy="three_way",
+    )
     src_ds = src_ap.get_dataset(
-        "test",
-        relevant_layers=[best_layer],
+        "train",
         num_views=1,
         pad_length=63,
         include_response_logprobs=True,
@@ -261,10 +344,9 @@ def score_llmsknow_transfer(
     src_full, src_rows, src_labels = _split_view(src_ds)
 
     # Target-test: all rows in the test capture dir.
-    tgt_ap = _build_memmap_parser(tgt_test_dir, random_seed=training_seed)
+    tgt_ap = _build_memmap_parser(tgt_test_dir, split_strategy="none")
     tgt_ds = tgt_ap.get_dataset(
         "test",
-        relevant_layers=[best_layer],
         num_views=1,
         pad_length=63,
         include_response_logprobs=True,
@@ -274,21 +356,26 @@ def score_llmsknow_transfer(
     )
     tgt_full, tgt_rows, tgt_labels = _split_view(tgt_ds)
 
-    # layer_idx=0 because we requested a single relevant_layers=[best_layer].
     probe = train_final_probe(
         src_full, src_rows, src_labels,
-        layer_idx=0, token_pos=best_token_pos,
+        layer_idx=best_layer_idx, token_pos=best_token_pos,
         seed=training_seed, C=C, max_iter=max_iter,
     )
 
     outlier_class = 1  # consistent with all memmap dataset configs
-    auroc, _scores = eval_probe(
+    auroc, scores = eval_probe(
         probe, tgt_full, tgt_rows, tgt_labels,
-        layer_idx=0, token_pos=best_token_pos,
+        layer_idx=best_layer_idx, token_pos=best_token_pos,
         outlier_class=outlier_class,
     )
 
-    return float(auroc), int(src_rows.shape[0]), int(tgt_rows.shape[0])
+    return (
+        float(auroc),
+        int(src_rows.shape[0]),
+        int(tgt_rows.shape[0]),
+        np.asarray(scores, dtype=np.float32),
+        np.asarray(tgt_labels, dtype=np.int32),
+    )
 
 
 def _resolve_probe_layer(run_dir: str, run_config: dict) -> int:
@@ -360,17 +447,23 @@ def evaluate_transfer_cell(
 
     outlier_class: int = int(source_dataset_cfg.get("outlier_class", 1))
 
+    # split_seed governs the stratified 90/10 split of the source-train capture
+    # at training time. Mirror it here so the source-train reference matches
+    # exactly what the persisted probe/encoder was trained against.
+    split_seed: int = int(run_config.get("split_seed", 42))
+
     if method == "llmsknow_probe":
         artifacts_dir = os.path.join(source_run_dir, "artifacts")
         sweep_path = os.path.join(artifacts_dir, _LLMSKNOW_ARTIFACT)
         if not os.path.exists(sweep_path):
             return {"status": "missing_artifact"}
 
-        auroc, n_src, n_tgt = score_llmsknow_transfer(
+        auroc, n_src, n_tgt, scores, labels = score_llmsknow_transfer(
             source_run_dir=source_run_dir,
             src_train_dir=src_train_dir,
             tgt_test_dir=tgt_test_dir,
             training_seed=training_seed,
+            split_seed=split_seed,
             run_config=run_config,
         )
         if np.isnan(auroc):
@@ -384,6 +477,8 @@ def evaluate_transfer_cell(
             "knn_auroc": None,
             "n_src_train": n_src,
             "n_tgt_test": n_tgt,
+            "_scores": [float(s) for s in scores],
+            "_labels": [int(l) for l in labels],
         }
 
     # contrastive_logprob_recon or saplma — need a checkpoint.
@@ -395,49 +490,99 @@ def evaluate_transfer_cell(
     model = load_checkpoint_model(method, checkpoint_path, source_dataset_cfg, run_config)
 
     if method == "contrastive_logprob_recon":
-        src_train_records = get_embeddings_contrastive(
-            model,
-            capture_dir=src_train_dir,
-            relevant_layers=relevant_layers,
-            device=device,
+        # Mirror run_experiment.run_contrastive_logprob_recon's eval block 1:1 so
+        # the diagonal cell reproduces eval_metrics.json bit-for-bit. Inputs come
+        # from the source run's config.json (method.data / method.evaluation).
+        method_cfg = run_config.get("method", {})
+        data_cfg = method_cfg.get("data", {})
+        eval_cfg = method_cfg.get("evaluation", {})
+
+        src_relevant_layers = _parse_layer_spec(data_cfg.get("relevant_layers"))
+        target_layers = list(data_cfg.get("target_layers", [22, 26]))
+        ds_kwargs = dict(
+            relevant_layers=src_relevant_layers,
+            num_views=int(data_cfg.get("num_views", 2)),
+            pad_length=int(data_cfg.get("pad_length", 63)),
+            include_response_logprobs=True,
+            response_logprobs_top_k=int(data_cfg.get("response_logprobs_top_k", 20)),
+            preload=False,
+            check_ram=False,
         )
-        tgt_test_records = get_embeddings_contrastive(
+
+        src_ap = _build_memmap_parser(
+            src_train_dir, random_seed=split_seed, split_strategy="three_way",
+        )
+        tgt_ap = _build_memmap_parser(tgt_test_dir, split_strategy="none")
+
+        train_ds = src_ap.get_dataset("train", **ds_kwargs)
+        test_ds = tgt_ap.get_dataset("test", **ds_kwargs)
+
+        train_ds_target = train_ds.slice_layers(target_layers)
+        test_ds_target = test_ds.slice_layers(target_layers)
+
+        train_loader = DataLoader(train_ds_target, batch_size=64, shuffle=False)
+        eval_loader = DataLoader(test_ds_target, batch_size=64, shuffle=False)
+
+        metrics_list: list = []
+        for m in eval_cfg.get("metrics", ["cosine", "mds", "knn"]):
+            if m == "knn":
+                knn_params = dict(eval_cfg.get("knn_params", {}))
+                knn_params["sample_seed"] = training_seed
+                # KNN is the headline scoring for contrastive — request
+                # per-sample distances so AUPR / calibration / reweighting can
+                # be recomputed downstream without re-running the cell.
+                knn_params["include_per_sample"] = True
+                metrics_list.append(
+                    {"metric": "knn", "kwargs": knn_params, "train_selection": "all"}
+                )
+            else:
+                metrics_list.append(m)
+
+        evaluator = MultiMetricHallucinationEvaluator(
+            activation_parser_df=tgt_ap.df,
+            train_data_loader=train_loader,
+            metrics=metrics_list,
+            batch_size=int(eval_cfg.get("eval_batch_size", 256)),
+            sub_batch_size=int(eval_cfg.get("sub_batch_size", 64)),
+            device=device,
+            num_workers=0,
+            persistent_workers=False,
+            outlier_class=outlier_class,
+        )
+        model = model.to(device)
+        model.eval()
+        ood_stats = evaluator.compute(eval_loader, model)
+
+        cell = {
+            "status": "ok",
+            "auroc": ood_stats.get("knn_auroc"),  # KNN is the headline for contrastive
+            "knn_auroc": ood_stats.get("knn_auroc"),
+            "mahalanobis_auroc": ood_stats.get("mahalanobis_auroc"),
+            "cosine_auroc": ood_stats.get("cosine_auroc"),
+            "n_src_train": len(train_ds_target),
+            "n_tgt_test": len(test_ds_target),
+        }
+        # Per-sample KNN distances (the headline score for contrastive).
+        k_scores = ood_stats.get("knn_scores")
+        k_labels = ood_stats.get("knn_labels")
+        if k_scores is not None and k_labels is not None:
+            cell["_scores"] = [float(s) for s in np.asarray(k_scores).ravel()]
+            cell["_labels"] = [int(l) for l in np.asarray(k_labels).ravel()]
+        return cell
+
+    if method == "act_vit":
+        scores, labels = _score_act_vit(
+            model, tgt_test_dir=tgt_test_dir, split_seed=split_seed, device=device,
+        )
+    else:
+        # saplma
+        scores, labels = get_scores_probe(
             model,
             capture_dir=tgt_test_dir,
-            relevant_layers=relevant_layers,
+            probe_layer=probe_layer,
             device=device,
         )
 
-        maha_stats = mahalanobis_ood_stats(
-            src_train_records, tgt_test_records, outlier_class=outlier_class
-        )
-        knn_stats = knn_ood_stats(
-            src_train_records, tgt_test_records,
-            outlier_class=outlier_class,
-            k=50,
-            metric="euclidean",
-            calibrate_k=False,
-        )
-        return {
-            "status": "ok",
-            "auroc": maha_stats["mahalanobis_auroc"],   # headline per spec
-            "mahalanobis_auroc": maha_stats["mahalanobis_auroc"],
-            "mahalanobis_mean_id": maha_stats["mahalanobis_mean_id"],
-            "mahalanobis_std_id": maha_stats["mahalanobis_std_id"],
-            "mahalanobis_mean_ood": maha_stats["mahalanobis_mean_ood"],
-            "mahalanobis_std_ood": maha_stats["mahalanobis_std_ood"],
-            "knn_auroc": knn_stats["knn_auroc"],
-            "n_src_train": len(src_train_records),
-            "n_tgt_test": len(tgt_test_records),
-        }
-
-    # saplma
-    scores, labels = get_scores_probe(
-        model,
-        capture_dir=tgt_test_dir,
-        probe_layer=probe_layer,
-        device=device,
-    )
     if len(np.unique(labels)) < 2:
         auroc = float("nan")
         status = "single_class"
@@ -451,6 +596,8 @@ def evaluate_transfer_cell(
         "knn_auroc": None,
         "n_src_train": None,
         "n_tgt_test": int(len(labels)),
+        "_scores": [float(s) for s in scores],
+        "_labels": [int(l) for l in labels],
     }
 
 

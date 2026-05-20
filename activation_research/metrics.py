@@ -243,7 +243,13 @@ def token_entropy_ood_stats(
     return stats
 
 
-def mahalanobis_ood_stats(train_records, test_records, outlier_class=1, train_label_filter: str = "id_only"):
+def mahalanobis_ood_stats(
+    train_records,
+    test_records,
+    outlier_class=1,
+    train_label_filter: str = "id_only",
+    include_per_sample: bool = False,
+):
     train_records = _filter_train_records_by_label(train_records, outlier_class=outlier_class, train_label_filter=train_label_filter)
 
     train_z = torch.stack([_record_embedding(r) for r in train_records])
@@ -287,6 +293,9 @@ def mahalanobis_ood_stats(train_records, test_records, outlier_class=1, train_la
         'mahalanobis_std_ood': ood_dists.std().item(),
         'mahalanobis_auroc': _safe_auroc(binary_outlier_labels, dists.detach().cpu().numpy())
     }
+    if include_per_sample:
+        stats['mahalanobis_scores'] = dists.detach().cpu().numpy()
+        stats['mahalanobis_labels'] = np.asarray(binary_outlier_labels, dtype=np.int32)
 
     return stats
 
@@ -386,6 +395,7 @@ def knn_ood_stats(
     k_candidates=None,
     max_train_size: int = 200000,
     sample_seed: int = 0,
+    include_per_sample: bool = False,
 ):
     """Compute OOD statistics using k-nearest-neighbor distance in embedding space.
 
@@ -515,5 +525,8 @@ def knn_ood_stats(
         "knn_std_ood": ood_scores.std().item() if ood_scores.numel() else float("nan"),
         "knn_auroc": _safe_auroc(binary_outlier_labels, knn_scores.numpy()),
     }
+    if include_per_sample:
+        stats["knn_scores"] = knn_scores.numpy()
+        stats["knn_labels"] = np.asarray(binary_outlier_labels, dtype=np.int32)
 
     return stats

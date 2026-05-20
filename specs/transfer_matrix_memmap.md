@@ -26,7 +26,7 @@ correct. What changes:
 
 | Method | Source artifact (resolved under `seed_dir/artifacts/`) | Transfer-time scoring |
 |--------|---------------------------------------------------------|------------------------|
-| `contrastive_logprob_recon` | `contrastive_last.pt` (fallback: `final_weights.pt`) | Embed `src_train` (whole 50k) and `tgt_test` with the contrastive model on `target_layers` (defaults to `[22, 26]` per method cfg). Mahalanobis OOD on source-train embeddings → AUROC (headline); KNN-OOD AUROC as secondary. |
+| `contrastive_logprob_recon` | `contrastive_last.pt` (fallback: `final_weights.pt`) | Embed `src_train` (per-seed 90% subset matching in-dist) and `tgt_test` with the contrastive model on `target_layers` (defaults to `[22, 26]` per method cfg). KNN-OOD on source-train embeddings → AUROC (headline); Mahalanobis and cosine AUROCs stored as secondary fields. |
 | `saplma` | `linear_probe_last.pt` (fallback: `final_weights.pt`) | Forward-pass `tgt_test` at `probe_layer` resolved from `eval_metrics.json[selected_layer]` → `seed_dir/config.json[method.data.probe_layer]` → 22 (`saplma.json` canonical default; not 26). Sigmoid → AUROC. |
 | `llmsknow_probe` | `seed_dir/artifacts/sweep_summary.json` — provides `best_layer`, `best_token_pos`. **The fitted sklearn probe is not persisted** by `run_llmsknow_probe`. | Re-fit a `LogisticRegression` on the source-train `(N, H)` column at the cached `(best_layer, best_token_pos)`, then score the target-test column at the same `(layer, token_pos)`. Single forward, no sweep. |
 
@@ -100,7 +100,7 @@ For each completed seed, the diagonal cell `(src=tgt, model, method, seed)` must
 | Method | In-dist source of truth | Transfer cell field |
 |--------|------------------------|---------------------|
 | `saplma` | `seed_dir/eval_metrics.json[auroc]` | `auroc` |
-| `contrastive_logprob_recon` | `seed_dir/eval_metrics.json[mahalanobis_auroc]` | `mahalanobis_auroc` (headline) |
+| `contrastive_logprob_recon` | `seed_dir/eval_metrics.json[knn_auroc]` | `knn_auroc` (headline) |
 | `llmsknow_probe` | `seed_dir/eval_metrics.json[auroc]` | `auroc` |
 
 If any diagonal misses by more than ±0.02, the pipeline is wrong — most likely a data-loader mismatch between training-time and transfer-time (relevant_layers, pad_length, response_logprobs inclusion, …). Audit the constructor args passed to `get_dataset` and align with `run_saplma` / `run_contrastive_logprob_recon` / `run_llmsknow_probe` in `scripts/run_experiment.py`.
