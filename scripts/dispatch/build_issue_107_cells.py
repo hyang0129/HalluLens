@@ -89,7 +89,7 @@ def build(dispatch_root: Path) -> int:
             print(f"  skip (config missing): {cfg_rel}", file=sys.stderr)
             continue
 
-        cell_id = f"issue107__{dataset_key}__{_METHOD}"
+        cell_id = f"1_issue107__{dataset_key}__{_METHOD}"
         if _dispatch_has_cell(dispatch_root, cell_id):
             print(f"  skip (already queued): {cell_id}")
             continue
