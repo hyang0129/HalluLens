@@ -997,7 +997,7 @@ def train_contrastive_logprob_recon(
 
                 total_loss += loss.item()
                 total_supcon += supcon.item()
-                total_recon += float(recon)
+                total_recon += float(recon.detach())
                 total_intra_cos += intra_sample_cosine_mean(z_views)
                 total_intra_inter += intra_inter_margin(z_views)
                 n_batches += 1
@@ -1417,7 +1417,7 @@ def train_contrastive_logprob_recon_dualloss(
                 total_loss += loss.item()
                 total_supcon_a += supcon_A.item()
                 total_supcon_b += supcon_B.item()
-                total_recon += float(recon)
+                total_recon += float(recon.detach())
                 total_intra_cos += intra_sample_cosine_mean(z_views)
                 total_intra_inter += intra_inter_margin(z_views)
                 n_batches += 1
