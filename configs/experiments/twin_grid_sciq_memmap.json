@@ -2,7 +2,6 @@
   "experiment_name": "twin_grid_sciq_memmap",
   "dataset": "sciq_memmap",
   "methods": [
-    "contrastive_logprob_recon_c0",
     "contrastive_logprob_recon_c1",
     "contrastive_logprob_recon_c2",
     "contrastive_logprob_recon_c3"

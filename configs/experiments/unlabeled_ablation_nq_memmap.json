@@ -1,10 +1,8 @@
 {
-  "experiment_name": "twin_grid_nq_memmap",
+  "experiment_name": "unlabeled_ablation_nq_memmap",
   "dataset": "nq_memmap",
   "methods": [
-    "contrastive_logprob_recon_c1",
-    "contrastive_logprob_recon_c2",
-    "contrastive_logprob_recon_c3"
+    "contrastive_logprob_recon_c0"
   ],
   "split_seed": 42,
   "training_seeds": [0],
