@@ -30,7 +30,7 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-PYTHON = "/mnt/home/hyang1/.local/share/mamba/envs/py312/bin/python"
+PYTHON = "/mnt/home/hyang1/.local/share/mamba/envs/p311/bin/python"
 
 EXPERIMENTS = {
     "llama": [
