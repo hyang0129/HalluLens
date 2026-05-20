@@ -1,18 +1,19 @@
 """
 generate_manifest_89.py — populate pending/ with one JSON cell per
-(source_run × target_dataset) for the issue #89 transfer matrix sweep.
+(source_dataset × model_slug × seed) for the issue #89 transfer matrix sweep.
 
-Scans the runs directory for completed memmap training checkpoints via
-discover_runs(), then emits one cell per
-(source_dataset × target_dataset × method × model_slug × seed).
+Each batch cell covers all requested methods and all target datasets, so the
+worker loads each source checkpoint once and scores all 6 targets in one pass
+instead of 6 separate cells.  Cell count: 6 sources × 2 slugs × 5 seeds = 60
+instead of the old 6×6×4×2×5 = 1,440.
 
 Usage:
     python scripts/dispatch/generate_manifest_89.py \\
-        --dispatch-root shared/issue_89_dispatch \\
+        --dispatch-root shared/issue_79_dispatch \\
         [--runs-dir runs] \\
         [--configs-dir configs] \\
         [--output-dir runs/transfer_matrix_memmap] \\
-        [--methods contrastive_logprob_recon,saplma,llmsknow_probe] \\
+        [--methods contrastive_logprob_recon,saplma,llmsknow_probe,act_vit] \\
         [--model-slugs llama,qwen3] \\
         [--source-datasets hotpotqa,mmlu,...] \\
         [--target-datasets hotpotqa,mmlu,...] \\
@@ -20,30 +21,28 @@ Usage:
         [--relevant-layers 14-29] \\
         [--skip-existing]
 
-Cell shape (consumed by scripts/dispatch/worker_89.sh):
+Batch cell shape (consumed by worker_79.sh via eval_transfer_matrix_memmap.py):
 
     {
-      "cell_id":            "hotpotqa__hotpotqa__contrastive_logprob_recon__llama__0",
-      "source_dataset":     "hotpotqa",
-      "target_dataset":     "hotpotqa",
-      "method":             "contrastive_logprob_recon",
-      "model_slug":         "llama",
-      "seed":               0,
-      "source_run_dir":     "runs/baseline_comparison_hotpotqa_memmap/hotpotqa_memmap/contrastive_logprob_recon/seed_0",
-      "source_dataset_cfg": "configs/datasets/hotpotqa_memmap.json",
-      "target_dataset_cfg": "configs/datasets/hotpotqa_memmap.json",
-      "output_check":       "runs/transfer_matrix_memmap/llama/hotpotqa__hotpotqa__contrastive_logprob_recon__0.json",
-      "relevant_layers":    [14, 15, ..., 29],
-      "probe_layer":        22
+      "cell_id":             "hotpotqa__llama__0",
+      "task_type":           "transfer_eval",
+      "source_dataset":      "hotpotqa",
+      "model_slug":          "llama",
+      "seed":                0,
+      "source_run_dirs":     {"contrastive_logprob_recon": "runs/.../seed_0", ...},
+      "source_dataset_cfg":  "configs/datasets/hotpotqa_memmap.json",
+      "target_datasets":     ["hotpotqa", "mmlu", ...],
+      "target_dataset_cfgs": {"hotpotqa": "configs/...", ...},
+      "probe_layers":        {"saplma": 18, ...},
+      "relevant_layers":     [14, ..., 29],
+      "output_check":        "runs/transfer_matrix_memmap/llama/hotpotqa__0.done"
     }
-
-cell_id ordering is source → target → method → seed, so the diagonal
-(in-dist sanity check) cells all land early in the sorted claim order.
 
 Skip rules:
   - Cells already in pending/claimed/done/failed are never re-queued.
-  - --skip-existing additionally skips cells whose output_check exists at
-    manifest time (default OFF — emit all cells and let the worker decide).
+  - --skip-existing additionally skips cells whose output_check sentinel exists.
+  - Only methods with a completed source run are included in source_run_dirs;
+    cells with no discovered runs are silently skipped.
 """
 
 from __future__ import annotations
@@ -124,7 +123,7 @@ def generate_manifest(
     init_dispatch_dirs(dispatch_root)
     written = 0
 
-    # Discover all completed source runs.
+    # Discover all completed source runs across requested methods.
     all_runs: list[dict] = []
     for method in methods:
         found = discover_runs(str(runs_dir), method)
@@ -142,72 +141,80 @@ def generate_manifest(
         print("No completed runs found — nothing to queue.", file=sys.stderr)
         return 0
 
-    # Pre-load target dataset configs for quick lookup.
-    target_cfgs: dict[tuple[str, str], Path] = {}
-    for tgt_ds in target_datasets:
-        for slug in model_slugs:
-            cfg_name = _dataset_cfg_name(tgt_ds, slug)
-            cfg_path = configs_dir / "datasets" / f"{cfg_name}.json"
-            if cfg_path.exists():
-                target_cfgs[(tgt_ds, slug)] = cfg_path
-            else:
-                print(f"  [warn] Target config not found: {cfg_path} — skipping {tgt_ds}/{slug}")
-
+    # Group runs by (source_dataset, model_slug, seed) — one batch cell per group.
+    from collections import defaultdict
+    groups: dict[tuple[str, str, int], dict[str, dict]] = defaultdict(dict)
     for run in all_runs:
         model_slug = _slug_from_experiment(run["experiment_name"])
         bare_src = _bare_dataset(run["dataset"])
+        key = (bare_src, model_slug, int(run["seed"]))
+        groups[key][run["method"]] = run
+
+    for (bare_src, model_slug, seed), method_runs in sorted(groups.items()):
+        cell_id = f"{bare_src}__{model_slug}__{seed}"
+
+        if _dispatch_has_cell(dispatch_root, cell_id):
+            continue
 
         src_cfg_name = _dataset_cfg_name(bare_src, model_slug)
         src_cfg_path = configs_dir / "datasets" / f"{src_cfg_name}.json"
         if not src_cfg_path.exists():
-            print(f"  [warn] Source config not found: {src_cfg_path} — skipping")
+            print(f"  [warn] Source config not found: {src_cfg_path} — skipping {cell_id}")
             continue
 
-        probe_layer = _resolve_probe_layer(run["run_dir"], run["config"])
-        # Make run_dir project-relative for portability.
-        try:
-            rel_run_dir = str(Path(run["run_dir"]).relative_to(_PROJECT_ROOT))
-        except ValueError:
-            rel_run_dir = run["run_dir"]
+        # Build per-method source_run_dirs and probe_layers.
+        source_run_dirs: dict[str, str] = {}
+        probe_layers: dict[str, int] = {}
+        for method, run in method_runs.items():
+            try:
+                rel_run_dir = str(Path(run["run_dir"]).relative_to(_PROJECT_ROOT))
+            except ValueError:
+                rel_run_dir = run["run_dir"]
+            source_run_dirs[method] = rel_run_dir
+            probe_layers[method] = _resolve_probe_layer(run["run_dir"], run["config"])
 
+        # Build target dataset config map for this model slug.
+        tgt_ds_list: list[str] = []
+        tgt_cfg_map: dict[str, str] = {}
         for tgt_ds in target_datasets:
-            key = (tgt_ds, model_slug)
-            if key not in target_cfgs:
-                continue
+            cfg_name = _dataset_cfg_name(tgt_ds, model_slug)
+            cfg_path = configs_dir / "datasets" / f"{cfg_name}.json"
+            if cfg_path.exists():
+                tgt_ds_list.append(tgt_ds)
+                tgt_cfg_map[tgt_ds] = str(cfg_path.relative_to(_PROJECT_ROOT))
+            else:
+                print(f"  [warn] Target config not found: {cfg_path} — skipping {tgt_ds}/{model_slug}")
 
-            tgt_cfg_path = target_cfgs[key]
-            cell_id = f"{bare_src}__{tgt_ds}__{run['method']}__{model_slug}__{run['seed']}"
+        if not tgt_ds_list:
+            print(f"  [warn] No target configs found for {cell_id} — skipping")
+            continue
 
-            if _dispatch_has_cell(dispatch_root, cell_id):
-                continue
+        output_check = str(
+            (output_dir / model_slug / f"{bare_src}__{seed}.done")
+            .relative_to(_PROJECT_ROOT)
+        )
 
-            output_check = str(
-                (output_dir / model_slug / f"{bare_src}__{tgt_ds}__{run['method']}__{run['seed']}.json")
-                .relative_to(_PROJECT_ROOT)
-            )
+        if skip_existing and (_PROJECT_ROOT / output_check).exists():
+            continue
 
-            if skip_existing and (_PROJECT_ROOT / output_check).exists():
-                continue
-
-            cell = {
-                "cell_id": cell_id,
-                "task_type": "transfer_eval",
-                "source_dataset": bare_src,
-                "target_dataset": tgt_ds,
-                "method": run["method"],
-                "model_slug": model_slug,
-                "seed": int(run["seed"]),
-                "source_run_dir": rel_run_dir,
-                "source_dataset_cfg": str(src_cfg_path.relative_to(_PROJECT_ROOT)),
-                "target_dataset_cfg": str(tgt_cfg_path.relative_to(_PROJECT_ROOT)),
-                "output_check": output_check,
-                "relevant_layers": relevant_layers,
-                "probe_layer": probe_layer,
-            }
-            cell_path = dispatch_root / "pending" / f"{cell_id}.json"
-            cell_path.write_text(json.dumps(cell, indent=2), encoding="utf-8")
-            written += 1
-            print(f"  queued: {cell_id}")
+        cell = {
+            "cell_id": cell_id,
+            "task_type": "transfer_eval",
+            "source_dataset": bare_src,
+            "model_slug": model_slug,
+            "seed": seed,
+            "source_run_dirs": source_run_dirs,
+            "source_dataset_cfg": str(src_cfg_path.relative_to(_PROJECT_ROOT)),
+            "target_datasets": tgt_ds_list,
+            "target_dataset_cfgs": tgt_cfg_map,
+            "probe_layers": probe_layers,
+            "relevant_layers": relevant_layers,
+            "output_check": output_check,
+        }
+        cell_path = dispatch_root / "pending" / f"{cell_id}.json"
+        cell_path.write_text(json.dumps(cell, indent=2), encoding="utf-8")
+        written += 1
+        print(f"  queued: {cell_id}")
 
     return written
 

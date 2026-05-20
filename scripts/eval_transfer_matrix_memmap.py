@@ -37,8 +37,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from activation_research.transfer_eval_memmap import (
     _resolve_probe_layer,
+    build_source_scorer,
     discover_runs,
     evaluate_transfer_cell,
+    score_on_target,
 )
 
 DATASETS = ["hotpotqa", "mmlu", "nq", "popqa", "sciq", "searchqa"]
@@ -155,7 +157,152 @@ def aggregate_results(output_dir: str) -> None:
     print(f"[aggregate] Wrote {summary_path}")
 
 
-def run_cell_json(cell_json_path: str, output_dir: str | None = None) -> int:
+def run_batch_cell_json(cell_json_path: str, output_dir: str | None = None) -> int:
+    """Run a batch cell: all (method × target_dataset) for one (source, model, seed).
+
+    Batch cell JSON shape (produced by generate_manifest_89.py):
+      {
+        "cell_id":             str   — "hotpotqa__llama__0"
+        "task_type":           "transfer_eval"
+        "source_dataset":      str
+        "model_slug":          str
+        "seed":                int
+        "source_run_dirs":     {method: project-relative run_dir, ...}
+        "source_dataset_cfg":  str   — project-relative path
+        "target_datasets":     list[str]
+        "target_dataset_cfgs": {dataset: project-relative path, ...}
+        "probe_layers":        {method: int, ...}
+        "relevant_layers":     list[int]   — informational only; methods read from config
+        "output_check":        str   — project-relative sentinel path (.done file)
+      }
+
+    Output JSONs are written as:
+      <output_dir>/<model_slug>/<source>__<target>__<method>__<seed>.json
+
+    Sentinel is written only when all scorers build and all targets score successfully.
+    Individual (method, target) pairs whose output JSON already exists are skipped.
+    Returns 0 on full success, 1 if any scorer or scoring step failed.
+    """
+    project_root = Path(__file__).parent.parent
+
+    with open(cell_json_path) as f:
+        cell = json.load(f)
+
+    cell_id = cell["cell_id"]
+    sentinel_path = project_root / cell["output_check"]
+
+    if sentinel_path.exists():
+        print(f"[{cell_id}] sentinel exists — skipping")
+        return 0
+
+    source_dataset = cell["source_dataset"]
+    model_slug = cell["model_slug"]
+    seed = cell["seed"]
+    source_run_dirs: dict = cell["source_run_dirs"]
+    target_datasets: list = cell["target_datasets"]
+    target_dataset_cfgs: dict = cell["target_dataset_cfgs"]
+    probe_layers: dict = cell.get("probe_layers", {})
+
+    src_cfg_path = project_root / cell["source_dataset_cfg"]
+    if not src_cfg_path.exists():
+        print(f"[{cell_id}] source dataset config not found: {src_cfg_path}", file=sys.stderr)
+        return 1
+    with open(src_cfg_path) as f:
+        src_dataset_cfg = json.load(f)
+
+    if output_dir is not None:
+        base_out = Path(output_dir) / model_slug
+    else:
+        base_out = project_root / "runs" / "transfer_matrix_memmap" / model_slug
+    base_out.mkdir(parents=True, exist_ok=True)
+
+    n_ok = 0
+    n_skip = 0
+    n_fail = 0
+
+    for method, rel_run_dir in source_run_dirs.items():
+        source_run_dir = str(project_root / rel_run_dir)
+        probe_layer = probe_layers.get(method, 22)
+
+        try:
+            scorer = build_source_scorer(
+                method=method,
+                source_run_dir=source_run_dir,
+                source_dataset_cfg=src_dataset_cfg,
+                probe_layer=probe_layer,
+                training_seed=seed,
+            )
+        except Exception as exc:
+            print(f"[{cell_id}/{method}] build_source_scorer error: {exc}", file=sys.stderr)
+            n_fail += 1
+            continue
+
+        if scorer.get("status") in ("missing_artifact", "missing_checkpoint"):
+            print(f"[{cell_id}/{method}] {scorer['status']} — skipping method")
+            n_fail += 1
+            continue
+
+        for tgt_ds in target_datasets:
+            out_stem = f"{source_dataset}__{tgt_ds}__{method}__{seed}"
+            out_path = base_out / f"{out_stem}.json"
+
+            if out_path.exists():
+                n_skip += 1
+                continue
+
+            tgt_cfg_path = project_root / target_dataset_cfgs[tgt_ds]
+            if not tgt_cfg_path.exists():
+                print(f"[{cell_id}] target config not found: {tgt_cfg_path}", file=sys.stderr)
+                n_fail += 1
+                continue
+            with open(tgt_cfg_path) as f:
+                tgt_dataset_cfg = json.load(f)
+
+            try:
+                result = score_on_target(scorer, tgt_dataset_cfg)
+            except Exception as exc:
+                print(f"[{cell_id}] {method}->{tgt_ds} error: {exc}", file=sys.stderr)
+                n_fail += 1
+                continue
+
+            result.update({
+                "source_dataset": source_dataset,
+                "target_dataset": tgt_ds,
+                "method": method,
+                "seed": seed,
+                "model_slug": model_slug,
+                "cell_id": f"{source_dataset}__{tgt_ds}__{method}__{model_slug}__{seed}",
+            })
+
+            sample_scores = result.pop("_scores", None)
+            sample_labels = result.pop("_labels", None)
+            if sample_scores is not None and sample_labels is not None:
+                preds_path = out_path.with_suffix(".predictions.csv")
+                with open(preds_path, "w") as pf:
+                    pf.write("example_id,score_halu,label_halu\n")
+                    for i, (s, l) in enumerate(zip(sample_scores, sample_labels)):
+                        pf.write(f"{i},{float(s):.10f},{int(l)}\n")
+
+            with open(out_path, "w") as f:
+                json.dump(result, f, indent=2)
+
+            auroc = result.get("auroc")
+            status = result.get("status", "?")
+            auroc_str = f"{auroc:.4f}" if isinstance(auroc, float) and auroc == auroc else str(auroc)
+            print(f"[{cell_id}] {method}->{tgt_ds}: status={status} auroc={auroc_str}")
+            n_ok += 1
+
+    print(f"[{cell_id}] done: {n_ok} written, {n_skip} skipped, {n_fail} failed")
+
+    if n_fail > 0:
+        return 1
+
+    sentinel_path.parent.mkdir(parents=True, exist_ok=True)
+    sentinel_path.write_text("")
+    return 0
+
+
+def _run_single_cell_json(cell_json_path: str, output_dir: str | None = None) -> int:
     """Evaluate a single transfer matrix cell from a dispatch cell JSON.
 
     Cell JSON shape (produced by generate_manifest_89.py):
@@ -243,6 +390,19 @@ def run_cell_json(cell_json_path: str, output_dir: str | None = None) -> int:
         print(f"[{cell_id}] status={status} auroc={auroc}")
 
     return 0 if result.get("status") in ("ok", "single_class") else 1
+
+
+def run_cell_json(cell_json_path: str, output_dir: str | None = None) -> int:
+    """Dispatch to batch or single-cell runner based on cell format.
+
+    Batch cells have "source_run_dirs" (dict of method→run_dir).
+    Single cells have "source_run_dir" (a single string path).
+    """
+    with open(cell_json_path) as f:
+        cell = json.load(f)
+    if "source_run_dirs" in cell:
+        return run_batch_cell_json(cell_json_path, output_dir=output_dir)
+    return _run_single_cell_json(cell_json_path, output_dir=output_dir)
 
 
 def main() -> None:

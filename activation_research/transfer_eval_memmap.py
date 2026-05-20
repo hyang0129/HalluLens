@@ -412,33 +412,31 @@ def _resolve_checkpoint(artifacts_dir: str, method: str) -> Optional[str]:
     return None
 
 
-def evaluate_transfer_cell(
+def build_source_scorer(
+    method: str,
     source_run_dir: str,
     source_dataset_cfg: dict,
-    target_dataset_cfg: dict,
-    method: str,
-    relevant_layers: list,
     probe_layer: int,
-    device: str,
     training_seed: int,
+    device: str = "cpu",
 ) -> dict:
-    """Evaluate one transfer matrix cell.
+    """Pre-compute all source-side state for one (method, source_dataset, seed).
 
-    Loads the source checkpoint, embeds or scores the target test split, and
-    returns a dict with AUROC metrics.  Unused fields are set to None so the
-    schema stays consistent across methods.
+    Returns a scorer dict consumed by score_on_target() for each target dataset,
+    avoiding repeated checkpoint loads and reference-distribution fits per target.
+
+    Keys always present: method, split_seed, outlier_class, training_seed, device.
+    On failure: status = "missing_artifact" | "missing_checkpoint".
+    Method-specific:
+      contrastive_logprob_recon — model, train_loader, ds_kwargs, target_layers,
+                                   eval_cfg, n_src_train
+      saplma                    — model, probe_layer
+      act_vit                   — model (split_seed already in base keys)
+      llmsknow_probe            — probe, best_layer_idx, best_token_pos, n_src_train
     """
-    # Resolve paths relative to repo root so this works regardless of cwd.
     repo_root = Path(__file__).parent.parent
+    src_train_dir = str(repo_root / source_dataset_cfg["icr_capture"]["train_dir"])
 
-    src_train_dir = str(
-        repo_root / source_dataset_cfg["icr_capture"]["train_dir"]
-    )
-    tgt_test_dir = str(
-        repo_root / target_dataset_cfg["icr_capture"]["test_dir"]
-    )
-
-    # Load per-run config (needed for model_params and sweep settings).
     run_config: dict = {}
     config_path = os.path.join(source_run_dir, "config.json")
     if os.path.exists(config_path):
@@ -446,53 +444,74 @@ def evaluate_transfer_cell(
             run_config = json.load(f)
 
     outlier_class: int = int(source_dataset_cfg.get("outlier_class", 1))
-
-    # split_seed governs the stratified 90/10 split of the source-train capture
-    # at training time. Mirror it here so the source-train reference matches
-    # exactly what the persisted probe/encoder was trained against.
     split_seed: int = int(run_config.get("split_seed", 42))
 
+    scorer: dict = {
+        "method": method,
+        "split_seed": split_seed,
+        "outlier_class": outlier_class,
+        "training_seed": training_seed,
+        "device": device,
+    }
+
     if method == "llmsknow_probe":
+        from activation_research.llmsknow_probe import _split_view, train_final_probe
+
         artifacts_dir = os.path.join(source_run_dir, "artifacts")
         sweep_path = os.path.join(artifacts_dir, _LLMSKNOW_ARTIFACT)
         if not os.path.exists(sweep_path):
-            return {"status": "missing_artifact"}
+            scorer["status"] = "missing_artifact"
+            return scorer
 
-        auroc, n_src, n_tgt, scores, labels = score_llmsknow_transfer(
-            source_run_dir=source_run_dir,
-            src_train_dir=src_train_dir,
-            tgt_test_dir=tgt_test_dir,
-            training_seed=training_seed,
-            split_seed=split_seed,
-            run_config=run_config,
+        with open(sweep_path) as f:
+            sweep_summary = json.load(f)
+        best_layer_idx: int = int(sweep_summary["best_layer_idx"])
+        best_token_pos: int = int(sweep_summary["best_token_pos"])
+
+        sweep_cfg: dict = run_config.get("method", {}).get("sweep", {})
+        C: float = float(sweep_cfg.get("C", 1.0))
+        max_iter: int = int(sweep_cfg.get("max_iter", 100))
+
+        src_ap = _build_memmap_parser(src_train_dir, random_seed=split_seed, split_strategy="three_way")
+        src_ds = src_ap.get_dataset(
+            "train",
+            num_views=1,
+            pad_length=63,
+            include_response_logprobs=True,
+            response_logprobs_top_k=20,
+            preload=False,
+            check_ram=False,
         )
-        if np.isnan(auroc):
-            return {"status": "single_class", "auroc": float("nan"),
-                    "n_src_train": n_src, "n_tgt_test": n_tgt,
-                    "mahalanobis_auroc": None, "knn_auroc": None}
-        return {
-            "status": "ok",
-            "auroc": auroc,
-            "mahalanobis_auroc": None,
-            "knn_auroc": None,
-            "n_src_train": n_src,
-            "n_tgt_test": n_tgt,
-            "_scores": [float(s) for s in scores],
-            "_labels": [int(l) for l in labels],
-        }
+        src_full, src_rows, src_labels = _split_view(src_ds)
+        probe = train_final_probe(
+            src_full, src_rows, src_labels,
+            layer_idx=best_layer_idx, token_pos=best_token_pos,
+            seed=training_seed, C=C, max_iter=max_iter,
+        )
+        scorer.update({
+            "probe": probe,
+            "best_layer_idx": best_layer_idx,
+            "best_token_pos": best_token_pos,
+            "n_src_train": int(src_rows.shape[0]),
+        })
+        return scorer
 
-    # contrastive_logprob_recon or saplma — need a checkpoint.
+    # Checkpoint-based methods: contrastive, saplma, act_vit.
     artifacts_dir = os.path.join(source_run_dir, "artifacts")
     checkpoint_path = _resolve_checkpoint(artifacts_dir, method)
     if checkpoint_path is None:
-        return {"status": "missing_checkpoint"}
+        scorer["status"] = "missing_checkpoint"
+        return scorer
 
     model = load_checkpoint_model(method, checkpoint_path, source_dataset_cfg, run_config)
+    model = model.to(device)
+    model.eval()
+    scorer["model"] = model
 
-    if method == "contrastive_logprob_recon":
-        # Mirror run_experiment.run_contrastive_logprob_recon's eval block 1:1 so
-        # the diagonal cell reproduces eval_metrics.json bit-for-bit. Inputs come
-        # from the source run's config.json (method.data / method.evaluation).
+    if method == "saplma":
+        scorer["probe_layer"] = probe_layer
+
+    elif method == "contrastive_logprob_recon":
         method_cfg = run_config.get("method", {})
         data_cfg = method_cfg.get("data", {})
         eval_cfg = method_cfg.get("evaluation", {})
@@ -508,39 +527,109 @@ def evaluate_transfer_cell(
             preload=False,
             check_ram=False,
         )
-
-        src_ap = _build_memmap_parser(
-            src_train_dir, random_seed=split_seed, split_strategy="three_way",
-        )
-        tgt_ap = _build_memmap_parser(tgt_test_dir, split_strategy="none")
-
+        src_ap = _build_memmap_parser(src_train_dir, random_seed=split_seed, split_strategy="three_way")
         train_ds = src_ap.get_dataset("train", **ds_kwargs)
-        test_ds = tgt_ap.get_dataset("test", **ds_kwargs)
-
         train_ds_target = train_ds.slice_layers(target_layers)
-        test_ds_target = test_ds.slice_layers(target_layers)
-
         train_loader = DataLoader(train_ds_target, batch_size=64, shuffle=False)
+        scorer.update({
+            "train_loader": train_loader,
+            "ds_kwargs": ds_kwargs,
+            "target_layers": target_layers,
+            "eval_cfg": eval_cfg,
+            "n_src_train": len(train_ds_target),
+        })
+
+    # act_vit: model already stored; split_seed in base keys covers target scoring.
+    return scorer
+
+
+def score_on_target(scorer: dict, target_dataset_cfg: dict) -> dict:
+    """Score one target dataset using pre-computed source scorer state.
+
+    Returns the same result dict as evaluate_transfer_cell.
+    Propagates any error status from the scorer immediately.
+    """
+    if "status" in scorer:
+        return {"status": scorer["status"]}
+
+    method = scorer["method"]
+    device = scorer.get("device", "cpu")
+    split_seed = scorer["split_seed"]
+    outlier_class = scorer["outlier_class"]
+    training_seed = scorer["training_seed"]
+
+    repo_root = Path(__file__).parent.parent
+    tgt_test_dir = str(repo_root / target_dataset_cfg["icr_capture"]["test_dir"])
+
+    if method == "llmsknow_probe":
+        from activation_research.llmsknow_probe import _split_view, eval_probe
+
+        tgt_ap = _build_memmap_parser(tgt_test_dir, split_strategy="none")
+        tgt_ds = tgt_ap.get_dataset(
+            "test",
+            num_views=1,
+            pad_length=63,
+            include_response_logprobs=True,
+            response_logprobs_top_k=20,
+            preload=False,
+            check_ram=False,
+        )
+        tgt_full, tgt_rows, tgt_labels = _split_view(tgt_ds)
+        auroc, scores = eval_probe(
+            scorer["probe"], tgt_full, tgt_rows, tgt_labels,
+            layer_idx=scorer["best_layer_idx"], token_pos=scorer["best_token_pos"],
+            outlier_class=outlier_class,
+        )
+        if np.isnan(auroc):
+            return {
+                "status": "single_class", "auroc": float("nan"),
+                "mahalanobis_auroc": None, "knn_auroc": None,
+                "n_src_train": scorer["n_src_train"],
+                "n_tgt_test": int(tgt_rows.shape[0]),
+            }
+        return {
+            "status": "ok",
+            "auroc": float(auroc),
+            "mahalanobis_auroc": None,
+            "knn_auroc": None,
+            "n_src_train": scorer["n_src_train"],
+            "n_tgt_test": int(tgt_rows.shape[0]),
+            "_scores": [float(s) for s in scores],
+            "_labels": [int(l) for l in tgt_labels],
+        }
+
+    model = scorer["model"]
+
+    if method == "act_vit":
+        scores, labels = _score_act_vit(
+            model, tgt_test_dir=tgt_test_dir, split_seed=split_seed, device=device,
+        )
+
+    elif method == "saplma":
+        scores, labels = get_scores_probe(
+            model, capture_dir=tgt_test_dir, probe_layer=scorer["probe_layer"], device=device,
+        )
+
+    elif method == "contrastive_logprob_recon":
+        tgt_ap = _build_memmap_parser(tgt_test_dir, split_strategy="none")
+        test_ds = tgt_ap.get_dataset("test", **scorer["ds_kwargs"])
+        test_ds_target = test_ds.slice_layers(scorer["target_layers"])
         eval_loader = DataLoader(test_ds_target, batch_size=64, shuffle=False)
 
+        eval_cfg = scorer["eval_cfg"]
         metrics_list: list = []
         for m in eval_cfg.get("metrics", ["cosine", "mds", "knn"]):
             if m == "knn":
                 knn_params = dict(eval_cfg.get("knn_params", {}))
                 knn_params["sample_seed"] = training_seed
-                # KNN is the headline scoring for contrastive — request
-                # per-sample distances so AUPR / calibration / reweighting can
-                # be recomputed downstream without re-running the cell.
                 knn_params["include_per_sample"] = True
-                metrics_list.append(
-                    {"metric": "knn", "kwargs": knn_params, "train_selection": "all"}
-                )
+                metrics_list.append({"metric": "knn", "kwargs": knn_params, "train_selection": "all"})
             else:
                 metrics_list.append(m)
 
         evaluator = MultiMetricHallucinationEvaluator(
             activation_parser_df=tgt_ap.df,
-            train_data_loader=train_loader,
+            train_data_loader=scorer["train_loader"],
             metrics=metrics_list,
             batch_size=int(eval_cfg.get("eval_batch_size", 256)),
             sub_batch_size=int(eval_cfg.get("sub_batch_size", 64)),
@@ -550,19 +639,17 @@ def evaluate_transfer_cell(
             outlier_class=outlier_class,
         )
         model = model.to(device)
-        model.eval()
         ood_stats = evaluator.compute(eval_loader, model)
 
-        cell = {
+        cell: dict = {
             "status": "ok",
-            "auroc": ood_stats.get("knn_auroc"),  # KNN is the headline for contrastive
+            "auroc": ood_stats.get("knn_auroc"),
             "knn_auroc": ood_stats.get("knn_auroc"),
             "mahalanobis_auroc": ood_stats.get("mahalanobis_auroc"),
             "cosine_auroc": ood_stats.get("cosine_auroc"),
-            "n_src_train": len(train_ds_target),
+            "n_src_train": scorer["n_src_train"],
             "n_tgt_test": len(test_ds_target),
         }
-        # Per-sample KNN distances (the headline score for contrastive).
         k_scores = ood_stats.get("knn_scores")
         k_labels = ood_stats.get("knn_labels")
         if k_scores is not None and k_labels is not None:
@@ -570,28 +657,20 @@ def evaluate_transfer_cell(
             cell["_labels"] = [int(l) for l in np.asarray(k_labels).ravel()]
         return cell
 
-    if method == "act_vit":
-        scores, labels = _score_act_vit(
-            model, tgt_test_dir=tgt_test_dir, split_seed=split_seed, device=device,
-        )
     else:
-        # saplma
-        scores, labels = get_scores_probe(
-            model,
-            capture_dir=tgt_test_dir,
-            probe_layer=probe_layer,
-            device=device,
-        )
+        raise ValueError(f"score_on_target: unsupported method '{method}'")
 
     if len(np.unique(labels)) < 2:
-        auroc = float("nan")
-        status = "single_class"
-    else:
-        auroc = float(roc_auc_score(labels, scores))
-        status = "ok"
+        return {
+            "status": "single_class", "auroc": float("nan"),
+            "mahalanobis_auroc": None, "knn_auroc": None,
+            "n_src_train": None, "n_tgt_test": int(len(labels)),
+            "_scores": [float(s) for s in scores],
+            "_labels": [int(l) for l in labels],
+        }
     return {
-        "status": status,
-        "auroc": auroc,
+        "status": "ok",
+        "auroc": float(roc_auc_score(labels, scores)),
         "mahalanobis_auroc": None,
         "knn_auroc": None,
         "n_src_train": None,
@@ -599,6 +678,32 @@ def evaluate_transfer_cell(
         "_scores": [float(s) for s in scores],
         "_labels": [int(l) for l in labels],
     }
+
+
+def evaluate_transfer_cell(
+    source_run_dir: str,
+    source_dataset_cfg: dict,
+    target_dataset_cfg: dict,
+    method: str,
+    relevant_layers: list,
+    probe_layer: int,
+    device: str,
+    training_seed: int,
+) -> dict:
+    """Evaluate one transfer matrix cell.
+
+    Thin wrapper around build_source_scorer + score_on_target.
+    Kept for backward compatibility with the non-batched CLI path.
+    """
+    scorer = build_source_scorer(
+        method=method,
+        source_run_dir=source_run_dir,
+        source_dataset_cfg=source_dataset_cfg,
+        probe_layer=probe_layer,
+        training_seed=training_seed,
+        device=device,
+    )
+    return score_on_target(scorer, target_dataset_cfg)
 
 
 def discover_runs(runs_root: str, method: str) -> list:
