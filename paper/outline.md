@@ -23,8 +23,8 @@ Structural skeleton only. Each section lists what the prose will cover, not the 
 - **The detection axis we work in.** White-box, single forward pass. Distinguish from: retrieval-augmented checking, multi-sample consistency methods, prompt-based self-evaluation.
 - **What's already known about activations and hallucination.** A single layer carries some signal (linear-probe literature), but it's not clear which layer or what structure to extract.
 - **Our contribution (3 bullets, paper-claim-aligned).**
-  1. A learned contrastive compression of intermediate activations beats linear probes, an 11M-param MLP probe (SAPLMA), and sampling-based methods at matched compute.
-  2. The signal is consistent across two model families, six datasets, and five training seeds, and transfers across datasets without retraining.
+  1. A learned contrastive compression of intermediate activations is competitive with or outperforms the strongest learned-activation baselines (single-layer linear probe, SAPLMA, LLMsKnow, ACT-ViT) and clearly outperforms sampling-based methods at matched compute. Exact verb (*beats* vs. *matches-or-outperforms*) and headline-cell selection pending ACT-ViT 5/5-seed completion — see Open Question 6.
+  2. The signal is consistent across two model families, six datasets, and five training seeds (for our method; ACT-ViT seeds still completing on a subset of cells), and transfers across datasets without retraining.
   3. The effective signal concentrates in mid-to-late residual-stream layer pairs, matching a cross-layer-coherence prediction.
 - **Roadmap of the paper.** One paragraph.
 
@@ -100,7 +100,7 @@ Numbers freeze before this section is written. Until then, table/figure slots ar
 ## 8. Discussion (~0.5 page)
 
 - **Where the method works.** Mid-to-late layers, both model families, free-form QA + multi-choice MMLU.
-- **Where it doesn't.** Whatever the data shows — call it out honestly. (See roadmap §9 risk register for the live candidates: Qwen weaker than Llama, SAPLMA parity, etc. Update this section after numbers freeze.)
+- **Where it doesn't.** Whatever the data shows — call it out honestly. Live candidates from the 2026-05-20 draft headline pass: NQ on both models (ACT-ViT modestly above ours, ~0.013–0.018 AUROC), several near-ties on HotpotQA / SciQ / SearchQA. Original risk-register candidates (Qwen weaker than Llama, SAPLMA parity) appear *not* to fire on current numbers but stay in the watch list until 5/5 seeds complete. Update this section after numbers freeze.
 - **What the layer-pair concentration result means.** Brief — full theoretical argument in the appendix.
 
 ---
@@ -159,9 +159,10 @@ Each section below should eventually have its own file. Naming convention: `NN_s
 
 1. ~~**Theory as §3 subsection vs. its own section.**~~ **Resolved 2026-05-19** — folded into §3 as §3.2 (information-theoretic argument), not promoted to a standalone Theory section. Rationale: the load-bearing theoretical move is short, structurally inseparable from the architecture, and the 8-page EMNLP main paper does not have room for a dedicated theory section. Full information-bound derivation lives in Appendix A. See [`03_method.md`](03_method.md) structural-decision header. Soft commit revisable post-internal-review.
 2. ~~**Where does SEP-binary / SEP-SE land in §5?**~~ **Removed** — SEP-binary was a confabulation; SEP-SE cut 2026-05-20. Both upper-bounded by max(SE, linear probe), already reported. Defused with a one-sentence footnote in §2.2.
-3. **Headline framing if Qwen is materially weaker than Llama.** Per risk register, this changes the abstract. Don't pre-commit; check before week 3.
+3. **Headline framing across model families.** Preliminary numbers (2026-05-20 draft headline table) suggest Qwen tracks slightly *above* Llama on most cells (mean ours: Qwen 0.852, Llama 0.812), inverting the original "what if Qwen is materially weaker" worry. The opposite framing question is now live — whether the abstract leads with Qwen, leads with Llama, or treats both symmetrically. Don't pre-commit; revisit once 5/5 seeds complete across baselines.
 4. **§2.3 novelty-claim level — broad / medium / narrow.** Resolved 2026-05-19 to **broad with hedging** (see `02_related_work.md` §2.3 framing-level decision). Reviewer-rebuttal fallback to medium then narrow is documented there. Abstract and §1 contribution claims must be drafted to the broad level once §3 / §5 freeze.
 5. **§3.4 attribution headline — locked when #66 (SupCon-asymm only) and #67 (SAPLMA + recon) land.** Until then, §3.4 prose is the *menu* of four outcome-conditional framings. The headline framing of §3 and the abstract cannot finalize until these resolve. See [`03_method.md`](03_method.md) §3.4.
+6. **ACT-ViT as the primary learned competitor.** Per the 2026-05-20 draft headline pass ([`../results/draft_headline_table.md`](../results/draft_headline_table.md)), ACT-ViT is materially closer than the original outline implied. Mean across both models: ours ≈ 0.83 vs. ACT-ViT ≈ 0.79 (≈ +0.04 on the cells ACT-ViT has reported). Win pattern concentrates in PopQA (~+0.09 both models, 5/5 seeds) and MMLU (~+0.15, ACT-ViT only 2/5 seeds — gap may move). On HotpotQA / SciQ / SearchQA the two methods sit within ±0.03; on NQ ACT-ViT is modestly ahead on both models. Implications: (a) the §1 contribution verb against learned baselines should not lock until ACT-ViT seeds finish; (b) the §1 / §8 framing needs to choose between *mean-margin* story, *PopQA-and-MMLU-headline-cells* story, or *parameter-/compute-efficiency-at-matched-AUROC* story — pick after numbers freeze; (c) an interpretation question is also open: ACT-ViT-vs-ours wins concentrate on already-high-AUROC datasets (PopQA is the highest-AUROC cell on the table), not on the hardest-to-detect ones (SciQ, NQ) — does our method *push the ceiling* or *recover the floor*? Decide in §8 after numbers freeze.
 
 ---
 
