@@ -91,6 +91,21 @@ class JobRecord:
 
 
 # ---------------------------------------------------------------------------
+# Jupyter port helpers
+# ---------------------------------------------------------------------------
+
+def _port_is_88xx(port: int) -> bool:
+    """Return True only for Jupyter ports in the 88xx range (8800–8899)."""
+    return 8800 <= port <= 8899
+
+
+def _url_port(url: str) -> Optional[int]:
+    """Extract the port number from a URL like http://host:8888. Returns None on failure."""
+    m = re.search(r":(\d+)(?:/|$)", url)
+    return int(m.group(1)) if m else None
+
+
+# ---------------------------------------------------------------------------
 # Config loading
 # ---------------------------------------------------------------------------
 
@@ -112,6 +127,11 @@ def load_nodes(config: dict) -> List[NodeConfig]:
     nodes = []
     for entry in config.get("nodes", []):
         hostname = entry["hostname"]
+        jurl = entry.get("jupyter_url", defaults.get("jupyter_url"))
+        if jurl is not None:
+            p = _url_port(jurl)
+            if p is None or not _port_is_88xx(p):
+                jurl = None  # ignore Jupyter endpoints outside the 88xx range
         nodes.append(NodeConfig(
             name=entry.get("name", hostname),
             hostname=hostname,
@@ -119,7 +139,7 @@ def load_nodes(config: dict) -> List[NodeConfig]:
             project_root=entry.get("project_root", defaults.get("project_root", ".")),
             max_concurrent_jobs=entry.get("max_concurrent_jobs", 1),
             tags=entry.get("tags", []),
-            jupyter_url=entry.get("jupyter_url", defaults.get("jupyter_url")),
+            jupyter_url=jurl,
             jupyter_password=entry.get("jupyter_password", defaults.get("jupyter_password", "123")),
             source=entry.get("source"),
         ))
@@ -435,6 +455,8 @@ def discover_jupyter_allocations(squeue_timeout: int = 15) -> List[dict]:
             continue
         m = JUPYTER_JOB_NAME_RE.match(name)
         if not m:
+            continue
+        if not _port_is_88xx(int(m.group(1))):
             continue
         if "[" in nodelist or "," in nodelist:
             # Multi-node allocation — ambiguous which host hosts the Jupyter
