@@ -1975,6 +1975,25 @@ def run_act_vit(
     best_val_auroc = -1.0
     best_epoch = -1
 
+    # If final_weights.pt exists, training completed in a prior run that crashed
+    # before writing eval_metrics.json (e.g. ACTViTDataset IndexError during test
+    # eval).  Load best_checkpoint.pt and set max_epochs=0 so the training loop
+    # is skipped entirely; fall through to test evaluation.
+    # Guard on final_weights.pt (written after the loop) not best_checkpoint.pt
+    # (written mid-training) to avoid silently evaluating an undertrained model
+    # after a mid-epoch crash.
+    best_ckpt_path = os.path.join(artifact_dir, "best_checkpoint.pt")
+    final_weights_path = os.path.join(artifact_dir, "final_weights.pt")
+    if os.path.exists(final_weights_path) and os.path.exists(best_ckpt_path):
+        logger.info(
+            "[act_vit] final_weights.pt found — training already complete, "
+            "loading best_checkpoint.pt and skipping to test eval."
+        )
+        ckpt = torch.load(best_ckpt_path, map_location=eval_device, weights_only=True)
+        model.load_state_dict(ckpt["model_state_dict"])
+        best_epoch = int(ckpt.get("epoch", -1))
+        max_epochs = 0
+
     log_every = 50
     for epoch in range(max_epochs):
         model.train()
