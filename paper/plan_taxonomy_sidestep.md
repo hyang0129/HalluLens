@@ -220,7 +220,7 @@ Post-sweep, the full edit set is small and well-localized. Findings confirm no s
 
 - **2026-05-20 (initial).** Option A selected after literature sweep (Ji 2022, HalluLens 2025, ACT-ViT 2025). See §1–§3.
 - **2026-05-20 (sweep).** Findings sweep complete across all paper files. Net edit list: 5 prose edits (A1, A2, A3, B1, E1-placeholder) + 2 bib additions gated on human approval (F1). No additional conflicts found in §2, §4, §5, figures outline, or macros.
-- *(further entries as edits are made)*
+- **2026-05-20 (edits applied).** A1, A2, A3, B1 executed. F1 bib entries inserted upstream.
 
 ## 7. Out of scope for this plan
 

@@ -14,7 +14,7 @@ Structural skeleton only. Each section lists what the prose will cover, not the 
 
 ## Abstract (~180 words)
 
-- One-sentence framing of the problem (intrinsic LLM hallucination detection, white-box single-pass).
+- One-sentence framing of the problem (LLM hallucination detection in a white-box single-pass regime against gold-reference labels).
 - One-sentence statement of the method (learned contrastive compression of intermediate-layer activations with a logprob-recon auxiliary loss).
 - One-sentence statement of the comparison classes (output-space scalar baselines, single-layer linear probe, MLP probe, sampling-based methods).
 - One-sentence headline result naming the AUROC delta and the scope (two model families, six datasets, five seeds).
