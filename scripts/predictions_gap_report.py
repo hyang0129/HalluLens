@@ -24,8 +24,11 @@ Sections:
   §6 Transfer matrix   (from transfer_matrix_table.csv)
   Summary
 
-contrastive_logprob_recon (training + ablation variants) is distance-based and
-does not write predictions.csv — its local-preds gap is informational only.
+The headline `contrastive_logprob_recon` emits per-sample distance scores
+(one-column predictions.csv with score_halu = kNN distance). Its ablation
+variants (b0..b9, c0..c3, cd1..cd3, d2a, d2b) skip per-sample output and
+report eval_metrics.json only — those cells show `n/a (distance)` in the
+Predictions column.
 """
 
 import csv
@@ -55,9 +58,13 @@ SAMPLING_PREDS_FILES = {
 }
 PTRUE_PREDS_FILE = "ptrue.jsonl"
 
-# Distance-based — produces eval_metrics.json only, no predictions.csv.
-DISTANCE_BASED_METHODS = {"contrastive_logprob_recon"}
-DISTANCE_BASED_PREFIXES = ("contrastive_logprob_recon_",)  # ablation variants
+# Methods that emit only eval_metrics.json, no per-sample predictions.csv.
+# Note: the headline `contrastive_logprob_recon` itself DOES emit predictions.csv
+# (one column: score_halu, the kNN distance score). Only its ablation variants
+# (contrastive_logprob_recon_{b0..b9,c0..c3,cd1..cd3,d2a,d2b}) skip per-sample
+# scores and report eval_metrics.json only.
+DISTANCE_BASED_METHODS: set[str] = set()
+DISTANCE_BASED_PREFIXES = ("contrastive_logprob_recon_",)
 
 # Transfer-matrix grid (mirrors constants in results_table.py)
 TRANSFER_MODEL_SLUGS = ["llama", "qwen3"]
@@ -450,9 +457,11 @@ def build_report(rows: list[dict], transfer_rows: list[dict], preds: dict) -> st
         "- **Predictions** — the per-sample prediction file is in `results/preds/`,"
         " available for offline downstream analysis.",
         "",
-        "`contrastive_logprob_recon` (and its ablation variants) produces only"
-        " distance-based scores in `eval_metrics.json` — no `predictions.csv` — so"
-        " its Predictions column is marked `n/a (distance)`.",
+        "The headline `contrastive_logprob_recon` emits per-sample distance"
+        " scores in `predictions.csv` (one column: `score_halu`, the kNN"
+        " distance). Its ablation variants (`*_b0`..`*_b9`, `*_c0`..`*_c3`,"
+        " `*_cd1`..`*_cd3`, `*_d2a`, `*_d2b`) skip per-sample output and report"
+        " `eval_metrics.json` only — those cells are marked `n/a (distance)`.",
         "",
     ]
 
