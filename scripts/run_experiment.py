@@ -436,10 +436,21 @@ def run_contrastive_logprob_recon(
 
     predictions: list[dict] = []
     if knn_scores_arr is not None and knn_labels_arr is not None:
-        predictions = [
-            {"example_id": i, "score_halu": float(s), "label_halu": int(l)}
-            for i, (s, l) in enumerate(zip(knn_scores_arr, knn_labels_arr))
-        ]
+        # Under flip_auroc=True (B5: ignore_label=0), the contrastive loss compacts hallu
+        # and the KNN base contains all train samples — so low knn_score = close to hallu cluster = halu.
+        # binary_outlier_labels is (test_label == 0), i.e. 1 = correct. Negate both so predictions.csv
+        # always has score_halu="higher = more halu" and label_halu="1 = halu" regardless of convention;
+        # AUROC computed downstream from these columns then matches eval_metrics.knn_auroc.
+        if flip_auroc:
+            predictions = [
+                {"example_id": i, "score_halu": -float(s), "label_halu": 1 - int(l)}
+                for i, (s, l) in enumerate(zip(knn_scores_arr, knn_labels_arr))
+            ]
+        else:
+            predictions = [
+                {"example_id": i, "score_halu": float(s), "label_halu": int(l)}
+                for i, (s, l) in enumerate(zip(knn_scores_arr, knn_labels_arr))
+            ]
     return eval_metrics, predictions
 
 
