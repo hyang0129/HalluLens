@@ -5,7 +5,9 @@
     "contrastive_logprob_recon_small",
     "contrastive_logprob_recon_mid",
     "contrastive_logprob_recon_actvit_mean",
-    "contrastive_logprob_recon_actvit_max"
+    "contrastive_logprob_recon_actvit_max",
+    "contrastive_logprob_recon_actvit_mean_ln",
+    "contrastive_logprob_recon_actvit_mean_ln_512"
   ],
   "split_seed": 42,
   "training_seeds": [0],

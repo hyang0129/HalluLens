@@ -123,6 +123,7 @@ def _build_model(model_class: str, input_dim: int, model_params: dict) -> torch.
             dropout=model_params.get("dropout", 0.1),
             input_dropout=model_params.get("input_dropout", 0.2),
             pool=model_params.get("pool", "mean"),
+            adapter_norm=model_params.get("adapter_norm", False),
             recon_seq_len=model_params.get("recon_seq_len", 64),
             recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
             recon_lambda=model_params.get("recon_lambda", 1.0),

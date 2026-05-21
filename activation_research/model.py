@@ -310,6 +310,10 @@ class AdapterViTCompressor(nn.Module):
         Dropout after adapter, before positional encoding + blocks.
     pool : {"mean", "max"}
         Sequence-axis pooling.
+    adapter_norm : bool
+        If True, apply ``LayerNorm(d_model)`` immediately after the adapter,
+        before input_dropout and pos_encodings. Default False preserves
+        backward compatibility for existing runs.
     """
 
     def __init__(
@@ -322,6 +326,7 @@ class AdapterViTCompressor(nn.Module):
         dropout: float = 0.1,
         input_dropout: float = 0.2,
         pool: str = "mean",
+        adapter_norm: bool = False,
     ):
         super().__init__()
         pool = str(pool).lower().strip()
@@ -331,6 +336,8 @@ class AdapterViTCompressor(nn.Module):
         self.d_model = int(d_model)
 
         self.adapter = nn.Linear(int(input_dim), int(d_model), bias=False)
+        if bool(adapter_norm):
+            self.adapter_norm = nn.LayerNorm(int(d_model))
         self.pos_encodings = PositionalEncoding(int(d_model))
         self.input_dropout = nn.Dropout(float(input_dropout))
         self.blocks = nn.ModuleList([
@@ -342,6 +349,8 @@ class AdapterViTCompressor(nn.Module):
         """x: (B, L, input_dim) → (B, d_model)."""
         x = x.float()
         x = self.adapter(x)
+        if hasattr(self, "adapter_norm"):
+            x = self.adapter_norm(x)
         x = self.input_dropout(x)
         x = self.pos_encodings(x)
         for block in self.blocks:
@@ -372,6 +381,7 @@ class LogprobReconAdapterViTCompressor(LogprobReconProgressiveCompressor):
         dropout: float = 0.1,
         input_dropout: float = 0.2,
         pool: str = "mean",
+        adapter_norm: bool = False,
         recon_seq_len: int = 64,
         recon_hidden_dim: int = 256,
         recon_lambda: float = 1.0,
@@ -391,6 +401,7 @@ class LogprobReconAdapterViTCompressor(LogprobReconProgressiveCompressor):
             dropout=float(dropout),
             input_dropout=float(input_dropout),
             pool=str(pool),
+            adapter_norm=bool(adapter_norm),
         )
 
         # Decoder input dim is d_model (no final_proj on the encoder).
