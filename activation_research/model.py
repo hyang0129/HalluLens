@@ -249,6 +249,158 @@ class LogprobReconProgressiveCompressor(nn.Module):
         return loss, {"logprob_var": logprob_var, "suppressed": False}
 
 
+class _PreNormBlock(nn.Module):
+    """Pre-norm Transformer encoder block at fixed d_model.
+
+    Mirrors ``activation_research.act_vit._TransformerBlock``: LayerNorm →
+    MultiheadAttention → residual → LayerNorm → MLP(GELU) → residual,
+    with dropout on each residual addition.
+    """
+
+    def __init__(self, d_model: int, num_heads: int, mlp_ratio: float, dropout: float) -> None:
+        super().__init__()
+        self.norm1 = nn.LayerNorm(d_model)
+        self.attn = nn.MultiheadAttention(
+            embed_dim=d_model,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.norm2 = nn.LayerNorm(d_model)
+        hidden = int(d_model * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, d_model),
+        )
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.norm1(x)
+        h, _ = self.attn(h, h, h, need_weights=False)
+        x = x + self.drop(h)
+        x = x + self.drop(self.mlp(self.norm2(x)))
+        return x
+
+
+class AdapterViTCompressor(nn.Module):
+    """ACT-ViT-style encoder over (B, L, input_dim) activations.
+
+    Single bias-free Linear adapter to ``d_model``, sinusoidal positional
+    encoding, ``depth`` pre-norm transformer blocks at fixed ``d_model``,
+    then mean- or max-pool over the sequence dim. No CLS token, no final
+    projection — output dim is ``d_model``.
+
+    Parameters
+    ----------
+    input_dim : int
+        Activation dim (e.g. 4096).
+    d_model : int
+        Encoder hidden dim and output embedding dim.
+    depth : int
+        Number of pre-norm transformer blocks.
+    num_heads : int
+        Attention heads per block.
+    mlp_ratio : float
+        MLP hidden = mlp_ratio * d_model.
+    dropout : float
+        Dropout inside attention / MLP / residual.
+    input_dropout : float
+        Dropout after adapter, before positional encoding + blocks.
+    pool : {"mean", "max"}
+        Sequence-axis pooling.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 4096,
+        d_model: int = 256,
+        depth: int = 4,
+        num_heads: int = 8,
+        mlp_ratio: float = 4,
+        dropout: float = 0.1,
+        input_dropout: float = 0.2,
+        pool: str = "mean",
+    ):
+        super().__init__()
+        pool = str(pool).lower().strip()
+        if pool not in ("mean", "max"):
+            raise ValueError(f"pool must be 'mean' or 'max', got {pool!r}")
+        self.pool = pool
+        self.d_model = int(d_model)
+
+        self.adapter = nn.Linear(int(input_dim), int(d_model), bias=False)
+        self.pos_encodings = PositionalEncoding(int(d_model))
+        self.input_dropout = nn.Dropout(float(input_dropout))
+        self.blocks = nn.ModuleList([
+            _PreNormBlock(int(d_model), int(num_heads), float(mlp_ratio), float(dropout))
+            for _ in range(int(depth))
+        ])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (B, L, input_dim) → (B, d_model)."""
+        x = x.float()
+        x = self.adapter(x)
+        x = self.input_dropout(x)
+        x = self.pos_encodings(x)
+        for block in self.blocks:
+            x = block(x)
+        if self.pool == "mean":
+            return x.mean(dim=1)
+        return x.max(dim=1).values
+
+
+class LogprobReconAdapterViTCompressor(LogprobReconProgressiveCompressor):
+    """AdapterViT encoder + LogprobRecon auxiliary decoder.
+
+    Structurally identical to ``LogprobReconProgressiveCompressor`` but
+    swaps the encoder for ``AdapterViTCompressor``. The decoder input dim
+    is ``d_model`` (no ``final_proj``). Inherited ``forward``,
+    ``forward_with_recon``, and ``recon_loss`` work unchanged because they
+    only reference ``self.encoder``, ``self.decoder``, and the recon
+    hyperparameter attributes.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 4096,
+        d_model: int = 256,
+        depth: int = 4,
+        num_heads: int = 8,
+        mlp_ratio: float = 4,
+        dropout: float = 0.1,
+        input_dropout: float = 0.2,
+        pool: str = "mean",
+        recon_seq_len: int = 64,
+        recon_hidden_dim: int = 256,
+        recon_lambda: float = 1.0,
+        logprob_var_threshold: float = 1e-4,
+    ):
+        nn.Module.__init__(self)
+        self.recon_seq_len = int(recon_seq_len)
+        self.recon_lambda = float(recon_lambda)
+        self.logprob_var_threshold = float(logprob_var_threshold)
+
+        self.encoder = AdapterViTCompressor(
+            input_dim=int(input_dim),
+            d_model=int(d_model),
+            depth=int(depth),
+            num_heads=int(num_heads),
+            mlp_ratio=float(mlp_ratio),
+            dropout=float(dropout),
+            input_dropout=float(input_dropout),
+            pool=str(pool),
+        )
+
+        # Decoder input dim is d_model (no final_proj on the encoder).
+        self.decoder = nn.Sequential(
+            nn.Linear(int(d_model), int(recon_hidden_dim)),
+            nn.GELU(),
+            nn.Linear(int(recon_hidden_dim), self.recon_seq_len),
+        )
+
+
 class TwinConcatModel(nn.Module):
     """Two independent projection heads whose embeddings are concatenated at eval time.
 

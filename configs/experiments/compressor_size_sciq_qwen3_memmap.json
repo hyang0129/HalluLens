@@ -3,7 +3,9 @@
   "dataset": "sciq_qwen3_memmap",
   "methods": [
     "contrastive_logprob_recon_small",
-    "contrastive_logprob_recon_mid"
+    "contrastive_logprob_recon_mid",
+    "contrastive_logprob_recon_actvit_mean",
+    "contrastive_logprob_recon_actvit_max"
   ],
   "split_seed": 42,
   "training_seeds": [0],

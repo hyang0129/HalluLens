@@ -111,6 +111,23 @@ def _build_model(model_class: str, input_dim: int, model_params: dict) -> torch.
             logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
             block_dims=model_params.get("block_dims"),
         )
+    if name == "logprob_recon_adapter_vit_compressor":
+        from activation_research.model import LogprobReconAdapterViTCompressor
+
+        return LogprobReconAdapterViTCompressor(
+            input_dim=input_dim,
+            d_model=model_params.get("d_model", 256),
+            depth=model_params.get("depth", 4),
+            num_heads=model_params.get("num_heads", 8),
+            mlp_ratio=model_params.get("mlp_ratio", 4),
+            dropout=model_params.get("dropout", 0.1),
+            input_dropout=model_params.get("input_dropout", 0.2),
+            pool=model_params.get("pool", "mean"),
+            recon_seq_len=model_params.get("recon_seq_len", 64),
+            recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
+        )
     raise ValueError(
         f"Unsupported model_class='{model_class}'. "
         "Add a branch in _build_model() to support it."

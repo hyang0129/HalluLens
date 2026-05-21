@@ -303,19 +303,38 @@ def run_contrastive_logprob_recon(
     has_val = ap.split_strategy == "three_way"
     val_ds = ap.get_dataset("val", **ds_kwargs) if has_val else test_ds
 
-    from activation_research.model import LogprobReconProgressiveCompressor
-
     model_params = method_cfg.get("model_params", {})
-    model = LogprobReconProgressiveCompressor(
-        input_dim=dataset_cfg["input_dim"],
-        final_dim=model_params.get("final_dim", 512),
-        input_dropout=model_params.get("input_dropout", 0.3),
-        recon_seq_len=model_params.get("recon_seq_len", 64),
-        recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
-        recon_lambda=model_params.get("recon_lambda", 1.0),
-        logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
-        block_dims=model_params.get("block_dims"),
-    )
+    model_class = str(method_cfg.get("model_class", "logprob_recon_progressive_compressor")).strip().lower()
+    if model_class == "logprob_recon_adapter_vit_compressor":
+        from activation_research.model import LogprobReconAdapterViTCompressor
+
+        model = LogprobReconAdapterViTCompressor(
+            input_dim=dataset_cfg["input_dim"],
+            d_model=model_params.get("d_model", 256),
+            depth=model_params.get("depth", 4),
+            num_heads=model_params.get("num_heads", 8),
+            mlp_ratio=model_params.get("mlp_ratio", 4),
+            dropout=model_params.get("dropout", 0.1),
+            input_dropout=model_params.get("input_dropout", 0.2),
+            pool=model_params.get("pool", "mean"),
+            recon_seq_len=model_params.get("recon_seq_len", 64),
+            recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
+        )
+    else:
+        from activation_research.model import LogprobReconProgressiveCompressor
+
+        model = LogprobReconProgressiveCompressor(
+            input_dim=dataset_cfg["input_dim"],
+            final_dim=model_params.get("final_dim", 512),
+            input_dropout=model_params.get("input_dropout", 0.3),
+            recon_seq_len=model_params.get("recon_seq_len", 64),
+            recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
+            block_dims=model_params.get("block_dims"),
+        )
 
     train_device = device if device != "auto" else (
         "cuda" if torch.cuda.is_available() else "cpu"
