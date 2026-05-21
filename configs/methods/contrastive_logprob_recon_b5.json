@@ -43,6 +43,7 @@
     },
     "eval_batch_size": 256,
     "sub_batch_size": 64,
-    "flip_auroc": true
+    "flip_auroc": true,
+    "dump_embeddings": true
   }
 }
