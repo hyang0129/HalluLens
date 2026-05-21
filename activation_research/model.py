@@ -19,7 +19,7 @@ class PositionalEncoding(nn.Module):
         return x + self.pe[:, :x.size(1)]
 
 class TransformerBlock(nn.Module):
-    def __init__(self, d_model_in, d_model_out, nhead=8, ff_multiplier=4, dropout=0.1):
+    def __init__(self, d_model_in, d_model_out, nhead=8, ff_multiplier=4, dropout=0.1, pre_norm: bool = False):
         super().__init__()
         self.input_proj = nn.Linear(d_model_in, d_model_out)
         self.encoder = nn.TransformerEncoderLayer(
@@ -27,7 +27,8 @@ class TransformerBlock(nn.Module):
             nhead=min(nhead, d_model_out // 64),  # clamp num heads to dimension
             dim_feedforward=d_model_out * ff_multiplier,
             dropout=dropout,
-            batch_first=True
+            batch_first=True,
+            norm_first=bool(pre_norm),
         )
         self.norm = nn.LayerNorm(d_model_out)
 
@@ -59,10 +60,12 @@ class ProgressiveCompressor(nn.Module):
     """
 
     def __init__(self, input_dim=4096, final_dim=512, dropout=0.1, input_dropout=0.2,
-                 normalize_input: bool = False, block_dims: list | None = None):
+                 normalize_input: bool = False, block_dims: list | None = None,
+                 pre_norm: bool = False):
         super().__init__()
 
         self.normalize_input = bool(normalize_input)
+        self.pre_norm = bool(pre_norm)
         if self.normalize_input:
             self.input_norm = nn.LayerNorm(int(input_dim))
 
@@ -80,7 +83,7 @@ class ProgressiveCompressor(nn.Module):
 
         self.pos_encodings = PositionalEncoding(input_dim)
         self.blocks = nn.ModuleList([
-            TransformerBlock(d_in, d_out, dropout=dropout)
+            TransformerBlock(d_in, d_out, dropout=dropout, pre_norm=self.pre_norm)
             for (d_in, d_out) in dims
         ])
         self.final_proj = nn.Linear(dims[-1][1], final_dim)
@@ -160,6 +163,7 @@ class LogprobReconProgressiveCompressor(nn.Module):
         recon_lambda: float = 1.0,
         logprob_var_threshold: float = 1e-4,
         block_dims: list | None = None,
+        pre_norm: bool = False,
     ):
         super().__init__()
         self.recon_seq_len = int(recon_seq_len)
@@ -173,6 +177,7 @@ class LogprobReconProgressiveCompressor(nn.Module):
             input_dropout=float(input_dropout),
             normalize_input=bool(normalize_input),
             block_dims=block_dims,
+            pre_norm=bool(pre_norm),
         )
 
         # Auxiliary decoder: z (B, final_dim) → logprob_pred (B, recon_seq_len)
