@@ -130,6 +130,7 @@ class HallucinationEvaluator(MetricEvaluator):
         # Cache for computed embeddings
         self._baseline_embeddings = None
         self._labeled_baseline_embeddings = None
+        self._labeled_test_embeddings = None
 
     @staticmethod
     def _resolve_metric(metric: Union[str, Callable[..., Dict[str, Any]]]):
@@ -612,6 +613,12 @@ class MultiMetricHallucinationEvaluator(HallucinationEvaluator):
         labeled_baseline_embeddings = self._get_labeled_baseline_embeddings(baseline_embeddings)
         test_embeddings = self._compute_test_embeddings(data_loader, model)
         labeled_test_embeddings = self._assign_hallucination_labels(test_embeddings)
+
+        # Cache labeled test embeddings so a caller (e.g. run_experiment.py) can
+        # dump them after eval completes without recomputing the forward pass.
+        # Memory footprint is identical to what compute() already held locally;
+        # we just keep the reference instead of letting it be collected.
+        self._labeled_test_embeddings = labeled_test_embeddings
 
         stats = self._compute_all_metrics(labeled_baseline_embeddings, labeled_test_embeddings)
 

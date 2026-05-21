@@ -1,3 +1,7 @@
+import json
+import os
+from typing import List
+
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -357,11 +361,11 @@ def inference_embeddings(model, dataset, batch_size=512, sub_batch_size=64, devi
 def assign_hallucination_labels(embeddings, activation_parser_df):
     """
     Assign hallucination labels to embeddings records using the activation parser's dataframe.
-    
+
     Args:
         embeddings: List of dicts from inference_embeddings containing 'hashkey' and 'layer_embeddings'
         activation_parser_df: DataFrame from ActivationParser containing 'prompt_hash' and 'halu' columns
-        
+
     Returns:
         List of dicts with 'halu' key added to each record
     """
@@ -369,5 +373,75 @@ def assign_hallucination_labels(embeddings, activation_parser_df):
         ishalu = activation_parser_df[activation_parser_df['prompt_hash'] == record['hashkey']]['halu']
         assert len(ishalu) == 1, f"Expected exactly 1 match for hashkey {record['hashkey']}, found {len(ishalu)}"
         embeddings[i]['halu'] = ishalu.values[0]
-    
+
     return embeddings
+
+
+def dump_embeddings_to_memmap(
+    records: List[dict],
+    out_dir: str,
+    split_name: str,
+    *,
+    dtype: str = "float16",
+) -> dict:
+    """Write a list of (`z_views`, `halu`, `hashkey`) records to .npy files.
+
+    Files written under `out_dir`:
+      - {split_name}_z.npy        (N, K, D) `dtype`, np.save format → mmap on read
+      - {split_name}_labels.npy   (N,) int8
+      - {split_name}_hashkeys.json  list of N hashkeys (traceability)
+      - {split_name}_meta.json    shape, dtype, split_name, n
+
+    Callers load via `np.load(path, mmap_mode='r')` to get a memmap view —
+    nothing in this codebase reads these files automatically; consumers must
+    opt in explicitly.
+
+    Returns the meta dict that was written.
+    """
+    if not records:
+        raise ValueError(f"dump_embeddings_to_memmap: empty records for split={split_name}")
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Validate schema on the first record; subsequent records assumed consistent.
+    first = records[0]
+    if "z_views" not in first:
+        raise KeyError("Records must contain 'z_views' — legacy z1/z2 schema not supported by this dumper")
+    if "halu" not in first:
+        raise KeyError("Records must contain 'halu' — call _assign_hallucination_labels first")
+
+    def _to_np(x):
+        if isinstance(x, torch.Tensor):
+            return x.detach().cpu().numpy()
+        return np.asarray(x)
+
+    z_stack = np.stack([_to_np(r["z_views"]) for r in records]).astype(np.dtype(dtype), copy=False)
+    labels = np.array([int(r["halu"]) for r in records], dtype=np.int8)
+    hashkeys = [str(r.get("hashkey", "")) for r in records]
+
+    z_path = os.path.join(out_dir, f"{split_name}_z.npy")
+    labels_path = os.path.join(out_dir, f"{split_name}_labels.npy")
+    hash_path = os.path.join(out_dir, f"{split_name}_hashkeys.json")
+    meta_path = os.path.join(out_dir, f"{split_name}_meta.json")
+
+    np.save(z_path, z_stack)
+    np.save(labels_path, labels)
+    with open(hash_path, "w") as f:
+        json.dump(hashkeys, f)
+
+    meta = {
+        "split_name": split_name,
+        "n": int(z_stack.shape[0]),
+        "z_shape": list(z_stack.shape),
+        "z_dtype": str(z_stack.dtype),
+        "label_dtype": str(labels.dtype),
+        "files": {
+            "z": os.path.basename(z_path),
+            "labels": os.path.basename(labels_path),
+            "hashkeys": os.path.basename(hash_path),
+        },
+    }
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+
+    return meta

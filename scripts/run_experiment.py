@@ -451,6 +451,29 @@ def run_contrastive_logprob_recon(
                 {"example_id": i, "score_halu": float(s), "label_halu": int(l)}
                 for i, (s, l) in enumerate(zip(knn_scores_arr, knn_labels_arr))
             ]
+
+    # Optional: dump predicted train+test embeddings as memmap-friendly .npy files
+    # for downstream reuse (e.g. KNN-k sweeps, cosine-collapse analysis). Opt-in via
+    # eval_cfg["dump_embeddings"] — runs only at the final test eval, and downstream
+    # callers must explicitly load via np.load(..., mmap_mode='r'); no path in this
+    # codebase reads these files automatically.
+    if eval_cfg.get("dump_embeddings", False):
+        from activation_research.evaluation import dump_embeddings_to_memmap
+
+        emb_dir = os.path.join(output_dir, "embeddings")
+        train_records = getattr(evaluator, "_labeled_baseline_embeddings", None)
+        test_records = getattr(evaluator, "_labeled_test_embeddings", None)
+        if train_records:
+            train_meta = dump_embeddings_to_memmap(train_records, emb_dir, "train")
+            logger.info(f"dumped train embeddings: {train_meta['n']} × {train_meta['z_shape'][1:]} -> {emb_dir}")
+        else:
+            logger.warning("dump_embeddings=true but evaluator has no _labeled_baseline_embeddings; skipping train dump")
+        if test_records:
+            test_meta = dump_embeddings_to_memmap(test_records, emb_dir, "test")
+            logger.info(f"dumped test embeddings: {test_meta['n']} × {test_meta['z_shape'][1:]} -> {emb_dir}")
+        else:
+            logger.warning("dump_embeddings=true but evaluator has no _labeled_test_embeddings; skipping test dump")
+
     return eval_metrics, predictions
 
 
