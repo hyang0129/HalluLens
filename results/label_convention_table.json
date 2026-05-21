@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-05-21T06:42:39-0400",
+  "generated_at": "2026-05-21T06:50:59-0400",
   "git": {
     "branch": "main",
     "commit": "efbf926859432898ebb7acdc21d0a293efd301b5"
@@ -20,6 +20,7 @@
     "Llama-3.1-8B-Instruct",
     "Qwen3-8B"
   ],
+  "seed": 0,
   "cells": [
     {
       "key": {
@@ -48,102 +49,6 @@
     {
       "key": {
         "dataset": "nq",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon",
-        "seed": 1,
-        "label_convention": "true_class"
-      },
-      "kind": "training",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.7058126626953398,
-        "mahalanobis_auroc": 0.7358066680275575,
-        "knn_auroc": 0.7581420072689564
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/baseline_comparison_nq_memmap/nq_memmap/contrastive_logprob_recon/seed_1",
-        "eval_metrics": "runs/baseline_comparison_nq_memmap/nq_memmap/contrastive_logprob_recon/seed_1/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/baseline_comparison_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon",
-        "seed": 2,
-        "label_convention": "true_class"
-      },
-      "kind": "training",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.698660253609313,
-        "mahalanobis_auroc": 0.7296525735738623,
-        "knn_auroc": 0.7544070087001411
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/baseline_comparison_nq_memmap/nq_memmap/contrastive_logprob_recon/seed_2",
-        "eval_metrics": "runs/baseline_comparison_nq_memmap/nq_memmap/contrastive_logprob_recon/seed_2/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/baseline_comparison_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon",
-        "seed": 3,
-        "label_convention": "true_class"
-      },
-      "kind": "training",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.7081122588706743,
-        "mahalanobis_auroc": 0.7370438414910865,
-        "knn_auroc": 0.7574804006417557
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/baseline_comparison_nq_memmap/nq_memmap/contrastive_logprob_recon/seed_3",
-        "eval_metrics": "runs/baseline_comparison_nq_memmap/nq_memmap/contrastive_logprob_recon/seed_3/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/baseline_comparison_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon",
-        "seed": 4,
-        "label_convention": "true_class"
-      },
-      "kind": "training",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.6920422191067945,
-        "mahalanobis_auroc": 0.7184710560456449,
-        "knn_auroc": 0.750800366878167
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/baseline_comparison_nq_memmap/nq_memmap/contrastive_logprob_recon/seed_4",
-        "eval_metrics": "runs/baseline_comparison_nq_memmap/nq_memmap/contrastive_logprob_recon/seed_4/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/baseline_comparison_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq",
         "model": "Qwen3-8B",
         "method": "contrastive_logprob_recon",
         "seed": 0,
@@ -161,102 +66,6 @@
       "paths": {
         "run_dir": "runs/baseline_comparison_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon/seed_0",
         "eval_metrics": "runs/baseline_comparison_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/baseline_comparison_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon",
-        "seed": 1,
-        "label_convention": "true_class"
-      },
-      "kind": "training",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.8068824537927908,
-        "mahalanobis_auroc": 0.8223888252266016,
-        "knn_auroc": 0.8397984588121017
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/baseline_comparison_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon/seed_1",
-        "eval_metrics": "runs/baseline_comparison_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon/seed_1/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/baseline_comparison_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon",
-        "seed": 2,
-        "label_convention": "true_class"
-      },
-      "kind": "training",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.7540727848126607,
-        "mahalanobis_auroc": 0.7590054108940187,
-        "knn_auroc": 0.7884650341894509
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/baseline_comparison_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon/seed_2",
-        "eval_metrics": "runs/baseline_comparison_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon/seed_2/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/baseline_comparison_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon",
-        "seed": 3,
-        "label_convention": "true_class"
-      },
-      "kind": "training",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.7964416384991075,
-        "mahalanobis_auroc": 0.8096307427186759,
-        "knn_auroc": 0.8307836387121159
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/baseline_comparison_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon/seed_3",
-        "eval_metrics": "runs/baseline_comparison_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon/seed_3/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/baseline_comparison_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon",
-        "seed": 4,
-        "label_convention": "true_class"
-      },
-      "kind": "training",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.7812984223764531,
-        "mahalanobis_auroc": 0.7868818852365154,
-        "knn_auroc": 0.8210160821347607
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/baseline_comparison_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon/seed_4",
-        "eval_metrics": "runs/baseline_comparison_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon/seed_4/eval_metrics.json",
         "eval_metrics_extended": null,
         "config": "configs/experiments/baseline_comparison_nq_qwen3_memmap.json"
       }
@@ -288,102 +97,6 @@
     {
       "key": {
         "dataset": "sciq",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon",
-        "seed": 1,
-        "label_convention": "true_class"
-      },
-      "kind": "training",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.7313261348687021,
-        "mahalanobis_auroc": 0.7486075754728264,
-        "knn_auroc": 0.7707027045497258
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/baseline_comparison_sciq_memmap/sciq_memmap/contrastive_logprob_recon/seed_1",
-        "eval_metrics": "runs/baseline_comparison_sciq_memmap/sciq_memmap/contrastive_logprob_recon/seed_1/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/baseline_comparison_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon",
-        "seed": 2,
-        "label_convention": "true_class"
-      },
-      "kind": "training",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.7272641847909654,
-        "mahalanobis_auroc": 0.751460764381268,
-        "knn_auroc": 0.768930139584152
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/baseline_comparison_sciq_memmap/sciq_memmap/contrastive_logprob_recon/seed_2",
-        "eval_metrics": "runs/baseline_comparison_sciq_memmap/sciq_memmap/contrastive_logprob_recon/seed_2/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/baseline_comparison_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon",
-        "seed": 3,
-        "label_convention": "true_class"
-      },
-      "kind": "training",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.7358387008593736,
-        "mahalanobis_auroc": 0.7470955562009876,
-        "knn_auroc": 0.7576668773812167
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/baseline_comparison_sciq_memmap/sciq_memmap/contrastive_logprob_recon/seed_3",
-        "eval_metrics": "runs/baseline_comparison_sciq_memmap/sciq_memmap/contrastive_logprob_recon/seed_3/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/baseline_comparison_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon",
-        "seed": 4,
-        "label_convention": "true_class"
-      },
-      "kind": "training",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.741455382617758,
-        "mahalanobis_auroc": 0.7578163708120483,
-        "knn_auroc": 0.7811971433940988
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/baseline_comparison_sciq_memmap/sciq_memmap/contrastive_logprob_recon/seed_4",
-        "eval_metrics": "runs/baseline_comparison_sciq_memmap/sciq_memmap/contrastive_logprob_recon/seed_4/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/baseline_comparison_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq",
         "model": "Qwen3-8B",
         "method": "contrastive_logprob_recon",
         "seed": 0,
@@ -401,102 +114,6 @@
       "paths": {
         "run_dir": "runs/baseline_comparison_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon/seed_0",
         "eval_metrics": "runs/baseline_comparison_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/baseline_comparison_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon",
-        "seed": 1,
-        "label_convention": "true_class"
-      },
-      "kind": "training",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.8068346032580137,
-        "mahalanobis_auroc": 0.8148506118159298,
-        "knn_auroc": 0.8110314540950379
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/baseline_comparison_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon/seed_1",
-        "eval_metrics": "runs/baseline_comparison_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon/seed_1/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/baseline_comparison_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon",
-        "seed": 2,
-        "label_convention": "true_class"
-      },
-      "kind": "training",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.809234479393439,
-        "mahalanobis_auroc": 0.8143861196606861,
-        "knn_auroc": 0.811341115531867
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/baseline_comparison_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon/seed_2",
-        "eval_metrics": "runs/baseline_comparison_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon/seed_2/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/baseline_comparison_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon",
-        "seed": 3,
-        "label_convention": "true_class"
-      },
-      "kind": "training",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.8216584715862174,
-        "mahalanobis_auroc": 0.8198802642444261,
-        "knn_auroc": 0.8180176037834997
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/baseline_comparison_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon/seed_3",
-        "eval_metrics": "runs/baseline_comparison_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon/seed_3/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/baseline_comparison_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon",
-        "seed": 4,
-        "label_convention": "true_class"
-      },
-      "kind": "training",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.8216936603858569,
-        "mahalanobis_auroc": 0.8273074468883718,
-        "knn_auroc": 0.8275654980857293
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/baseline_comparison_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon/seed_4",
-        "eval_metrics": "runs/baseline_comparison_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon/seed_4/eval_metrics.json",
         "eval_metrics_extended": null,
         "config": "configs/experiments/baseline_comparison_sciq_qwen3_memmap.json"
       }

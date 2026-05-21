@@ -50,9 +50,11 @@ Also always emits a filtered view for the label-convention ablation
   label_convention_table.{json,csv} — same schema as above, restricted to the
     4-way single-axis ablation {C0 unlabeled, B5 halu_class, B0 true_class,
     B6 two_class} × {nq, sciq} × {Llama, Qwen3} × seed 0. B0 is pulled from
-    the training cells (the paper headline); B5/B6 come from aug_grid_*
-    ablation configs; C0 comes from sharedtrunk_grid_* ablation configs.
-    Each row carries an extra `label_convention` column for pivoting.
+    the training cells (the paper headline, restricted here to seed 0 so the
+    comparison is apples-to-apples — B5/B6/C0 were only run at seed 0);
+    B5/B6 come from aug_grid_* ablation configs; C0 comes from
+    sharedtrunk_grid_* ablation configs. Each row carries an extra
+    `label_convention` column for pivoting.
 
 And the §6 cross-dataset transfer view (issues #89 / #113):
 
@@ -153,6 +155,11 @@ LABEL_CONVENTION_VIEW: dict[str, tuple[str, str, tuple[str, ...]]] = {
 }
 LABEL_CONVENTION_DATASETS = ("nq", "sciq")
 LABEL_CONVENTION_MODELS = ("Llama-3.1-8B-Instruct", "Qwen3-8B")
+# B5/B6/C0 were only run at seed 0 (issues #81 + #99). The B0 headline carries
+# seeds 0–4 in the main table, but pulling its multi-seed bundle here breaks
+# apples-to-apples — pin all four conventions to seed 0 so the comparison is
+# uniform.
+LABEL_CONVENTION_SEED = 0
 
 # Cross-dataset transfer matrix (§6, issue #89 / #113). Each per-cell JSON
 # lives at runs/transfer_matrix_memmap/{slug}/<src>__<tgt>__<method>__<seed>.json
@@ -992,6 +999,8 @@ def _filter_label_convention(
                     cfg_path = c["paths"].get("config", "")
                     if not cfg_path.endswith("_memmap.json"):
                         continue
+                if c["key"].get("seed") != LABEL_CONVENTION_SEED:
+                    continue
                 model_label = c["key"]["model"]
                 if model_label not in LABEL_CONVENTION_MODELS:
                     continue
@@ -1179,6 +1188,7 @@ def write_label_convention_outputs(cells: list[dict], out_dir: Path) -> tuple[Pa
         "conventions": list(LABEL_CONVENTION_VIEW.keys()),
         "datasets": list(LABEL_CONVENTION_DATASETS),
         "models": list(LABEL_CONVENTION_MODELS),
+        "seed": LABEL_CONVENTION_SEED,
         "cells": cells,
     }
     with open(json_path, "w") as f:
