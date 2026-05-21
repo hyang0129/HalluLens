@@ -1,6 +1,6 @@
 # Predictions Gap Report
 
-Generated: 2026-05-21 10:30 UTC
+Generated: 2026-05-21 10:40 UTC
 
 Source of truth: `results/results_table.csv` and `results/transfer_matrix_table.csv` (produced by `scripts/results_table.py` — re-run that first if numbers feel stale). Local cache: `results/preds` (synced by `scripts/pull_predictions.py`).
 
@@ -13,99 +13,99 @@ Each cell is rated on two axes:
 
 ## §1 Training Baselines (kind=training)
 
-### Complete (12)
+### Complete (66)
 
 | Dataset | Model | Method | Summary AUROC seeds | Predictions seeds |
 |---------|-------|--------|---------------------|-------------------|
+| hotpotqa | Llama-3.1-8B-Instruct | act_vit | 5/5 | 5/5 |
 | hotpotqa | Llama-3.1-8B-Instruct | contrastive_logprob_recon | 5/5 | n/a (distance) |
+| hotpotqa | Llama-3.1-8B-Instruct | linear_probe | 5/5 | 5/5 |
+| hotpotqa | Llama-3.1-8B-Instruct | llmsknow_probe | 5/5 | 5/5 |
+| hotpotqa | Llama-3.1-8B-Instruct | saplma | 5/5 | 5/5 |
+| hotpotqa | Qwen3-8B | act_vit | 5/5 | 5/5 |
 | hotpotqa | Qwen3-8B | contrastive_logprob_recon | 5/5 | n/a (distance) |
+| hotpotqa | Qwen3-8B | linear_probe | 5/5 | 5/5 |
+| hotpotqa | Qwen3-8B | llmsknow_probe | 5/5 | 5/5 |
+| hotpotqa | Qwen3-8B | saplma | 5/5 | 5/5 |
+| mmlu | Llama-3.1-8B-Instruct | act_vit | 5/5 | 5/5 |
 | mmlu | Llama-3.1-8B-Instruct | contrastive_logprob_recon | 5/5 | n/a (distance) |
+| mmlu | Llama-3.1-8B-Instruct | icr_probe | 5/5 | 5/5 |
+| mmlu | Llama-3.1-8B-Instruct | linear_probe | 5/5 | 5/5 |
+| mmlu | Llama-3.1-8B-Instruct | llmsknow_probe | 5/5 | 5/5 |
+| mmlu | Llama-3.1-8B-Instruct | saplma | 5/5 | 5/5 |
+| mmlu | Qwen3-8B | act_vit | 5/5 | 5/5 |
 | mmlu | Qwen3-8B | contrastive_logprob_recon | 5/5 | n/a (distance) |
+| mmlu | Qwen3-8B | icr_probe | 5/5 | 5/5 |
+| mmlu | Qwen3-8B | linear_probe | 5/5 | 5/5 |
+| mmlu | Qwen3-8B | llmsknow_probe | 5/5 | 5/5 |
+| mmlu | Qwen3-8B | saplma | 5/5 | 5/5 |
+| natural_questions | Llama-3.1-8B-Instruct | act_vit | 5/5 | 5/5 |
 | natural_questions | Llama-3.1-8B-Instruct | contrastive_logprob_recon | 5/5 | n/a (distance) |
+| natural_questions | Llama-3.1-8B-Instruct | icr_probe | 5/5 | 5/5 |
+| natural_questions | Llama-3.1-8B-Instruct | linear_probe | 5/5 | 5/5 |
+| natural_questions | Llama-3.1-8B-Instruct | llmsknow_probe | 5/5 | 5/5 |
+| natural_questions | Llama-3.1-8B-Instruct | saplma | 5/5 | 5/5 |
+| natural_questions | Qwen3-8B | act_vit | 5/5 | 5/5 |
 | natural_questions | Qwen3-8B | contrastive_logprob_recon | 5/5 | n/a (distance) |
+| natural_questions | Qwen3-8B | icr_probe | 5/5 | 5/5 |
+| natural_questions | Qwen3-8B | linear_probe | 5/5 | 5/5 |
+| natural_questions | Qwen3-8B | llmsknow_probe | 5/5 | 5/5 |
+| natural_questions | Qwen3-8B | saplma | 5/5 | 5/5 |
+| popqa | Llama-3.1-8B-Instruct | act_vit | 5/5 | 5/5 |
 | popqa | Llama-3.1-8B-Instruct | contrastive_logprob_recon | 5/5 | n/a (distance) |
+| popqa | Llama-3.1-8B-Instruct | icr_probe | 5/5 | 5/5 |
+| popqa | Llama-3.1-8B-Instruct | linear_probe | 5/5 | 5/5 |
+| popqa | Llama-3.1-8B-Instruct | llmsknow_probe | 5/5 | 5/5 |
+| popqa | Llama-3.1-8B-Instruct | saplma | 5/5 | 5/5 |
+| popqa | Qwen3-8B | act_vit | 5/5 | 5/5 |
 | popqa | Qwen3-8B | contrastive_logprob_recon | 5/5 | n/a (distance) |
+| popqa | Qwen3-8B | icr_probe | 5/5 | 5/5 |
+| popqa | Qwen3-8B | linear_probe | 5/5 | 5/5 |
+| popqa | Qwen3-8B | llmsknow_probe | 5/5 | 5/5 |
+| popqa | Qwen3-8B | saplma | 5/5 | 5/5 |
+| sciq | Llama-3.1-8B-Instruct | act_vit | 5/5 | 5/5 |
 | sciq | Llama-3.1-8B-Instruct | contrastive_logprob_recon | 5/5 | n/a (distance) |
+| sciq | Llama-3.1-8B-Instruct | linear_probe | 5/5 | 5/5 |
+| sciq | Llama-3.1-8B-Instruct | llmsknow_probe | 5/5 | 5/5 |
+| sciq | Llama-3.1-8B-Instruct | saplma | 5/5 | 5/5 |
+| sciq | Qwen3-8B | act_vit | 5/5 | 5/5 |
 | sciq | Qwen3-8B | contrastive_logprob_recon | 5/5 | n/a (distance) |
+| sciq | Qwen3-8B | linear_probe | 5/5 | 5/5 |
+| sciq | Qwen3-8B | llmsknow_probe | 5/5 | 5/5 |
+| sciq | Qwen3-8B | saplma | 5/5 | 5/5 |
+| searchqa | Llama-3.1-8B-Instruct | act_vit | 5/5 | 5/5 |
 | searchqa | Llama-3.1-8B-Instruct | contrastive_logprob_recon | 5/5 | n/a (distance) |
+| searchqa | Llama-3.1-8B-Instruct | linear_probe | 5/5 | 5/5 |
+| searchqa | Llama-3.1-8B-Instruct | llmsknow_probe | 5/5 | 5/5 |
+| searchqa | Llama-3.1-8B-Instruct | saplma | 5/5 | 5/5 |
+| searchqa | Qwen3-8B | act_vit | 5/5 | 5/5 |
 | searchqa | Qwen3-8B | contrastive_logprob_recon | 5/5 | n/a (distance) |
+| searchqa | Qwen3-8B | linear_probe | 5/5 | 5/5 |
+| searchqa | Qwen3-8B | llmsknow_probe | 5/5 | 5/5 |
+| searchqa | Qwen3-8B | saplma | 5/5 | 5/5 |
 
 ### Missing Summary AUROC
 
 None — every cell has a Summary AUROC in results_table.csv.
 
-### Missing Predictions — run `scripts/pull_predictions.py` (68)
+### Missing Predictions — run `scripts/pull_predictions.py` (14)
 
 | Dataset | Model | Method | Summary AUROC seeds | Predictions seeds |
 |---------|-------|--------|---------------------|-------------------|
-| hotpotqa | Llama-3.1-8B-Instruct | act_vit | 5/5 | 0/5 |
 | hotpotqa | Llama-3.1-8B-Instruct | contrastive | 5/5 | 0/5 |
 | hotpotqa | Llama-3.1-8B-Instruct | icr_probe | 5/5 | 0/5 |
-| hotpotqa | Llama-3.1-8B-Instruct | linear_probe | 5/5 | 0/5 |
-| hotpotqa | Llama-3.1-8B-Instruct | llmsknow_probe | 5/5 | 0/5 |
-| hotpotqa | Llama-3.1-8B-Instruct | saplma | 5/5 | 0/5 |
 | hotpotqa | Llama-3.1-8B-Instruct | saplma_logprob_recon | 5/5 | 0/5 |
-| hotpotqa | Qwen3-8B | act_vit | 5/5 | 0/5 |
 | hotpotqa | Qwen3-8B | contrastive | 5/5 | 0/5 |
 | hotpotqa | Qwen3-8B | icr_probe | 5/5 | 0/5 |
-| hotpotqa | Qwen3-8B | linear_probe | 5/5 | 0/5 |
-| hotpotqa | Qwen3-8B | llmsknow_probe | 5/5 | 0/5 |
-| hotpotqa | Qwen3-8B | saplma | 5/5 | 0/5 |
 | hotpotqa | Qwen3-8B | saplma_logprob_recon | 5/5 | 0/5 |
-| mmlu | Llama-3.1-8B-Instruct | act_vit | 5/5 | 0/5 |
-| mmlu | Llama-3.1-8B-Instruct | icr_probe | 5/5 | 0/5 |
-| mmlu | Llama-3.1-8B-Instruct | linear_probe | 5/5 | 0/5 |
-| mmlu | Llama-3.1-8B-Instruct | llmsknow_probe | 5/5 | 0/5 |
-| mmlu | Llama-3.1-8B-Instruct | saplma | 5/5 | 0/5 |
-| mmlu | Qwen3-8B | act_vit | 5/5 | 0/5 |
-| mmlu | Qwen3-8B | icr_probe | 5/5 | 0/5 |
-| mmlu | Qwen3-8B | linear_probe | 5/5 | 0/5 |
-| mmlu | Qwen3-8B | llmsknow_probe | 5/5 | 0/5 |
-| mmlu | Qwen3-8B | saplma | 5/5 | 0/5 |
-| natural_questions | Llama-3.1-8B-Instruct | act_vit | 5/5 | 0/5 |
-| natural_questions | Llama-3.1-8B-Instruct | icr_probe | 5/5 | 0/5 |
-| natural_questions | Llama-3.1-8B-Instruct | linear_probe | 5/5 | 0/5 |
-| natural_questions | Llama-3.1-8B-Instruct | llmsknow_probe | 5/5 | 0/5 |
-| natural_questions | Llama-3.1-8B-Instruct | saplma | 5/5 | 0/5 |
-| natural_questions | Qwen3-8B | act_vit | 5/5 | 0/5 |
-| natural_questions | Qwen3-8B | icr_probe | 5/5 | 0/5 |
-| natural_questions | Qwen3-8B | linear_probe | 5/5 | 0/5 |
-| natural_questions | Qwen3-8B | llmsknow_probe | 5/5 | 0/5 |
-| natural_questions | Qwen3-8B | saplma | 5/5 | 0/5 |
-| popqa | Llama-3.1-8B-Instruct | act_vit | 5/5 | 0/5 |
 | popqa | Llama-3.1-8B-Instruct | contrastive | 5/5 | 0/5 |
-| popqa | Llama-3.1-8B-Instruct | icr_probe | 5/5 | 0/5 |
-| popqa | Llama-3.1-8B-Instruct | linear_probe | 5/5 | 0/5 |
-| popqa | Llama-3.1-8B-Instruct | llmsknow_probe | 5/5 | 0/5 |
-| popqa | Llama-3.1-8B-Instruct | saplma | 5/5 | 0/5 |
 | popqa | Llama-3.1-8B-Instruct | saplma_logprob_recon | 5/5 | 0/5 |
-| popqa | Qwen3-8B | act_vit | 5/5 | 0/5 |
 | popqa | Qwen3-8B | contrastive | 5/5 | 0/5 |
-| popqa | Qwen3-8B | icr_probe | 5/5 | 0/5 |
-| popqa | Qwen3-8B | linear_probe | 5/5 | 0/5 |
-| popqa | Qwen3-8B | llmsknow_probe | 5/5 | 0/5 |
-| popqa | Qwen3-8B | saplma | 5/5 | 0/5 |
 | popqa | Qwen3-8B | saplma_logprob_recon | 5/5 | 0/5 |
-| sciq | Llama-3.1-8B-Instruct | act_vit | 5/5 | 0/5 |
 | sciq | Llama-3.1-8B-Instruct | icr_probe | 5/5 | 0/5 |
-| sciq | Llama-3.1-8B-Instruct | linear_probe | 5/5 | 0/5 |
-| sciq | Llama-3.1-8B-Instruct | llmsknow_probe | 5/5 | 0/5 |
-| sciq | Llama-3.1-8B-Instruct | saplma | 5/5 | 0/5 |
-| sciq | Qwen3-8B | act_vit | 5/5 | 0/5 |
 | sciq | Qwen3-8B | icr_probe | 5/5 | 0/5 |
-| sciq | Qwen3-8B | linear_probe | 5/5 | 0/5 |
-| sciq | Qwen3-8B | llmsknow_probe | 5/5 | 0/5 |
-| sciq | Qwen3-8B | saplma | 5/5 | 0/5 |
-| searchqa | Llama-3.1-8B-Instruct | act_vit | 5/5 | 0/5 |
 | searchqa | Llama-3.1-8B-Instruct | icr_probe | 5/5 | 0/5 |
-| searchqa | Llama-3.1-8B-Instruct | linear_probe | 5/5 | 0/5 |
-| searchqa | Llama-3.1-8B-Instruct | llmsknow_probe | 5/5 | 0/5 |
-| searchqa | Llama-3.1-8B-Instruct | saplma | 5/5 | 0/5 |
-| searchqa | Qwen3-8B | act_vit | 5/5 | 0/5 |
 | searchqa | Qwen3-8B | icr_probe | 5/5 | 0/5 |
-| searchqa | Qwen3-8B | linear_probe | 5/5 | 0/5 |
-| searchqa | Qwen3-8B | llmsknow_probe | 5/5 | 0/5 |
-| searchqa | Qwen3-8B | saplma | 5/5 | 0/5 |
 
 ## §2 Ablations (kind=ablation)
 
@@ -201,107 +201,105 @@ None — per-sample preds pulled for every Summary-AUROC-complete cell.
 
 ## §3 Sampling Baselines (kind=sampling)
 
-### Complete (0)
+### Complete (60)
 
 | Dataset | Model | Method | Summary AUROC | Predictions file |
 |---------|-------|--------|---------------|------------------|
+| hotpotqa | Llama-3.1-8B-Instruct | se_semantic_entropy | complete | present |
+| hotpotqa | Llama-3.1-8B-Instruct | se_length_normalized | complete | present |
+| hotpotqa | Llama-3.1-8B-Instruct | se_discrete | complete | present |
+| hotpotqa | Llama-3.1-8B-Instruct | selfcheck_nli | complete | present |
+| hotpotqa | Llama-3.1-8B-Instruct | selfcheck_ngram | complete | present |
+| hotpotqa | Llama-3.1-8B-Instruct | selfcheck_bertscore | complete | present |
+| hotpotqa | Qwen3-8B | se_semantic_entropy | complete | present |
+| hotpotqa | Qwen3-8B | se_length_normalized | complete | present |
+| hotpotqa | Qwen3-8B | se_discrete | complete | present |
+| hotpotqa | Qwen3-8B | selfcheck_nli | complete | present |
+| hotpotqa | Qwen3-8B | selfcheck_ngram | complete | present |
+| hotpotqa | Qwen3-8B | selfcheck_bertscore | complete | present |
+| natural_questions | Llama-3.1-8B-Instruct | se_semantic_entropy | complete | present |
+| natural_questions | Llama-3.1-8B-Instruct | se_length_normalized | complete | present |
+| natural_questions | Llama-3.1-8B-Instruct | se_discrete | complete | present |
+| natural_questions | Llama-3.1-8B-Instruct | selfcheck_nli | complete | present |
+| natural_questions | Llama-3.1-8B-Instruct | selfcheck_ngram | complete | present |
+| natural_questions | Llama-3.1-8B-Instruct | selfcheck_bertscore | complete | present |
+| natural_questions | Qwen3-8B | se_semantic_entropy | complete | present |
+| natural_questions | Qwen3-8B | se_length_normalized | complete | present |
+| natural_questions | Qwen3-8B | se_discrete | complete | present |
+| natural_questions | Qwen3-8B | selfcheck_nli | complete | present |
+| natural_questions | Qwen3-8B | selfcheck_ngram | complete | present |
+| natural_questions | Qwen3-8B | selfcheck_bertscore | complete | present |
+| popqa | Llama-3.1-8B-Instruct | se_semantic_entropy | complete | present |
+| popqa | Llama-3.1-8B-Instruct | se_length_normalized | complete | present |
+| popqa | Llama-3.1-8B-Instruct | se_discrete | complete | present |
+| popqa | Llama-3.1-8B-Instruct | selfcheck_nli | complete | present |
+| popqa | Llama-3.1-8B-Instruct | selfcheck_ngram | complete | present |
+| popqa | Llama-3.1-8B-Instruct | selfcheck_bertscore | complete | present |
+| popqa | Qwen3-8B | se_semantic_entropy | complete | present |
+| popqa | Qwen3-8B | se_length_normalized | complete | present |
+| popqa | Qwen3-8B | se_discrete | complete | present |
+| popqa | Qwen3-8B | selfcheck_nli | complete | present |
+| popqa | Qwen3-8B | selfcheck_ngram | complete | present |
+| popqa | Qwen3-8B | selfcheck_bertscore | complete | present |
+| sciq | Llama-3.1-8B-Instruct | se_semantic_entropy | complete | present |
+| sciq | Llama-3.1-8B-Instruct | se_length_normalized | complete | present |
+| sciq | Llama-3.1-8B-Instruct | se_discrete | complete | present |
+| sciq | Llama-3.1-8B-Instruct | selfcheck_nli | complete | present |
+| sciq | Llama-3.1-8B-Instruct | selfcheck_ngram | complete | present |
+| sciq | Llama-3.1-8B-Instruct | selfcheck_bertscore | complete | present |
+| sciq | Qwen3-8B | se_semantic_entropy | complete | present |
+| sciq | Qwen3-8B | se_length_normalized | complete | present |
+| sciq | Qwen3-8B | se_discrete | complete | present |
+| sciq | Qwen3-8B | selfcheck_nli | complete | present |
+| sciq | Qwen3-8B | selfcheck_ngram | complete | present |
+| sciq | Qwen3-8B | selfcheck_bertscore | complete | present |
+| searchqa | Llama-3.1-8B-Instruct | se_semantic_entropy | complete | present |
+| searchqa | Llama-3.1-8B-Instruct | se_length_normalized | complete | present |
+| searchqa | Llama-3.1-8B-Instruct | se_discrete | complete | present |
+| searchqa | Llama-3.1-8B-Instruct | selfcheck_nli | complete | present |
+| searchqa | Llama-3.1-8B-Instruct | selfcheck_ngram | complete | present |
+| searchqa | Llama-3.1-8B-Instruct | selfcheck_bertscore | complete | present |
+| searchqa | Qwen3-8B | se_semantic_entropy | complete | present |
+| searchqa | Qwen3-8B | se_length_normalized | complete | present |
+| searchqa | Qwen3-8B | se_discrete | complete | present |
+| searchqa | Qwen3-8B | selfcheck_nli | complete | present |
+| searchqa | Qwen3-8B | selfcheck_ngram | complete | present |
+| searchqa | Qwen3-8B | selfcheck_bertscore | complete | present |
 
 ### Missing Summary AUROC
 
 None — every cell has a Summary AUROC in results_table.csv.
 
-### Missing Predictions — run `scripts/pull_predictions.py` (60)
+### Missing Predictions
 
-| Dataset | Model | Method | Summary AUROC | Predictions file |
-|---------|-------|--------|---------------|------------------|
-| hotpotqa | Llama-3.1-8B-Instruct | se_semantic_entropy | complete | missing |
-| hotpotqa | Llama-3.1-8B-Instruct | se_length_normalized | complete | missing |
-| hotpotqa | Llama-3.1-8B-Instruct | se_discrete | complete | missing |
-| hotpotqa | Llama-3.1-8B-Instruct | selfcheck_nli | complete | missing |
-| hotpotqa | Llama-3.1-8B-Instruct | selfcheck_ngram | complete | missing |
-| hotpotqa | Llama-3.1-8B-Instruct | selfcheck_bertscore | complete | missing |
-| hotpotqa | Qwen3-8B | se_semantic_entropy | complete | missing |
-| hotpotqa | Qwen3-8B | se_length_normalized | complete | missing |
-| hotpotqa | Qwen3-8B | se_discrete | complete | missing |
-| hotpotqa | Qwen3-8B | selfcheck_nli | complete | missing |
-| hotpotqa | Qwen3-8B | selfcheck_ngram | complete | missing |
-| hotpotqa | Qwen3-8B | selfcheck_bertscore | complete | missing |
-| natural_questions | Llama-3.1-8B-Instruct | se_semantic_entropy | complete | missing |
-| natural_questions | Llama-3.1-8B-Instruct | se_length_normalized | complete | missing |
-| natural_questions | Llama-3.1-8B-Instruct | se_discrete | complete | missing |
-| natural_questions | Llama-3.1-8B-Instruct | selfcheck_nli | complete | missing |
-| natural_questions | Llama-3.1-8B-Instruct | selfcheck_ngram | complete | missing |
-| natural_questions | Llama-3.1-8B-Instruct | selfcheck_bertscore | complete | missing |
-| natural_questions | Qwen3-8B | se_semantic_entropy | complete | missing |
-| natural_questions | Qwen3-8B | se_length_normalized | complete | missing |
-| natural_questions | Qwen3-8B | se_discrete | complete | missing |
-| natural_questions | Qwen3-8B | selfcheck_nli | complete | missing |
-| natural_questions | Qwen3-8B | selfcheck_ngram | complete | missing |
-| natural_questions | Qwen3-8B | selfcheck_bertscore | complete | missing |
-| popqa | Llama-3.1-8B-Instruct | se_semantic_entropy | complete | missing |
-| popqa | Llama-3.1-8B-Instruct | se_length_normalized | complete | missing |
-| popqa | Llama-3.1-8B-Instruct | se_discrete | complete | missing |
-| popqa | Llama-3.1-8B-Instruct | selfcheck_nli | complete | missing |
-| popqa | Llama-3.1-8B-Instruct | selfcheck_ngram | complete | missing |
-| popqa | Llama-3.1-8B-Instruct | selfcheck_bertscore | complete | missing |
-| popqa | Qwen3-8B | se_semantic_entropy | complete | missing |
-| popqa | Qwen3-8B | se_length_normalized | complete | missing |
-| popqa | Qwen3-8B | se_discrete | complete | missing |
-| popqa | Qwen3-8B | selfcheck_nli | complete | missing |
-| popqa | Qwen3-8B | selfcheck_ngram | complete | missing |
-| popqa | Qwen3-8B | selfcheck_bertscore | complete | missing |
-| sciq | Llama-3.1-8B-Instruct | se_semantic_entropy | complete | missing |
-| sciq | Llama-3.1-8B-Instruct | se_length_normalized | complete | missing |
-| sciq | Llama-3.1-8B-Instruct | se_discrete | complete | missing |
-| sciq | Llama-3.1-8B-Instruct | selfcheck_nli | complete | missing |
-| sciq | Llama-3.1-8B-Instruct | selfcheck_ngram | complete | missing |
-| sciq | Llama-3.1-8B-Instruct | selfcheck_bertscore | complete | missing |
-| sciq | Qwen3-8B | se_semantic_entropy | complete | missing |
-| sciq | Qwen3-8B | se_length_normalized | complete | missing |
-| sciq | Qwen3-8B | se_discrete | complete | missing |
-| sciq | Qwen3-8B | selfcheck_nli | complete | missing |
-| sciq | Qwen3-8B | selfcheck_ngram | complete | missing |
-| sciq | Qwen3-8B | selfcheck_bertscore | complete | missing |
-| searchqa | Llama-3.1-8B-Instruct | se_semantic_entropy | complete | missing |
-| searchqa | Llama-3.1-8B-Instruct | se_length_normalized | complete | missing |
-| searchqa | Llama-3.1-8B-Instruct | se_discrete | complete | missing |
-| searchqa | Llama-3.1-8B-Instruct | selfcheck_nli | complete | missing |
-| searchqa | Llama-3.1-8B-Instruct | selfcheck_ngram | complete | missing |
-| searchqa | Llama-3.1-8B-Instruct | selfcheck_bertscore | complete | missing |
-| searchqa | Qwen3-8B | se_semantic_entropy | complete | missing |
-| searchqa | Qwen3-8B | se_length_normalized | complete | missing |
-| searchqa | Qwen3-8B | se_discrete | complete | missing |
-| searchqa | Qwen3-8B | selfcheck_nli | complete | missing |
-| searchqa | Qwen3-8B | selfcheck_ngram | complete | missing |
-| searchqa | Qwen3-8B | selfcheck_bertscore | complete | missing |
+None — per-sample preds pulled for every Summary-AUROC-complete cell.
 
 ## §4 P(True) (kind=p_true)
 
-### Complete (0)
+### Complete (12)
 
 | Dataset | Model | Method | Summary AUROC | Predictions file |
 |---------|-------|--------|---------------|------------------|
+| hotpotqa | Llama-3.1-8B-Instruct | p_true | complete | present |
+| hotpotqa | Qwen3-8B | p_true | complete | present |
+| mmlu | Llama-3.1-8B-Instruct | p_true | complete | present |
+| mmlu | Qwen3-8B | p_true | complete | present |
+| natural_questions | Llama-3.1-8B-Instruct | p_true | complete | present |
+| natural_questions | Qwen3-8B | p_true | complete | present |
+| popqa | Llama-3.1-8B-Instruct | p_true | complete | present |
+| popqa | Qwen3-8B | p_true | complete | present |
+| sciq | Llama-3.1-8B-Instruct | p_true | complete | present |
+| sciq | Qwen3-8B | p_true | complete | present |
+| searchqa | Llama-3.1-8B-Instruct | p_true | complete | present |
+| searchqa | Qwen3-8B | p_true | complete | present |
 
 ### Missing Summary AUROC
 
 None — every cell has a Summary AUROC in results_table.csv.
 
-### Missing Predictions — run `scripts/pull_predictions.py` (12)
+### Missing Predictions
 
-| Dataset | Model | Method | Summary AUROC | Predictions file |
-|---------|-------|--------|---------------|------------------|
-| hotpotqa | Llama-3.1-8B-Instruct | p_true | complete | missing |
-| hotpotqa | Qwen3-8B | p_true | complete | missing |
-| mmlu | Llama-3.1-8B-Instruct | p_true | complete | missing |
-| mmlu | Qwen3-8B | p_true | complete | missing |
-| natural_questions | Llama-3.1-8B-Instruct | p_true | complete | missing |
-| natural_questions | Qwen3-8B | p_true | complete | missing |
-| popqa | Llama-3.1-8B-Instruct | p_true | complete | missing |
-| popqa | Qwen3-8B | p_true | complete | missing |
-| sciq | Llama-3.1-8B-Instruct | p_true | complete | missing |
-| sciq | Qwen3-8B | p_true | complete | missing |
-| searchqa | Llama-3.1-8B-Instruct | p_true | complete | missing |
-| searchqa | Qwen3-8B | p_true | complete | missing |
+None — per-sample preds pulled for every Summary-AUROC-complete cell.
 
 ## §5 SEP (kind=sep)
 
@@ -821,10 +819,10 @@ Sources are gated on baseline checkpoints existing — missing source-dataset ce
 
 | Section | Missing Summary AUROC | Missing Predictions |
 |---------|-----------------------|---------------------|
-| §1 Training | 0 | 68 |
+| §1 Training | 0 | 14 |
 | §2 Ablations | 76 | 0 |
-| §3 Sampling | 0 | 60 |
-| §4 P(True) | 0 | 12 |
+| §3 Sampling | 0 | 0 |
+| §4 P(True) | 0 | 0 |
 | §5 SEP | 6 | 0 |
 | §6 Transfer matrix | 462 | — |
-| **Total** | **544** | **140** |
+| **Total** | **544** | **14** |
