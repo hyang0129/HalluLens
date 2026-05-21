@@ -109,6 +109,7 @@ def _build_model(model_class: str, input_dim: int, model_params: dict) -> torch.
             recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
             recon_lambda=model_params.get("recon_lambda", 1.0),
             logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
+            block_dims=model_params.get("block_dims"),
         )
     raise ValueError(
         f"Unsupported model_class='{model_class}'. "

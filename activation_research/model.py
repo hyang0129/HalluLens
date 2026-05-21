@@ -59,19 +59,24 @@ class ProgressiveCompressor(nn.Module):
     """
 
     def __init__(self, input_dim=4096, final_dim=512, dropout=0.1, input_dropout=0.2,
-                 normalize_input: bool = False):
+                 normalize_input: bool = False, block_dims: list | None = None):
         super().__init__()
 
         self.normalize_input = bool(normalize_input)
         if self.normalize_input:
             self.input_norm = nn.LayerNorm(int(input_dim))
 
-        dims = []
-        d = input_dim
-        while d > final_dim:
-            next_d = max(d // 2, final_dim)
-            dims.append((d, next_d))
-            d = next_d
+        if block_dims:
+            block_dims = [int(d) for d in block_dims]
+            dims = [(int(input_dim), block_dims[0])]
+            dims += [(block_dims[i], block_dims[i + 1]) for i in range(len(block_dims) - 1)]
+        else:
+            dims = []
+            d = input_dim
+            while d > final_dim:
+                next_d = max(d // 2, final_dim)
+                dims.append((d, next_d))
+                d = next_d
 
         self.pos_encodings = PositionalEncoding(input_dim)
         self.blocks = nn.ModuleList([
@@ -154,6 +159,7 @@ class LogprobReconProgressiveCompressor(nn.Module):
         recon_hidden_dim: int = 256,
         recon_lambda: float = 1.0,
         logprob_var_threshold: float = 1e-4,
+        block_dims: list | None = None,
     ):
         super().__init__()
         self.recon_seq_len = int(recon_seq_len)
@@ -166,6 +172,7 @@ class LogprobReconProgressiveCompressor(nn.Module):
             dropout=float(dropout),
             input_dropout=float(input_dropout),
             normalize_input=bool(normalize_input),
+            block_dims=block_dims,
         )
 
         # Auxiliary decoder: z (B, final_dim) → logprob_pred (B, recon_seq_len)
