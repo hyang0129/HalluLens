@@ -7,11 +7,17 @@
     "contrastive_logprob_recon_actvit_mean",
     "contrastive_logprob_recon_actvit_max",
     "contrastive_logprob_recon_actvit_mean_ln",
-    "contrastive_logprob_recon_actvit_mean_ln_512"
+    "contrastive_logprob_recon_actvit_mean_ln_512",
+    "contrastive_logprob_recon_actvit_mean_ln_hlr",
+    "contrastive_logprob_recon_actvit_mean_ln_512_hlr"
   ],
   "split_seed": 42,
-  "training_seeds": [0],
-  "split_seeds": [42],
+  "training_seeds": [
+    0
+  ],
+  "split_seeds": [
+    42
+  ],
   "device": "auto",
   "num_workers": 4,
   "persistent_workers": true,
