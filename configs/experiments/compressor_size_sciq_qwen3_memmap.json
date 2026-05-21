@@ -11,7 +11,8 @@
     "contrastive_logprob_recon_actvit_mean_ln_hlr",
     "contrastive_logprob_recon_actvit_mean_ln_512_hlr",
     "contrastive_logprob_recon_prenorm",
-    "contrastive_logprob_recon_small_hlr"
+    "contrastive_logprob_recon_small_hlr",
+    "contrastive_logprob_recon_hlr"
   ],
   "split_seed": 42,
   "training_seeds": [
