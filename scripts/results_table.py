@@ -44,9 +44,18 @@ Also always emits a filtered view for the §7.1 loss-decomposition ablation:
     results_table.{json,csv} (still kind="training"), re-emitted here so the
     ablation can be loaded without scanning the full table.
 
+And the §6 cross-dataset transfer view (issues #89 / #113):
+
+  transfer_matrix_table.{json,csv} — distinct schema from the main table:
+    cells carry kind="transfer" with both source_dataset and target_dataset.
+    Sourced from runs/transfer_matrix_memmap/{llama,qwen3}/ per-cell JSONs
+    written by scripts/eval_transfer_matrix_memmap.py. Silent no-op when
+    that directory does not exist.
+
 Usage:
     python scripts/results_table.py              # writes output/results_table/*
     python scripts/results_table.py --out-dir DIR
+    python scripts/results_table.py --no-transfer
 """
 from __future__ import annotations
 
@@ -110,6 +119,38 @@ LOSS_DECOMPOSITION_METHODS = (
     "saplma",
     "saplma_logprob_recon",
 )
+
+# Cross-dataset transfer matrix (§6, issue #89 / #113). Each per-cell JSON
+# lives at runs/transfer_matrix_memmap/{slug}/<src>__<tgt>__<method>__<seed>.json
+# and is produced by scripts/eval_transfer_matrix_memmap.py.
+TRANSFER_DATASETS = ("hotpotqa", "mmlu", "nq", "popqa", "sciq", "searchqa")
+TRANSFER_METHODS = (
+    "contrastive_logprob_recon",
+    "saplma",
+    "llmsknow_probe",
+    "act_vit",
+)
+TRANSFER_MODEL_SLUGS = ("llama", "qwen3")
+TRANSFER_MODEL_DISPLAY = {
+    "llama": "Llama-3.1-8B-Instruct",
+    "qwen3": "Qwen3-8B",
+}
+# Metrics surfaced from each per-cell JSON. n_src_train / n_tgt_test are size
+# fields, not AUROCs — we still pass them through so the long-form CSV has a
+# row for cells whose AUROC is null (e.g. single_class targets).
+_TRANSFER_METRIC_KEYS = (
+    "auroc",
+    "knn_auroc",
+    "mahalanobis_auroc",
+    "cosine_auroc",
+    "n_src_train",
+    "n_tgt_test",
+)
+# Maps per-cell JSON status → results_table cell status.
+_TRANSFER_STATUS_MAP = {
+    "ok": "complete",
+    "single_class": "partial",
+}
 
 # Optional sklearn (preferred); fall back to numpy Mann–Whitney AUROC.
 try:
@@ -654,6 +695,169 @@ def collect_p_true_cells() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Transfer matrix (§6 ablation table)
+# ---------------------------------------------------------------------------
+
+def _slug_from_experiment_name(experiment_name: str) -> str:
+    """Infer model slug from a baseline_comparison_*_memmap experiment name."""
+    return "qwen3" if "_qwen3_memmap" in experiment_name else "llama"
+
+
+def _dataset_from_dataset_dir(dataset_dir_name: str) -> str:
+    """Strip _memmap / _qwen3_memmap suffix to get the bare dataset name.
+
+    Mirrors the per-cell JSON convention (sources/targets in the cell filename
+    are bare names like ``hotpotqa`` — see ``scripts/eval_transfer_matrix_memmap.py``).
+    """
+    stem = dataset_dir_name.removesuffix("_memmap").removesuffix("_qwen3")
+    return stem
+
+
+def _discover_transfer_source_seeds(baseline_runs_dir: Path) -> dict:
+    """Enumerate source seeds that actually have a trained checkpoint on disk.
+
+    Returns ``{(slug, source_dataset, method): set[int]}``. If
+    ``baseline_runs_dir`` is missing, returns an empty dict — collectors
+    fall back to filesystem-only discovery (no "missing" cells emitted).
+
+    Imports ``activation_research.transfer_eval_memmap.discover_runs`` lazily
+    so that ``scripts/results_table.py`` stays importable in environments
+    where the activation_research deps (torch) aren't installed.
+    """
+    if not baseline_runs_dir.exists():
+        return {}
+    try:
+        from activation_research.transfer_eval_memmap import discover_runs
+    except Exception:
+        return {}
+
+    out: dict[tuple[str, str, str], set[int]] = {}
+    for method in TRANSFER_METHODS:
+        for entry in discover_runs(str(baseline_runs_dir), method):
+            slug = _slug_from_experiment_name(entry["experiment_name"])
+            src = _dataset_from_dataset_dir(entry["dataset"])
+            out.setdefault((slug, src, method), set()).add(int(entry["seed"]))
+    return out
+
+
+def _cell_json_path(runs_root: Path, slug: str, src: str, tgt: str,
+                    method: str, seed: int) -> Path:
+    return runs_root / slug / f"{src}__{tgt}__{method}__{seed}.json"
+
+
+def collect_transfer_cells(
+    runs_root: Optional[Path] = None,
+    *,
+    baseline_runs_dir: Optional[Path] = None,
+) -> list[dict]:
+    """One cell per (model, method, source, target, seed) for the §6 transfer view.
+
+    Reads per-cell JSONs produced by ``scripts/eval_transfer_matrix_memmap.py``
+    (issue #89) under ``runs/transfer_matrix_memmap/{llama,qwen3}/``.
+
+    Expected-vs-missing logic:
+      - If ``baseline_runs_dir`` contains discoverable source checkpoints,
+        enumerate the full grid (seeds × 6 targets) per (slug, source, method)
+        and emit ``status="missing"`` rows where the cell JSON is absent.
+      - Otherwise (no baseline checkpoints locally — typical for a dev box that
+        only synced the transfer outputs), emit only cells that exist on disk.
+
+    Returns ``[]`` silently when ``runs_root`` does not exist.
+    """
+    if runs_root is None:
+        runs_root = PROJECT_ROOT / "runs" / "transfer_matrix_memmap"
+    if baseline_runs_dir is None:
+        baseline_runs_dir = PROJECT_ROOT / "runs"
+
+    if not runs_root.exists():
+        return []
+
+    expected = _discover_transfer_source_seeds(baseline_runs_dir)
+
+    cells: list[dict] = []
+    seen: set[tuple[str, str, str, str, int]] = set()
+
+    if expected:
+        # Full-grid mode: enumerate (slug, src, method, seed) × targets and
+        # emit complete/partial/failed/missing for each.
+        for (slug, src, method), seeds in sorted(expected.items()):
+            for seed in sorted(seeds):
+                for tgt in TRANSFER_DATASETS:
+                    cell_path = _cell_json_path(runs_root, slug, src, tgt, method, seed)
+                    cells.append(_build_transfer_cell(
+                        cell_path, slug=slug, src=src, tgt=tgt,
+                        method=method, seed=seed,
+                    ))
+                    seen.add((slug, src, tgt, method, seed))
+
+    # Filesystem sweep — pick up cells the baseline-runs enumeration didn't
+    # cover (e.g. when baseline_runs_dir is absent, or when the transfer
+    # script produced cells outside the expected method/dataset set).
+    for slug in TRANSFER_MODEL_SLUGS:
+        slug_dir = runs_root / slug
+        if not slug_dir.is_dir():
+            continue
+        for cell_path in sorted(slug_dir.glob("*__*__*__*.json")):
+            stem = cell_path.stem
+            parts = stem.split("__")
+            # Method names contain underscores (contrastive_logprob_recon,
+            # llmsknow_probe, …); seed is always the last "__"-separated chunk.
+            if len(parts) < 4:
+                continue
+            try:
+                seed = int(parts[-1])
+            except ValueError:
+                continue
+            src, tgt = parts[0], parts[1]
+            method = "__".join(parts[2:-1])
+            if (slug, src, tgt, method, seed) in seen:
+                continue
+            cells.append(_build_transfer_cell(
+                cell_path, slug=slug, src=src, tgt=tgt,
+                method=method, seed=seed,
+            ))
+            seen.add((slug, src, tgt, method, seed))
+
+    return cells
+
+
+def _build_transfer_cell(cell_path: Path, *, slug: str, src: str, tgt: str,
+                         method: str, seed: int) -> dict:
+    """Construct one transfer cell dict from an (expected or actual) JSON path."""
+    metrics: dict[str, float] = {}
+    if cell_path.exists():
+        try:
+            with open(cell_path) as f:
+                data = json.load(f)
+            raw_status = data.get("status", "")
+            status = _TRANSFER_STATUS_MAP.get(raw_status, "failed")
+            for k in _TRANSFER_METRIC_KEYS:
+                v = data.get(k)
+                if isinstance(v, (int, float)) and np.isfinite(v):
+                    metrics[k] = float(v)
+        except Exception:
+            status = "failed"
+    else:
+        status = "missing"
+
+    return {
+        "key": {
+            "source_dataset": src,
+            "target_dataset": tgt,
+            "model": TRANSFER_MODEL_DISPLAY.get(slug, slug),
+            "method": method,
+            "seed": seed,
+        },
+        "kind": "transfer",
+        "status": status,
+        "metrics": metrics,
+        "expected_rows": None,
+        "actual_rows": None,
+        "paths": {"cell_json": _rel(cell_path)},
+    }
+
+
+# ---------------------------------------------------------------------------
 # Serialization
 # ---------------------------------------------------------------------------
 
@@ -730,6 +934,79 @@ def write_outputs(cells: list[dict], out_dir: Path) -> tuple[Path, Path]:
     return json_path, csv_path
 
 
+TRANSFER_CSV_COLUMNS = [
+    "kind", "source_dataset", "target_dataset", "model", "method", "seed", "status",
+    "metric_name", "metric_value",
+    "expected_rows", "actual_rows", "path",
+]
+
+
+def transfer_cells_to_long_rows(cells: list[dict]) -> list[dict]:
+    """Long-form rows for the transfer view (source_dataset + target_dataset).
+
+    Mirrors ``cells_to_long_rows`` but uses the transfer-specific column layout
+    — the main table's ``dataset`` column is replaced by ``source_dataset`` and
+    ``target_dataset`` so each cell carries both axes.
+    """
+    rows: list[dict] = []
+    for c in cells:
+        key = c["key"]
+        primary_path = next(iter(c["paths"].values()), "")
+        base = {
+            "kind":            c["kind"],
+            "source_dataset":  key["source_dataset"],
+            "target_dataset":  key["target_dataset"],
+            "model":           key["model"],
+            "method":          key["method"],
+            "seed":            key["seed"] if key["seed"] is not None else "",
+            "status":          c["status"],
+            "expected_rows":   c["expected_rows"] if c["expected_rows"] is not None else "",
+            "actual_rows":     c["actual_rows"] if c["actual_rows"] is not None else "",
+            "path":            primary_path,
+        }
+        if c["metrics"]:
+            for metric_name, value in c["metrics"].items():
+                rows.append({**base, "metric_name": metric_name, "metric_value": value})
+        else:
+            rows.append({**base, "metric_name": "", "metric_value": ""})
+    return rows
+
+
+def write_transfer_matrix_outputs(cells: list[dict], out_dir: Path) -> tuple[Path, Path]:
+    """Write the §6 cross-dataset transfer view to its own pair of files.
+
+    Mirrors ``write_outputs`` / ``write_loss_decomposition_outputs`` but uses
+    the transfer column layout. Always writes both files, even when ``cells``
+    is empty (CSV gets a header-only row), so downstream consumers don't break
+    on the file's absence.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = out_dir / "transfer_matrix_table.json"
+    csv_path  = out_dir / "transfer_matrix_table.csv"
+
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "git": _git_info(),
+        "view": "transfer_matrix",
+        "datasets": list(TRANSFER_DATASETS),
+        "methods": list(TRANSFER_METHODS),
+        "model_slugs": list(TRANSFER_MODEL_SLUGS),
+        "cells": cells,
+    }
+    with open(json_path, "w") as f:
+        json.dump(payload, f, indent=2, default=str)
+
+    rows = transfer_cells_to_long_rows(cells)
+    with open(csv_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=TRANSFER_CSV_COLUMNS)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+    return json_path, csv_path
+
+
 def write_loss_decomposition_outputs(cells: list[dict], out_dir: Path) -> tuple[Path, Path]:
     """Write the §7.1 loss-decomposition view to its own pair of files.
 
@@ -771,7 +1048,7 @@ def _summary(cells: list[dict]) -> str:
         d[c["status"]] = d.get(c["status"], 0) + 1
         d["total"] = d.get("total", 0) + 1
     lines = ["Summary:"]
-    for kind in ("training", "ablation", "sampling", "sep", "p_true"):
+    for kind in ("training", "ablation", "sampling", "sep", "p_true", "transfer"):
         d = by_kind.get(kind, {})
         if not d:
             continue
@@ -811,6 +1088,30 @@ def main() -> None:
              "default so the main table stays clean. Ablation cells carry "
              "kind='ablation' and an extra 'experiment' key for grouping.",
     )
+    parser.add_argument(
+        "--no-transfer",
+        action="store_true",
+        help="Skip the §6 transfer-matrix view (transfer_matrix_table.{json,csv}). "
+             "By default the view is emitted whenever runs/transfer_matrix_memmap/ "
+             "exists; pass this to suppress it entirely. When the runs directory is "
+             "absent the view is a silent no-op already, so this flag is mostly for "
+             "regression tests against the pre-transfer table.",
+    )
+    parser.add_argument(
+        "--transfer-runs-dir",
+        type=Path,
+        default=PROJECT_ROOT / "runs" / "transfer_matrix_memmap",
+        help="Where to find per-cell transfer JSONs "
+             "(default: runs/transfer_matrix_memmap/).",
+    )
+    parser.add_argument(
+        "--transfer-baseline-runs-dir",
+        type=Path,
+        default=PROJECT_ROOT / "runs",
+        help="Where to discover source baseline checkpoints for enumerating "
+             "expected (vs. missing) transfer cells. If absent, the transfer "
+             "view degrades to filesystem-only discovery — no 'missing' rows.",
+    )
     args = parser.parse_args()
 
     cells: list[dict] = []
@@ -829,8 +1130,21 @@ def main() -> None:
     print(f"Wrote {ld_json}")
     print(f"Wrote {ld_csv}")
 
+    tx_cells: list[dict] = []
+    if not args.no_transfer:
+        tx_cells = collect_transfer_cells(
+            runs_root=args.transfer_runs_dir,
+            baseline_runs_dir=args.transfer_baseline_runs_dir,
+        )
+    # Always emit transfer_matrix_table.{json,csv} (header-only when --no-transfer
+    # or when the runs dir is missing) so downstream consumers can rely on the
+    # file's presence — same convention as loss_decomposition_table.{json,csv}.
+    tx_json, tx_csv = write_transfer_matrix_outputs(tx_cells, args.out_dir)
+    print(f"Wrote {tx_json}")
+    print(f"Wrote {tx_csv}")
+
     print()
-    print(_summary(cells))
+    print(_summary(cells + tx_cells))
     ld_cells = _filter_loss_decomposition(cells)
     ld_complete = sum(1 for c in ld_cells if c["status"] == "complete")
     print(f"  loss_decomposition (view) {ld_complete}/{len(ld_cells)} complete  "
