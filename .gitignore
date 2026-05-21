@@ -6,6 +6,11 @@ development
 shared
 shared/
 
+# Per-sample prediction cache (large files; shipped as a GitHub release asset
+# rather than tracked in git). Re-fill via scripts/assemble_predictions_tarball.py
+# on the cluster + scp + extract.
+results/preds/
+
 # Root-level notebooks (all notebooks should live in notebooks/)
 /*.ipynb
 
