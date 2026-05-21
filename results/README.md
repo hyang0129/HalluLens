@@ -26,7 +26,7 @@ When assembling paper tables or figures, filter to these two categories only. Th
 Coverage notes:
 
 - `saplma`, `saplma_logprob_recon`, `contrastive_logprob_recon` — full memmap coverage (6 datasets × 2 models × 5 seeds).
-- `contrastive` (no recon) — zarr pilot only, hotpotqa + popqa at 5 seeds. The memmap pair is the gap to close before the ablation is publishable.
+- `contrastive` (no recon) — zarr only; hotpotqa + popqa at 5 seeds × 2 models. The ablation uses these zarr results (no memmap runs planned).
 
 These rows are duplicates of cells already present in `results_table.{json,csv}` (still `kind="training"`); the separate file just makes the ablation easy to load without scanning the full table. They remain in the main table as well — `contrastive_logprob_recon` is the headline method for §5 and is not an ablation-only row.
 
@@ -46,7 +46,7 @@ Incomplete cells in the canonical numbers (asterisked in `draft_headline_table.m
 - **ICR Probe**: memmap coverage on NQ, MMLU, PopQA only (hotpotqa, sciq, searchqa missing).
 - **ACT-ViT**: MMLU incomplete (2/5 Llama, 3/5 Qwen), SearchQA incomplete (3/5 Llama, 3/5 Qwen), HotpotQA Qwen incomplete (3/5).
 - **SelfCheckGPT-BERT**: no results yet (not tracked by the gap report).
-- **`contrastive` (no recon)**: no memmap results — zarr pilot only (hotpotqa + popqa).
+- **`contrastive` (no recon)**: zarr only (hotpotqa + popqa, 5 seeds × 2 models) — intentional; ablation uses zarr.
 - **Transfer matrix (§6)**: coverage tracked per `predictions_gap_report.py` — expected grid is 2 models × 4 methods × 6 src × 6 tgt × 5 seeds = 1440 cells; sources gated on baseline checkpoints existing.
 
 ## Files
