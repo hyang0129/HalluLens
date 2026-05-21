@@ -66,6 +66,7 @@ USER = os.environ.get("USER") or os.environ.get("LOGNAME") or "default"
 SOCKET_PATH = Path(f"/tmp/empire-shell-{USER}.sock")
 PID_PATH = Path(f"/tmp/empire-shell-{USER}.pid")
 LOG_PATH = Path(f"/tmp/empire-shell-{USER}.log")
+_LOCK_PATH = Path(f"/tmp/empire-shell-{USER}.lock")
 
 SSH_HOST = "empire-ai"
 DEFAULT_TIMEOUT = 120
@@ -126,6 +127,25 @@ class Result:
 
 
 # ----------------------------- client side -----------------------------
+
+def ensure_daemon() -> None:
+    """Ensure the reaper daemon is running; no-op if already up.
+
+    Uses a file lock to prevent double-spawn when called concurrently
+    (e.g. multiple gpu_dispatch invocations racing at startup).
+    Returns immediately — does not wait for the SSH session to be ready.
+    """
+    if SOCKET_PATH.exists():
+        return
+    import fcntl as _fcntl
+    with open(_LOCK_PATH, "w") as _lf:
+        _fcntl.flock(_lf.fileno(), _fcntl.LOCK_EX)
+        try:
+            if not SOCKET_PATH.exists():
+                _spawn_daemon()
+        finally:
+            _fcntl.flock(_lf.fileno(), _fcntl.LOCK_UN)
+
 
 def run(cmd: str, timeout: int = DEFAULT_TIMEOUT) -> Result:
     """Run a shell command on the Empire AI login node. Auto-starts daemon."""

@@ -8,6 +8,10 @@ Coverage checked:
                         across all baseline_comparison_*_memmap experiments
   Sampling baselines  — se_labels.jsonl, selfcheck_scores.jsonl, ptrue.jsonl
                         per (dataset, model)
+  Transfer matrix     — read locally from results/transfer_matrix_table.csv
+                        (already synced by results_table.py; no SSH needed)
+                        Expected grid: 2 models × 4 methods × 6 src × 6 tgt × 5 seeds
+                        = 1440 cells (sources gated on baseline checkpoints existing)
 
 contrastive_logprob_recon is excluded from predictions.csv gaps because it
 produces only distance-based scores (eval_metrics.json) by design.
@@ -48,6 +52,21 @@ SAMPLING_FILES    = ["se_labels.jsonl", "selfcheck_scores.jsonl", "ptrue.jsonl"]
 # Methods that are expected to produce predictions.csv
 PREDICTIONS_EXCLUDED: set[str] = set()
 
+# Transfer matrix expected grid (mirrors results_table.py constants).
+# File path pattern: runs/transfer_matrix_memmap/{slug}/{src}__{tgt}__{method}__{seed}.json
+# Sources are gated on baseline checkpoints existing, so missing source cells may
+# indicate incomplete training rather than a missing transfer evaluation.
+TRANSFER_MODEL_SLUGS = ["llama", "qwen3"]
+TRANSFER_MODEL_DISPLAY = {"llama": "Llama-3.1-8B-Instruct", "qwen3": "Qwen3-8B"}
+TRANSFER_DATASETS = ["hotpotqa", "mmlu", "nq", "popqa", "sciq", "searchqa"]
+TRANSFER_METHODS  = [
+    "contrastive_logprob_recon",
+    "saplma",
+    "llmsknow_probe",
+    "act_vit",
+]
+TRANSFER_EXPECTED_SEEDS = list(range(5))  # seeds 0–4
+
 
 def ssh(cmd: str) -> str:
     result = subprocess.run(
@@ -83,6 +102,30 @@ def gather_training_data() -> dict:
     return data
 
 
+def gather_transfer_data() -> set:
+    """
+    Read results/transfer_matrix_table.csv locally and return a set of
+    (model, src, tgt, method, seed) tuples that have a complete auroc row.
+
+    No SSH needed — results_table.py already syncs this file from the cluster.
+    """
+    csv_path = RESULTS_DIR / "transfer_matrix_table.csv"
+    present: set[tuple[str, str, str, str, int]] = set()
+    if not csv_path.exists():
+        return present
+    import csv as _csv
+    with open(csv_path) as f:
+        for row in _csv.DictReader(f):
+            if row.get("metric_name") != "auroc":
+                continue
+            try:
+                seed = int(row["seed"])
+            except (ValueError, KeyError):
+                continue
+            present.add((row["model"], row["source_dataset"], row["target_dataset"], row["method"], seed))
+    return present
+
+
 def gather_sampling_data() -> dict:
     """
     Returns dict:
@@ -108,7 +151,87 @@ def gather_sampling_data() -> dict:
     return data
 
 
-def build_report(training: dict, sampling: dict) -> str:
+def build_transfer_section(lines: list, transfer_present: set) -> int:
+    """
+    Append the §6 transfer-matrix coverage section to `lines`.
+
+    Expected grid: 2 models × 4 methods × 6 src × 6 tgt × 5 seeds = 1440 cells.
+    Sources are gated on baseline checkpoints existing, so missing source cells
+    may indicate incomplete training rather than a missing transfer eval.
+
+    Returns the count of missing cells across the full theoretical grid.
+    """
+    n_tgt = len(TRANSFER_DATASETS)
+    n_seeds = len(TRANSFER_EXPECTED_SEEDS)
+    cells_per_method_model = n_tgt * n_tgt * n_seeds  # 6 src × 6 tgt × 5 seeds = 180
+
+    total_expected = len(TRANSFER_MODEL_SLUGS) * len(TRANSFER_METHODS) * cells_per_method_model
+    total_present = len(transfer_present)
+    total_missing = total_expected - total_present
+
+    lines += [
+        f"Expected grid: {len(TRANSFER_MODEL_SLUGS)} models × {len(TRANSFER_METHODS)} methods"
+        f" × {n_tgt} src × {n_tgt} tgt × {n_seeds} seeds = **{total_expected} cells**",
+        "",
+        "Sources are gated on baseline checkpoints existing — missing source-dataset cells"
+        " may reflect incomplete training rather than a missing transfer evaluation.",
+        "",
+    ]
+
+    # Coverage summary table per (model, method)
+    lines += [
+        "### Coverage by method × model",
+        "",
+        f"| Method | Llama ({cells_per_method_model} cells) | Qwen3 ({cells_per_method_model} cells) |",
+        "|--------|" + "-" * (len(f"Llama ({cells_per_method_model} cells)") + 2) + "|"
+        + "-" * (len(f"Qwen3 ({cells_per_method_model} cells)") + 2) + "|",
+    ]
+
+    method_gaps = {}
+    for method in TRANSFER_METHODS:
+        row_parts = [f"| {method}"]
+        for slug in TRANSFER_MODEL_SLUGS:
+            model_display = TRANSFER_MODEL_DISPLAY[slug]
+            present_count = sum(
+                1 for (mdl, src, tgt, m, sd) in transfer_present
+                if mdl == model_display and m == method
+            )
+            pct = f"{present_count}/{cells_per_method_model}"
+            mark = " ✓" if present_count == cells_per_method_model else ""
+            row_parts.append(f"{pct}{mark}")
+            method_gaps[(slug, method)] = cells_per_method_model - present_count
+        lines.append(" | ".join(row_parts) + " |")
+    lines.append("")
+
+    # Missing cells detail: group by (model, method) — only show methods with gaps
+    missing_detail_rows = []
+    for slug in TRANSFER_MODEL_SLUGS:
+        model_display = TRANSFER_MODEL_DISPLAY[slug]
+        for method in TRANSFER_METHODS:
+            if method_gaps.get((slug, method), 0) == 0:
+                continue
+            for src in TRANSFER_DATASETS:
+                for tgt in TRANSFER_DATASETS:
+                    for seed in TRANSFER_EXPECTED_SEEDS:
+                        if (model_display, src, tgt, method, seed) not in transfer_present:
+                            missing_detail_rows.append(
+                                f"| {model_display} | {method} | {src} | {tgt} | {seed} |"
+                            )
+
+    if missing_detail_rows:
+        lines += [
+            f"### Missing cells ({len(missing_detail_rows)} of {total_expected})",
+            "",
+            "| Model | Method | Source | Target | Seed |",
+            "|-------|--------|--------|--------|------|",
+        ] + missing_detail_rows + [""]
+    else:
+        lines += ["### Missing cells\n\nNone — full transfer grid is complete.\n"]
+
+    return len(missing_detail_rows)
+
+
+def build_report(training: dict, sampling: dict, transfer: set) -> str:
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     lines = [
         f"# Predictions Gap Report",
@@ -201,6 +324,11 @@ def build_report(training: dict, sampling: dict) -> str:
     else:
         lines += ["None.\n"]
 
+    # ── Transfer matrix ─────────────────────────────────────────────────────
+    lines += ["## §6 Transfer Matrix", ""]
+
+    transfer_missing_cells = build_transfer_section(lines, transfer)
+
     # ── Sampling baselines ──────────────────────────────────────────────────
     lines += ["## Sampling Baselines", ""]
 
@@ -228,7 +356,10 @@ def build_report(training: dict, sampling: dict) -> str:
         lines += ["All sampling files present. No gaps.\n"]
 
     # ── Summary ──────────────────────────────────────────────────────────────
-    total_gaps = len(gap_rows) + len(stub_rows) + len(absence_notes) + len(sampling_gaps)
+    total_gaps = (
+        len(gap_rows) + len(stub_rows) + len(sorted(set(absence_notes)))
+        + len(sampling_gaps) + transfer_missing_cells
+    )
     lines += [
         "## Summary",
         "",
@@ -238,6 +369,7 @@ def build_report(training: dict, sampling: dict) -> str:
         f"| Training: stub runs (no seeds) | {len(stub_rows)} |",
         f"| Training: method absent from dataset | {len(sorted(set(absence_notes)))} |",
         f"| Sampling: missing files | {len(sampling_gaps)} |",
+        f"| Transfer matrix: missing cells | {transfer_missing_cells} |",
         f"| **Total gaps** | **{total_gaps}** |",
         "",
     ]
@@ -250,9 +382,11 @@ def main() -> None:
     training = gather_training_data()
     print("Gathering sampling baseline data from Empire AI...")
     sampling = gather_sampling_data()
+    print("Reading transfer matrix coverage from local results/transfer_matrix_table.csv...")
+    transfer = gather_transfer_data()
     print("Building report...")
 
-    report = build_report(training, sampling)
+    report = build_report(training, sampling, transfer)
 
     out_path = RESULTS_DIR / "predictions_gap_report.md"
     out_path.write_text(report)

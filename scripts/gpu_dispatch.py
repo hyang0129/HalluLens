@@ -921,6 +921,15 @@ def main():
 
     args = parser.parse_args()
 
+    # Best-effort: keep the empire_shell reaper daemon alive so orphaned
+    # processes on the login node don't accumulate to TasksMax=512.
+    # Non-blocking — spawns in background if not already running.
+    try:
+        from utils.empire_shell import ensure_daemon
+        ensure_daemon()
+    except Exception:
+        pass
+
     handlers = {
         "status": cmd_status,
         "run": cmd_run,

@@ -26,18 +26,82 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
 
-from activation_research.transfer_eval_memmap import (  # noqa: E402
-    _resolve_probe_layer,
-    discover_runs,
-)
-from scripts.dispatch.claim import init_dispatch_dirs  # noqa: E402
+# ---------------------------------------------------------------------------
+# Inlined from activation_research/transfer_eval_memmap.py — no torch needed.
+# ---------------------------------------------------------------------------
+_ACT_VIT_CHECKPOINT_PREFERRED = "best_checkpoint.pt"
+_CHECKPOINT_FALLBACK = "final_weights.pt"
+
+
+def _resolve_checkpoint(artifacts_dir: str) -> str | None:
+    p = os.path.join(artifacts_dir, _ACT_VIT_CHECKPOINT_PREFERRED)
+    if os.path.exists(p):
+        return p
+    fb = os.path.join(artifacts_dir, _CHECKPOINT_FALLBACK)
+    return fb if os.path.exists(fb) else None
+
+
+def discover_act_vit_runs(runs_root: Path) -> list[dict]:
+    """Walk runs_root/baseline_comparison_*_memmap/<ds>_memmap/act_vit/seed_*/ for completed runs."""
+    results = []
+    for exp_dir in sorted(runs_root.iterdir()):
+        if not exp_dir.is_dir() or not exp_dir.name.endswith("_memmap"):
+            continue
+        for ds_dir in sorted(exp_dir.iterdir()):
+            if not ds_dir.is_dir() or not ds_dir.name.endswith("_memmap"):
+                continue
+            method_dir = ds_dir / "act_vit"
+            if not method_dir.is_dir():
+                continue
+            for seed_dir in sorted(method_dir.iterdir()):
+                if not seed_dir.is_dir() or not seed_dir.name.startswith("seed_"):
+                    continue
+                try:
+                    seed = int(seed_dir.name.split("_", 1)[1])
+                except (ValueError, IndexError):
+                    continue
+                if not (seed_dir / "eval_metrics.json").exists():
+                    continue
+                if _resolve_checkpoint(str(seed_dir / "artifacts")) is None:
+                    continue
+                cfg: dict = {}
+                cfg_path = seed_dir / "config.json"
+                if cfg_path.exists():
+                    cfg = json.loads(cfg_path.read_text())
+                results.append({
+                    "experiment_name": exp_dir.name,
+                    "dataset": ds_dir.name,
+                    "seed": seed,
+                    "run_dir": str(seed_dir),
+                    "config": cfg,
+                })
+    return results
+
+
+def _resolve_probe_layer(run_dir: str, run_config: dict) -> int:
+    em_path = os.path.join(run_dir, "eval_metrics.json")
+    if os.path.exists(em_path):
+        em = json.loads(open(em_path).read())
+        if em.get("selected_layer") is not None:
+            return int(em["selected_layer"])
+    method_data = run_config.get("method", {}).get("data", {})
+    if "probe_layer" in method_data:
+        return int(method_data["probe_layer"])
+    return 22
+
+
+# ---------------------------------------------------------------------------
+# Inlined from scripts/dispatch/claim.py — init_dispatch_dirs
+# ---------------------------------------------------------------------------
+def init_dispatch_dirs(dispatch_root: Path) -> None:
+    for sub in ("pending", "claimed", "done", "failed"):
+        (dispatch_root / sub).mkdir(parents=True, exist_ok=True)
 
 _DEFAULT_DATASETS = ["hotpotqa", "mmlu", "nq", "popqa", "sciq", "searchqa"]
 _DEFAULT_SLUGS = ["llama", "qwen3"]
@@ -87,7 +151,7 @@ def build(
 ) -> int:
     init_dispatch_dirs(dispatch_root)
 
-    runs = discover_runs(str(runs_dir), "act_vit")
+    runs = discover_act_vit_runs(runs_dir)
     runs = [r for r in runs if _bare_dataset(r["dataset"]) in source_datasets]
     runs = [r for r in runs if _slug_from_experiment(r["experiment_name"]) in model_slugs]
     if seed_filter is not None:
