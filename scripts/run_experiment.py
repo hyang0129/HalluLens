@@ -465,13 +465,37 @@ def run_contrastive_logprob_recon(
             from activation_research.evaluation import dump_embeddings_to_memmap
 
             emb_dir = os.path.join(output_dir, "embeddings")
-            train_records = getattr(evaluator, "_labeled_baseline_embeddings", None)
+
+            # Test records: the evaluator's labeling used eval_ap.df which is the
+            # test parser's df, so test hashkeys resolve and labels are correct.
             test_records = getattr(evaluator, "_labeled_test_embeddings", None)
+
+            # Train records: the evaluator labels baseline embeddings using the
+            # same activation_parser_df (eval_ap.df, the test parser), so train
+            # hashkeys almost never match — _labeled_baseline_embeddings comes
+            # out >99% unlabeled and our dumper filter drops them all. Fix it
+            # here by re-labeling from ap.df (the train parser) before dumping.
+            train_records = None
+            train_records_raw = getattr(evaluator, "_baseline_embeddings", None)
+            if train_records_raw is not None and hasattr(ap, "df") and ap.df is not None:
+                train_hash_to_halu = dict(zip(ap.df["prompt_hash"], ap.df["halu"]))
+                train_records = []
+                for r in train_records_raw:
+                    h = r.get("hashkey")
+                    if h is None:
+                        continue
+                    halu = train_hash_to_halu.get(h)
+                    if halu is None:
+                        continue
+                    rec = dict(r)
+                    rec["halu"] = int(halu)
+                    train_records.append(rec)
+
             if train_records:
                 train_meta = dump_embeddings_to_memmap(train_records, emb_dir, "train")
                 logger.info(f"dumped train embeddings: {train_meta['n']} × {train_meta['z_shape'][1:]} -> {emb_dir}")
             else:
-                logger.warning("dump_embeddings=true but evaluator has no _labeled_baseline_embeddings; skipping train dump")
+                logger.warning("dump_embeddings=true but no labeled train records (check ap.df); skipping train dump")
             if test_records:
                 test_meta = dump_embeddings_to_memmap(test_records, emb_dir, "test")
                 logger.info(f"dumped test embeddings: {test_meta['n']} × {test_meta['z_shape'][1:]} -> {emb_dir}")
