@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-05-20T10:01:52-0400",
+  "generated_at": "2026-05-20T21:07:18-0400",
   "git": {
     "branch": "main",
-    "commit": "cf1c3ace6d2337f6d6be36e19abfc907fdbb3a7f"
+    "commit": "e6fe3acfe8b9725da01f7663368b0ecc41ac7a32"
   },
   "cells": [
     {
@@ -2714,8 +2714,10 @@
         "seed": 2
       },
       "kind": "training",
-      "status": "running",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8770682864962286
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -3976,8 +3978,10 @@
         "seed": 2
       },
       "kind": "training",
-      "status": "running",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6565467733328841
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -3995,8 +3999,10 @@
         "seed": 3
       },
       "kind": "training",
-      "status": "failed",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6662854526812986
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -4014,8 +4020,10 @@
         "seed": 4
       },
       "kind": "training",
-      "status": "running",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.660156505668902
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -5228,8 +5236,10 @@
         "seed": 2
       },
       "kind": "training",
-      "status": "failed",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6693387616065798
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -5247,8 +5257,10 @@
         "seed": 3
       },
       "kind": "training",
-      "status": "running",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6836746519159029
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -5266,8 +5278,10 @@
         "seed": 4
       },
       "kind": "training",
-      "status": "running",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6826213843343059
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -14204,8 +14218,10 @@
         "seed": 3
       },
       "kind": "training",
-      "status": "running",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8163022599836156
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -14223,8 +14239,10 @@
         "seed": 4
       },
       "kind": "training",
-      "status": "running",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8125043006902831
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -15321,8 +15339,10 @@
         "seed": 1
       },
       "kind": "training",
-      "status": "running",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8397037606906111
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -15361,8 +15381,10 @@
         "seed": 3
       },
       "kind": "training",
-      "status": "running",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.840225037022435
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -15380,8 +15402,10 @@
         "seed": 4
       },
       "kind": "training",
-      "status": "running",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8364127667842159
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -15422,7 +15446,7 @@
       "kind": "sampling",
       "status": "complete",
       "metrics": {
-        "auroc": 0.6483345806713818,
+        "auroc": 0.6483345806713817,
         "n_scored": 6717.0
       },
       "expected_rows": 7405,
@@ -15443,7 +15467,7 @@
       "kind": "sampling",
       "status": "complete",
       "metrics": {
-        "auroc": 0.6510350699254569,
+        "auroc": 0.6510350699254568,
         "n_scored": 7405.0
       },
       "expected_rows": 7405,
@@ -15464,7 +15488,7 @@
       "kind": "sampling",
       "status": "complete",
       "metrics": {
-        "auroc": 0.6053768388416123,
+        "auroc": 0.6053768388416122,
         "n_scored": 7405.0
       },
       "expected_rows": 7405,
@@ -15524,7 +15548,7 @@
       "kind": "sampling",
       "status": "complete",
       "metrics": {
-        "auroc": 0.5732558450734382,
+        "auroc": 0.5732558450734381,
         "n_scored": 7403.0
       },
       "expected_rows": 7405,
@@ -15608,7 +15632,7 @@
       "kind": "sampling",
       "status": "complete",
       "metrics": {
-        "auroc": 0.6903066495352881,
+        "auroc": 0.6903066495352882,
         "n_scored": 7405.0
       },
       "expected_rows": 7405,
@@ -15668,7 +15692,7 @@
       "kind": "sampling",
       "status": "complete",
       "metrics": {
-        "auroc": 0.5524867546941912,
+        "auroc": 0.5524867546941913,
         "n_scored": 3722.0
       },
       "expected_rows": 4155,
@@ -15710,7 +15734,7 @@
       "kind": "sampling",
       "status": "complete",
       "metrics": {
-        "auroc": 0.5629898300499683,
+        "auroc": 0.5629898300499684,
         "n_scored": 4155.0
       },
       "expected_rows": 4155,
@@ -15812,7 +15836,7 @@
       "kind": "sampling",
       "status": "complete",
       "metrics": {
-        "auroc": 0.6606277816439818,
+        "auroc": 0.660627781643982,
         "n_scored": 4155.0
       },
       "expected_rows": 4155,
@@ -15833,7 +15857,7 @@
       "kind": "sampling",
       "status": "complete",
       "metrics": {
-        "auroc": 0.6811409797860462,
+        "auroc": 0.681140979786046,
         "n_scored": 4155.0
       },
       "expected_rows": 4155,
@@ -15956,7 +15980,7 @@
       "kind": "sampling",
       "status": "complete",
       "metrics": {
-        "auroc": 0.6819301437954908,
+        "auroc": 0.6819301437954909,
         "n_scored": 2854.0
       },
       "expected_rows": 2854,
@@ -15977,7 +16001,7 @@
       "kind": "sampling",
       "status": "complete",
       "metrics": {
-        "auroc": 0.6439967918642692,
+        "auroc": 0.6439967918642693,
         "n_scored": 2854.0
       },
       "expected_rows": 2854,
@@ -16058,7 +16082,7 @@
       "kind": "sampling",
       "status": "complete",
       "metrics": {
-        "auroc": 0.7818430901674192,
+        "auroc": 0.781843090167419,
         "n_scored": 2854.0
       },
       "expected_rows": 2854,
@@ -16100,7 +16124,7 @@
       "kind": "sampling",
       "status": "complete",
       "metrics": {
-        "auroc": 0.791144958195842,
+        "auroc": 0.7911449581958419,
         "n_scored": 2854.0
       },
       "expected_rows": 2854,
@@ -16139,7 +16163,7 @@
       "kind": "sampling",
       "status": "complete",
       "metrics": {
-        "auroc": 0.5144995014767576,
+        "auroc": 0.5144995014767575,
         "n_scored": 959.0
       },
       "expected_rows": 1000,
@@ -16262,7 +16286,7 @@
       "kind": "sampling",
       "status": "complete",
       "metrics": {
-        "auroc": 0.522972864992409,
+        "auroc": 0.5229728649924089,
         "n_scored": 1000.0
       },
       "expected_rows": 1000,
@@ -16346,7 +16370,7 @@
       "kind": "sampling",
       "status": "complete",
       "metrics": {
-        "auroc": 0.5669632575170034,
+        "auroc": 0.5669632575170035,
         "n_scored": 1000.0
       },
       "expected_rows": 1000,
@@ -16406,7 +16430,7 @@
       "kind": "sampling",
       "status": "complete",
       "metrics": {
-        "auroc": 0.5733989076838615,
+        "auroc": 0.5733989076838616,
         "n_scored": 9425.0
       },
       "expected_rows": 10000,
@@ -16427,7 +16451,7 @@
       "kind": "sampling",
       "status": "complete",
       "metrics": {
-        "auroc": 0.5757320203889236,
+        "auroc": 0.5757320203889237,
         "n_scored": 10000.0
       },
       "expected_rows": 10000,
@@ -16508,7 +16532,7 @@
       "kind": "sampling",
       "status": "complete",
       "metrics": {
-        "auroc": 0.5038574100074922,
+        "auroc": 0.5038574100074923,
         "n_scored": 9995.0
       },
       "expected_rows": 10000,
@@ -16550,7 +16574,7 @@
       "kind": "sampling",
       "status": "complete",
       "metrics": {
-        "auroc": 0.6235742953224078,
+        "auroc": 0.6235742953224077,
         "n_scored": 10000.0
       },
       "expected_rows": 10000,
@@ -16847,7 +16871,7 @@
       "kind": "p_true",
       "status": "complete",
       "metrics": {
-        "p_true_auroc_fwd": 0.5637820354245002,
+        "p_true_auroc_fwd": 0.5637820354245003,
         "p_true_auroc_rev": 0.5799691190052114,
         "p_true_auroc_best": 0.5799691190052114
       },
@@ -16869,9 +16893,9 @@
       "kind": "p_true",
       "status": "complete",
       "metrics": {
-        "p_true_auroc_fwd": 0.6220342727205199,
+        "p_true_auroc_fwd": 0.6220342727205198,
         "p_true_auroc_rev": 0.6161115490409337,
-        "p_true_auroc_best": 0.6220342727205199
+        "p_true_auroc_best": 0.6220342727205198
       },
       "expected_rows": 4155,
       "actual_rows": 4155,
@@ -16891,9 +16915,9 @@
       "kind": "p_true",
       "status": "complete",
       "metrics": {
-        "p_true_auroc_fwd": 0.6715932578428141,
+        "p_true_auroc_fwd": 0.671593257842814,
         "p_true_auroc_rev": 0.6517648444962931,
-        "p_true_auroc_best": 0.6715932578428141
+        "p_true_auroc_best": 0.671593257842814
       },
       "expected_rows": 2854,
       "actual_rows": 2854,
@@ -16935,9 +16959,9 @@
       "kind": "p_true",
       "status": "complete",
       "metrics": {
-        "p_true_auroc_fwd": 0.6097019495369609,
-        "p_true_auroc_rev": 0.6043530541436185,
-        "p_true_auroc_best": 0.6097019495369609
+        "p_true_auroc_fwd": 0.6097019495369608,
+        "p_true_auroc_rev": 0.6043530541436186,
+        "p_true_auroc_best": 0.6097019495369608
       },
       "expected_rows": 43227,
       "actual_rows": 43227,
@@ -16957,9 +16981,9 @@
       "kind": "p_true",
       "status": "complete",
       "metrics": {
-        "p_true_auroc_fwd": 0.6596675847138297,
-        "p_true_auroc_rev": 0.6457703146481049,
-        "p_true_auroc_best": 0.6596675847138297
+        "p_true_auroc_fwd": 0.6596675847138296,
+        "p_true_auroc_rev": 0.6457703146481047,
+        "p_true_auroc_best": 0.6596675847138296
       },
       "expected_rows": 10225,
       "actual_rows": 10225,
@@ -16979,9 +17003,9 @@
       "kind": "p_true",
       "status": "complete",
       "metrics": {
-        "p_true_auroc_fwd": 0.6406606885145234,
+        "p_true_auroc_fwd": 0.6406606885145233,
         "p_true_auroc_rev": 0.6110109492473997,
-        "p_true_auroc_best": 0.6406606885145234
+        "p_true_auroc_best": 0.6406606885145233
       },
       "expected_rows": 7405,
       "actual_rows": 7405,
@@ -17002,7 +17026,7 @@
       "status": "complete",
       "metrics": {
         "p_true_auroc_fwd": 0.6179423521986114,
-        "p_true_auroc_rev": 0.6087353736101896,
+        "p_true_auroc_rev": 0.6087353736101895,
         "p_true_auroc_best": 0.6179423521986114
       },
       "expected_rows": 4155,
@@ -17023,9 +17047,9 @@
       "kind": "p_true",
       "status": "complete",
       "metrics": {
-        "p_true_auroc_fwd": 0.7089863124278801,
+        "p_true_auroc_fwd": 0.7089863124278802,
         "p_true_auroc_rev": 0.6490516250986902,
-        "p_true_auroc_best": 0.7089863124278801
+        "p_true_auroc_best": 0.7089863124278802
       },
       "expected_rows": 2854,
       "actual_rows": 2854,
@@ -17067,7 +17091,7 @@
       "kind": "p_true",
       "status": "complete",
       "metrics": {
-        "p_true_auroc_fwd": 0.6952607137828282,
+        "p_true_auroc_fwd": 0.6952607137828283,
         "p_true_auroc_rev": 0.7056986980700989,
         "p_true_auroc_best": 0.7056986980700989
       },
