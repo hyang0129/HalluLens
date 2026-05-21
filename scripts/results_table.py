@@ -44,6 +44,16 @@ Also always emits a filtered view for the §7.1 loss-decomposition ablation:
     results_table.{json,csv} (still kind="training"), re-emitted here so the
     ablation can be loaded without scanning the full table.
 
+Also always emits a filtered view for the label-convention ablation
+(issues #81 + #99):
+
+  label_convention_table.{json,csv} — same schema as above, restricted to the
+    4-way single-axis ablation {C0 unlabeled, B5 halu_class, B0 true_class,
+    B6 two_class} × {nq, sciq} × {Llama, Qwen3} × seed 0. B0 is pulled from
+    the training cells (the paper headline); B5/B6 come from aug_grid_*
+    ablation configs; C0 comes from sharedtrunk_grid_* ablation configs.
+    Each row carries an extra `label_convention` column for pivoting.
+
 And the §6 cross-dataset transfer view (issues #89 / #113):
 
   transfer_matrix_table.{json,csv} — distinct schema from the main table:
@@ -119,6 +129,30 @@ LOSS_DECOMPOSITION_METHODS = (
     "saplma",
     "saplma_logprob_recon",
 )
+
+# Label-convention ablation (issues #81 + #99). The 2x2 of {what's pulled together
+# under SupCon} × {what's pushed apart}, as a 4-way single-axis ablation:
+#
+#   unlabeled  → C0 (use_labels=False, SimCLR-style)         [sharedtrunk_grid_*]
+#   halu_class → B5 (ignore_label=0, hallu as the cluster)   [aug_grid_*]
+#   true_class → B0 (ignore_label=1, truth as the cluster)   [baseline_comparison_*]  ← paper headline
+#   two_class  → B6 (ignore_label=-1, both form clusters)    [aug_grid_*]
+#
+# B0 is the existing paper headline (`contrastive_logprob_recon` in
+# baseline_comparison_*), pulled from training cells. B5/B6/C0 are not run as
+# baselines so they live under ablation configs (aug_grid_* and
+# sharedtrunk_grid_* respectively). The view stitches both kinds together,
+# normalizes the dataset label to its bare stem, and tags each cell with a
+# human-readable `label_convention` so the CSV is pivot-ready.
+LABEL_CONVENTION_VIEW: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    # name        : (method,                         source_kind, allowed-experiment-prefixes)
+    "true_class":  ("contrastive_logprob_recon",     "training", ("baseline_comparison_",)),
+    "halu_class":  ("contrastive_logprob_recon_b5",  "ablation", ("aug_grid_",)),
+    "two_class":   ("contrastive_logprob_recon_b6",  "ablation", ("aug_grid_",)),
+    "unlabeled":   ("contrastive_logprob_recon_c0",  "ablation", ("sharedtrunk_grid_",)),
+}
+LABEL_CONVENTION_DATASETS = ("nq", "sciq")
+LABEL_CONVENTION_MODELS = ("Llama-3.1-8B-Instruct", "Qwen3-8B")
 
 # Cross-dataset transfer matrix (§6, issue #89 / #113). Each per-cell JSON
 # lives at runs/transfer_matrix_memmap/{slug}/<src>__<tgt>__<method>__<seed>.json
@@ -235,6 +269,8 @@ def _git_info() -> dict[str, str]:
 # accidentally including run_size / hparams / etc.).
 _TRAINING_METRIC_KEYS = {
     "contrastive_logprob_recon":     ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
+    "contrastive_logprob_recon_b5":  ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
+    "contrastive_logprob_recon_b6":  ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
     "contrastive_logprob_recon_c0":  ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
     "contrastive_logprob_recon_d2a": ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
     "contrastive_logprob_recon_d2b": ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
@@ -896,6 +932,82 @@ def cells_to_long_rows(cells: list[dict]) -> list[dict]:
     return rows
 
 
+def _bare_dataset_label(raw: str, model_label: str) -> str:
+    """Strip `_qwen3` / `_smollm3` / `_memmap` so ablation + training cells agree.
+
+    Ablation configs use the raw `cfg["dataset"]` (e.g. ``nq_qwen3_memmap``)
+    while training configs already feed through ``_dataset_from_config_name``
+    and emit a bare name (e.g. ``nq``). For side-by-side views we want both
+    paths to land on the same label.
+    """
+    s = raw.removesuffix("_memmap")
+    if model_label == "Qwen3-8B":
+        s = s.removesuffix("_qwen3")
+    elif model_label == "SmolLM3":
+        s = s.removesuffix("_smollm3")
+    return s
+
+
+def _filter_label_convention(
+    training_cells: list[dict],
+    ablation_cells: list[dict],
+) -> list[dict]:
+    """Pick out the label-convention ablation cells (B0/B5/B6/C0).
+
+    Source disambiguation matters: ``contrastive_logprob_recon_c0`` lives in
+    both ``unlabeled_ablation_*`` (a stale, empty attempt) and
+    ``sharedtrunk_grid_*`` (where the actual seed_0 results landed). We gate
+    on the ``experiment`` key (only present on ablation cells) to keep just
+    the correct source. Same idea protects B5/B6 against any future
+    aug_grid-named-but-different ablation.
+
+    Cells are returned with two extra fields:
+      - ``label_convention``: ``"unlabeled" | "halu_class" | "true_class" | "two_class"``
+      - ``key.dataset``:     rewritten to the bare stem so NQ/SciQ rows align
+                             across training (B0) and ablation (B5/B6/C0) cells
+
+    Missing cells are not synthesized — if a cell isn't present in either
+    input list it simply won't appear here. The downstream JSON still carries
+    a ``view`` field listing the expected (model × dataset × convention) grid
+    so consumers can detect gaps.
+    """
+    out: list[dict] = []
+    for source_cells in (training_cells, ablation_cells):
+        for c in source_cells:
+            method = c["key"]["method"]
+            for conv_name, (m, kind, allowed_prefixes) in LABEL_CONVENTION_VIEW.items():
+                if method != m or c["kind"] != kind:
+                    continue
+                if kind == "ablation":
+                    experiment = c["key"].get("experiment", "")
+                    if not any(experiment.startswith(p) for p in allowed_prefixes):
+                        continue
+                else:
+                    # Training cells (B0): restrict to memmap configs only.
+                    # The legacy JSON+NPY baseline_comparison_{nq,sciq}.json
+                    # configs produce a different cell at the same key with
+                    # markedly different AUROCs — including both makes the
+                    # ablation comparison meaningless. B5/B6/C0 are memmap-only,
+                    # so memmap is the apples-to-apples B0 source.
+                    cfg_path = c["paths"].get("config", "")
+                    if not cfg_path.endswith("_memmap.json"):
+                        continue
+                model_label = c["key"]["model"]
+                if model_label not in LABEL_CONVENTION_MODELS:
+                    continue
+                bare_ds = _bare_dataset_label(c["key"]["dataset"], model_label)
+                if bare_ds not in LABEL_CONVENTION_DATASETS:
+                    continue
+                # Don't mutate the original cell — it's still referenced by
+                # the main results_table output.
+                new_key = dict(c["key"])
+                new_key["dataset"] = bare_ds
+                new_key["label_convention"] = conv_name
+                out.append({**c, "key": new_key})
+                break
+    return out
+
+
 def _filter_loss_decomposition(cells: list[dict]) -> list[dict]:
     """Pick out the §7.1 loss-decomposition 2x2 cells from a cells list.
 
@@ -1010,6 +1122,78 @@ def write_transfer_matrix_outputs(cells: list[dict], out_dir: Path) -> tuple[Pat
     return json_path, csv_path
 
 
+LABEL_CONVENTION_CSV_COLUMNS = [
+    "kind", "label_convention", "dataset", "model", "method", "seed", "status",
+    "metric_name", "metric_value",
+    "expected_rows", "actual_rows", "path",
+]
+
+
+def label_convention_cells_to_long_rows(cells: list[dict]) -> list[dict]:
+    """Long-form rows for the label-convention view (one extra leading column).
+
+    Mirrors ``cells_to_long_rows`` but emits ``label_convention`` as a top-level
+    column so the CSV pivots cleanly on (label_convention × dataset × model).
+    """
+    rows: list[dict] = []
+    for c in cells:
+        key = c["key"]
+        primary_path = next(iter(c["paths"].values()), "")
+        base = {
+            "kind":             c["kind"],
+            "label_convention": key.get("label_convention", ""),
+            "dataset":          key["dataset"],
+            "model":            key["model"],
+            "method":           key["method"],
+            "seed":             key["seed"] if key["seed"] is not None else "",
+            "status":           c["status"],
+            "expected_rows":    c["expected_rows"] if c["expected_rows"] is not None else "",
+            "actual_rows":      c["actual_rows"] if c["actual_rows"] is not None else "",
+            "path":             primary_path,
+        }
+        if c["metrics"]:
+            for metric_name, value in c["metrics"].items():
+                rows.append({**base, "metric_name": metric_name, "metric_value": value})
+        else:
+            rows.append({**base, "metric_name": "", "metric_value": ""})
+    return rows
+
+
+def write_label_convention_outputs(cells: list[dict], out_dir: Path) -> tuple[Path, Path]:
+    """Write the label-convention (B0/B5/B6/C0) view to its own pair of files.
+
+    Always emits both files (CSV gets a header-only row when ``cells`` is empty)
+    so downstream consumers can rely on the file's presence. The JSON payload
+    includes the expected (model × dataset × convention) grid so missing-cell
+    gaps stay visible after filtering.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = out_dir / "label_convention_table.json"
+    csv_path  = out_dir / "label_convention_table.csv"
+
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "git": _git_info(),
+        "view": "label_convention",
+        "conventions": list(LABEL_CONVENTION_VIEW.keys()),
+        "datasets": list(LABEL_CONVENTION_DATASETS),
+        "models": list(LABEL_CONVENTION_MODELS),
+        "cells": cells,
+    }
+    with open(json_path, "w") as f:
+        json.dump(payload, f, indent=2, default=str)
+
+    rows = label_convention_cells_to_long_rows(cells)
+    with open(csv_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=LABEL_CONVENTION_CSV_COLUMNS)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+    return json_path, csv_path
+
+
 def write_loss_decomposition_outputs(cells: list[dict], out_dir: Path) -> tuple[Path, Path]:
     """Write the §7.1 loss-decomposition view to its own pair of files.
 
@@ -1117,10 +1301,16 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    training_cells = collect_training_cells(include_smollm3=args.include_smollm3)
+    # Always collect ablation cells (cheap walk over configs/experiments/) so
+    # the label-convention view can pull B5/B6/C0 even when the main table
+    # excludes them. Merging into `cells` is still gated on --include-ablations.
+    ablation_cells = collect_ablation_cells()
+
     cells: list[dict] = []
-    cells += collect_training_cells(include_smollm3=args.include_smollm3)
+    cells += training_cells
     if args.include_ablations:
-        cells += collect_ablation_cells()
+        cells += ablation_cells
     cells += collect_sampling_cells()
     cells += collect_sep_cells()
     cells += collect_p_true_cells()
@@ -1132,6 +1322,11 @@ def main() -> None:
     ld_json, ld_csv = write_loss_decomposition_outputs(cells, args.out_dir)
     print(f"Wrote {ld_json}")
     print(f"Wrote {ld_csv}")
+
+    lc_cells = _filter_label_convention(training_cells, ablation_cells)
+    lc_json, lc_csv = write_label_convention_outputs(lc_cells, args.out_dir)
+    print(f"Wrote {lc_json}")
+    print(f"Wrote {lc_csv}")
 
     tx_cells: list[dict] = []
     if not args.no_transfer:
@@ -1152,6 +1347,9 @@ def main() -> None:
     ld_complete = sum(1 for c in ld_cells if c["status"] == "complete")
     print(f"  loss_decomposition (view) {ld_complete}/{len(ld_cells)} complete  "
           f"({len(LOSS_DECOMPOSITION_METHODS)} methods)")
+    lc_complete = sum(1 for c in lc_cells if c["status"] == "complete")
+    print(f"  label_convention   (view) {lc_complete}/{len(lc_cells)} complete  "
+          f"({len(LABEL_CONVENTION_VIEW)} conventions)")
     if not _HAS_SKLEARN:
         print()
         print("(note: sklearn not available — AUROC computed with numpy "
