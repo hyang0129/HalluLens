@@ -234,8 +234,11 @@ def _git_info() -> dict[str, str]:
 # have its own set; anything not listed here is dropped (keeps the table from
 # accidentally including run_size / hparams / etc.).
 _TRAINING_METRIC_KEYS = {
-    "contrastive_logprob_recon": ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
-    "contrastive":               ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
+    "contrastive_logprob_recon":     ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
+    "contrastive_logprob_recon_c0":  ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
+    "contrastive_logprob_recon_d2a": ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
+    "contrastive_logprob_recon_d2b": ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
+    "contrastive":                   ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
     "linear_probe":               ("auroc",),
     "saplma":                     ("auroc",),
     "saplma_logprob_recon":       ("auroc",),
