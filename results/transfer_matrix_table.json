@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-05-21T06:42:44-0400",
+  "generated_at": "2026-05-21T10:10:37-0400",
   "git": {
     "branch": "main",
-    "commit": "efbf926859432898ebb7acdc21d0a293efd301b5"
+    "commit": "eb725d294c894c031c4f8a92e6f369e817dddb25"
   },
   "view": "transfer_matrix",
   "datasets": [
@@ -10334,8 +10334,11 @@
         "seed": 0
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7083113486957875,
+        "n_tgt_test": 21609.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -10371,8 +10374,11 @@
         "seed": 1
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6138730481098191,
+        "n_tgt_test": 10269.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -10388,8 +10394,11 @@
         "seed": 1
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6623843594281335,
+        "n_tgt_test": 4155.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -10405,8 +10414,11 @@
         "seed": 1
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.766704902016359,
+        "n_tgt_test": 2797.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -10422,8 +10434,11 @@
         "seed": 1
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7660940356392338,
+        "n_tgt_test": 1000.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -10439,8 +10454,11 @@
         "seed": 1
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7088242274298231,
+        "n_tgt_test": 21609.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -10496,8 +10514,11 @@
         "seed": 2
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6492191467214622,
+        "n_tgt_test": 4155.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -10513,8 +10534,11 @@
         "seed": 2
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7584420651090207,
+        "n_tgt_test": 2797.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -10530,8 +10554,11 @@
         "seed": 2
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7600972134424494,
+        "n_tgt_test": 1000.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -10547,8 +10574,11 @@
         "seed": 2
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.696895706067455,
+        "n_tgt_test": 21609.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -10584,8 +10614,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6093614310413292,
+        "n_tgt_test": 10269.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -10601,8 +10634,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6261301157825656,
+        "n_tgt_test": 4155.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -10618,8 +10654,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7697237162536916,
+        "n_tgt_test": 2797.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -10635,8 +10674,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7578505407390956,
+        "n_tgt_test": 1000.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -10652,8 +10694,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7072822586211021,
+        "n_tgt_test": 21609.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -10729,8 +10774,11 @@
         "seed": 4
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7718594495221137,
+        "n_tgt_test": 2797.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -10746,8 +10794,11 @@
         "seed": 4
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7629333173873675,
+        "n_tgt_test": 1000.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -10763,8 +10814,11 @@
         "seed": 4
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7002517994190949,
+        "n_tgt_test": 21609.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -12750,8 +12804,11 @@
         "seed": 0
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6567955933242543,
+        "n_tgt_test": 10269.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -12767,8 +12824,11 @@
         "seed": 0
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.655759576706723,
+        "n_tgt_test": 4155.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -12784,8 +12844,11 @@
         "seed": 0
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8076839714968804,
+        "n_tgt_test": 2797.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -12801,8 +12864,11 @@
         "seed": 0
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.747373186858246,
+        "n_tgt_test": 1000.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -12818,8 +12884,11 @@
         "seed": 0
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8180088886872381,
+        "n_tgt_test": 21609.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -12855,8 +12924,11 @@
         "seed": 1
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6684504761358291,
+        "n_tgt_test": 10269.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -12872,8 +12944,11 @@
         "seed": 1
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6740243340773244,
+        "n_tgt_test": 4155.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -12889,8 +12964,11 @@
         "seed": 1
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8177802156518181,
+        "n_tgt_test": 2797.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -12906,8 +12984,11 @@
         "seed": 1
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7742905468896824,
+        "n_tgt_test": 1000.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -12923,8 +13004,11 @@
         "seed": 1
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.814795125052765,
+        "n_tgt_test": 21609.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -12940,8 +13024,11 @@
         "seed": 2
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.670220730869532,
+        "n_tgt_test": 7405.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -12957,8 +13044,11 @@
         "seed": 2
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.657524330576836,
+        "n_tgt_test": 10269.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -12974,8 +13064,11 @@
         "seed": 2
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6690187021263075,
+        "n_tgt_test": 4155.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -12991,8 +13084,11 @@
         "seed": 2
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8218705088747136,
+        "n_tgt_test": 2797.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -13008,8 +13104,11 @@
         "seed": 2
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7672643556406008,
+        "n_tgt_test": 1000.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -13025,8 +13124,11 @@
         "seed": 2
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8123790066755623,
+        "n_tgt_test": 21609.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -13042,8 +13144,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6428716234781116,
+        "n_tgt_test": 7405.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -13059,8 +13164,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6437126715177791,
+        "n_tgt_test": 10269.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -13076,8 +13184,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6255222137307134,
+        "n_tgt_test": 4155.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -13093,8 +13204,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8157742491588779,
+        "n_tgt_test": 2797.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -13110,8 +13224,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7492525328458424,
+        "n_tgt_test": 1000.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -13127,8 +13244,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8163022642671716,
+        "n_tgt_test": 21609.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -13144,8 +13264,11 @@
         "seed": 4
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6587561633400844,
+        "n_tgt_test": 7405.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -13161,8 +13284,11 @@
         "seed": 4
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6688155466520814,
+        "n_tgt_test": 10269.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -13178,8 +13304,11 @@
         "seed": 4
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6561953991768298,
+        "n_tgt_test": 4155.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -13195,8 +13324,11 @@
         "seed": 4
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8172339169781625,
+        "n_tgt_test": 2797.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -13212,8 +13344,11 @@
         "seed": 4
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7694768584169072,
+        "n_tgt_test": 1000.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -13229,8 +13364,11 @@
         "seed": 4
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8125043006902831,
+        "n_tgt_test": 21609.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25398,8 +25536,11 @@
         "seed": 0
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6477445102220771,
+        "n_tgt_test": 10269.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25415,8 +25556,11 @@
         "seed": 0
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7217445548724872,
+        "n_tgt_test": 4155.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25432,8 +25576,11 @@
         "seed": 0
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7552026416597956,
+        "n_tgt_test": 2797.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25449,8 +25596,11 @@
         "seed": 0
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7907157871030703,
+        "n_tgt_test": 1000.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25466,8 +25616,11 @@
         "seed": 0
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7427774768257016,
+        "n_tgt_test": 21609.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25503,8 +25656,11 @@
         "seed": 1
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6636542323633723,
+        "n_tgt_test": 10269.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25520,8 +25676,11 @@
         "seed": 1
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7477137631458619,
+        "n_tgt_test": 4155.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25537,8 +25696,11 @@
         "seed": 1
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7265077304844225,
+        "n_tgt_test": 2797.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25554,8 +25716,11 @@
         "seed": 1
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7842128969296599,
+        "n_tgt_test": 1000.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25571,8 +25736,11 @@
         "seed": 1
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7513420820729407,
+        "n_tgt_test": 21609.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25608,8 +25776,11 @@
         "seed": 2
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.639147694092573,
+        "n_tgt_test": 10269.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25625,8 +25796,11 @@
         "seed": 2
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7468467148257855,
+        "n_tgt_test": 4155.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25642,8 +25816,11 @@
         "seed": 2
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7070641517770844,
+        "n_tgt_test": 2797.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25659,8 +25836,11 @@
         "seed": 2
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7849870505217326,
+        "n_tgt_test": 1000.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25676,8 +25856,11 @@
         "seed": 2
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.750551625126598,
+        "n_tgt_test": 21609.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25713,8 +25896,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6432988146430333,
+        "n_tgt_test": 10269.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25730,8 +25916,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7174371404982635,
+        "n_tgt_test": 4155.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25747,8 +25936,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7175315709117592,
+        "n_tgt_test": 2797.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25764,8 +25956,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7937654830718415,
+        "n_tgt_test": 1000.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25781,8 +25976,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7575727098410917,
+        "n_tgt_test": 21609.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25818,8 +26016,11 @@
         "seed": 4
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6234871063538863,
+        "n_tgt_test": 10269.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25835,8 +26036,11 @@
         "seed": 4
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6994235159680231,
+        "n_tgt_test": 4155.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25852,8 +26056,11 @@
         "seed": 4
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7159459569638797,
+        "n_tgt_test": 2797.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25869,8 +26076,11 @@
         "seed": 4
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7805814128068463,
+        "n_tgt_test": 1000.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -25886,8 +26096,11 @@
         "seed": 4
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7252148214143848,
+        "n_tgt_test": 21609.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -27853,8 +28066,11 @@
         "seed": 0
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6875937075851635,
+        "n_tgt_test": 7405.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -27870,8 +28086,11 @@
         "seed": 0
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6745002178560378,
+        "n_tgt_test": 10269.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -27887,8 +28106,11 @@
         "seed": 0
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7651630355139468,
+        "n_tgt_test": 4155.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -27904,8 +28126,11 @@
         "seed": 0
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.840892862074271,
+        "n_tgt_test": 2797.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -27921,8 +28146,11 @@
         "seed": 0
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7563011410554762,
+        "n_tgt_test": 1000.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -27938,8 +28166,11 @@
         "seed": 0
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8361942219367604,
+        "n_tgt_test": 21609.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -27955,8 +28186,11 @@
         "seed": 1
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6948866341810738,
+        "n_tgt_test": 7405.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -27972,8 +28206,11 @@
         "seed": 1
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6610309365284689,
+        "n_tgt_test": 10269.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -27989,8 +28226,11 @@
         "seed": 1
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7635474548298056,
+        "n_tgt_test": 4155.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -28006,8 +28246,11 @@
         "seed": 1
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8534107631067118,
+        "n_tgt_test": 2797.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -28023,8 +28266,11 @@
         "seed": 1
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7661211620749192,
+        "n_tgt_test": 1000.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -28040,8 +28286,11 @@
         "seed": 1
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8397037692867859,
+        "n_tgt_test": 21609.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -28057,8 +28306,11 @@
         "seed": 2
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6743467058273813,
+        "n_tgt_test": 7405.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -28074,8 +28326,11 @@
         "seed": 2
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6818833686823369,
+        "n_tgt_test": 10269.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -28091,8 +28346,11 @@
         "seed": 2
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7747027691893749,
+        "n_tgt_test": 4155.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -28108,8 +28366,11 @@
         "seed": 2
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8555575719559039,
+        "n_tgt_test": 2797.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -28125,8 +28386,11 @@
         "seed": 2
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7700013137151865,
+        "n_tgt_test": 1000.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -28142,8 +28406,11 @@
         "seed": 2
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8395193813394962,
+        "n_tgt_test": 21609.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -28159,8 +28426,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6657869301114745,
+        "n_tgt_test": 7405.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -28176,8 +28446,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6889868350858929,
+        "n_tgt_test": 10269.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -28193,8 +28466,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7722842028640823,
+        "n_tgt_test": 4155.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -28210,8 +28486,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8578496931345513,
+        "n_tgt_test": 2797.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -28227,8 +28506,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7662806846332858,
+        "n_tgt_test": 1000.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -28244,8 +28526,11 @@
         "seed": 3
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8402250585128718,
+        "n_tgt_test": 21609.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -28261,8 +28546,11 @@
         "seed": 4
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6832420176668224,
+        "n_tgt_test": 7405.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -28278,8 +28566,11 @@
         "seed": 4
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6380537201265313,
+        "n_tgt_test": 10269.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -28295,8 +28586,11 @@
         "seed": 4
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7416037851433843,
+        "n_tgt_test": 4155.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -28312,8 +28606,11 @@
         "seed": 4
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8424262030348577,
+        "n_tgt_test": 2797.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -28329,8 +28626,11 @@
         "seed": 4
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.7658818782373696,
+        "n_tgt_test": 1000.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -28346,8 +28646,11 @@
         "seed": 4
       },
       "kind": "transfer",
-      "status": "missing",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8364128054670021,
+        "n_tgt_test": 21609.0
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
