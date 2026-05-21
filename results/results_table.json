@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-05-20T23:13:09-0400",
+  "generated_at": "2026-05-21T06:39:55-0400",
   "git": {
     "branch": "main",
-    "commit": "ed156f09c5cf38533d1e5d927c9741411c628953"
+    "commit": "efbf926859432898ebb7acdc21d0a293efd301b5"
   },
   "cells": [
     {
@@ -1036,8 +1036,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.5972608028320299,
+        "mean_logprob_auroc": 0.6131585856550595,
+        "min_logprob_auroc": 0.6212146790426057
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -1055,8 +1059,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.6131585856550595,
+        "perplexity_auroc": 0.6131585856550595,
+        "seq_logprob_auroc": 0.6115167060160008
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -2419,8 +2427,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.6340540239859378,
+        "mean_logprob_auroc": 0.6282633558062434,
+        "min_logprob_auroc": 0.6012489597935162
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -2438,8 +2450,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.6282633558062434,
+        "perplexity_auroc": 0.6282634003070556,
+        "seq_logprob_auroc": 0.6282634448078678
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -4838,8 +4854,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.6270098359722533,
+        "mean_logprob_auroc": 0.6218781368626676,
+        "min_logprob_auroc": 0.6016006318077045
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -4857,8 +4877,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.6218781368626676,
+        "perplexity_auroc": 0.621878096432667,
+        "seq_logprob_auroc": 0.6218781368626676
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -6096,8 +6120,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.5898459269156646,
+        "mean_logprob_auroc": 0.595383262280212,
+        "min_logprob_auroc": 0.5834754676937456
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -6115,8 +6143,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.595383262280212,
+        "perplexity_auroc": 0.5953834028681055,
+        "seq_logprob_auroc": 0.5953680787877049
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -7354,8 +7386,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.6564290501826988,
+        "mean_logprob_auroc": 0.6578648549741066,
+        "min_logprob_auroc": 0.664336186524896
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -7373,8 +7409,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.6578648549741066,
+        "perplexity_auroc": 0.6578644545823633,
+        "seq_logprob_auroc": 0.6578648549741066
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -8832,8 +8872,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.6041235268553315,
+        "mean_logprob_auroc": 0.632099242962306,
+        "min_logprob_auroc": 0.7132515496987298
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -8851,8 +8895,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.632099242962306,
+        "perplexity_auroc": 0.632099242962306,
+        "seq_logprob_auroc": 0.6313967795609827
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -10310,8 +10358,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.705954912411514,
+        "mean_logprob_auroc": 0.72818046607779,
+        "min_logprob_auroc": 0.7851488169209303
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -10329,8 +10381,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.72818046607779,
+        "perplexity_auroc": 0.72818046607779,
+        "seq_logprob_auroc": 0.72818046607779
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -11578,8 +11634,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.5422852847209172,
+        "mean_logprob_auroc": 0.5446173822418889,
+        "min_logprob_auroc": 0.5426056277869846
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -11597,8 +11657,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.5446173822418889,
+        "perplexity_auroc": 0.5446173822418889,
+        "seq_logprob_auroc": 0.5441945293946797
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -12741,8 +12805,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.5723387883792508,
+        "mean_logprob_auroc": 0.5604074393814279,
+        "min_logprob_auroc": 0.5254766909391186
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -12760,8 +12828,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.5604074393814279,
+        "perplexity_auroc": 0.5604074393814279,
+        "seq_logprob_auroc": 0.5604074393814279
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -13904,8 +13976,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.5637018416069819,
+        "mean_logprob_auroc": 0.5693609803065396,
+        "min_logprob_auroc": 0.585040474635831
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -13923,8 +13999,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.5693609803065396,
+        "perplexity_auroc": 0.5693609845900955,
+        "seq_logprob_auroc": 0.569381472838725
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -15067,8 +15147,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.6422290744049981,
+        "mean_logprob_auroc": 0.6390265308381664,
+        "min_logprob_auroc": 0.626510135139259
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -15086,8 +15170,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.6390265308381664,
+        "perplexity_auroc": 0.6390265910113893,
+        "seq_logprob_auroc": 0.6390280179763893
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -15415,1734 +15503,6 @@
         "eval_metrics": "runs/baseline_comparison_searchqa_qwen3_memmap/searchqa_qwen3_memmap/act_vit/seed_4/eval_metrics.json",
         "eval_metrics_extended": null,
         "config": "configs/experiments/baseline_comparison_searchqa_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b0",
-        "seed": 0,
-        "experiment": "aug_grid_nq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b0/seed_0",
-        "eval_metrics": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b0/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b1",
-        "seed": 0,
-        "experiment": "aug_grid_nq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b1/seed_0",
-        "eval_metrics": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b1/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b2",
-        "seed": 0,
-        "experiment": "aug_grid_nq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b2/seed_0",
-        "eval_metrics": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b2/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b3",
-        "seed": 0,
-        "experiment": "aug_grid_nq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b3/seed_0",
-        "eval_metrics": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b3/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b4",
-        "seed": 0,
-        "experiment": "aug_grid_nq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b4/seed_0",
-        "eval_metrics": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b4/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b5",
-        "seed": 0,
-        "experiment": "aug_grid_nq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b5/seed_0",
-        "eval_metrics": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b5/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b6",
-        "seed": 0,
-        "experiment": "aug_grid_nq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b6/seed_0",
-        "eval_metrics": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b6/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b7",
-        "seed": 0,
-        "experiment": "aug_grid_nq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b7/seed_0",
-        "eval_metrics": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b7/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b8",
-        "seed": 0,
-        "experiment": "aug_grid_nq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b8/seed_0",
-        "eval_metrics": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b8/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b9",
-        "seed": 0,
-        "experiment": "aug_grid_nq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b9/seed_0",
-        "eval_metrics": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b9/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b0",
-        "seed": 0,
-        "experiment": "aug_grid_nq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b0/seed_0",
-        "eval_metrics": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b0/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b1",
-        "seed": 0,
-        "experiment": "aug_grid_nq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b1/seed_0",
-        "eval_metrics": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b1/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b2",
-        "seed": 0,
-        "experiment": "aug_grid_nq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b2/seed_0",
-        "eval_metrics": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b2/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b3",
-        "seed": 0,
-        "experiment": "aug_grid_nq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b3/seed_0",
-        "eval_metrics": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b3/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b4",
-        "seed": 0,
-        "experiment": "aug_grid_nq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b4/seed_0",
-        "eval_metrics": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b4/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b5",
-        "seed": 0,
-        "experiment": "aug_grid_nq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b5/seed_0",
-        "eval_metrics": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b5/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b6",
-        "seed": 0,
-        "experiment": "aug_grid_nq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b6/seed_0",
-        "eval_metrics": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b6/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b7",
-        "seed": 0,
-        "experiment": "aug_grid_nq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b7/seed_0",
-        "eval_metrics": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b7/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b8",
-        "seed": 0,
-        "experiment": "aug_grid_nq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b8/seed_0",
-        "eval_metrics": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b8/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b9",
-        "seed": 0,
-        "experiment": "aug_grid_nq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b9/seed_0",
-        "eval_metrics": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b9/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b0",
-        "seed": 0,
-        "experiment": "aug_grid_sciq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b0/seed_0",
-        "eval_metrics": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b0/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b1",
-        "seed": 0,
-        "experiment": "aug_grid_sciq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b1/seed_0",
-        "eval_metrics": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b1/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b2",
-        "seed": 0,
-        "experiment": "aug_grid_sciq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b2/seed_0",
-        "eval_metrics": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b2/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b3",
-        "seed": 0,
-        "experiment": "aug_grid_sciq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b3/seed_0",
-        "eval_metrics": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b3/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b4",
-        "seed": 0,
-        "experiment": "aug_grid_sciq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b4/seed_0",
-        "eval_metrics": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b4/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b5",
-        "seed": 0,
-        "experiment": "aug_grid_sciq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b5/seed_0",
-        "eval_metrics": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b5/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b6",
-        "seed": 0,
-        "experiment": "aug_grid_sciq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b6/seed_0",
-        "eval_metrics": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b6/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b7",
-        "seed": 0,
-        "experiment": "aug_grid_sciq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b7/seed_0",
-        "eval_metrics": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b7/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b8",
-        "seed": 0,
-        "experiment": "aug_grid_sciq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b8/seed_0",
-        "eval_metrics": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b8/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b9",
-        "seed": 0,
-        "experiment": "aug_grid_sciq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b9/seed_0",
-        "eval_metrics": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b9/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b0",
-        "seed": 0,
-        "experiment": "aug_grid_sciq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b0/seed_0",
-        "eval_metrics": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b0/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b1",
-        "seed": 0,
-        "experiment": "aug_grid_sciq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b1/seed_0",
-        "eval_metrics": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b1/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b2",
-        "seed": 0,
-        "experiment": "aug_grid_sciq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b2/seed_0",
-        "eval_metrics": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b2/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b3",
-        "seed": 0,
-        "experiment": "aug_grid_sciq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b3/seed_0",
-        "eval_metrics": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b3/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b4",
-        "seed": 0,
-        "experiment": "aug_grid_sciq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b4/seed_0",
-        "eval_metrics": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b4/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b5",
-        "seed": 0,
-        "experiment": "aug_grid_sciq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b5/seed_0",
-        "eval_metrics": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b5/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b6",
-        "seed": 0,
-        "experiment": "aug_grid_sciq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b6/seed_0",
-        "eval_metrics": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b6/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b7",
-        "seed": 0,
-        "experiment": "aug_grid_sciq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b7/seed_0",
-        "eval_metrics": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b7/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b8",
-        "seed": 0,
-        "experiment": "aug_grid_sciq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b8/seed_0",
-        "eval_metrics": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b8/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b9",
-        "seed": 0,
-        "experiment": "aug_grid_sciq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b9/seed_0",
-        "eval_metrics": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b9/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/aug_grid_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b2",
-        "seed": 0,
-        "experiment": "channel_dropout_ablation_nq_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/channel_dropout_ablation_nq_memmap/nq_memmap/contrastive_logprob_recon_b2/seed_0",
-        "eval_metrics": "runs/channel_dropout_ablation_nq_memmap/nq_memmap/contrastive_logprob_recon_b2/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/channel_dropout_ablation_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_cd1",
-        "seed": 0,
-        "experiment": "channel_dropout_ablation_nq_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/channel_dropout_ablation_nq_memmap/nq_memmap/contrastive_logprob_recon_cd1/seed_0",
-        "eval_metrics": "runs/channel_dropout_ablation_nq_memmap/nq_memmap/contrastive_logprob_recon_cd1/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/channel_dropout_ablation_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_cd2",
-        "seed": 0,
-        "experiment": "channel_dropout_ablation_nq_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/channel_dropout_ablation_nq_memmap/nq_memmap/contrastive_logprob_recon_cd2/seed_0",
-        "eval_metrics": "runs/channel_dropout_ablation_nq_memmap/nq_memmap/contrastive_logprob_recon_cd2/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/channel_dropout_ablation_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_cd3",
-        "seed": 0,
-        "experiment": "channel_dropout_ablation_nq_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/channel_dropout_ablation_nq_memmap/nq_memmap/contrastive_logprob_recon_cd3/seed_0",
-        "eval_metrics": "runs/channel_dropout_ablation_nq_memmap/nq_memmap/contrastive_logprob_recon_cd3/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/channel_dropout_ablation_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b2",
-        "seed": 0,
-        "experiment": "channel_dropout_ablation_nq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/channel_dropout_ablation_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b2/seed_0",
-        "eval_metrics": "runs/channel_dropout_ablation_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b2/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/channel_dropout_ablation_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_cd1",
-        "seed": 0,
-        "experiment": "channel_dropout_ablation_nq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/channel_dropout_ablation_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_cd1/seed_0",
-        "eval_metrics": "runs/channel_dropout_ablation_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_cd1/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/channel_dropout_ablation_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_cd2",
-        "seed": 0,
-        "experiment": "channel_dropout_ablation_nq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/channel_dropout_ablation_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_cd2/seed_0",
-        "eval_metrics": "runs/channel_dropout_ablation_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_cd2/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/channel_dropout_ablation_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_cd3",
-        "seed": 0,
-        "experiment": "channel_dropout_ablation_nq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/channel_dropout_ablation_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_cd3/seed_0",
-        "eval_metrics": "runs/channel_dropout_ablation_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_cd3/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/channel_dropout_ablation_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_b2",
-        "seed": 0,
-        "experiment": "channel_dropout_ablation_sciq_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/channel_dropout_ablation_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b2/seed_0",
-        "eval_metrics": "runs/channel_dropout_ablation_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b2/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/channel_dropout_ablation_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_cd1",
-        "seed": 0,
-        "experiment": "channel_dropout_ablation_sciq_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/channel_dropout_ablation_sciq_memmap/sciq_memmap/contrastive_logprob_recon_cd1/seed_0",
-        "eval_metrics": "runs/channel_dropout_ablation_sciq_memmap/sciq_memmap/contrastive_logprob_recon_cd1/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/channel_dropout_ablation_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_cd2",
-        "seed": 0,
-        "experiment": "channel_dropout_ablation_sciq_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/channel_dropout_ablation_sciq_memmap/sciq_memmap/contrastive_logprob_recon_cd2/seed_0",
-        "eval_metrics": "runs/channel_dropout_ablation_sciq_memmap/sciq_memmap/contrastive_logprob_recon_cd2/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/channel_dropout_ablation_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_cd3",
-        "seed": 0,
-        "experiment": "channel_dropout_ablation_sciq_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/channel_dropout_ablation_sciq_memmap/sciq_memmap/contrastive_logprob_recon_cd3/seed_0",
-        "eval_metrics": "runs/channel_dropout_ablation_sciq_memmap/sciq_memmap/contrastive_logprob_recon_cd3/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/channel_dropout_ablation_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_b2",
-        "seed": 0,
-        "experiment": "channel_dropout_ablation_sciq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/channel_dropout_ablation_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b2/seed_0",
-        "eval_metrics": "runs/channel_dropout_ablation_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b2/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/channel_dropout_ablation_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_cd1",
-        "seed": 0,
-        "experiment": "channel_dropout_ablation_sciq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/channel_dropout_ablation_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_cd1/seed_0",
-        "eval_metrics": "runs/channel_dropout_ablation_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_cd1/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/channel_dropout_ablation_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_cd2",
-        "seed": 0,
-        "experiment": "channel_dropout_ablation_sciq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/channel_dropout_ablation_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_cd2/seed_0",
-        "eval_metrics": "runs/channel_dropout_ablation_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_cd2/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/channel_dropout_ablation_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_cd3",
-        "seed": 0,
-        "experiment": "channel_dropout_ablation_sciq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/channel_dropout_ablation_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_cd3/seed_0",
-        "eval_metrics": "runs/channel_dropout_ablation_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_cd3/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/channel_dropout_ablation_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_c0",
-        "seed": 0,
-        "experiment": "sharedtrunk_grid_nq_llama_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.5105698196032384,
-        "mahalanobis_auroc": 0.5225467834333475,
-        "knn_auroc": 0.5207701742221412
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/sharedtrunk_grid_nq_llama_memmap/nq_memmap/contrastive_logprob_recon_c0/seed_0",
-        "eval_metrics": "runs/sharedtrunk_grid_nq_llama_memmap/nq_memmap/contrastive_logprob_recon_c0/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/sharedtrunk_grid_nq_llama_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_d2a",
-        "seed": 0,
-        "experiment": "sharedtrunk_grid_nq_llama_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.43204838810356494,
-        "mahalanobis_auroc": 0.496327281868042,
-        "knn_auroc": 0.48392461789616403
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/sharedtrunk_grid_nq_llama_memmap/nq_memmap/contrastive_logprob_recon_d2a/seed_0",
-        "eval_metrics": "runs/sharedtrunk_grid_nq_llama_memmap/nq_memmap/contrastive_logprob_recon_d2a/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/sharedtrunk_grid_nq_llama_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_d2b",
-        "seed": 0,
-        "experiment": "sharedtrunk_grid_nq_llama_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.5353966574947124,
-        "mahalanobis_auroc": 0.549983635569187,
-        "knn_auroc": 0.585351753721502
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/sharedtrunk_grid_nq_llama_memmap/nq_memmap/contrastive_logprob_recon_d2b/seed_0",
-        "eval_metrics": "runs/sharedtrunk_grid_nq_llama_memmap/nq_memmap/contrastive_logprob_recon_d2b/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/sharedtrunk_grid_nq_llama_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_c0",
-        "seed": 0,
-        "experiment": "sharedtrunk_grid_nq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.5179894008297719,
-        "mahalanobis_auroc": 0.5187155112562132,
-        "knn_auroc": 0.5174534764813894
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/sharedtrunk_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_c0/seed_0",
-        "eval_metrics": "runs/sharedtrunk_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_c0/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/sharedtrunk_grid_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_d2a",
-        "seed": 0,
-        "experiment": "sharedtrunk_grid_nq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.37217173282339444,
-        "mahalanobis_auroc": 0.34323341957771486,
-        "knn_auroc": 0.30972663654119187
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/sharedtrunk_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_d2a/seed_0",
-        "eval_metrics": "runs/sharedtrunk_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_d2a/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/sharedtrunk_grid_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_d2b",
-        "seed": 0,
-        "experiment": "sharedtrunk_grid_nq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.32989837256772025,
-        "mahalanobis_auroc": 0.3810498191430496,
-        "knn_auroc": 0.2877231082891501
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/sharedtrunk_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_d2b/seed_0",
-        "eval_metrics": "runs/sharedtrunk_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_d2b/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/sharedtrunk_grid_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_c0",
-        "seed": 0,
-        "experiment": "sharedtrunk_grid_sciq_llama_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.5262019271838854,
-        "mahalanobis_auroc": 0.5451085749431925,
-        "knn_auroc": 0.5281602911277784
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/sharedtrunk_grid_sciq_llama_memmap/sciq_memmap/contrastive_logprob_recon_c0/seed_0",
-        "eval_metrics": "runs/sharedtrunk_grid_sciq_llama_memmap/sciq_memmap/contrastive_logprob_recon_c0/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/sharedtrunk_grid_sciq_llama_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_d2a",
-        "seed": 0,
-        "experiment": "sharedtrunk_grid_sciq_llama_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.560788300216979,
-        "mahalanobis_auroc": 0.6222343715296168,
-        "knn_auroc": 0.6827493123302182
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/sharedtrunk_grid_sciq_llama_memmap/sciq_memmap/contrastive_logprob_recon_d2a/seed_0",
-        "eval_metrics": "runs/sharedtrunk_grid_sciq_llama_memmap/sciq_memmap/contrastive_logprob_recon_d2a/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/sharedtrunk_grid_sciq_llama_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_d2b",
-        "seed": 0,
-        "experiment": "sharedtrunk_grid_sciq_llama_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.5882288872563257,
-        "mahalanobis_auroc": 0.6151227554629171,
-        "knn_auroc": 0.6760819053151321
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/sharedtrunk_grid_sciq_llama_memmap/sciq_memmap/contrastive_logprob_recon_d2b/seed_0",
-        "eval_metrics": "runs/sharedtrunk_grid_sciq_llama_memmap/sciq_memmap/contrastive_logprob_recon_d2b/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/sharedtrunk_grid_sciq_llama_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_c0",
-        "seed": 0,
-        "experiment": "sharedtrunk_grid_sciq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.5398102619923429,
-        "mahalanobis_auroc": 0.5434558216350124,
-        "knn_auroc": 0.5360427145109226
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/sharedtrunk_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_c0/seed_0",
-        "eval_metrics": "runs/sharedtrunk_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_c0/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/sharedtrunk_grid_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_d2a",
-        "seed": 0,
-        "experiment": "sharedtrunk_grid_sciq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.5714238795886194,
-        "mahalanobis_auroc": 0.6200735680504468,
-        "knn_auroc": 0.6042855266121162
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/sharedtrunk_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_d2a/seed_0",
-        "eval_metrics": "runs/sharedtrunk_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_d2a/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/sharedtrunk_grid_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_d2b",
-        "seed": 0,
-        "experiment": "sharedtrunk_grid_sciq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {
-        "cosine_auroc": 0.7145015389235042,
-        "mahalanobis_auroc": 0.7415875309661436,
-        "knn_auroc": 0.7571034456872607
-      },
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/sharedtrunk_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_d2b/seed_0",
-        "eval_metrics": "runs/sharedtrunk_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_d2b/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/sharedtrunk_grid_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_c1",
-        "seed": 0,
-        "experiment": "twin_grid_nq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/twin_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_c1/seed_0",
-        "eval_metrics": "runs/twin_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_c1/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/twin_grid_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_c2",
-        "seed": 0,
-        "experiment": "twin_grid_nq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/twin_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_c2/seed_0",
-        "eval_metrics": "runs/twin_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_c2/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/twin_grid_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_c3",
-        "seed": 0,
-        "experiment": "twin_grid_nq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/twin_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_c3/seed_0",
-        "eval_metrics": "runs/twin_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_c3/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/twin_grid_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_c1",
-        "seed": 0,
-        "experiment": "twin_grid_nq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/twin_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_c1/seed_0",
-        "eval_metrics": "runs/twin_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_c1/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/twin_grid_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_c2",
-        "seed": 0,
-        "experiment": "twin_grid_nq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/twin_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_c2/seed_0",
-        "eval_metrics": "runs/twin_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_c2/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/twin_grid_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_c3",
-        "seed": 0,
-        "experiment": "twin_grid_nq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/twin_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_c3/seed_0",
-        "eval_metrics": "runs/twin_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_c3/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/twin_grid_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_c1",
-        "seed": 0,
-        "experiment": "twin_grid_sciq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/twin_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_c1/seed_0",
-        "eval_metrics": "runs/twin_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_c1/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/twin_grid_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_c2",
-        "seed": 0,
-        "experiment": "twin_grid_sciq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/twin_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_c2/seed_0",
-        "eval_metrics": "runs/twin_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_c2/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/twin_grid_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_c3",
-        "seed": 0,
-        "experiment": "twin_grid_sciq_memmap"
-      },
-      "kind": "ablation",
-      "status": "complete",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/twin_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_c3/seed_0",
-        "eval_metrics": "runs/twin_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_c3/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/twin_grid_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_c1",
-        "seed": 0,
-        "experiment": "twin_grid_sciq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/twin_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_c1/seed_0",
-        "eval_metrics": "runs/twin_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_c1/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/twin_grid_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_c2",
-        "seed": 0,
-        "experiment": "twin_grid_sciq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/twin_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_c2/seed_0",
-        "eval_metrics": "runs/twin_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_c2/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/twin_grid_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_c3",
-        "seed": 0,
-        "experiment": "twin_grid_sciq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/twin_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_c3/seed_0",
-        "eval_metrics": "runs/twin_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_c3/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/twin_grid_sciq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_c0",
-        "seed": 0,
-        "experiment": "unlabeled_ablation_nq_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/unlabeled_ablation_nq_memmap/nq_memmap/contrastive_logprob_recon_c0/seed_0",
-        "eval_metrics": "runs/unlabeled_ablation_nq_memmap/nq_memmap/contrastive_logprob_recon_c0/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/unlabeled_ablation_nq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "nq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_c0",
-        "seed": 0,
-        "experiment": "unlabeled_ablation_nq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/unlabeled_ablation_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_c0/seed_0",
-        "eval_metrics": "runs/unlabeled_ablation_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_c0/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/unlabeled_ablation_nq_qwen3_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_memmap",
-        "model": "Llama-3.1-8B-Instruct",
-        "method": "contrastive_logprob_recon_c0",
-        "seed": 0,
-        "experiment": "unlabeled_ablation_sciq_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/unlabeled_ablation_sciq_memmap/sciq_memmap/contrastive_logprob_recon_c0/seed_0",
-        "eval_metrics": "runs/unlabeled_ablation_sciq_memmap/sciq_memmap/contrastive_logprob_recon_c0/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/unlabeled_ablation_sciq_memmap.json"
-      }
-    },
-    {
-      "key": {
-        "dataset": "sciq_qwen3_memmap",
-        "model": "Qwen3-8B",
-        "method": "contrastive_logprob_recon_c0",
-        "seed": 0,
-        "experiment": "unlabeled_ablation_sciq_qwen3_memmap"
-      },
-      "kind": "ablation",
-      "status": "pending",
-      "metrics": {},
-      "expected_rows": null,
-      "actual_rows": null,
-      "paths": {
-        "run_dir": "runs/unlabeled_ablation_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_c0/seed_0",
-        "eval_metrics": "runs/unlabeled_ablation_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_c0/seed_0/eval_metrics.json",
-        "eval_metrics_extended": null,
-        "config": "configs/experiments/unlabeled_ablation_sciq_qwen3_memmap.json"
       }
     },
     {

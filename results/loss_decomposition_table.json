@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-05-20T21:08:00-0400",
+  "generated_at": "2026-05-21T06:39:55-0400",
   "git": {
     "branch": "main",
-    "commit": "e6fe3acfe8b9725da01f7663368b0ecc41ac7a32"
+    "commit": "efbf926859432898ebb7acdc21d0a293efd301b5"
   },
   "view": "loss_decomposition",
   "methods": [
