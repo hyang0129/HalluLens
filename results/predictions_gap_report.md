@@ -1,6 +1,6 @@
 # Predictions Gap Report
 
-Generated: 2026-05-21 10:56 UTC
+Generated: 2026-05-21 11:01 UTC
 
 Source of truth: `results/results_table.csv` and `results/transfer_matrix_table.csv` (produced by `scripts/results_table.py` — re-run that first if numbers feel stale). Local cache: `results/preds` (synced by `scripts/pull_predictions.py`).
 
@@ -88,24 +88,9 @@ The headline `contrastive_logprob_recon` emits per-sample distance scores in `pr
 
 None — every cell has a Summary AUROC in results_table.csv.
 
-### Missing Predictions — run `scripts/pull_predictions.py` (14)
+### Missing Predictions
 
-| Dataset | Model | Method | Summary AUROC seeds | Predictions seeds |
-|---------|-------|--------|---------------------|-------------------|
-| hotpotqa | Llama-3.1-8B-Instruct | contrastive | 5/5 | 0/5 |
-| hotpotqa | Llama-3.1-8B-Instruct | icr_probe | 5/5 | 0/5 |
-| hotpotqa | Llama-3.1-8B-Instruct | saplma_logprob_recon | 5/5 | 0/5 |
-| hotpotqa | Qwen3-8B | contrastive | 5/5 | 0/5 |
-| hotpotqa | Qwen3-8B | icr_probe | 5/5 | 0/5 |
-| hotpotqa | Qwen3-8B | saplma_logprob_recon | 5/5 | 0/5 |
-| popqa | Llama-3.1-8B-Instruct | contrastive | 5/5 | 0/5 |
-| popqa | Llama-3.1-8B-Instruct | saplma_logprob_recon | 5/5 | 0/5 |
-| popqa | Qwen3-8B | contrastive | 5/5 | 0/5 |
-| popqa | Qwen3-8B | saplma_logprob_recon | 5/5 | 0/5 |
-| sciq | Llama-3.1-8B-Instruct | icr_probe | 5/5 | 0/5 |
-| sciq | Qwen3-8B | icr_probe | 5/5 | 0/5 |
-| searchqa | Llama-3.1-8B-Instruct | icr_probe | 5/5 | 0/5 |
-| searchqa | Qwen3-8B | icr_probe | 5/5 | 0/5 |
+None — per-sample preds pulled for every Summary-AUROC-complete cell.
 
 ## §2 Ablations (kind=ablation)
 
@@ -219,34 +204,6 @@ None — per-sample preds pulled for every Summary-AUROC-complete cell.
 ### Missing Summary AUROC
 
 None — every cell has a Summary AUROC in results_table.csv.
-
-### Missing Predictions
-
-None — per-sample preds pulled for every Summary-AUROC-complete cell.
-
-## §5 SEP (kind=sep)
-
-### Complete (6)
-
-| Dataset | Model | Method | Summary AUROC | Predictions file |
-|---------|-------|--------|---------------|------------------|
-| hotpotqa | Llama-3.1-8B-Instruct | sep | complete | n/a |
-| natural_questions | Llama-3.1-8B-Instruct | sep | complete | n/a |
-| popqa | Llama-3.1-8B-Instruct | sep | complete | n/a |
-| sciq | Llama-3.1-8B-Instruct | sep | complete | n/a |
-| sciq | Qwen3-8B | sep | complete | n/a |
-| searchqa | Llama-3.1-8B-Instruct | sep | complete | n/a |
-
-### Missing Summary AUROC — need more training/eval (6)
-
-| Dataset | Model | Method | Summary AUROC | Predictions file |
-|---------|-------|--------|---------------|------------------|
-| hotpotqa | Qwen3-8B | sep | missing | n/a |
-| mmlu | Llama-3.1-8B-Instruct | sep | missing | n/a |
-| mmlu | Qwen3-8B | sep | missing | n/a |
-| natural_questions | Qwen3-8B | sep | missing | n/a |
-| popqa | Qwen3-8B | sep | missing | n/a |
-| searchqa | Qwen3-8B | sep | missing | n/a |
 
 ### Missing Predictions
 
@@ -387,10 +344,11 @@ Sources are gated on baseline checkpoints existing — missing source-dataset ce
 
 | Section | Missing Summary AUROC | Missing Predictions |
 |---------|-----------------------|---------------------|
-| §1 Training | 0 | 14 |
+| §1 Training | 0 | 0 |
 | §2 Ablations | 0 | 0 |
 | §3 Sampling | 0 | 0 |
 | §4 P(True) | 0 | 0 |
-| §5 SEP | 6 | 0 |
 | §6 Transfer matrix | 107 | — |
-| **Total** | **113** | **14** |
+| **Total** | **107** | **0** |
+
+Descoped (not counted): §5 SEP (kind=sep); legacy non-memmap training runs (`runs/baseline_comparison_{ds}/` without `_memmap` suffix).

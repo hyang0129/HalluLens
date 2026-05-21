@@ -16,13 +16,17 @@ Two coverage axes per cell:
                   (synced from the cluster by scripts/pull_predictions.py).
 
 Sections:
-  §1 Training baselines (kind=training)
+  §1 Training baselines (kind=training; legacy non-memmap rows are descoped)
   §2 Ablations         (kind=ablation)
   §3 Sampling baselines (kind=sampling)
   §4 P(True)           (kind=p_true)
-  §5 SEP               (kind=sep)
   §6 Transfer matrix   (from transfer_matrix_table.csv)
   Summary
+
+Descoped from the paper (filtered out before counting gaps):
+  - §5 SEP (kind=sep)
+  - Legacy non-memmap training runs (e.g. runs/baseline_comparison_hotpotqa/)
+See DESCOPED_KINDS and TRAINING_DATASET_SUFFIXES at the top of this file.
 
 The headline `contrastive_logprob_recon` emits per-sample distance scores
 (one-column predictions.csv with score_halu = kNN distance). Its ablation
@@ -80,6 +84,15 @@ TRANSFER_EXPECTED_SEEDS = list(range(5))
 
 # Higher = "better" status; collapse multiple metric rows per cell to the best.
 _STATUS_RANK = {"complete": 4, "running": 3, "partial": 2, "pending": 1, "missing": 0, "": 0}
+
+# Sections / cell families descoped from the paper (do not count as gaps).
+# Keep this list explicit so the descoping decision is visible in code review
+# and easy to reverse.
+DESCOPED_KINDS = {"sep"}  # §5 SEP — descoped from paper
+# Legacy non-memmap training runs (e.g. runs/baseline_comparison_hotpotqa/) are
+# descoped — only the memmap pipeline produces canonical paper numbers.
+# Training rows whose raw dataset label is NOT one of these suffixes are skipped.
+TRAINING_DATASET_SUFFIXES = ("_memmap", "_qwen3_memmap")
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +165,16 @@ def _best_status(rows: list[dict]) -> str:
     return max((r.get("status", "") for r in rows), key=lambda s: _STATUS_RANK.get(s, 0), default="missing")
 
 
+def _row_included(r: dict, kind: str) -> bool:
+    """Per-kind row filter — drops descoped families (SEP, legacy non-memmap training)."""
+    if kind in DESCOPED_KINDS:
+        return False
+    if kind == "training":
+        ds = r.get("dataset", "")
+        return any(ds.endswith(s) for s in TRAINING_DATASET_SUFFIXES)
+    return True
+
+
 def _group_by_cell(rows: list[dict], kind: str, seeded: bool) -> dict:
     """
     Group results_table rows of a given kind into cells. Returns:
@@ -162,6 +185,8 @@ def _group_by_cell(rows: list[dict], kind: str, seeded: bool) -> dict:
         seed_map: dict = defaultdict(lambda: defaultdict(list))
         for r in rows:
             if r.get("kind") != kind:
+                continue
+            if not _row_included(r, kind):
                 continue
             try:
                 seed = int(r["seed"]) if r.get("seed") not in (None, "") else None
@@ -176,6 +201,8 @@ def _group_by_cell(rows: list[dict], kind: str, seeded: bool) -> dict:
     cell_rows: dict = defaultdict(list)
     for r in rows:
         if r.get("kind") != kind:
+            continue
+        if not _row_included(r, kind):
             continue
         cell = (_canonical_ds(r["dataset"]), r["model"], r["method"])
         cell_rows[cell].append(r)
@@ -506,26 +533,11 @@ def build_report(rows: list[dict], transfer_rows: list[dict], preds: dict) -> st
     )
     lines += sec
 
-    sep_cells = _group_by_cell(rows, kind="sep", seeded=False)
-    sep_grid = [
-        (_canonical_ds(ds), model, "sep")
-        for ds in ("hotpotqa", "mmlu", "nq", "popqa", "sciq", "searchqa")
-        for model in MODELS
-    ]
-    sec, n_sp_summary, n_sp_preds = _section_unseeded(
-        "§5 SEP (kind=sep)",
-        sep_cells,
-        preds,
-        expected_grid=sep_grid,
-        preds_file_fn=lambda ds, model, method: None,  # no per-sample preds tracked
-    )
-    lines += sec
-
     sec, n_tx_summary = _build_transfer_section(transfer_rows)
     lines += sec
 
-    total_summary = n_tr_summary + n_ab_summary + n_sa_summary + n_pt_summary + n_sp_summary + n_tx_summary
-    total_preds = n_tr_preds + n_ab_preds + n_sa_preds + n_pt_preds + n_sp_preds
+    total_summary = n_tr_summary + n_ab_summary + n_sa_summary + n_pt_summary + n_tx_summary
+    total_preds = n_tr_preds + n_ab_preds + n_sa_preds + n_pt_preds
     lines += [
         "## Summary",
         "",
@@ -542,9 +554,11 @@ def build_report(rows: list[dict], transfer_rows: list[dict], preds: dict) -> st
         f"| §2 Ablations | {n_ab_summary} | {n_ab_preds} |",
         f"| §3 Sampling | {n_sa_summary} | {n_sa_preds} |",
         f"| §4 P(True) | {n_pt_summary} | {n_pt_preds} |",
-        f"| §5 SEP | {n_sp_summary} | {n_sp_preds} |",
         f"| §6 Transfer matrix | {n_tx_summary} | — |",
         f"| **Total** | **{total_summary}** | **{total_preds}** |",
+        "",
+        "Descoped (not counted): §5 SEP (kind=sep); legacy non-memmap training"
+        " runs (`runs/baseline_comparison_{ds}/` without `_memmap` suffix).",
         "",
     ]
     return "\n".join(lines)
