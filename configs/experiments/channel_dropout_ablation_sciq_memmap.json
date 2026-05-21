@@ -1,0 +1,17 @@
+{
+  "experiment_name": "channel_dropout_ablation_sciq_memmap",
+  "dataset": "sciq_memmap",
+  "methods": [
+    "contrastive_logprob_recon_b2",
+    "contrastive_logprob_recon_cd1",
+    "contrastive_logprob_recon_cd2",
+    "contrastive_logprob_recon_cd3"
+  ],
+  "split_seed": 42,
+  "training_seeds": [0],
+  "split_seeds": [42],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs"
+}

@@ -91,6 +91,21 @@ class JobRecord:
 
 
 # ---------------------------------------------------------------------------
+# Jupyter port helpers
+# ---------------------------------------------------------------------------
+
+def _port_is_88xx(port: int) -> bool:
+    """Return True only for Jupyter ports in the 88xx range (8800–8899)."""
+    return 8800 <= port <= 8899
+
+
+def _url_port(url: str) -> Optional[int]:
+    """Extract the port number from a URL like http://host:8888. Returns None on failure."""
+    m = re.search(r":(\d+)(?:/|$)", url)
+    return int(m.group(1)) if m else None
+
+
+# ---------------------------------------------------------------------------
 # Config loading
 # ---------------------------------------------------------------------------
 
@@ -112,6 +127,11 @@ def load_nodes(config: dict) -> List[NodeConfig]:
     nodes = []
     for entry in config.get("nodes", []):
         hostname = entry["hostname"]
+        jurl = entry.get("jupyter_url", defaults.get("jupyter_url"))
+        if jurl is not None:
+            p = _url_port(jurl)
+            if p is None or not _port_is_88xx(p):
+                jurl = None  # ignore Jupyter endpoints outside the 88xx range
         nodes.append(NodeConfig(
             name=entry.get("name", hostname),
             hostname=hostname,
@@ -119,7 +139,7 @@ def load_nodes(config: dict) -> List[NodeConfig]:
             project_root=entry.get("project_root", defaults.get("project_root", ".")),
             max_concurrent_jobs=entry.get("max_concurrent_jobs", 1),
             tags=entry.get("tags", []),
-            jupyter_url=entry.get("jupyter_url", defaults.get("jupyter_url")),
+            jupyter_url=jurl,
             jupyter_password=entry.get("jupyter_password", defaults.get("jupyter_password", "123")),
             source=entry.get("source"),
         ))
@@ -436,6 +456,8 @@ def discover_jupyter_allocations(squeue_timeout: int = 15) -> List[dict]:
         m = JUPYTER_JOB_NAME_RE.match(name)
         if not m:
             continue
+        if not _port_is_88xx(int(m.group(1))):
+            continue
         if "[" in nodelist or "," in nodelist:
             # Multi-node allocation — ambiguous which host hosts the Jupyter
             # server. Skip rather than guess.
@@ -528,18 +550,11 @@ def refresh_job_statuses(
             continue
         jupyter_by_name.setdefault(job.node_name, []).append((i, job))
 
-    changed = False
-
-    # Check via Jupyter API (one probe per logical node).
-    # Mark "unknown" on any probe failure rather than blocking.
-    for node_name, job_list in jupyter_by_name.items():
+    def _probe(node_name: str, job_list: list) -> dict:
+        """Return {job_idx: new_status} for any jobs whose status changed."""
         node = name_map.get(node_name)
         if node is None or not node.jupyter_url:
-            for idx, _ in job_list:
-                if jobs[idx].status == "running":
-                    jobs[idx].status = "unknown"
-                    changed = True
-            continue
+            return {idx: "unknown" for idx, _ in job_list}
         pids = [str(j.pid) for _, j in job_list]
         try:
             from utils.jupyter_exec import JupyterExecutor
@@ -557,15 +572,25 @@ def refresh_job_statuses(
                     alive_pids.add(int(line.strip()))
                 except ValueError:
                     pass
-            for idx, job in job_list:
-                if job.pid not in alive_pids:
-                    jobs[idx].status = "finished"
-                    changed = True
+            return {idx: "finished" for idx, job in job_list if job.pid not in alive_pids}
         except Exception:
-            for idx, _ in job_list:
-                if jobs[idx].status == "running":
-                    jobs[idx].status = "unknown"
-                    changed = True
+            return {idx: "unknown" for idx, _ in job_list}
+
+    # Probe all nodes in parallel — sequential probes caused O(n*timeout) blocking.
+    updates: dict = {}
+    with ThreadPoolExecutor(max_workers=max(1, len(jupyter_by_name))) as pool:
+        futures = {
+            pool.submit(_probe, node_name, job_list): node_name
+            for node_name, job_list in jupyter_by_name.items()
+        }
+        for future in as_completed(futures):
+            updates.update(future.result())
+
+    changed = False
+    for idx, new_status in updates.items():
+        if jobs[idx].status != new_status:
+            jobs[idx].status = new_status
+            changed = True
 
     if changed:
         save_manifest(manifest_path, jobs)
@@ -895,6 +920,15 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Best-effort: keep the empire_shell reaper daemon alive so orphaned
+    # processes on the login node don't accumulate to TasksMax=512.
+    # Non-blocking — spawns in background if not already running.
+    try:
+        from utils.empire_shell import ensure_daemon
+        ensure_daemon()
+    except Exception:
+        pass
 
     handlers = {
         "status": cmd_status,

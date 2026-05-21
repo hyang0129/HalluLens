@@ -5,10 +5,16 @@ Coverage and metrics live together in `results_table.json` (produced by
 `scripts/results_table.py`). This script is a thin formatter — it does not
 walk the filesystem. Run `results_table.py` first if the JSON is stale.
 
+Complementary tool: `scripts/predictions_gap_report.py` SSHes to Empire AI
+and checks for actual per-sample files (predictions.csv, sampling JSONL, and
+§6 transfer-matrix cell JSONs). Run it separately to see what is physically
+present on the cluster, including transfer matrix coverage gaps.
+
 Usage:
     python scripts/results_table.py            # refresh source-of-truth
     python scripts/audit_coverage.py           # print markdown to stdout
     python scripts/audit_coverage.py --out reports/coverage.md
+    python scripts/predictions_gap_report.py   # check actual files on cluster
 """
 from __future__ import annotations
 

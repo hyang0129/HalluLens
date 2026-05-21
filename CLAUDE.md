@@ -112,13 +112,29 @@ ssh empire-ai 'cd ~/LLM_research/HalluLens && python scripts/results_table.py'
 
 ### Claude Code GPU execution (REMOTE_GPU only)
 
-Use `utils/jupyter_exec.py` to run code on the GPU node without user intervention:
+GPU nodes (`alphagpuXX`) are not directly reachable from this dev container — they are only accessible from the Empire AI login node. Before using `jupyter_exec.py`, first SSH into the login node to open a tunnel:
 
 ```bash
-python utils/jupyter_exec.py "import torch; print(torch.cuda.get_device_name(0))"
+# Step 1: open a tunnel from localhost → target GPU node (pick an unused local port)
+ssh -f -N -L <local_port>:<node>:<jupyter_port> empire-ai
+
+# Step 2: point jupyter_exec at localhost
+GPUNODE=localhost GPUNODEPORT=<local_port> python utils/jupyter_exec.py "..."
 ```
 
+Example — alphagpu10 running Jupyter on 8887:
+```bash
+ssh -f -N -L 18887:alphagpu10:8887 empire-ai
+GPUNODE=localhost GPUNODEPORT=18887 python utils/jupyter_exec.py "import torch; print(torch.cuda.get_device_name(0))"
+```
+
+Or use `JupyterExecutor` directly after the tunnel is up:
+
 ```python
+import os
+os.environ["GPUNODE"] = "localhost"
+os.environ["GPUNODEPORT"] = "18887"
+
 from utils.jupyter_exec import JupyterExecutor
 
 with JupyterExecutor() as jup:

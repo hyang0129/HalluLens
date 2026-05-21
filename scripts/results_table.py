@@ -36,9 +36,38 @@ Cells with status != complete still appear (with empty metric/value) so the
 table doubles as the coverage view — `audit_coverage.py` is now redundant
 modulo presentation.
 
+Also always emits a filtered view for the §7.1 loss-decomposition ablation:
+
+  loss_decomposition_table.{json,csv} — same schema as above, restricted to
+    the 2x2 of {contrastive, contrastive_logprob_recon, saplma,
+    saplma_logprob_recon}. Cells are duplicates of the corresponding rows in
+    results_table.{json,csv} (still kind="training"), re-emitted here so the
+    ablation can be loaded without scanning the full table.
+
+Also always emits a filtered view for the label-convention ablation
+(issues #81 + #99):
+
+  label_convention_table.{json,csv} — same schema as above, restricted to the
+    4-way single-axis ablation {C0 unlabeled, B5 halu_class, B0 true_class,
+    B6 two_class} × {nq, sciq} × {Llama, Qwen3} × seed 0. B0 is pulled from
+    the training cells (the paper headline, restricted here to seed 0 so the
+    comparison is apples-to-apples — B5/B6/C0 were only run at seed 0);
+    B5/B6 come from aug_grid_* ablation configs; C0 comes from
+    sharedtrunk_grid_* ablation configs. Each row carries an extra
+    `label_convention` column for pivoting.
+
+And the §6 cross-dataset transfer view (issues #89 / #113):
+
+  transfer_matrix_table.{json,csv} — distinct schema from the main table:
+    cells carry kind="transfer" with both source_dataset and target_dataset.
+    Sourced from runs/transfer_matrix_memmap/{llama,qwen3}/ per-cell JSONs
+    written by scripts/eval_transfer_matrix_memmap.py. Silent no-op when
+    that directory does not exist.
+
 Usage:
     python scripts/results_table.py              # writes output/results_table/*
     python scripts/results_table.py --out-dir DIR
+    python scripts/results_table.py --no-transfer
 """
 from __future__ import annotations
 
@@ -88,6 +117,81 @@ SAMPLING_MODELS = [
     "meta-llama/Llama-3.1-8B-Instruct",
     "Qwen/Qwen3-8B",
 ]
+
+# Methods that make up the §7.1 loss-decomposition 2x2:
+#   contrastive            → contrastive_logprob_recon   (adds logprob-recon to contrastive)
+#   saplma                 → saplma_logprob_recon        (adds logprob-recon to SAPLMA)
+# All four come from baseline_comparison_* configs and so are already produced
+# by collect_training_cells(); we just re-emit a filtered view to a separate
+# output file (loss_decomposition_table.{json,csv}) so the ablation is easy to
+# slice without polluting the main table.
+LOSS_DECOMPOSITION_METHODS = (
+    "contrastive",
+    "contrastive_logprob_recon",
+    "saplma",
+    "saplma_logprob_recon",
+)
+
+# Label-convention ablation (issues #81 + #99). The 2x2 of {what's pulled together
+# under SupCon} × {what's pushed apart}, as a 4-way single-axis ablation:
+#
+#   unlabeled  → C0 (use_labels=False, SimCLR-style)         [sharedtrunk_grid_*]
+#   halu_class → B5 (ignore_label=0, hallu as the cluster)   [aug_grid_*]
+#   true_class → B0 (ignore_label=1, truth as the cluster)   [baseline_comparison_*]  ← paper headline
+#   two_class  → B6 (ignore_label=-1, both form clusters)    [aug_grid_*]
+#
+# B0 is the existing paper headline (`contrastive_logprob_recon` in
+# baseline_comparison_*), pulled from training cells. B5/B6/C0 are not run as
+# baselines so they live under ablation configs (aug_grid_* and
+# sharedtrunk_grid_* respectively). The view stitches both kinds together,
+# normalizes the dataset label to its bare stem, and tags each cell with a
+# human-readable `label_convention` so the CSV is pivot-ready.
+LABEL_CONVENTION_VIEW: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    # name        : (method,                         source_kind, allowed-experiment-prefixes)
+    "true_class":  ("contrastive_logprob_recon",     "training", ("baseline_comparison_",)),
+    "halu_class":  ("contrastive_logprob_recon_b5",  "ablation", ("aug_grid_",)),
+    "two_class":   ("contrastive_logprob_recon_b6",  "ablation", ("aug_grid_",)),
+    "unlabeled":   ("contrastive_logprob_recon_c0",  "ablation", ("sharedtrunk_grid_",)),
+}
+LABEL_CONVENTION_DATASETS = ("nq", "sciq")
+LABEL_CONVENTION_MODELS = ("Llama-3.1-8B-Instruct", "Qwen3-8B")
+# B5/B6/C0 were only run at seed 0 (issues #81 + #99). The B0 headline carries
+# seeds 0–4 in the main table, but pulling its multi-seed bundle here breaks
+# apples-to-apples — pin all four conventions to seed 0 so the comparison is
+# uniform.
+LABEL_CONVENTION_SEED = 0
+
+# Cross-dataset transfer matrix (§6, issue #89 / #113). Each per-cell JSON
+# lives at runs/transfer_matrix_memmap/{slug}/<src>__<tgt>__<method>__<seed>.json
+# and is produced by scripts/eval_transfer_matrix_memmap.py.
+TRANSFER_DATASETS = ("hotpotqa", "mmlu", "nq", "popqa", "sciq", "searchqa")
+TRANSFER_METHODS = (
+    "contrastive_logprob_recon",
+    "saplma",
+    "llmsknow_probe",
+    "act_vit",
+)
+TRANSFER_MODEL_SLUGS = ("llama", "qwen3")
+TRANSFER_MODEL_DISPLAY = {
+    "llama": "Llama-3.1-8B-Instruct",
+    "qwen3": "Qwen3-8B",
+}
+# Metrics surfaced from each per-cell JSON. n_src_train / n_tgt_test are size
+# fields, not AUROCs — we still pass them through so the long-form CSV has a
+# row for cells whose AUROC is null (e.g. single_class targets).
+_TRANSFER_METRIC_KEYS = (
+    "auroc",
+    "knn_auroc",
+    "mahalanobis_auroc",
+    "cosine_auroc",
+    "n_src_train",
+    "n_tgt_test",
+)
+# Maps per-cell JSON status → results_table cell status.
+_TRANSFER_STATUS_MAP = {
+    "ok": "complete",
+    "single_class": "partial",
+}
 
 # Optional sklearn (preferred); fall back to numpy Mann–Whitney AUROC.
 try:
@@ -171,8 +275,13 @@ def _git_info() -> dict[str, str]:
 # have its own set; anything not listed here is dropped (keeps the table from
 # accidentally including run_size / hparams / etc.).
 _TRAINING_METRIC_KEYS = {
-    "contrastive_logprob_recon": ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
-    "contrastive":               ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
+    "contrastive_logprob_recon":     ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
+    "contrastive_logprob_recon_b5":  ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
+    "contrastive_logprob_recon_b6":  ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
+    "contrastive_logprob_recon_c0":  ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
+    "contrastive_logprob_recon_d2a": ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
+    "contrastive_logprob_recon_d2b": ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
+    "contrastive":                   ("cosine_auroc", "mahalanobis_auroc", "knn_auroc"),
     "linear_probe":               ("auroc",),
     "saplma":                     ("auroc",),
     "saplma_logprob_recon":       ("auroc",),
@@ -303,6 +412,75 @@ def collect_training_cells(*, include_smollm3: bool = False) -> list[dict]:
                         else None
                     ),
                     "config":       _rel(cfg_path),
+                },
+            })
+    return cells
+
+
+def collect_ablation_cells() -> list[dict]:
+    """One cell per (config, dataset, method, seed) for non-baseline experiments.
+
+    Picks up every experiment config that is NOT a ``baseline_comparison_*``
+    file (aug_grid, channel_dropout_ablation, twin_grid, sharedtrunk_grid,
+    unlabeled_ablation, and any future ablation prefixes). Cells carry
+    ``kind="ablation"`` so they are excluded from the main table by default
+    and can be accessed by passing ``--include-ablations``.
+
+    Dataset label is read directly from ``cfg["dataset"]`` (always present and
+    authoritative) rather than being parsed from the filename, which avoids the
+    brittle prefix-stripping that ``collect_training_cells`` needs for
+    ``baseline_comparison_*`` names.
+    """
+    cells: list[dict] = []
+    cfg_dir = PROJECT_ROOT / "configs" / "experiments"
+    for cfg_path in sorted(cfg_dir.glob("*.json")):
+        if cfg_path.name.startswith("baseline_comparison_"):
+            continue
+        cfg = load_experiment_config(str(cfg_path), project_root=str(PROJECT_ROOT))
+        model_label = _model_from_config_name(cfg_path.name)
+        dataset_label = cfg.get("dataset", cfg_path.stem)
+
+        specs = enumerate_runs(
+            cfg,
+            output_base=cfg.get("output_dir", "runs"),
+            project_root=str(PROJECT_ROOT),
+        )
+        for spec in specs:
+            run_dir = Path(spec.run_dir)
+            status = classify_run(str(run_dir))
+            metrics: dict[str, float] = {}
+            if status == RunStatus.COMPLETE:
+                with open(run_dir / "eval_metrics.json") as f:
+                    eval_data = json.load(f)
+                allowed = _TRAINING_METRIC_KEYS.get(spec.method_name, ())
+                for k in allowed:
+                    v = eval_data.get(k)
+                    if isinstance(v, (int, float)) and np.isfinite(v):
+                        metrics[k] = float(v)
+                _merge_extended_metrics(run_dir, metrics)
+
+            cells.append({
+                "key": {
+                    "dataset":    dataset_label,
+                    "model":      model_label,
+                    "method":     spec.method_name,
+                    "seed":       spec.seed,
+                    "experiment": cfg.get("experiment_name", cfg_path.stem),
+                },
+                "kind": "ablation",
+                "status": status.value,
+                "metrics": metrics,
+                "expected_rows": None,
+                "actual_rows": None,
+                "paths": {
+                    "run_dir":      _rel(run_dir),
+                    "eval_metrics": _rel(run_dir / "eval_metrics.json"),
+                    "eval_metrics_extended": (
+                        _rel(run_dir / "eval_metrics_extended.json")
+                        if (run_dir / "eval_metrics_extended.json").exists()
+                        else None
+                    ),
+                    "config": _rel(cfg_path),
                 },
             })
     return cells
@@ -563,6 +741,169 @@ def collect_p_true_cells() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Transfer matrix (§6 ablation table)
+# ---------------------------------------------------------------------------
+
+def _slug_from_experiment_name(experiment_name: str) -> str:
+    """Infer model slug from a baseline_comparison_*_memmap experiment name."""
+    return "qwen3" if "_qwen3_memmap" in experiment_name else "llama"
+
+
+def _dataset_from_dataset_dir(dataset_dir_name: str) -> str:
+    """Strip _memmap / _qwen3_memmap suffix to get the bare dataset name.
+
+    Mirrors the per-cell JSON convention (sources/targets in the cell filename
+    are bare names like ``hotpotqa`` — see ``scripts/eval_transfer_matrix_memmap.py``).
+    """
+    stem = dataset_dir_name.removesuffix("_memmap").removesuffix("_qwen3")
+    return stem
+
+
+def _discover_transfer_source_seeds(baseline_runs_dir: Path) -> dict:
+    """Enumerate source seeds that actually have a trained checkpoint on disk.
+
+    Returns ``{(slug, source_dataset, method): set[int]}``. If
+    ``baseline_runs_dir`` is missing, returns an empty dict — collectors
+    fall back to filesystem-only discovery (no "missing" cells emitted).
+
+    Imports ``activation_research.transfer_eval_memmap.discover_runs`` lazily
+    so that ``scripts/results_table.py`` stays importable in environments
+    where the activation_research deps (torch) aren't installed.
+    """
+    if not baseline_runs_dir.exists():
+        return {}
+    try:
+        from activation_research.transfer_eval_memmap import discover_runs
+    except Exception:
+        return {}
+
+    out: dict[tuple[str, str, str], set[int]] = {}
+    for method in TRANSFER_METHODS:
+        for entry in discover_runs(str(baseline_runs_dir), method):
+            slug = _slug_from_experiment_name(entry["experiment_name"])
+            src = _dataset_from_dataset_dir(entry["dataset"])
+            out.setdefault((slug, src, method), set()).add(int(entry["seed"]))
+    return out
+
+
+def _cell_json_path(runs_root: Path, slug: str, src: str, tgt: str,
+                    method: str, seed: int) -> Path:
+    return runs_root / slug / f"{src}__{tgt}__{method}__{seed}.json"
+
+
+def collect_transfer_cells(
+    runs_root: Optional[Path] = None,
+    *,
+    baseline_runs_dir: Optional[Path] = None,
+) -> list[dict]:
+    """One cell per (model, method, source, target, seed) for the §6 transfer view.
+
+    Reads per-cell JSONs produced by ``scripts/eval_transfer_matrix_memmap.py``
+    (issue #89) under ``runs/transfer_matrix_memmap/{llama,qwen3}/``.
+
+    Expected-vs-missing logic:
+      - If ``baseline_runs_dir`` contains discoverable source checkpoints,
+        enumerate the full grid (seeds × 6 targets) per (slug, source, method)
+        and emit ``status="missing"`` rows where the cell JSON is absent.
+      - Otherwise (no baseline checkpoints locally — typical for a dev box that
+        only synced the transfer outputs), emit only cells that exist on disk.
+
+    Returns ``[]`` silently when ``runs_root`` does not exist.
+    """
+    if runs_root is None:
+        runs_root = PROJECT_ROOT / "runs" / "transfer_matrix_memmap"
+    if baseline_runs_dir is None:
+        baseline_runs_dir = PROJECT_ROOT / "runs"
+
+    if not runs_root.exists():
+        return []
+
+    expected = _discover_transfer_source_seeds(baseline_runs_dir)
+
+    cells: list[dict] = []
+    seen: set[tuple[str, str, str, str, int]] = set()
+
+    if expected:
+        # Full-grid mode: enumerate (slug, src, method, seed) × targets and
+        # emit complete/partial/failed/missing for each.
+        for (slug, src, method), seeds in sorted(expected.items()):
+            for seed in sorted(seeds):
+                for tgt in TRANSFER_DATASETS:
+                    cell_path = _cell_json_path(runs_root, slug, src, tgt, method, seed)
+                    cells.append(_build_transfer_cell(
+                        cell_path, slug=slug, src=src, tgt=tgt,
+                        method=method, seed=seed,
+                    ))
+                    seen.add((slug, src, tgt, method, seed))
+
+    # Filesystem sweep — pick up cells the baseline-runs enumeration didn't
+    # cover (e.g. when baseline_runs_dir is absent, or when the transfer
+    # script produced cells outside the expected method/dataset set).
+    for slug in TRANSFER_MODEL_SLUGS:
+        slug_dir = runs_root / slug
+        if not slug_dir.is_dir():
+            continue
+        for cell_path in sorted(slug_dir.glob("*__*__*__*.json")):
+            stem = cell_path.stem
+            parts = stem.split("__")
+            # Method names contain underscores (contrastive_logprob_recon,
+            # llmsknow_probe, …); seed is always the last "__"-separated chunk.
+            if len(parts) < 4:
+                continue
+            try:
+                seed = int(parts[-1])
+            except ValueError:
+                continue
+            src, tgt = parts[0], parts[1]
+            method = "__".join(parts[2:-1])
+            if (slug, src, tgt, method, seed) in seen:
+                continue
+            cells.append(_build_transfer_cell(
+                cell_path, slug=slug, src=src, tgt=tgt,
+                method=method, seed=seed,
+            ))
+            seen.add((slug, src, tgt, method, seed))
+
+    return cells
+
+
+def _build_transfer_cell(cell_path: Path, *, slug: str, src: str, tgt: str,
+                         method: str, seed: int) -> dict:
+    """Construct one transfer cell dict from an (expected or actual) JSON path."""
+    metrics: dict[str, float] = {}
+    if cell_path.exists():
+        try:
+            with open(cell_path) as f:
+                data = json.load(f)
+            raw_status = data.get("status", "")
+            status = _TRANSFER_STATUS_MAP.get(raw_status, "failed")
+            for k in _TRANSFER_METRIC_KEYS:
+                v = data.get(k)
+                if isinstance(v, (int, float)) and np.isfinite(v):
+                    metrics[k] = float(v)
+        except Exception:
+            status = "failed"
+    else:
+        status = "missing"
+
+    return {
+        "key": {
+            "source_dataset": src,
+            "target_dataset": tgt,
+            "model": TRANSFER_MODEL_DISPLAY.get(slug, slug),
+            "method": method,
+            "seed": seed,
+        },
+        "kind": "transfer",
+        "status": status,
+        "metrics": metrics,
+        "expected_rows": None,
+        "actual_rows": None,
+        "paths": {"cell_json": _rel(cell_path)},
+    }
+
+
+# ---------------------------------------------------------------------------
 # Serialization
 # ---------------------------------------------------------------------------
 
@@ -598,6 +939,101 @@ def cells_to_long_rows(cells: list[dict]) -> list[dict]:
     return rows
 
 
+def _bare_dataset_label(raw: str, model_label: str) -> str:
+    """Strip `_qwen3` / `_smollm3` / `_memmap` so ablation + training cells agree.
+
+    Ablation configs use the raw `cfg["dataset"]` (e.g. ``nq_qwen3_memmap``)
+    while training configs already feed through ``_dataset_from_config_name``
+    and emit a bare name (e.g. ``nq``). For side-by-side views we want both
+    paths to land on the same label.
+    """
+    s = raw.removesuffix("_memmap")
+    if model_label == "Qwen3-8B":
+        s = s.removesuffix("_qwen3")
+    elif model_label == "SmolLM3":
+        s = s.removesuffix("_smollm3")
+    return s
+
+
+def _filter_label_convention(
+    training_cells: list[dict],
+    ablation_cells: list[dict],
+) -> list[dict]:
+    """Pick out the label-convention ablation cells (B0/B5/B6/C0).
+
+    Source disambiguation matters: ``contrastive_logprob_recon_c0`` lives in
+    both ``unlabeled_ablation_*`` (a stale, empty attempt) and
+    ``sharedtrunk_grid_*`` (where the actual seed_0 results landed). We gate
+    on the ``experiment`` key (only present on ablation cells) to keep just
+    the correct source. Same idea protects B5/B6 against any future
+    aug_grid-named-but-different ablation.
+
+    Cells are returned with two extra fields:
+      - ``label_convention``: ``"unlabeled" | "halu_class" | "true_class" | "two_class"``
+      - ``key.dataset``:     rewritten to the bare stem so NQ/SciQ rows align
+                             across training (B0) and ablation (B5/B6/C0) cells
+
+    Missing cells are not synthesized — if a cell isn't present in either
+    input list it simply won't appear here. The downstream JSON still carries
+    a ``view`` field listing the expected (model × dataset × convention) grid
+    so consumers can detect gaps.
+    """
+    out: list[dict] = []
+    for source_cells in (training_cells, ablation_cells):
+        for c in source_cells:
+            method = c["key"]["method"]
+            for conv_name, (m, kind, allowed_prefixes) in LABEL_CONVENTION_VIEW.items():
+                if method != m or c["kind"] != kind:
+                    continue
+                if kind == "ablation":
+                    experiment = c["key"].get("experiment", "")
+                    if not any(experiment.startswith(p) for p in allowed_prefixes):
+                        continue
+                else:
+                    # Training cells (B0): restrict to memmap configs only.
+                    # The legacy JSON+NPY baseline_comparison_{nq,sciq}.json
+                    # configs produce a different cell at the same key with
+                    # markedly different AUROCs — including both makes the
+                    # ablation comparison meaningless. B5/B6/C0 are memmap-only,
+                    # so memmap is the apples-to-apples B0 source.
+                    cfg_path = c["paths"].get("config", "")
+                    if not cfg_path.endswith("_memmap.json"):
+                        continue
+                if c["key"].get("seed") != LABEL_CONVENTION_SEED:
+                    continue
+                model_label = c["key"]["model"]
+                if model_label not in LABEL_CONVENTION_MODELS:
+                    continue
+                bare_ds = _bare_dataset_label(c["key"]["dataset"], model_label)
+                if bare_ds not in LABEL_CONVENTION_DATASETS:
+                    continue
+                # Don't mutate the original cell — it's still referenced by
+                # the main results_table output.
+                new_key = dict(c["key"])
+                new_key["dataset"] = bare_ds
+                new_key["label_convention"] = conv_name
+                out.append({**c, "key": new_key})
+                break
+    return out
+
+
+def _filter_loss_decomposition(cells: list[dict]) -> list[dict]:
+    """Pick out the §7.1 loss-decomposition 2x2 cells from a cells list.
+
+    Filters to training-kind cells whose method is in
+    ``LOSS_DECOMPOSITION_METHODS``. The cell dicts are returned unchanged
+    (still ``kind="training"``) — these methods are bona-fide training runs
+    that double as the ablation pivot; tagging them differently would also
+    remove ``contrastive_logprob_recon`` from the main table, which it
+    headlines.
+    """
+    return [
+        c for c in cells
+        if c["kind"] == "training"
+        and c["key"]["method"] in LOSS_DECOMPOSITION_METHODS
+    ]
+
+
 def write_outputs(cells: list[dict], out_dir: Path) -> tuple[Path, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     json_path = out_dir / "results_table.json"
@@ -622,6 +1058,186 @@ def write_outputs(cells: list[dict], out_dir: Path) -> tuple[Path, Path]:
     return json_path, csv_path
 
 
+TRANSFER_CSV_COLUMNS = [
+    "kind", "source_dataset", "target_dataset", "model", "method", "seed", "status",
+    "metric_name", "metric_value",
+    "expected_rows", "actual_rows", "path",
+]
+
+
+def transfer_cells_to_long_rows(cells: list[dict]) -> list[dict]:
+    """Long-form rows for the transfer view (source_dataset + target_dataset).
+
+    Mirrors ``cells_to_long_rows`` but uses the transfer-specific column layout
+    — the main table's ``dataset`` column is replaced by ``source_dataset`` and
+    ``target_dataset`` so each cell carries both axes.
+    """
+    rows: list[dict] = []
+    for c in cells:
+        key = c["key"]
+        primary_path = next(iter(c["paths"].values()), "")
+        base = {
+            "kind":            c["kind"],
+            "source_dataset":  key["source_dataset"],
+            "target_dataset":  key["target_dataset"],
+            "model":           key["model"],
+            "method":          key["method"],
+            "seed":            key["seed"] if key["seed"] is not None else "",
+            "status":          c["status"],
+            "expected_rows":   c["expected_rows"] if c["expected_rows"] is not None else "",
+            "actual_rows":     c["actual_rows"] if c["actual_rows"] is not None else "",
+            "path":            primary_path,
+        }
+        if c["metrics"]:
+            for metric_name, value in c["metrics"].items():
+                rows.append({**base, "metric_name": metric_name, "metric_value": value})
+        else:
+            rows.append({**base, "metric_name": "", "metric_value": ""})
+    return rows
+
+
+def write_transfer_matrix_outputs(cells: list[dict], out_dir: Path) -> tuple[Path, Path]:
+    """Write the §6 cross-dataset transfer view to its own pair of files.
+
+    Mirrors ``write_outputs`` / ``write_loss_decomposition_outputs`` but uses
+    the transfer column layout. Always writes both files, even when ``cells``
+    is empty (CSV gets a header-only row), so downstream consumers don't break
+    on the file's absence.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = out_dir / "transfer_matrix_table.json"
+    csv_path  = out_dir / "transfer_matrix_table.csv"
+
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "git": _git_info(),
+        "view": "transfer_matrix",
+        "datasets": list(TRANSFER_DATASETS),
+        "methods": list(TRANSFER_METHODS),
+        "model_slugs": list(TRANSFER_MODEL_SLUGS),
+        "cells": cells,
+    }
+    with open(json_path, "w") as f:
+        json.dump(payload, f, indent=2, default=str)
+
+    rows = transfer_cells_to_long_rows(cells)
+    with open(csv_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=TRANSFER_CSV_COLUMNS)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+    return json_path, csv_path
+
+
+LABEL_CONVENTION_CSV_COLUMNS = [
+    "kind", "label_convention", "dataset", "model", "method", "seed", "status",
+    "metric_name", "metric_value",
+    "expected_rows", "actual_rows", "path",
+]
+
+
+def label_convention_cells_to_long_rows(cells: list[dict]) -> list[dict]:
+    """Long-form rows for the label-convention view (one extra leading column).
+
+    Mirrors ``cells_to_long_rows`` but emits ``label_convention`` as a top-level
+    column so the CSV pivots cleanly on (label_convention × dataset × model).
+    """
+    rows: list[dict] = []
+    for c in cells:
+        key = c["key"]
+        primary_path = next(iter(c["paths"].values()), "")
+        base = {
+            "kind":             c["kind"],
+            "label_convention": key.get("label_convention", ""),
+            "dataset":          key["dataset"],
+            "model":            key["model"],
+            "method":           key["method"],
+            "seed":             key["seed"] if key["seed"] is not None else "",
+            "status":           c["status"],
+            "expected_rows":    c["expected_rows"] if c["expected_rows"] is not None else "",
+            "actual_rows":      c["actual_rows"] if c["actual_rows"] is not None else "",
+            "path":             primary_path,
+        }
+        if c["metrics"]:
+            for metric_name, value in c["metrics"].items():
+                rows.append({**base, "metric_name": metric_name, "metric_value": value})
+        else:
+            rows.append({**base, "metric_name": "", "metric_value": ""})
+    return rows
+
+
+def write_label_convention_outputs(cells: list[dict], out_dir: Path) -> tuple[Path, Path]:
+    """Write the label-convention (B0/B5/B6/C0) view to its own pair of files.
+
+    Always emits both files (CSV gets a header-only row when ``cells`` is empty)
+    so downstream consumers can rely on the file's presence. The JSON payload
+    includes the expected (model × dataset × convention) grid so missing-cell
+    gaps stay visible after filtering.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = out_dir / "label_convention_table.json"
+    csv_path  = out_dir / "label_convention_table.csv"
+
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "git": _git_info(),
+        "view": "label_convention",
+        "conventions": list(LABEL_CONVENTION_VIEW.keys()),
+        "datasets": list(LABEL_CONVENTION_DATASETS),
+        "models": list(LABEL_CONVENTION_MODELS),
+        "seed": LABEL_CONVENTION_SEED,
+        "cells": cells,
+    }
+    with open(json_path, "w") as f:
+        json.dump(payload, f, indent=2, default=str)
+
+    rows = label_convention_cells_to_long_rows(cells)
+    with open(csv_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=LABEL_CONVENTION_CSV_COLUMNS)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+    return json_path, csv_path
+
+
+def write_loss_decomposition_outputs(cells: list[dict], out_dir: Path) -> tuple[Path, Path]:
+    """Write the §7.1 loss-decomposition view to its own pair of files.
+
+    Mirrors ``write_outputs`` but filters to the 2x2 methods. Emitted under
+    ``out_dir`` as ``loss_decomposition_table.{json,csv}`` so consumers can
+    load just the ablation without scanning the full table.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = out_dir / "loss_decomposition_table.json"
+    csv_path  = out_dir / "loss_decomposition_table.csv"
+
+    subset = _filter_loss_decomposition(cells)
+
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "git": _git_info(),
+        "view": "loss_decomposition",
+        "methods": list(LOSS_DECOMPOSITION_METHODS),
+        "cells": subset,
+    }
+    with open(json_path, "w") as f:
+        json.dump(payload, f, indent=2, default=str)
+
+    rows = cells_to_long_rows(subset)
+    with open(csv_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+    return json_path, csv_path
+
+
 def _summary(cells: list[dict]) -> str:
     by_kind: dict[str, dict[str, int]] = {}
     for c in cells:
@@ -629,7 +1245,7 @@ def _summary(cells: list[dict]) -> str:
         d[c["status"]] = d.get(c["status"], 0) + 1
         d["total"] = d.get("total", 0) + 1
     lines = ["Summary:"]
-    for kind in ("training", "sampling", "sep", "p_true"):
+    for kind in ("training", "ablation", "sampling", "sep", "p_true", "transfer"):
         d = by_kind.get(kind, {})
         if not d:
             continue
@@ -661,10 +1277,50 @@ def main() -> None:
              "SmolLM3 is out of scope per PAPER_ROADMAP §5; flip on to inspect "
              "the cached SmolLM3 configs without losing the rest of the table.",
     )
+    parser.add_argument(
+        "--include-ablations",
+        action="store_true",
+        help="Include ablation experiment cells (aug_grid, channel_dropout_ablation, "
+             "twin_grid, sharedtrunk_grid, unlabeled_ablation, etc.). Excluded by "
+             "default so the main table stays clean. Ablation cells carry "
+             "kind='ablation' and an extra 'experiment' key for grouping.",
+    )
+    parser.add_argument(
+        "--no-transfer",
+        action="store_true",
+        help="Skip the §6 transfer-matrix view (transfer_matrix_table.{json,csv}). "
+             "By default the view is emitted whenever runs/transfer_matrix_memmap/ "
+             "exists; pass this to suppress it entirely. When the runs directory is "
+             "absent the view is a silent no-op already, so this flag is mostly for "
+             "regression tests against the pre-transfer table.",
+    )
+    parser.add_argument(
+        "--transfer-runs-dir",
+        type=Path,
+        default=PROJECT_ROOT / "runs" / "transfer_matrix_memmap",
+        help="Where to find per-cell transfer JSONs "
+             "(default: runs/transfer_matrix_memmap/).",
+    )
+    parser.add_argument(
+        "--transfer-baseline-runs-dir",
+        type=Path,
+        default=PROJECT_ROOT / "runs",
+        help="Where to discover source baseline checkpoints for enumerating "
+             "expected (vs. missing) transfer cells. If absent, the transfer "
+             "view degrades to filesystem-only discovery — no 'missing' rows.",
+    )
     args = parser.parse_args()
 
+    training_cells = collect_training_cells(include_smollm3=args.include_smollm3)
+    # Always collect ablation cells (cheap walk over configs/experiments/) so
+    # the label-convention view can pull B5/B6/C0 even when the main table
+    # excludes them. Merging into `cells` is still gated on --include-ablations.
+    ablation_cells = collect_ablation_cells()
+
     cells: list[dict] = []
-    cells += collect_training_cells(include_smollm3=args.include_smollm3)
+    cells += training_cells
+    if args.include_ablations:
+        cells += ablation_cells
     cells += collect_sampling_cells()
     cells += collect_sep_cells()
     cells += collect_p_true_cells()
@@ -672,8 +1328,38 @@ def main() -> None:
     json_path, csv_path = write_outputs(cells, args.out_dir)
     print(f"Wrote {json_path}")
     print(f"Wrote {csv_path}")
+
+    ld_json, ld_csv = write_loss_decomposition_outputs(cells, args.out_dir)
+    print(f"Wrote {ld_json}")
+    print(f"Wrote {ld_csv}")
+
+    lc_cells = _filter_label_convention(training_cells, ablation_cells)
+    lc_json, lc_csv = write_label_convention_outputs(lc_cells, args.out_dir)
+    print(f"Wrote {lc_json}")
+    print(f"Wrote {lc_csv}")
+
+    tx_cells: list[dict] = []
+    if not args.no_transfer:
+        tx_cells = collect_transfer_cells(
+            runs_root=args.transfer_runs_dir,
+            baseline_runs_dir=args.transfer_baseline_runs_dir,
+        )
+    # Always emit transfer_matrix_table.{json,csv} (header-only when --no-transfer
+    # or when the runs dir is missing) so downstream consumers can rely on the
+    # file's presence — same convention as loss_decomposition_table.{json,csv}.
+    tx_json, tx_csv = write_transfer_matrix_outputs(tx_cells, args.out_dir)
+    print(f"Wrote {tx_json}")
+    print(f"Wrote {tx_csv}")
+
     print()
-    print(_summary(cells))
+    print(_summary(cells + tx_cells))
+    ld_cells = _filter_loss_decomposition(cells)
+    ld_complete = sum(1 for c in ld_cells if c["status"] == "complete")
+    print(f"  loss_decomposition (view) {ld_complete}/{len(ld_cells)} complete  "
+          f"({len(LOSS_DECOMPOSITION_METHODS)} methods)")
+    lc_complete = sum(1 for c in lc_cells if c["status"] == "complete")
+    print(f"  label_convention   (view) {lc_complete}/{len(lc_cells)} complete  "
+          f"({len(LABEL_CONVENTION_VIEW)} conventions)")
     if not _HAS_SKLEARN:
         print()
         print("(note: sklearn not available — AUROC computed with numpy "

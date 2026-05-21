@@ -1,0 +1,422 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-05-21T06:50:59-0400",
+  "git": {
+    "branch": "main",
+    "commit": "efbf926859432898ebb7acdc21d0a293efd301b5"
+  },
+  "view": "label_convention",
+  "conventions": [
+    "true_class",
+    "halu_class",
+    "two_class",
+    "unlabeled"
+  ],
+  "datasets": [
+    "nq",
+    "sciq"
+  ],
+  "models": [
+    "Llama-3.1-8B-Instruct",
+    "Qwen3-8B"
+  ],
+  "seed": 0,
+  "cells": [
+    {
+      "key": {
+        "dataset": "nq",
+        "model": "Llama-3.1-8B-Instruct",
+        "method": "contrastive_logprob_recon",
+        "seed": 0,
+        "label_convention": "true_class"
+      },
+      "kind": "training",
+      "status": "complete",
+      "metrics": {
+        "cosine_auroc": 0.7029706784265628,
+        "mahalanobis_auroc": 0.7318333729791193,
+        "knn_auroc": 0.7525901913513703
+      },
+      "expected_rows": null,
+      "actual_rows": null,
+      "paths": {
+        "run_dir": "runs/baseline_comparison_nq_memmap/nq_memmap/contrastive_logprob_recon/seed_0",
+        "eval_metrics": "runs/baseline_comparison_nq_memmap/nq_memmap/contrastive_logprob_recon/seed_0/eval_metrics.json",
+        "eval_metrics_extended": null,
+        "config": "configs/experiments/baseline_comparison_nq_memmap.json"
+      }
+    },
+    {
+      "key": {
+        "dataset": "nq",
+        "model": "Qwen3-8B",
+        "method": "contrastive_logprob_recon",
+        "seed": 0,
+        "label_convention": "true_class"
+      },
+      "kind": "training",
+      "status": "complete",
+      "metrics": {
+        "cosine_auroc": 0.8072992615975472,
+        "mahalanobis_auroc": 0.8182025293547206,
+        "knn_auroc": 0.8384803691932186
+      },
+      "expected_rows": null,
+      "actual_rows": null,
+      "paths": {
+        "run_dir": "runs/baseline_comparison_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon/seed_0",
+        "eval_metrics": "runs/baseline_comparison_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon/seed_0/eval_metrics.json",
+        "eval_metrics_extended": null,
+        "config": "configs/experiments/baseline_comparison_nq_qwen3_memmap.json"
+      }
+    },
+    {
+      "key": {
+        "dataset": "sciq",
+        "model": "Llama-3.1-8B-Instruct",
+        "method": "contrastive_logprob_recon",
+        "seed": 0,
+        "label_convention": "true_class"
+      },
+      "kind": "training",
+      "status": "complete",
+      "metrics": {
+        "cosine_auroc": 0.7274926961780936,
+        "mahalanobis_auroc": 0.7528531889084416,
+        "knn_auroc": 0.7646845261485367
+      },
+      "expected_rows": null,
+      "actual_rows": null,
+      "paths": {
+        "run_dir": "runs/baseline_comparison_sciq_memmap/sciq_memmap/contrastive_logprob_recon/seed_0",
+        "eval_metrics": "runs/baseline_comparison_sciq_memmap/sciq_memmap/contrastive_logprob_recon/seed_0/eval_metrics.json",
+        "eval_metrics_extended": null,
+        "config": "configs/experiments/baseline_comparison_sciq_memmap.json"
+      }
+    },
+    {
+      "key": {
+        "dataset": "sciq",
+        "model": "Qwen3-8B",
+        "method": "contrastive_logprob_recon",
+        "seed": 0,
+        "label_convention": "true_class"
+      },
+      "kind": "training",
+      "status": "complete",
+      "metrics": {
+        "cosine_auroc": 0.8098279971473613,
+        "mahalanobis_auroc": 0.8133914495908715,
+        "knn_auroc": 0.8125234591997599
+      },
+      "expected_rows": null,
+      "actual_rows": null,
+      "paths": {
+        "run_dir": "runs/baseline_comparison_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon/seed_0",
+        "eval_metrics": "runs/baseline_comparison_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon/seed_0/eval_metrics.json",
+        "eval_metrics_extended": null,
+        "config": "configs/experiments/baseline_comparison_sciq_qwen3_memmap.json"
+      }
+    },
+    {
+      "key": {
+        "dataset": "nq",
+        "model": "Llama-3.1-8B-Instruct",
+        "method": "contrastive_logprob_recon_b5",
+        "seed": 0,
+        "experiment": "aug_grid_nq_memmap",
+        "label_convention": "halu_class"
+      },
+      "kind": "ablation",
+      "status": "complete",
+      "metrics": {
+        "cosine_auroc": 0.7387654808359019,
+        "mahalanobis_auroc": 0.7399985772505169,
+        "knn_auroc": 0.7561188068924057
+      },
+      "expected_rows": null,
+      "actual_rows": null,
+      "paths": {
+        "run_dir": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b5/seed_0",
+        "eval_metrics": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b5/seed_0/eval_metrics.json",
+        "eval_metrics_extended": null,
+        "config": "configs/experiments/aug_grid_nq_memmap.json"
+      }
+    },
+    {
+      "key": {
+        "dataset": "nq",
+        "model": "Llama-3.1-8B-Instruct",
+        "method": "contrastive_logprob_recon_b6",
+        "seed": 0,
+        "experiment": "aug_grid_nq_memmap",
+        "label_convention": "two_class"
+      },
+      "kind": "ablation",
+      "status": "complete",
+      "metrics": {
+        "cosine_auroc": 0.3880830390828721,
+        "mahalanobis_auroc": 0.48177629429432467,
+        "knn_auroc": 0.405644294633985
+      },
+      "expected_rows": null,
+      "actual_rows": null,
+      "paths": {
+        "run_dir": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b6/seed_0",
+        "eval_metrics": "runs/aug_grid_nq_memmap/nq_memmap/contrastive_logprob_recon_b6/seed_0/eval_metrics.json",
+        "eval_metrics_extended": null,
+        "config": "configs/experiments/aug_grid_nq_memmap.json"
+      }
+    },
+    {
+      "key": {
+        "dataset": "nq",
+        "model": "Qwen3-8B",
+        "method": "contrastive_logprob_recon_b5",
+        "seed": 0,
+        "experiment": "aug_grid_nq_qwen3_memmap",
+        "label_convention": "halu_class"
+      },
+      "kind": "ablation",
+      "status": "complete",
+      "metrics": {
+        "cosine_auroc": 0.840573617227095,
+        "mahalanobis_auroc": 0.8469890941296965,
+        "knn_auroc": 0.8495872361518508
+      },
+      "expected_rows": null,
+      "actual_rows": null,
+      "paths": {
+        "run_dir": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b5/seed_0",
+        "eval_metrics": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b5/seed_0/eval_metrics.json",
+        "eval_metrics_extended": null,
+        "config": "configs/experiments/aug_grid_nq_qwen3_memmap.json"
+      }
+    },
+    {
+      "key": {
+        "dataset": "nq",
+        "model": "Qwen3-8B",
+        "method": "contrastive_logprob_recon_b6",
+        "seed": 0,
+        "experiment": "aug_grid_nq_qwen3_memmap",
+        "label_convention": "two_class"
+      },
+      "kind": "ablation",
+      "status": "complete",
+      "metrics": {
+        "cosine_auroc": 0.2541614715837976,
+        "mahalanobis_auroc": 0.2318096025151008,
+        "knn_auroc": 0.2112787150948488
+      },
+      "expected_rows": null,
+      "actual_rows": null,
+      "paths": {
+        "run_dir": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b6/seed_0",
+        "eval_metrics": "runs/aug_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_b6/seed_0/eval_metrics.json",
+        "eval_metrics_extended": null,
+        "config": "configs/experiments/aug_grid_nq_qwen3_memmap.json"
+      }
+    },
+    {
+      "key": {
+        "dataset": "sciq",
+        "model": "Llama-3.1-8B-Instruct",
+        "method": "contrastive_logprob_recon_b5",
+        "seed": 0,
+        "experiment": "aug_grid_sciq_memmap",
+        "label_convention": "halu_class"
+      },
+      "kind": "ablation",
+      "status": "complete",
+      "metrics": {
+        "cosine_auroc": 0.7151808443388974,
+        "mahalanobis_auroc": 0.7178332849259367,
+        "knn_auroc": 0.753092378397772
+      },
+      "expected_rows": null,
+      "actual_rows": null,
+      "paths": {
+        "run_dir": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b5/seed_0",
+        "eval_metrics": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b5/seed_0/eval_metrics.json",
+        "eval_metrics_extended": null,
+        "config": "configs/experiments/aug_grid_sciq_memmap.json"
+      }
+    },
+    {
+      "key": {
+        "dataset": "sciq",
+        "model": "Llama-3.1-8B-Instruct",
+        "method": "contrastive_logprob_recon_b6",
+        "seed": 0,
+        "experiment": "aug_grid_sciq_memmap",
+        "label_convention": "two_class"
+      },
+      "kind": "ablation",
+      "status": "complete",
+      "metrics": {
+        "cosine_auroc": 0.5363546667577865,
+        "mahalanobis_auroc": 0.5953127402572995,
+        "knn_auroc": 0.6004211443508568
+      },
+      "expected_rows": null,
+      "actual_rows": null,
+      "paths": {
+        "run_dir": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b6/seed_0",
+        "eval_metrics": "runs/aug_grid_sciq_memmap/sciq_memmap/contrastive_logprob_recon_b6/seed_0/eval_metrics.json",
+        "eval_metrics_extended": null,
+        "config": "configs/experiments/aug_grid_sciq_memmap.json"
+      }
+    },
+    {
+      "key": {
+        "dataset": "sciq",
+        "model": "Qwen3-8B",
+        "method": "contrastive_logprob_recon_b5",
+        "seed": 0,
+        "experiment": "aug_grid_sciq_qwen3_memmap",
+        "label_convention": "halu_class"
+      },
+      "kind": "ablation",
+      "status": "complete",
+      "metrics": {
+        "cosine_auroc": 0.7959753396892124,
+        "mahalanobis_auroc": 0.8044159597627806,
+        "knn_auroc": 0.8195143007281736
+      },
+      "expected_rows": null,
+      "actual_rows": null,
+      "paths": {
+        "run_dir": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b5/seed_0",
+        "eval_metrics": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b5/seed_0/eval_metrics.json",
+        "eval_metrics_extended": null,
+        "config": "configs/experiments/aug_grid_sciq_qwen3_memmap.json"
+      }
+    },
+    {
+      "key": {
+        "dataset": "sciq",
+        "model": "Qwen3-8B",
+        "method": "contrastive_logprob_recon_b6",
+        "seed": 0,
+        "experiment": "aug_grid_sciq_qwen3_memmap",
+        "label_convention": "two_class"
+      },
+      "kind": "ablation",
+      "status": "complete",
+      "metrics": {
+        "cosine_auroc": 0.6704381240147137,
+        "mahalanobis_auroc": 0.7183113129644921,
+        "knn_auroc": 0.7442524960588545
+      },
+      "expected_rows": null,
+      "actual_rows": null,
+      "paths": {
+        "run_dir": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b6/seed_0",
+        "eval_metrics": "runs/aug_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_b6/seed_0/eval_metrics.json",
+        "eval_metrics_extended": null,
+        "config": "configs/experiments/aug_grid_sciq_qwen3_memmap.json"
+      }
+    },
+    {
+      "key": {
+        "dataset": "nq",
+        "model": "Llama-3.1-8B-Instruct",
+        "method": "contrastive_logprob_recon_c0",
+        "seed": 0,
+        "experiment": "sharedtrunk_grid_nq_llama_memmap",
+        "label_convention": "unlabeled"
+      },
+      "kind": "ablation",
+      "status": "complete",
+      "metrics": {
+        "cosine_auroc": 0.5105698196032384,
+        "mahalanobis_auroc": 0.5225467834333475,
+        "knn_auroc": 0.5207701742221412
+      },
+      "expected_rows": null,
+      "actual_rows": null,
+      "paths": {
+        "run_dir": "runs/sharedtrunk_grid_nq_llama_memmap/nq_memmap/contrastive_logprob_recon_c0/seed_0",
+        "eval_metrics": "runs/sharedtrunk_grid_nq_llama_memmap/nq_memmap/contrastive_logprob_recon_c0/seed_0/eval_metrics.json",
+        "eval_metrics_extended": null,
+        "config": "configs/experiments/sharedtrunk_grid_nq_llama_memmap.json"
+      }
+    },
+    {
+      "key": {
+        "dataset": "nq",
+        "model": "Qwen3-8B",
+        "method": "contrastive_logprob_recon_c0",
+        "seed": 0,
+        "experiment": "sharedtrunk_grid_nq_qwen3_memmap",
+        "label_convention": "unlabeled"
+      },
+      "kind": "ablation",
+      "status": "complete",
+      "metrics": {
+        "cosine_auroc": 0.5179894008297719,
+        "mahalanobis_auroc": 0.5187155112562132,
+        "knn_auroc": 0.5174534764813894
+      },
+      "expected_rows": null,
+      "actual_rows": null,
+      "paths": {
+        "run_dir": "runs/sharedtrunk_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_c0/seed_0",
+        "eval_metrics": "runs/sharedtrunk_grid_nq_qwen3_memmap/nq_qwen3_memmap/contrastive_logprob_recon_c0/seed_0/eval_metrics.json",
+        "eval_metrics_extended": null,
+        "config": "configs/experiments/sharedtrunk_grid_nq_qwen3_memmap.json"
+      }
+    },
+    {
+      "key": {
+        "dataset": "sciq",
+        "model": "Llama-3.1-8B-Instruct",
+        "method": "contrastive_logprob_recon_c0",
+        "seed": 0,
+        "experiment": "sharedtrunk_grid_sciq_llama_memmap",
+        "label_convention": "unlabeled"
+      },
+      "kind": "ablation",
+      "status": "complete",
+      "metrics": {
+        "cosine_auroc": 0.5262019271838854,
+        "mahalanobis_auroc": 0.5451085749431925,
+        "knn_auroc": 0.5281602911277784
+      },
+      "expected_rows": null,
+      "actual_rows": null,
+      "paths": {
+        "run_dir": "runs/sharedtrunk_grid_sciq_llama_memmap/sciq_memmap/contrastive_logprob_recon_c0/seed_0",
+        "eval_metrics": "runs/sharedtrunk_grid_sciq_llama_memmap/sciq_memmap/contrastive_logprob_recon_c0/seed_0/eval_metrics.json",
+        "eval_metrics_extended": null,
+        "config": "configs/experiments/sharedtrunk_grid_sciq_llama_memmap.json"
+      }
+    },
+    {
+      "key": {
+        "dataset": "sciq",
+        "model": "Qwen3-8B",
+        "method": "contrastive_logprob_recon_c0",
+        "seed": 0,
+        "experiment": "sharedtrunk_grid_sciq_qwen3_memmap",
+        "label_convention": "unlabeled"
+      },
+      "kind": "ablation",
+      "status": "complete",
+      "metrics": {
+        "cosine_auroc": 0.5398102619923429,
+        "mahalanobis_auroc": 0.5434558216350124,
+        "knn_auroc": 0.5360427145109226
+      },
+      "expected_rows": null,
+      "actual_rows": null,
+      "paths": {
+        "run_dir": "runs/sharedtrunk_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_c0/seed_0",
+        "eval_metrics": "runs/sharedtrunk_grid_sciq_qwen3_memmap/sciq_qwen3_memmap/contrastive_logprob_recon_c0/seed_0/eval_metrics.json",
+        "eval_metrics_extended": null,
+        "config": "configs/experiments/sharedtrunk_grid_sciq_qwen3_memmap.json"
+      }
+    }
+  ]
+}

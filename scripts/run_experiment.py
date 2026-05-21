@@ -392,6 +392,202 @@ def run_contrastive_logprob_recon(
         if m == "knn":
             knn_params = dict(eval_cfg.get("knn_params", {}))
             knn_params["sample_seed"] = training_seed
+            knn_params["include_per_sample"] = True
+            metrics_list.append(
+                {
+                    "metric": "knn",
+                    "kwargs": knn_params,
+                    "train_selection": "all",
+                }
+            )
+        else:
+            metrics_list.append(m)
+
+    flip_auroc: bool = bool(eval_cfg.get("flip_auroc", False))
+    effective_outlier_class = 0 if flip_auroc else dataset_cfg.get("outlier_class", 1)
+
+    evaluator = MultiMetricHallucinationEvaluator(
+        activation_parser_df=eval_ap.df,
+        train_data_loader=train_loader,
+        metrics=metrics_list,
+        batch_size=eval_cfg.get("eval_batch_size", 256),
+        sub_batch_size=eval_cfg.get("sub_batch_size", 64),
+        device=train_device,
+        num_workers=experiment_cfg.get("num_workers", 4),
+        persistent_workers=False,
+        outlier_class=effective_outlier_class,
+    )
+
+    ood_stats = evaluator.compute(eval_loader, model)
+
+    knn_scores_arr = ood_stats.pop("knn_scores", None)
+    knn_labels_arr = ood_stats.pop("knn_labels", None)
+
+    eval_metrics: dict = {
+        "method": method_cfg["name"],
+        "dataset": dataset_cfg["name"],
+        "seed": training_seed,
+        "flip_auroc": flip_auroc,
+        "split_seed": experiment_cfg.get("split_seed", 42),
+        "n_train": len(train_ds),
+        "n_test": len(test_ds),
+    }
+    eval_metrics.update(ood_stats)
+
+    predictions: list[dict] = []
+    if knn_scores_arr is not None and knn_labels_arr is not None:
+        predictions = [
+            {"example_id": i, "score_halu": float(s), "label_halu": int(l)}
+            for i, (s, l) in enumerate(zip(knn_scores_arr, knn_labels_arr))
+        ]
+    return eval_metrics, predictions
+
+
+def run_contrastive_logprob_recon_shared_trunk(
+    ap,
+    dataset_cfg: dict,
+    method_cfg: dict,
+    experiment_cfg: dict,
+    output_dir: str,
+    device: str,
+    training_seed: int,
+    test_ap=None,
+) -> tuple[dict, list[dict]]:
+    """Train a shared-trunk twin-head model (D1 or D2) and evaluate.
+
+    Reads ``method_cfg["model_params"]["variant"]`` to select the model class:
+    - ``"split_output"`` → ``SharedTrunkSplitOutputCompressor`` (D1):
+        single trunk with ``final_dim = 2 * half_dim``.  Eval surface is
+        the full 2D embedding — KNN/Maha only (no cosine).
+    - ``"projection_head"`` → ``SharedTrunkProjectionHeadCompressor`` (D2):
+        trunk + two projection heads.  Heads discarded at eval.  Eval
+        surface is the trunk — KNN/Maha + cosine apply.
+
+    A single checkpoint ``artifacts/final_weights.pt`` is saved.  The model
+    is passed directly to ``MultiMetricHallucinationEvaluator`` (no
+    ``TwinConcatModel`` wrapper needed).
+    """
+    data_cfg = method_cfg["data"]
+    train_cfg = method_cfg["training"]
+    eval_cfg = method_cfg["evaluation"]
+
+    relevant_layers = parse_layer_range(data_cfg["relevant_layers"])
+    target_layers = data_cfg["target_layers"]
+
+    ds_kwargs = dict(
+        relevant_layers=relevant_layers,
+        num_views=data_cfg.get("num_views", 2),
+        pad_length=data_cfg.get("pad_length", 63),
+        preload=data_cfg.get("preload", True),
+        include_response_logprobs=True,
+        response_logprobs_top_k=data_cfg.get("response_logprobs_top_k", 20),
+        check_ram=False,
+    )
+
+    train_ds = ap.get_dataset("train", **ds_kwargs)
+    eval_ap = test_ap if test_ap is not None else ap
+    test_ds = eval_ap.get_dataset("test", **ds_kwargs)
+
+    has_val = ap.split_strategy == "three_way"
+    val_ds = ap.get_dataset("val", **ds_kwargs) if has_val else test_ds
+
+    from activation_research.model import (
+        SharedTrunkSplitOutputCompressor,
+        SharedTrunkProjectionHeadCompressor,
+    )
+    from activation_research.training import train_contrastive_logprob_recon_dualloss
+
+    model_params = method_cfg.get("model_params", {})
+    variant = model_params.get("variant", "split_output")
+
+    train_device = device if device != "auto" else (
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+
+    if variant == "split_output":
+        model = SharedTrunkSplitOutputCompressor(
+            input_dim=dataset_cfg["input_dim"],
+            half_dim=model_params.get("half_dim", 256),
+            input_dropout=model_params.get("input_dropout", 0.3),
+            recon_seq_len=model_params.get("recon_seq_len", 64),
+            recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
+        )
+    elif variant == "projection_head":
+        model = SharedTrunkProjectionHeadCompressor(
+            input_dim=dataset_cfg["input_dim"],
+            trunk_dim=model_params.get("trunk_dim", 512),
+            head_dim=model_params.get("head_dim", 256),
+            head_hidden_dim=model_params.get("head_hidden_dim", 256),
+            input_dropout=model_params.get("input_dropout", 0.3),
+            recon_seq_len=model_params.get("recon_seq_len", 64),
+            recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
+        )
+    else:
+        raise ValueError(
+            f"Unknown shared-trunk variant '{variant}'. "
+            "Expected 'split_output' or 'projection_head'."
+        )
+
+    artifacts_dir = os.path.join(output_dir, "artifacts")
+    final_weights = os.path.join(artifacts_dir, "final_weights.pt")
+
+    if os.path.exists(final_weights):
+        logger.info("final_weights.pt found — skipping training, loading weights for eval")
+        ckpt = torch.load(final_weights, map_location=train_device)
+        model.load_state_dict(ckpt["model_state_dict"])
+    else:
+        os.makedirs(artifacts_dir, exist_ok=True)
+        train_contrastive_logprob_recon_dualloss(
+            model=model,
+            train_dataset=train_ds,
+            test_dataset=val_ds,
+            epochs=train_cfg["max_epochs"],
+            batch_size=train_cfg["batch_size"],
+            lr=train_cfg["lr"],
+            temperature=train_cfg["temperature"],
+            device=train_device,
+            num_workers=experiment_cfg.get("num_workers", 4),
+            sub_batch_size=train_cfg.get("sub_batch_size", 64),
+            checkpoint_dir=artifacts_dir,
+            save_every=1,
+            snapshot_every=10,
+            snapshot_keep_last=3,
+            persistent_workers=experiment_cfg.get("persistent_workers", True),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", True),
+            infinite_stream_shuffle=True,
+            infinite_stream_seed=training_seed,
+            steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+            balanced_sampling=train_cfg.get("balanced_sampling", False),
+            grad_clip_norm=train_cfg.get("grad_clip_norm"),
+            augment_fn=None,
+            ignore_labels=(1, 0),
+        )
+        torch.save(
+            {"model_state_dict": model.state_dict()},
+            final_weights,
+        )
+
+    model.eval()
+
+    from torch.utils.data import DataLoader
+    from activation_research.metric_evaluator import MultiMetricHallucinationEvaluator
+
+    train_ds_target = train_ds.slice_layers(target_layers)
+    test_ds_target = test_ds.slice_layers(target_layers)
+
+    train_loader = DataLoader(train_ds_target, batch_size=64, shuffle=False)
+    eval_loader = DataLoader(test_ds_target, batch_size=64, shuffle=False)
+
+    metrics_list: list = []
+    for m in eval_cfg["metrics"]:
+        if m == "knn":
+            knn_params = dict(eval_cfg.get("knn_params", {}))
+            knn_params["sample_seed"] = training_seed
             metrics_list.append(
                 {
                     "metric": "knn",
@@ -427,6 +623,7 @@ def run_contrastive_logprob_recon(
         "split_seed": experiment_cfg.get("split_seed", 42),
         "n_train": len(train_ds),
         "n_test": len(test_ds),
+        "variant": variant,
     }
     eval_metrics.update(ood_stats)
 
@@ -2833,6 +3030,11 @@ def main() -> None:
         return result
 
     # ---- Main loop ----
+    # Track per-seed failures so the process can exit non-zero at the end.
+    # Worker dispatch relies on exit code AND output-file existence to decide
+    # done vs failed, and a multi-seed invocation must not silently succeed
+    # when an earlier seed errored.
+    had_failures = 0
     for dataset_name in datasets:
         # Load dataset config (use pre-loaded if available, else load from configs/)
         if dataset_name in _preloaded_dataset_cfgs:
@@ -3075,10 +3277,20 @@ def main() -> None:
 
                 # Resume check — skip only when eval_metrics.json exists AND there is
                 # no run_error.json (which would indicate the prior result was degenerate).
+                # For methods that also produce per-sample predictions.csv, require both
+                # files; otherwise a prior run that wrote only eval_metrics.json (issue #107)
+                # would be falsely treated as complete.
                 eval_metrics_path = os.path.join(run_dir, "eval_metrics.json")
+                pred_path = os.path.join(run_dir, "predictions.csv")
                 run_error_path = os.path.join(run_dir, "run_error.json")
                 prior_error = os.path.exists(run_error_path)
-                if os.path.exists(eval_metrics_path) and not args.force:
+                routine_for_skip = method_cfg.get("routine", method_cfg["name"])
+                needs_predictions = routine_for_skip in {
+                    "contrastive_logprob_recon",
+                    "contrastive_logprob_recon_twin",
+                }
+                have_predictions = (not needs_predictions) or os.path.exists(pred_path)
+                if os.path.exists(eval_metrics_path) and have_predictions and not args.force:
                     if prior_error:
                         logger.warning(
                             f"Found both eval_metrics.json and run_error.json for "
@@ -3092,6 +3304,11 @@ def main() -> None:
                         if not is_learned:
                             completed_nonlearned.add(method_name)
                         continue
+                elif os.path.exists(eval_metrics_path) and needs_predictions and not have_predictions:
+                    logger.info(
+                        f"{method_name} seed={effective_seed}: eval_metrics.json present but "
+                        f"predictions.csv missing — re-running eval to write predictions."
+                    )
 
                 os.makedirs(run_dir, exist_ok=True)
                 os.makedirs(os.path.join(run_dir, "artifacts"), exist_ok=True)
@@ -3132,6 +3349,11 @@ def main() -> None:
                         )
                     elif routine == "contrastive_logprob_recon_twin":
                         eval_metrics, predictions = run_contrastive_logprob_recon_twin(
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
+                            test_ap=test_ap,
+                        )
+                    elif routine == "contrastive_logprob_recon_shared_trunk":
+                        eval_metrics, predictions = run_contrastive_logprob_recon_shared_trunk(
                             ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
                         )
@@ -3199,9 +3421,11 @@ def main() -> None:
                         logger.warning(f"Unknown routine: {routine}, skipping")
                         continue
 
-                    # Write eval_metrics.json
-                    with open(eval_metrics_path, "w") as f:
-                        json.dump(eval_metrics, f, indent=2)
+                    # Write eval_metrics.json — preserve original mtime when re-running
+                    # only to backfill predictions.csv (values would be identical).
+                    if not os.path.exists(eval_metrics_path) or args.force:
+                        with open(eval_metrics_path, "w") as f:
+                            json.dump(eval_metrics, f, indent=2)
 
                     # Write predictions.csv
                     if predictions:
@@ -3215,6 +3439,15 @@ def main() -> None:
 
                     if not is_learned:
                         completed_nonlearned.add(method_name)
+
+                    # Free per-seed GPU/CPU state before the next iteration —
+                    # multi-seed invocations load a different checkpoint each pass
+                    # and stale CUDA allocations can pile up.
+                    import gc as _gc
+
+                    _gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
                 except Exception:
                     import traceback
@@ -3231,6 +3464,7 @@ def main() -> None:
                             f,
                             indent=2,
                         )
+                    had_failures += 1
 
     if args.smoketest_memmap_cache:
         n_total = len(smoketest_results)
@@ -3245,6 +3479,11 @@ def main() -> None:
         sys.exit(0 if n_miss == 0 else 1)
 
     logger.info("Experiment complete.")
+    if had_failures:
+        logger.error(
+            f"Experiment finished with {had_failures} per-seed failure(s) — exiting with code 1."
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

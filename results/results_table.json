@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-05-20T10:01:52-0400",
+  "generated_at": "2026-05-21T06:39:55-0400",
   "git": {
     "branch": "main",
-    "commit": "cf1c3ace6d2337f6d6be36e19abfc907fdbb3a7f"
+    "commit": "efbf926859432898ebb7acdc21d0a293efd301b5"
   },
   "cells": [
     {
@@ -1036,8 +1036,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.5972608028320299,
+        "mean_logprob_auroc": 0.6131585856550595,
+        "min_logprob_auroc": 0.6212146790426057
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -1055,8 +1059,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.6131585856550595,
+        "perplexity_auroc": 0.6131585856550595,
+        "seq_logprob_auroc": 0.6115167060160008
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -2419,8 +2427,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.6340540239859378,
+        "mean_logprob_auroc": 0.6282633558062434,
+        "min_logprob_auroc": 0.6012489597935162
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -2438,8 +2450,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.6282633558062434,
+        "perplexity_auroc": 0.6282634003070556,
+        "seq_logprob_auroc": 0.6282634448078678
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -2714,8 +2730,10 @@
         "seed": 2
       },
       "kind": "training",
-      "status": "running",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8770682864962286
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -2754,8 +2772,10 @@
         "seed": 4
       },
       "kind": "training",
-      "status": "running",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8794379992434862
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -3976,8 +3996,10 @@
         "seed": 2
       },
       "kind": "training",
-      "status": "running",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6565467733328841
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -3995,8 +4017,10 @@
         "seed": 3
       },
       "kind": "training",
-      "status": "failed",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6662854526812986
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -4014,8 +4038,10 @@
         "seed": 4
       },
       "kind": "training",
-      "status": "running",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.660156505668902
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -4828,8 +4854,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.6270098359722533,
+        "mean_logprob_auroc": 0.6218781368626676,
+        "min_logprob_auroc": 0.6016006318077045
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -4847,8 +4877,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.6218781368626676,
+        "perplexity_auroc": 0.621878096432667,
+        "seq_logprob_auroc": 0.6218781368626676
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -5228,8 +5262,10 @@
         "seed": 2
       },
       "kind": "training",
-      "status": "failed",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6693387616065798
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -5247,8 +5283,10 @@
         "seed": 3
       },
       "kind": "training",
-      "status": "running",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6836746519159029
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -5266,8 +5304,10 @@
         "seed": 4
       },
       "kind": "training",
-      "status": "running",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.6826213843343059
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -6080,8 +6120,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.5898459269156646,
+        "mean_logprob_auroc": 0.595383262280212,
+        "min_logprob_auroc": 0.5834754676937456
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -6099,8 +6143,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.595383262280212,
+        "perplexity_auroc": 0.5953834028681055,
+        "seq_logprob_auroc": 0.5953680787877049
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -7338,8 +7386,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.6564290501826988,
+        "mean_logprob_auroc": 0.6578648549741066,
+        "min_logprob_auroc": 0.664336186524896
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -7357,8 +7409,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.6578648549741066,
+        "perplexity_auroc": 0.6578644545823633,
+        "seq_logprob_auroc": 0.6578648549741066
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -8816,8 +8872,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.6041235268553315,
+        "mean_logprob_auroc": 0.632099242962306,
+        "min_logprob_auroc": 0.7132515496987298
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -8835,8 +8895,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.632099242962306,
+        "perplexity_auroc": 0.632099242962306,
+        "seq_logprob_auroc": 0.6313967795609827
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -10294,8 +10358,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.705954912411514,
+        "mean_logprob_auroc": 0.72818046607779,
+        "min_logprob_auroc": 0.7851488169209303
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -10313,8 +10381,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.72818046607779,
+        "perplexity_auroc": 0.72818046607779,
+        "seq_logprob_auroc": 0.72818046607779
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -11562,8 +11634,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.5422852847209172,
+        "mean_logprob_auroc": 0.5446173822418889,
+        "min_logprob_auroc": 0.5426056277869846
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -11581,8 +11657,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.5446173822418889,
+        "perplexity_auroc": 0.5446173822418889,
+        "seq_logprob_auroc": 0.5441945293946797
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -12725,8 +12805,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.5723387883792508,
+        "mean_logprob_auroc": 0.5604074393814279,
+        "min_logprob_auroc": 0.5254766909391186
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -12744,8 +12828,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.5604074393814279,
+        "perplexity_auroc": 0.5604074393814279,
+        "seq_logprob_auroc": 0.5604074393814279
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -13888,8 +13976,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.5637018416069819,
+        "mean_logprob_auroc": 0.5693609803065396,
+        "min_logprob_auroc": 0.585040474635831
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -13907,8 +13999,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.5693609803065396,
+        "perplexity_auroc": 0.5693609845900955,
+        "seq_logprob_auroc": 0.569381472838725
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -14204,8 +14300,10 @@
         "seed": 3
       },
       "kind": "training",
-      "status": "running",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8163022599836156
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -14223,8 +14321,10 @@
         "seed": 4
       },
       "kind": "training",
-      "status": "running",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8125043006902831
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -15047,8 +15147,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_entropy_auroc": 0.6422290744049981,
+        "mean_logprob_auroc": 0.6390265308381664,
+        "min_logprob_auroc": 0.626510135139259
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -15066,8 +15170,12 @@
         "seed": null
       },
       "kind": "training",
-      "status": "pending",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "mean_logprob_auroc": 0.6390265308381664,
+        "perplexity_auroc": 0.6390265910113893,
+        "seq_logprob_auroc": 0.6390280179763893
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -15321,8 +15429,10 @@
         "seed": 1
       },
       "kind": "training",
-      "status": "running",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8397037606906111
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -15361,8 +15471,10 @@
         "seed": 3
       },
       "kind": "training",
-      "status": "running",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.840225037022435
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {
@@ -15380,8 +15492,10 @@
         "seed": 4
       },
       "kind": "training",
-      "status": "running",
-      "metrics": {},
+      "status": "complete",
+      "metrics": {
+        "auroc": 0.8364127667842159
+      },
       "expected_rows": null,
       "actual_rows": null,
       "paths": {

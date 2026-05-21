@@ -259,6 +259,196 @@ class TwinConcatModel(nn.Module):
         return torch.cat([self.head_a(x), self.head_b(x)], dim=-1)
 
 
+class SharedTrunkSplitOutputCompressor(nn.Module):
+    """D1 shared-trunk variant: a single trunk with ``final_dim = 2 * half_dim``.
+
+    During training the output is sliced into two halves and each half receives
+    its own SupCon loss with opposite ``ignore_label``::
+
+        z = compressor(x)                   # (B, 2D)
+        z_A, z_B = z[:, :D], z[:, D:]       # each (B, D)
+        L_supcon_A = SupCon(z_A, labels, ignore_label=1)
+        L_supcon_B = SupCon(z_B, labels, ignore_label=0)
+        L_recon    = recon_loss(decoder(z), logprob_target)
+        loss       = L_supcon_A + L_supcon_B + λ · L_recon
+
+    The reconstruction decoder operates on the full ``z`` (2D-dim).
+
+    **Eval surface:** full ``z`` (2D-dim) — KNN/Maha only (no cosine).
+
+    Parameters
+    ----------
+    input_dim : int
+        Activation dimension (e.g. 4096 for Llama-8B).
+    half_dim : int
+        ``D``; total output is ``2 * half_dim``.
+    dropout, input_dropout : float
+    normalize_input : bool
+    recon_seq_len, recon_hidden_dim, recon_lambda, logprob_var_threshold :
+        Forwarded to the inner ``LogprobReconProgressiveCompressor``.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 4096,
+        half_dim: int = 256,
+        dropout: float = 0.1,
+        input_dropout: float = 0.2,
+        normalize_input: bool = False,
+        recon_seq_len: int = 64,
+        recon_hidden_dim: int = 256,
+        recon_lambda: float = 1.0,
+        logprob_var_threshold: float = 1e-4,
+    ):
+        super().__init__()
+        self.half_dim = int(half_dim)
+        self.recon_lambda = float(recon_lambda)
+
+        self._inner = LogprobReconProgressiveCompressor(
+            input_dim=int(input_dim),
+            final_dim=2 * self.half_dim,
+            dropout=float(dropout),
+            input_dropout=float(input_dropout),
+            normalize_input=bool(normalize_input),
+            recon_seq_len=int(recon_seq_len),
+            recon_hidden_dim=int(recon_hidden_dim),
+            recon_lambda=float(recon_lambda),
+            logprob_var_threshold=float(logprob_var_threshold),
+        )
+
+    def recon_loss(self, logprob_pred: torch.Tensor, logprob_target: torch.Tensor):
+        """Delegate to the inner module's ``recon_loss``."""
+        return self._inner.recon_loss(logprob_pred, logprob_target)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return full trunk embedding ``z`` of shape ``(B, 2*half_dim)``.
+
+        This is the eval surface — the two halves are NOT separated here.
+        """
+        return self._inner(x)
+
+    def forward_slices(self, x: torch.Tensor):
+        """Return ``(z, z_A, z_B)`` for the dual-loss trainer.
+
+        z   : (B, 2*half_dim) — full embedding (also passed to decoder)
+        z_A : (B, half_dim)   — first half  (trained with ignore_label=1)
+        z_B : (B, half_dim)   — second half (trained with ignore_label=0)
+        """
+        z, logprob_pred = self._inner.forward_with_recon(x)
+        z_A = z[:, : self.half_dim]
+        z_B = z[:, self.half_dim :]
+        return z, z_A, z_B, logprob_pred
+
+    def forward_with_recon(self, x: torch.Tensor):
+        """Return ``(z, logprob_pred)`` from the inner module."""
+        return self._inner.forward_with_recon(x)
+
+
+class SharedTrunkProjectionHeadCompressor(nn.Module):
+    """D2 shared-trunk variant: trunk + two small projection MLPs.
+
+    SupCon losses are computed on the head outputs; the decoder reconstructs
+    logprobs from the trunk embedding.  At eval-time ``forward(x)`` returns
+    **only the trunk** ``z`` — heads are discarded.
+
+    Training objective::
+
+        z  = compressor(x)                  # (B, trunk_dim)
+        zA = head_A(z)                       # (B, head_dim)
+        zB = head_B(z)                       # (B, head_dim)
+        L_supcon_A = SupCon(zA, labels, ignore_label=1)
+        L_supcon_B = SupCon(zB, labels, ignore_label=0)
+        L_recon    = recon_loss(decoder(z), logprob_target)
+        loss       = L_supcon_A + L_supcon_B + λ · L_recon
+
+    **Eval surface:** trunk ``z`` (trunk_dim) — KNN/Maha + cosine all apply.
+
+    Parameters
+    ----------
+    input_dim : int
+        Activation dimension (e.g. 4096 for Llama-8B).
+    trunk_dim : int
+        Trunk output dimension (eval surface).
+    head_dim : int
+        Projection head output dimension (used for SupCon only).
+    head_hidden_dim : int
+        Hidden dimension of each ``Linear → GELU → Linear`` projection head.
+    dropout, input_dropout : float
+    normalize_input : bool
+    recon_seq_len, recon_hidden_dim, recon_lambda, logprob_var_threshold :
+        Forwarded to the inner ``LogprobReconProgressiveCompressor``.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 4096,
+        trunk_dim: int = 512,
+        head_dim: int = 256,
+        head_hidden_dim: int = 256,
+        dropout: float = 0.1,
+        input_dropout: float = 0.2,
+        normalize_input: bool = False,
+        recon_seq_len: int = 64,
+        recon_hidden_dim: int = 256,
+        recon_lambda: float = 1.0,
+        logprob_var_threshold: float = 1e-4,
+    ):
+        super().__init__()
+        self.trunk_dim = int(trunk_dim)
+        self.head_dim = int(head_dim)
+        self.recon_lambda = float(recon_lambda)
+
+        self._inner = LogprobReconProgressiveCompressor(
+            input_dim=int(input_dim),
+            final_dim=int(trunk_dim),
+            dropout=float(dropout),
+            input_dropout=float(input_dropout),
+            normalize_input=bool(normalize_input),
+            recon_seq_len=int(recon_seq_len),
+            recon_hidden_dim=int(recon_hidden_dim),
+            recon_lambda=float(recon_lambda),
+            logprob_var_threshold=float(logprob_var_threshold),
+        )
+
+        self.head_A = nn.Sequential(
+            nn.Linear(int(trunk_dim), int(head_hidden_dim)),
+            nn.GELU(),
+            nn.Linear(int(head_hidden_dim), int(head_dim)),
+        )
+        self.head_B = nn.Sequential(
+            nn.Linear(int(trunk_dim), int(head_hidden_dim)),
+            nn.GELU(),
+            nn.Linear(int(head_hidden_dim), int(head_dim)),
+        )
+
+    def recon_loss(self, logprob_pred: torch.Tensor, logprob_target: torch.Tensor):
+        """Delegate to the inner module's ``recon_loss``."""
+        return self._inner.recon_loss(logprob_pred, logprob_target)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return trunk embedding ``z`` of shape ``(B, trunk_dim)``.
+
+        Projection heads are NOT called — this is the eval surface.
+        """
+        return self._inner(x)
+
+    def forward_with_heads(self, x: torch.Tensor):
+        """Return ``(z, zA, zB)`` for the dual-loss trainer.
+
+        z  : (B, trunk_dim)  — trunk (also the eval surface + recon input)
+        zA : (B, head_dim)   — head A output (trained with ignore_label=1)
+        zB : (B, head_dim)   — head B output (trained with ignore_label=0)
+        """
+        z, logprob_pred = self._inner.forward_with_recon(x)
+        zA = self.head_A(z)
+        zB = self.head_B(z)
+        return z, zA, zB, logprob_pred
+
+    def forward_with_recon(self, x: torch.Tensor):
+        """Return ``(z, logprob_pred)`` from the inner module."""
+        return self._inner.forward_with_recon(x)
+
+
 class LogprobAttnReconProgressiveCompressor(nn.Module):
     """ProgressiveCompressor with combined logprob (Mechanism F) + attention
     summary (Mechanism K) auxiliary reconstruction heads.
