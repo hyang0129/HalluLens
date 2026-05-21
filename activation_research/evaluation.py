@@ -403,12 +403,26 @@ def dump_embeddings_to_memmap(
 
     os.makedirs(out_dir, exist_ok=True)
 
-    # Validate schema on the first record; subsequent records assumed consistent.
-    first = records[0]
-    if "z_views" not in first:
-        raise KeyError("Records must contain 'z_views' — legacy z1/z2 schema not supported by this dumper")
-    if "halu" not in first:
-        raise KeyError("Records must contain 'halu' — call _assign_hallucination_labels first")
+    # The parent evaluator labels its baseline embeddings with keep_unlabeled=True
+    # for callers that don't strictly need labels, so a few records can pass through
+    # without a 'halu' key (no matching hashkey in the activation parser dataframe).
+    # We skip those here — they can't be used for downstream label-conditioned
+    # analysis anyway. Test records are labeled with keep_unlabeled=False upstream
+    # so this filter should usually be a no-op for them.
+    n_input = len(records)
+    records = [r for r in records if "z_views" in r and "halu" in r]
+    n_skipped = n_input - len(records)
+    if n_skipped:
+        import logging
+        logging.getLogger(__name__).warning(
+            f"dump_embeddings_to_memmap[{split_name}]: skipped {n_skipped}/{n_input} records "
+            f"missing 'z_views' or 'halu'"
+        )
+    if not records:
+        raise ValueError(
+            f"dump_embeddings_to_memmap: no usable records for split={split_name} "
+            f"after filtering (all {n_input} missing 'z_views' or 'halu')"
+        )
 
     def _to_np(x):
         if isinstance(x, torch.Tensor):
