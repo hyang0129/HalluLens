@@ -254,6 +254,135 @@ class LogprobReconProgressiveCompressor(nn.Module):
         return loss, {"logprob_var": logprob_var, "suppressed": False}
 
 
+class AttentionPooling(nn.Module):
+    """Single learned query → attention-weighted sum over sequence positions.
+
+    Parameters
+    ----------
+    d_model : int
+        Dimensionality of the sequence vectors to pool.
+    """
+
+    def __init__(self, d_model: int) -> None:
+        super().__init__()
+        self.query = nn.Parameter(torch.randn(1, 1, d_model))
+        self.scale = d_model ** -0.5
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, L, d_model) → (B, d_model)
+        attn = torch.softmax(
+            (self.query @ x.transpose(-1, -2)) * self.scale, dim=-1
+        )  # (B, 1, L)
+        return (attn @ x).squeeze(1)  # (B, d_model)
+
+
+class AttentionPoolProgressiveCompressor(nn.Module):
+    """ProgressiveCompressor with learned attention pooling instead of mean pool.
+
+    Identical to :class:`ProgressiveCompressor` except the final
+    ``x.mean(dim=1)`` is replaced by :class:`AttentionPooling`, a single
+    learned query that assigns a scalar weight to each of the L positions.
+    This lets the encoder concentrate on the most diagnostic LLM layers
+    rather than averaging over all of them equally.
+
+    Parameters match :class:`ProgressiveCompressor` exactly.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 4096,
+        final_dim: int = 512,
+        dropout: float = 0.1,
+        input_dropout: float = 0.2,
+        normalize_input: bool = False,
+        block_dims: list | None = None,
+        pre_norm: bool = False,
+    ) -> None:
+        super().__init__()
+
+        self.normalize_input = bool(normalize_input)
+        if self.normalize_input:
+            self.input_norm = nn.LayerNorm(int(input_dim))
+
+        if block_dims:
+            block_dims = [int(d) for d in block_dims]
+            dims = [(int(input_dim), block_dims[0])]
+            dims += [(block_dims[i], block_dims[i + 1]) for i in range(len(block_dims) - 1)]
+        else:
+            dims = []
+            d = input_dim
+            while d > final_dim:
+                next_d = max(d // 2, final_dim)
+                dims.append((d, next_d))
+                d = next_d
+
+        self.pos_encodings = PositionalEncoding(input_dim)
+        self.blocks = nn.ModuleList([
+            TransformerBlock(d_in, d_out, dropout=dropout, pre_norm=bool(pre_norm))
+            for (d_in, d_out) in dims
+        ])
+        self.pool = AttentionPooling(dims[-1][1])
+        self.final_proj = nn.Linear(dims[-1][1], final_dim)
+        self.dropout = nn.Dropout(p=input_dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (B, L, input_dim) → (B, final_dim)."""
+        x = x.float()
+        if self.normalize_input:
+            x = self.input_norm(x)
+        x = self.dropout(x)
+        x = self.pos_encodings(x)
+        for block in self.blocks:
+            x = block(x)
+        return self.final_proj(self.pool(x))
+
+
+class LogprobReconAttentionPoolProgressiveCompressor(LogprobReconProgressiveCompressor):
+    """AttentionPoolProgressiveCompressor + auxiliary logprob reconstruction.
+
+    Structurally identical to :class:`LogprobReconProgressiveCompressor` but
+    swaps the inner encoder for :class:`AttentionPoolProgressiveCompressor`.
+    Inherited ``forward``, ``forward_with_recon``, and ``recon_loss`` work
+    unchanged because they only reference ``self.encoder``, ``self.decoder``,
+    and the recon hyperparameter attributes.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 4096,
+        final_dim: int = 512,
+        dropout: float = 0.1,
+        input_dropout: float = 0.2,
+        normalize_input: bool = False,
+        block_dims: list | None = None,
+        pre_norm: bool = False,
+        recon_seq_len: int = 64,
+        recon_hidden_dim: int = 256,
+        recon_lambda: float = 1.0,
+        logprob_var_threshold: float = 1e-4,
+    ) -> None:
+        nn.Module.__init__(self)
+        self.recon_seq_len = int(recon_seq_len)
+        self.recon_lambda = float(recon_lambda)
+        self.logprob_var_threshold = float(logprob_var_threshold)
+
+        self.encoder = AttentionPoolProgressiveCompressor(
+            input_dim=int(input_dim),
+            final_dim=int(final_dim),
+            dropout=float(dropout),
+            input_dropout=float(input_dropout),
+            normalize_input=bool(normalize_input),
+            block_dims=block_dims,
+            pre_norm=bool(pre_norm),
+        )
+
+        self.decoder = nn.Sequential(
+            nn.Linear(int(final_dim), int(recon_hidden_dim)),
+            nn.GELU(),
+            nn.Linear(int(recon_hidden_dim), self.recon_seq_len),
+        )
+
+
 class _PreNormBlock(nn.Module):
     """Pre-norm Transformer encoder block at fixed d_model.
 

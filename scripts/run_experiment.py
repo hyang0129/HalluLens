@@ -323,6 +323,20 @@ def run_contrastive_logprob_recon(
             recon_lambda=model_params.get("recon_lambda", 1.0),
             logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
         )
+    elif model_class == "logprob_recon_attn_pool_progressive_compressor":
+        from activation_research.model import LogprobReconAttentionPoolProgressiveCompressor
+
+        model = LogprobReconAttentionPoolProgressiveCompressor(
+            input_dim=dataset_cfg["input_dim"],
+            final_dim=model_params.get("final_dim", 512),
+            input_dropout=model_params.get("input_dropout", 0.3),
+            recon_seq_len=model_params.get("recon_seq_len", 64),
+            recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
+            block_dims=model_params.get("block_dims"),
+            pre_norm=model_params.get("pre_norm", False),
+        )
     else:
         from activation_research.model import LogprobReconProgressiveCompressor
 

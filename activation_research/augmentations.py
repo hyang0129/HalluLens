@@ -154,10 +154,73 @@ def mixup_intra_label(
     return out
 
 
+def contiguous_block_dropout(
+    views: Tensor,
+    labels: Tensor,
+    p_min: float = 0.20,
+    p_max: float = 0.40,
+    max_block_size: int = 8,
+    asymmetric: bool = False,
+) -> Tensor:
+    """Zero out contiguous blocks of token positions.
+
+    For each sample, drops p_min–p_max of the T token positions as contiguous
+    blocks of size ≤ max_block_size.  Blocks are placed greedily without
+    overlap until the per-sample target drop count is reached.
+
+    Parameters
+    ----------
+    views:
+        Shape ``(B, K, T, H)``.
+    labels:
+        Shape ``(B,)`` — not used, kept for uniform signature.
+    p_min, p_max:
+        Range for per-sample drop fraction (uniform sample).
+    max_block_size:
+        Maximum number of contiguous tokens per block.
+    asymmetric:
+        When True apply masking only to view 0; view 1 stays clean.
+    """
+    B, K, T, H = views.shape
+    device = views.device
+
+    p_vals = torch.rand(B) * (p_max - p_min) + p_min  # (B,) on CPU
+    n_drop = (p_vals * T).round().long().clamp(min=1)  # (B,) tokens to drop
+
+    # Build binary keep-masks on CPU then move once.
+    masks = torch.ones(B, T, dtype=torch.float32)
+    for b in range(B):
+        remaining = int(n_drop[b])
+        attempts = 0
+        while remaining > 0 and attempts < T * 4:
+            bsz = min(max_block_size, remaining)
+            bsz = int(torch.randint(1, bsz + 1, (1,)))
+            max_start = T - bsz
+            if max_start < 0:
+                break
+            start = int(torch.randint(0, max_start + 1, (1,)))
+            # Only place if all positions are still unmasked (no overlap).
+            if masks[b, start : start + bsz].all():
+                masks[b, start : start + bsz] = 0.0
+                remaining -= bsz
+            attempts += 1
+
+    # (B, T) → (B, 1, T, 1) for broadcasting over K and H.
+    float_mask = masks.to(device=device).unsqueeze(1).unsqueeze(-1)
+
+    out = views.clone()
+    if asymmetric:
+        out[:, 0] = out[:, 0] * float_mask[:, 0]
+    else:
+        out = out * float_mask
+    return out
+
+
 _AUG_REGISTRY = {
     "whole_token_dropout": whole_token_dropout,
     "channel_dropout": channel_dropout,
     "mixup_intra_label": mixup_intra_label,
+    "contiguous_block_dropout": contiguous_block_dropout,
 }
 
 
