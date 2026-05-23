@@ -336,6 +336,7 @@ def run_contrastive_logprob_recon(
             logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
             block_dims=model_params.get("block_dims"),
             pre_norm=model_params.get("pre_norm", False),
+            pool_num_queries=model_params.get("pool_num_queries", 1),
         )
     else:
         from activation_research.model import LogprobReconProgressiveCompressor

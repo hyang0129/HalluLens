@@ -255,25 +255,48 @@ class LogprobReconProgressiveCompressor(nn.Module):
 
 
 class AttentionPooling(nn.Module):
-    """Single learned query → attention-weighted sum over sequence positions.
+    """K learned queries → attention-weighted sum(s) over sequence positions.
+
+    With ``num_queries=1`` (default) this is a single learned query whose
+    softmax-weighted sum collapses the L positions to a single d-dim vector
+    (identical to the original behavior).
+
+    With ``num_queries=K>1`` (multi-query pooling), K independent queries
+    each produce their own attention distribution over the L positions.
+    The K pooled outputs are concatenated to a ``(K·d)``-dim vector and
+    linearly projected back to ``d``. This lets the encoder attend to K
+    distinct layer subsets simultaneously rather than averaging them into
+    a single distribution.
 
     Parameters
     ----------
     d_model : int
         Dimensionality of the sequence vectors to pool.
+    num_queries : int
+        Number of independent learned queries (default 1).
     """
 
-    def __init__(self, d_model: int) -> None:
+    def __init__(self, d_model: int, num_queries: int = 1) -> None:
         super().__init__()
-        self.query = nn.Parameter(torch.randn(1, 1, d_model))
+        if num_queries < 1:
+            raise ValueError(f"num_queries must be >= 1, got {num_queries}")
+        self.num_queries = int(num_queries)
+        self.query = nn.Parameter(torch.randn(1, self.num_queries, d_model))
         self.scale = d_model ** -0.5
+        if self.num_queries > 1:
+            self.proj = nn.Linear(self.num_queries * d_model, d_model)
+        else:
+            self.proj = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, L, d_model) → (B, d_model)
         attn = torch.softmax(
             (self.query @ x.transpose(-1, -2)) * self.scale, dim=-1
-        )  # (B, 1, L)
-        return (attn @ x).squeeze(1)  # (B, d_model)
+        )  # (B, K, L)
+        pooled = attn @ x  # (B, K, d_model)
+        if self.num_queries == 1:
+            return pooled.squeeze(1)  # (B, d_model)
+        return self.proj(pooled.reshape(pooled.size(0), -1))  # (B, d_model)
 
 
 class AttentionPoolProgressiveCompressor(nn.Module):
@@ -297,6 +320,7 @@ class AttentionPoolProgressiveCompressor(nn.Module):
         normalize_input: bool = False,
         block_dims: list | None = None,
         pre_norm: bool = False,
+        pool_num_queries: int = 1,
     ) -> None:
         super().__init__()
 
@@ -321,7 +345,7 @@ class AttentionPoolProgressiveCompressor(nn.Module):
             TransformerBlock(d_in, d_out, dropout=dropout, pre_norm=bool(pre_norm))
             for (d_in, d_out) in dims
         ])
-        self.pool = AttentionPooling(dims[-1][1])
+        self.pool = AttentionPooling(dims[-1][1], num_queries=int(pool_num_queries))
         self.final_proj = nn.Linear(dims[-1][1], final_dim)
         self.dropout = nn.Dropout(p=input_dropout)
 
@@ -356,6 +380,7 @@ class LogprobReconAttentionPoolProgressiveCompressor(LogprobReconProgressiveComp
         normalize_input: bool = False,
         block_dims: list | None = None,
         pre_norm: bool = False,
+        pool_num_queries: int = 1,
         recon_seq_len: int = 64,
         recon_hidden_dim: int = 256,
         recon_lambda: float = 1.0,
@@ -374,6 +399,7 @@ class LogprobReconAttentionPoolProgressiveCompressor(LogprobReconProgressiveComp
             normalize_input=bool(normalize_input),
             block_dims=block_dims,
             pre_norm=bool(pre_norm),
+            pool_num_queries=int(pool_num_queries),
         )
 
         self.decoder = nn.Sequential(

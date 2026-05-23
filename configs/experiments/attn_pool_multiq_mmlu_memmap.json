@@ -1,0 +1,11 @@
+{
+  "experiment_name": "attn_pool_multiq_mmlu_memmap",
+  "dataset": "mmlu_memmap",
+  "methods": ["contrastive_logprob_recon_attn_pool_small_k2", "contrastive_logprob_recon_attn_pool_small_k4"],
+  "training_seeds": [0],
+  "split_seeds": [42],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs"
+}
