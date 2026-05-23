@@ -1,0 +1,11 @@
+{
+  "experiment_name": "aug_combo_hotpotqa_qwen3_memmap",
+  "dataset": "hotpotqa_qwen3_memmap",
+  "methods": ["contrastive_logprob_recon_x1", "contrastive_logprob_recon_x2"],
+  "training_seeds": [0],
+  "split_seeds": [42],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs"
+}
