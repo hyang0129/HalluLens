@@ -32,6 +32,7 @@ Output eval_results.json schema (ActivationParser-compatible):
   }
 """
 
+import ast
 import json
 import os
 from pathlib import Path
@@ -77,13 +78,18 @@ def load_simpleqa_data(split="test", n_samples=None, split_seed=42):
     data = []
     for idx in selected_indices:
         item = dataset[int(idx)]
-        meta = item.get("metadata", {})
+        raw_meta = item.get("metadata", {})
+        if isinstance(raw_meta, str):
+            try:
+                raw_meta = ast.literal_eval(raw_meta)
+            except Exception:
+                raw_meta = {}
         data.append({
             "id": f"simpleqa_{split}_{idx}",
             "question": item["problem"],
             "answer": item["answer"],
-            "topic": meta.get("topic", ""),
-            "answer_type": meta.get("answer_type", ""),
+            "topic": raw_meta.get("topic", ""),
+            "answer_type": raw_meta.get("answer_type", ""),
         })
 
     if n_samples is not None and n_samples < len(data):
