@@ -44,7 +44,7 @@ Task module contract (existing in tasks/llmsknow/<task>.py):
   - Each task module exposes is_correct(generated_text, answer_or_answers) -> bool.
   - Dataset rows yield (key, prompt, question, answer, passthrough_dict).
   - Closed-book LLMsKnow tasks: hotpotqa, mmlu, natural_questions, popqa, sciq,
-    searchqa. (movies excluded — no train split, can't be used for training data.)
+    searchqa, triviaqa, simpleqa. (movies excluded — no train split.)
 
 Label contract (spec "Label contract"):
   - hallucinated = not is_correct(decoded_response, sample.answer).
@@ -135,6 +135,8 @@ _TASK_REGISTRY: dict[str, tuple[str, Any, str]] = {
     "natural_questions": ("load_nq_data", _correct_nq, "test"),
     "sciq": ("load_sciq_data", _correct_str, "test"),
     "searchqa": ("load_searchqa_data", _correct_str, "train"),
+    "triviaqa": ("load_triviaqa_data", _correct_list, "validation"),
+    "simpleqa": ("load_simpleqa_data", _correct_str, "test"),
 }
 
 
