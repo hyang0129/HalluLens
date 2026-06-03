@@ -1,0 +1,23 @@
+{
+  "name": "simpleqa_popqa_merged_memmap",
+  "model_name": "Llama-3.1-8B-Instruct",
+  "input_dim": 4096,
+  "backend": "memmap",
+  "outlier_class": 1,
+  "icr_capture": {
+    "train_sources": [
+      {
+        "dir": "shared/icr_capture/simpleqa_train_Llama-3.1-8B-Instruct",
+        "halu": "all",
+        "nonhalu": "all"
+      },
+      {
+        "dir": "shared/icr_capture/popqa_train_Llama-3.1-8B-Instruct",
+        "halu": 224,
+        "nonhalu": 3236
+      }
+    ],
+    "train_sources_seed": 0,
+    "test_dir": "shared/icr_capture/simpleqa_test_Llama-3.1-8B-Instruct"
+  }
+}

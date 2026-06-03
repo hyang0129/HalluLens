@@ -1,0 +1,18 @@
+{
+  "experiment_name": "baseline_comparison_sciq_flipped_memmap_seed0",
+  "dataset": "sciq_memmap",
+  "methods": [
+    "contrastive_logprob_recon_b5"
+  ],
+  "split_seed": 42,
+  "training_seeds": [
+    0
+  ],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs",
+  "split_seeds": [
+    42
+  ]
+}

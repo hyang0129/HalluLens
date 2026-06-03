@@ -1,0 +1,18 @@
+{
+  "experiment_name": "baseline_comparison_hotpotqa_flipped_memmap_seed1",
+  "dataset": "hotpotqa_memmap",
+  "methods": [
+    "contrastive_logprob_recon_b5"
+  ],
+  "split_seed": 1,
+  "training_seeds": [
+    1
+  ],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs",
+  "split_seeds": [
+    1
+  ]
+}

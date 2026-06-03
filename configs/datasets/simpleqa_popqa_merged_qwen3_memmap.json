@@ -1,0 +1,23 @@
+{
+  "name": "simpleqa_popqa_merged_qwen3_memmap",
+  "model_name": "Qwen3-8B",
+  "input_dim": 4096,
+  "backend": "memmap",
+  "outlier_class": 1,
+  "icr_capture": {
+    "train_sources": [
+      {
+        "dir": "shared/icr_capture/simpleqa_train_Qwen3-8B",
+        "halu": "all",
+        "nonhalu": "all"
+      },
+      {
+        "dir": "shared/icr_capture/popqa_train_Qwen3-8B",
+        "halu": 157,
+        "nonhalu": 2759
+      }
+    ],
+    "train_sources_seed": 0,
+    "test_dir": "shared/icr_capture/simpleqa_test_Qwen3-8B"
+  }
+}

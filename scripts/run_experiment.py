@@ -3285,17 +3285,38 @@ def main() -> None:
 
             # Build a fresh train parser for this fold's split.
             if backend == "memmap":
-                from activation_research.memmap_activation_parser import MemmapActivationParser
-                logger.info(
-                    f"Loading train MemmapActivationParser (split_seed={actual_split_seed}) "
-                    f"from: {dataset_cfg['icr_capture']['train_dir']}"
-                )
-                ap = MemmapActivationParser(
-                    capture_dir=_resolve_shared(dataset_cfg["icr_capture"]["train_dir"]),
-                    random_seed=actual_split_seed,
-                    split_strategy="three_way",
-                    verbose=True,
-                )
+                icr_cfg_block = dataset_cfg["icr_capture"]
+                if "train_sources" in icr_cfg_block:
+                    from activation_research.composite_memmap_parser import (
+                        CompositeMemmapActivationParser,
+                    )
+                    resolved_sources = [
+                        {**s, "dir": _resolve_shared(s["dir"])}
+                        for s in icr_cfg_block["train_sources"]
+                    ]
+                    logger.info(
+                        f"Loading train CompositeMemmapActivationParser "
+                        f"(split_seed={actual_split_seed}) from {len(resolved_sources)} sources"
+                    )
+                    ap = CompositeMemmapActivationParser(
+                        sources=resolved_sources,
+                        random_seed=actual_split_seed,
+                        split_strategy="three_way",
+                        source_sample_seed=icr_cfg_block.get("train_sources_seed", 0),
+                        verbose=True,
+                    )
+                else:
+                    from activation_research.memmap_activation_parser import MemmapActivationParser
+                    logger.info(
+                        f"Loading train MemmapActivationParser (split_seed={actual_split_seed}) "
+                        f"from: {icr_cfg_block['train_dir']}"
+                    )
+                    ap = MemmapActivationParser(
+                        capture_dir=_resolve_shared(icr_cfg_block["train_dir"]),
+                        random_seed=actual_split_seed,
+                        split_strategy="three_way",
+                        verbose=True,
+                    )
             elif has_train_test:
                 train_cfg = {**dataset_cfg, **dataset_cfg["train"]}
                 _resolve_paths(train_cfg, project_root)
