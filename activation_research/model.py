@@ -779,6 +779,132 @@ class SharedTrunkProjectionHeadCompressor(nn.Module):
         return self._inner.forward_with_recon(x)
 
 
+class SharedSpineDualHeadCompressor(nn.Module):
+    """SS-1: shared spine + two *deep* heads with a **protected spine** and
+    **head-separate eval** (issue #129).
+
+    This is the fixed successor to ``SharedTrunkProjectionHeadCompressor`` (D2),
+    which failed (#128) for two reasons this class corrects:
+
+    1. **Gradient conflict at the shared trunk.** D2 lets both SupCon
+       convention-losses update the trunk, producing a mushy compromise. Here
+       the head→spine gradient is scaled by ``spine_supcon_grad_scale`` (0.0 =
+       full stop-grad). The spine is trained primarily by the convention-AGNOSTIC
+       log-prob reconstruction (whose gradient always flows through the full
+       ``z``), while each head's SupCon specialises only its own branch.
+    2. **Shallow heads + trunk-eval.** D2 heads are a single MLP and eval was on
+       the trunk (one representation, zero diversity). Here the heads are deep
+       (``head_depth`` hidden layers) so the two embedding spaces can diverge,
+       and **eval scores each head separately** (see the dual-head-fusion routine)
+       — never the trunk.
+
+    Training objective (assembled by ``train_contrastive_logprob_recon_dualloss``)::
+
+        z  = spine(x)                                   # (B, trunk_dim)
+        zc = grad_scale(z, spine_supcon_grad_scale)     # forward=z, backward·=scale
+        zA = head_A(zc) ; zB = head_B(zc)               # (B, head_dim)
+        L  = SupCon(zA, y, ignore=1) + SupCon(zB, y, ignore=0) + λ·recon(decoder(z), ℓ)
+
+    The trainer dispatches on ``forward_with_heads`` for any non-D1 model, so no
+    trainer change is needed. Eval uses ``head_embeddings`` (no grad scaling).
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 4096,
+        trunk_dim: int = 512,
+        head_dim: int = 512,
+        head_hidden_dim: int = 512,
+        head_depth: int = 2,
+        spine_supcon_grad_scale: float = 0.0,
+        dropout: float = 0.1,
+        input_dropout: float = 0.3,
+        normalize_input: bool = False,
+        recon_seq_len: int = 64,
+        recon_hidden_dim: int = 256,
+        recon_lambda: float = 1.0,
+        logprob_var_threshold: float = 1e-4,
+    ):
+        super().__init__()
+        self.trunk_dim = int(trunk_dim)
+        self.head_dim = int(head_dim)
+        self.recon_lambda = float(recon_lambda)
+        self.spine_supcon_grad_scale = float(spine_supcon_grad_scale)
+
+        self._inner = LogprobReconProgressiveCompressor(
+            input_dim=int(input_dim),
+            final_dim=int(trunk_dim),
+            dropout=float(dropout),
+            input_dropout=float(input_dropout),
+            normalize_input=bool(normalize_input),
+            recon_seq_len=int(recon_seq_len),
+            recon_hidden_dim=int(recon_hidden_dim),
+            recon_lambda=float(recon_lambda),
+            logprob_var_threshold=float(logprob_var_threshold),
+        )
+
+        self.head_A = self._make_head(self.trunk_dim, int(head_hidden_dim), self.head_dim, int(head_depth))
+        self.head_B = self._make_head(self.trunk_dim, int(head_hidden_dim), self.head_dim, int(head_depth))
+
+    @staticmethod
+    def _make_head(in_dim: int, hidden_dim: int, out_dim: int, depth: int) -> nn.Module:
+        """``depth`` hidden ``Linear→GELU`` blocks then a final linear projection."""
+        depth = max(1, int(depth))
+        layers = []
+        d = in_dim
+        for _ in range(depth):
+            layers += [nn.Linear(d, hidden_dim), nn.GELU()]
+            d = hidden_dim
+        layers += [nn.Linear(d, out_dim)]
+        return nn.Sequential(*layers)
+
+    @staticmethod
+    def _grad_scale(z: torch.Tensor, scale: float) -> torch.Tensor:
+        """Identity in forward; multiplies the gradient by ``scale`` in backward.
+
+        ``scale=1.0`` → unmodified (gradient fully reaches the spine, like D2).
+        ``scale=0.0`` → ``z.detach()`` (spine receives NO SupCon gradient).
+        """
+        if scale >= 1.0:
+            return z
+        if scale <= 0.0:
+            return z.detach()
+        return z * scale + z.detach() * (1.0 - scale)
+
+    def recon_loss(self, logprob_pred: torch.Tensor, logprob_target: torch.Tensor):
+        """Delegate to the inner module's ``recon_loss``."""
+        return self._inner.recon_loss(logprob_pred, logprob_target)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return the trunk embedding ``z`` (recon surface / D2-compat).
+
+        NOT the eval surface — SS-1 evaluates the heads (``head_embeddings``).
+        """
+        return self._inner(x)
+
+    def head_embeddings(self, x: torch.Tensor):
+        """Return ``(zA, zB)`` head embeddings for EVAL (no grad scaling)."""
+        z = self._inner(x)
+        return self.head_A(z), self.head_B(z)
+
+    def forward_with_heads(self, x: torch.Tensor):
+        """Return ``(z, zA, zB, logprob_pred)`` for the dual-loss trainer.
+
+        ``zA``/``zB`` are computed from a gradient-scaled view of the trunk so the
+        SupCon losses only partially (or not at all) update the spine; ``z`` and
+        ``logprob_pred`` carry full gradient for the convention-agnostic recon.
+        """
+        z, logprob_pred = self._inner.forward_with_recon(x)
+        zc = self._grad_scale(z, self.spine_supcon_grad_scale)
+        zA = self.head_A(zc)
+        zB = self.head_B(zc)
+        return z, zA, zB, logprob_pred
+
+    def forward_with_recon(self, x: torch.Tensor):
+        """Return ``(z, logprob_pred)`` from the inner module."""
+        return self._inner.forward_with_recon(x)
+
+
 class LogprobAttnReconProgressiveCompressor(nn.Module):
     """ProgressiveCompressor with combined logprob (Mechanism F) + attention
     summary (Mechanism K) auxiliary reconstruction heads.
