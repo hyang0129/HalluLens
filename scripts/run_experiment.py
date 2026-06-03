@@ -755,7 +755,7 @@ def run_contrastive_logprob_recon_dualhead_fusion(
     from sklearn.metrics import roc_auc_score
     from torch.utils.data import DataLoader
     from activation_research.metric_evaluator import MultiMetricHallucinationEvaluator
-    from activation_research.model import SharedSpineDualHeadCompressor
+    from activation_research.model import SharedSpineDualHeadCompressor, SharedStemDualBranchCompressor
     from activation_research.training import train_contrastive_logprob_recon_dualloss
 
     data_cfg = method_cfg["data"]
@@ -782,19 +782,35 @@ def run_contrastive_logprob_recon_dualhead_fusion(
 
     train_device = device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
 
-    model = SharedSpineDualHeadCompressor(
-        input_dim=dataset_cfg["input_dim"],
-        trunk_dim=model_params.get("trunk_dim", 512),
-        head_dim=model_params.get("head_dim", 512),
-        head_hidden_dim=model_params.get("head_hidden_dim", 512),
-        head_depth=model_params.get("head_depth", 2),
-        spine_supcon_grad_scale=model_params.get("spine_supcon_grad_scale", 0.0),
-        input_dropout=model_params.get("input_dropout", 0.3),
-        recon_seq_len=model_params.get("recon_seq_len", 64),
-        recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
-        recon_lambda=model_params.get("recon_lambda", 1.0),
-        logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
-    )
+    model_class = method_cfg.get("model_class", "shared_spine_dual_head")
+    if model_class == "shared_stem_dual_branch":
+        # SS-1b: early split — shared input stem, two independent branch sub-encoders.
+        model = SharedStemDualBranchCompressor(
+            input_dim=dataset_cfg["input_dim"],
+            stem_dim=model_params.get("stem_dim", 2048),
+            branch_block_dims=model_params.get("branch_block_dims", [1024, 512]),
+            final_dim=model_params.get("final_dim", 512),
+            input_dropout=model_params.get("input_dropout", 0.3),
+            recon_seq_len=model_params.get("recon_seq_len", 64),
+            recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
+        )
+    else:
+        # SS-1: shared spine + two heads, with protected-spine grad scale.
+        model = SharedSpineDualHeadCompressor(
+            input_dim=dataset_cfg["input_dim"],
+            trunk_dim=model_params.get("trunk_dim", 512),
+            head_dim=model_params.get("head_dim", 512),
+            head_hidden_dim=model_params.get("head_hidden_dim", 512),
+            head_depth=model_params.get("head_depth", 2),
+            spine_supcon_grad_scale=model_params.get("spine_supcon_grad_scale", 0.0),
+            input_dropout=model_params.get("input_dropout", 0.3),
+            recon_seq_len=model_params.get("recon_seq_len", 64),
+            recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
+        )
 
     artifacts_dir = os.path.join(output_dir, "artifacts")
     final_weights = os.path.join(artifacts_dir, "final_weights.pt")
@@ -843,8 +859,8 @@ def run_contrastive_logprob_recon_dualhead_fusion(
             self.which = which
 
         def forward(self, x):
-            z = self.base(x)  # trunk
-            return self.base.head_A(z) if self.which == "A" else self.base.head_B(z)
+            # Works for both SS-1 (head on trunk) and SS-1b (branch on stem seq).
+            return self.base.embed_head(x, self.which)
 
     train_loader = DataLoader(train_ds.slice_layers(target_layers), batch_size=64, shuffle=False)
     eval_loader = DataLoader(test_ds.slice_layers(target_layers), batch_size=64, shuffle=False)
@@ -893,6 +909,7 @@ def run_contrastive_logprob_recon_dualhead_fusion(
         "split_seed": experiment_cfg.get("split_seed", 42),
         "n_train": len(train_ds),
         "n_test": len(test_ds),
+        "model_class": model_class,
         "spine_supcon_grad_scale": float(model_params.get("spine_supcon_grad_scale", 0.0)),
         "knn_auroc_head_std": auroc_std,
         "knn_auroc_head_flip": auroc_flip,
