@@ -788,6 +788,7 @@ def run_contrastive_logprob_recon_dualhead_fusion(
         model = SharedStemDualBranchCompressor(
             input_dim=dataset_cfg["input_dim"],
             stem_dim=model_params.get("stem_dim", 2048),
+            stem_type=model_params.get("stem_type", "transformer"),
             branch_block_dims=model_params.get("branch_block_dims", [1024, 512]),
             final_dim=model_params.get("final_dim", 512),
             input_dropout=model_params.get("input_dropout", 0.3),

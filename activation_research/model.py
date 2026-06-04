@@ -956,6 +956,7 @@ class SharedStemDualBranchCompressor(nn.Module):
         self,
         input_dim: int = 4096,
         stem_dim: int = 2048,
+        stem_type: str = "transformer",
         branch_block_dims=(1024, 512),
         final_dim: int = 512,
         dropout: float = 0.1,
@@ -971,11 +972,20 @@ class SharedStemDualBranchCompressor(nn.Module):
         self.recon_lambda = float(recon_lambda)
         self.logprob_var_threshold = float(logprob_var_threshold)
         self.normalize_input = bool(normalize_input)
+        self.stem_type = str(stem_type)
         if self.normalize_input:
             self.input_norm = nn.LayerNorm(int(input_dim))
         self.input_dropout = nn.Dropout(p=float(input_dropout))
-        self.pos_encodings = PositionalEncoding(int(input_dim))
-        self.stem = TransformerBlock(int(input_dim), int(stem_dim), dropout=float(dropout))
+        # ``transformer`` stem: attention at input_dim then project to stem_dim.
+        # ``linear`` stem (SS-1c): cheap Linear input_dim->stem_dim, NO attention —
+        # imposes no discriminative structure, so the per-convention branches learn
+        # ~everything independently (maximises decorrelation among shared designs).
+        if self.stem_type == "linear":
+            self.stem = nn.Linear(int(input_dim), int(stem_dim))
+            self.pos_encodings = PositionalEncoding(int(stem_dim))
+        else:
+            self.stem = TransformerBlock(int(input_dim), int(stem_dim), dropout=float(dropout))
+            self.pos_encodings = PositionalEncoding(int(input_dim))
         self.branch_A = _DualBranch(int(stem_dim), branch_block_dims, int(final_dim), dropout=float(dropout))
         self.branch_B = _DualBranch(int(stem_dim), branch_block_dims, int(final_dim), dropout=float(dropout))
         self.decoder = nn.Sequential(
@@ -990,8 +1000,9 @@ class SharedStemDualBranchCompressor(nn.Module):
         if self.normalize_input:
             x = self.input_norm(x)
         x = self.input_dropout(x)
-        x = self.pos_encodings(x)
-        return self.stem(x)
+        if self.stem_type == "linear":
+            return self.pos_encodings(self.stem(x))  # Linear→stem_dim, then pos at stem_dim
+        return self.stem(self.pos_encodings(x))      # pos at input_dim, then TransformerBlock
 
     def embed_head(self, x: torch.Tensor, which: str) -> torch.Tensor:
         """One convention branch's eval embedding (``which`` in {'A','B'})."""
