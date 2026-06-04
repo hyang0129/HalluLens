@@ -899,8 +899,17 @@ def run_contrastive_logprob_recon_dualhead_fusion(
         order[np.argsort(a, kind="mergesort")] = np.arange(len(a))
         return order / max(1, len(a) - 1)
 
-    fused = 0.5 * _pct_rank(s_std) + 0.5 * _pct_rank(s_flip)
+    pr_std, pr_flip = _pct_rank(s_std), _pct_rank(s_flip)
+    fused = 0.5 * pr_std + 0.5 * pr_flip          # a-priori EQUAL weight (#127/#129)
     auroc_fused = float(roc_auc_score(lab, fused))
+    # Diagnostics: how correlated are the two heads (the thing that determines
+    # whether fusion can help), and would the test-optimal weight — UPPER BOUND
+    # ONLY, not a usable result — beat equal weight?
+    head_score_corr = float(np.corrcoef(pr_std, pr_flip)[0, 1])
+    _ws = np.linspace(0.0, 1.0, 21)
+    _oa = [roc_auc_score(lab, w * pr_std + (1.0 - w) * pr_flip) for w in _ws]
+    _j = int(np.argmax(_oa))
+    auroc_fused_oracle, fusion_oracle_weight_std = float(_oa[_j]), float(_ws[_j])
 
     eval_metrics: dict = {
         "method": method_cfg["name"],
@@ -917,6 +926,11 @@ def run_contrastive_logprob_recon_dualhead_fusion(
         "knn_auroc": auroc_fused,
         "knn_auroc_fused": auroc_fused,
         "fusion_delta_vs_best": auroc_fused - max(auroc_std, auroc_flip),
+        # head-correlation + best-weight diagnostics (the "why doesn't fusion help" probe)
+        "head_score_corr": head_score_corr,
+        "knn_auroc_fused_oracle": auroc_fused_oracle,
+        "fusion_oracle_weight_std": fusion_oracle_weight_std,
+        "fusion_oracle_delta_vs_best": auroc_fused_oracle - max(auroc_std, auroc_flip),
     }
     predictions = [
         {"example_id": i, "score_halu": float(f), "label_halu": int(l)}
@@ -924,7 +938,8 @@ def run_contrastive_logprob_recon_dualhead_fusion(
     ]
     logger.info(
         f"SS-1 dual-head: std={auroc_std:.4f} flip={auroc_flip:.4f} "
-        f"fused={auroc_fused:.4f} (Δvs_best={auroc_fused-max(auroc_std,auroc_flip):+.4f})"
+        f"fused={auroc_fused:.4f} (Δvs_best={auroc_fused-max(auroc_std,auroc_flip):+.4f}) "
+        f"head_corr={head_score_corr:.3f} oracle={auroc_fused_oracle:.4f}@w_std={fusion_oracle_weight_std:.2f}"
     )
     return eval_metrics, predictions
 
