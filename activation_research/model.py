@@ -1047,6 +1047,148 @@ class SharedStemDualBranchCompressor(nn.Module):
         return loss, {"logprob_var": logprob_var, "suppressed": False}
 
 
+class _SwiGLUIntake(nn.Module):
+    """SwiGLU channel-compression block: ``down(SiLU(gate(x)) * up(x))``.
+
+    The gated-linear unit used in modern LLM FFNs — multiplicative feature
+    interaction for high-dimensional, no-locality features. Applied per layer
+    position; maps the last dim ``in_dim -> out_dim``.
+    """
+
+    def __init__(self, in_dim: int, hidden: int, out_dim: int):
+        super().__init__()
+        self.gate = nn.Linear(in_dim, hidden)
+        self.up = nn.Linear(in_dim, hidden)
+        self.down = nn.Linear(hidden, out_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.down(F.silu(self.gate(x)) * self.up(x))
+
+
+class _ResNetMLPIntake(nn.Module):
+    """ResNet-style MLP channel compressor (the strong tabular-DL baseline):
+    project to ``hidden``, then ``depth`` pre-norm residual MLP blocks, then
+    project to ``out_dim``. Applied per layer position."""
+
+    def __init__(self, in_dim: int, hidden: int, out_dim: int, depth: int):
+        super().__init__()
+        self.proj_in = nn.Linear(in_dim, hidden)
+        self.blocks = nn.ModuleList([
+            nn.Sequential(
+                nn.LayerNorm(hidden), nn.Linear(hidden, hidden), nn.GELU(), nn.Linear(hidden, hidden)
+            ) for _ in range(max(1, int(depth)))
+        ])
+        self.proj_out = nn.Linear(hidden, out_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.proj_in(x)
+        for blk in self.blocks:
+            x = x + blk(x)
+        return self.proj_out(x)
+
+
+class _MLPIntakeEncoder(nn.Module):
+    """Per-position intake block + mean-pool over L → ``(B, final_dim)``.
+
+    ``forward(x, layer_idx=None)`` matches the encoder call convention used by the
+    contrastive trainer (``m.encoder(x, layer_idx=...)``); ``layer_idx`` is ignored
+    (this encoder is not layer-aware).
+    """
+
+    def __init__(self, input_dim, final_dim, intake_type, hidden_dim, depth,
+                 normalize_input, input_dropout):
+        super().__init__()
+        self.normalize_input = bool(normalize_input)
+        self.intake_type = str(intake_type).lower()
+        if self.normalize_input:
+            self.input_norm = nn.LayerNorm(int(input_dim))
+        self.input_dropout = nn.Dropout(p=float(input_dropout))
+        if self.intake_type == "swiglu":
+            self.intake = _SwiGLUIntake(int(input_dim), int(hidden_dim), int(final_dim))
+        elif self.intake_type == "resnet":
+            self.intake = _ResNetMLPIntake(int(input_dim), int(hidden_dim), int(final_dim), int(depth))
+        else:
+            self.intake = nn.Sequential(
+                nn.Linear(int(input_dim), int(hidden_dim)), nn.GELU(),
+                nn.Linear(int(hidden_dim), int(final_dim)),
+            )
+
+    def forward(self, x, layer_idx=None):
+        x = x.float()
+        if self.normalize_input:
+            x = self.input_norm(x)
+        x = self.input_dropout(x)
+        x = self.intake(x)          # (B, L, final_dim)
+        return x.mean(dim=1)        # mean-pool over L
+
+
+class LogprobReconMLPIntake(nn.Module):
+    """Single-head contrastive compressor with a configurable per-position INTAKE
+    block, for the intake-architecture ablation (#132).
+
+    No cross-layer attention: each layer position's 4096-d activation is compressed
+    by the same intake network, then mean-pooled over L. Plus the logprob-recon
+    auxiliary head (same interface as ``LogprobReconProgressiveCompressor``).
+
+    ``intake_type``:
+      - ``"mlp"``    — plain ``Linear→GELU→Linear`` (the base channel compressor)
+      - ``"swiglu"`` — gated-linear-unit block (:class:`_SwiGLUIntake`)
+      - ``"resnet"`` — pre-norm residual MLP stack (:class:`_ResNetMLPIntake`)
+    ``normalize_input=True`` adds an input ``LayerNorm`` (the normalization fix —
+    activations vary ~50→200 in magnitude across layers).
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 4096,
+        final_dim: int = 256,
+        intake_type: str = "mlp",
+        hidden_dim: int = 512,
+        depth: int = 2,
+        normalize_input: bool = False,
+        input_dropout: float = 0.3,
+        recon_seq_len: int = 64,
+        recon_hidden_dim: int = 256,
+        recon_lambda: float = 1.0,
+        logprob_var_threshold: float = 1e-4,
+    ):
+        super().__init__()
+        self.recon_seq_len = int(recon_seq_len)
+        self.recon_lambda = float(recon_lambda)
+        self.logprob_var_threshold = float(logprob_var_threshold)
+        self.intake_type = str(intake_type).lower()
+        self.encoder = _MLPIntakeEncoder(
+            input_dim=int(input_dim), final_dim=int(final_dim), intake_type=str(intake_type),
+            hidden_dim=int(hidden_dim), depth=int(depth), normalize_input=bool(normalize_input),
+            input_dropout=float(input_dropout),
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(int(final_dim), int(recon_hidden_dim)),
+            nn.GELU(),
+            nn.Linear(int(recon_hidden_dim), self.recon_seq_len),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encoder(x)
+
+    def forward_with_recon(self, x: torch.Tensor):
+        z = self.encoder(x)
+        return z, self.decoder(z)
+
+    def recon_loss(self, logprob_pred: torch.Tensor, logprob_target: torch.Tensor):
+        target = logprob_target.float()
+        logprob_var = float(target.var())
+        if logprob_var < self.logprob_var_threshold:
+            zero = torch.zeros(1, device=logprob_pred.device).squeeze()
+            return zero, {"logprob_var": logprob_var, "suppressed": True}
+        if target.shape[-1] != self.recon_seq_len:
+            target = F.interpolate(
+                target.unsqueeze(1), size=self.recon_seq_len, mode="linear", align_corners=False,
+            ).squeeze(1)
+        loss = F.mse_loss(logprob_pred, target)
+        return loss, {"logprob_var": logprob_var, "suppressed": False}
+
+
 class LogprobAttnReconProgressiveCompressor(nn.Module):
     """ProgressiveCompressor with combined logprob (Mechanism F) + attention
     summary (Mechanism K) auxiliary reconstruction heads.

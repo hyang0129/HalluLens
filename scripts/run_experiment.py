@@ -338,6 +338,22 @@ def run_contrastive_logprob_recon(
             pre_norm=model_params.get("pre_norm", False),
             pool_num_queries=model_params.get("pool_num_queries", 1),
         )
+    elif model_class == "logprob_recon_mlp_intake":
+        from activation_research.model import LogprobReconMLPIntake
+
+        model = LogprobReconMLPIntake(
+            input_dim=dataset_cfg["input_dim"],
+            final_dim=model_params.get("final_dim", 256),
+            intake_type=model_params.get("intake_type", "mlp"),
+            hidden_dim=model_params.get("hidden_dim", 512),
+            depth=model_params.get("depth", 2),
+            normalize_input=model_params.get("normalize_input", False),
+            input_dropout=model_params.get("input_dropout", 0.3),
+            recon_seq_len=model_params.get("recon_seq_len", 64),
+            recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
+        )
     else:
         from activation_research.model import LogprobReconProgressiveCompressor
 
