@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh empire-ai 'cd ~/LLM_research/HalluLens && python scripts/launch_jupyter.py:*)",
+      "Bash(ssh empire-ai 'squeue --me:*)"
+    ],
+    "deny": [
+      "Bash(scancel:*)",
+      "Bash(ssh empire-ai 'scancel:*)",
+      "Bash(ssh empire-ai 'scontrol:*)"
+    ]
+  }
+}
