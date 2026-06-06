@@ -184,8 +184,31 @@ python scripts/experiment_status.py --experiment configs/experiments/baseline_co
 
 ### Running on GPU nodes
 
-**Never submit or kill SLURM jobs without explicit user approval.** Do not run `sbatch`, `srun`, `scancel`, `gpu_dispatch.py run/kill`, or kill remote processes without asking first:
+**Never submit or kill SLURM jobs without explicit user approval** — *except* launching Jupyter nodes via the guarded launcher (see below). Do not run `sbatch`, `srun`, `scancel`, `gpu_dispatch.py run/kill`, or kill remote processes without asking first:
 > "I want to [specific action, e.g. kill PID 12345 on alphagpu22]. Yes/No?"
+
+#### Autonomous exception: launching Jupyter nodes
+
+Agents **may** start a Jupyter Lab allocation **without asking**, but **only** through the guarded launcher `scripts/launch_jupyter.py`. It enforces hard caps in code (no agent can bypass them) and has **no cancel path**:
+
+- Refuses if **≥ 4 jupyter jobs are already RUNNING**.
+- Refuses if **≥ 6 jobs total** (any state, including PENDING/queued).
+- Refuses if the requested port already serves a running jupyter job.
+
+```bash
+# Launch (runs squeue + sbatch on the login node in one process — no TOCTOU race):
+ssh empire-ai 'cd ~/LLM_research/HalluLens && python scripts/launch_jupyter.py <port>'
+
+# Preview the caps + the exact sbatch line without submitting:
+ssh empire-ai 'cd ~/LLM_research/HalluLens && python scripts/launch_jupyter.py <port> --dry-run'
+```
+
+Ports use the 88xx convention. A non-zero exit means a cap was hit — **do not** work around a refusal (no raw `sbatch`, no editing the caps).
+
+**Still requires explicit approval / still forbidden:**
+- Raw `sbatch ... empire_jupyter_lab.sh` (or any other `sbatch`/`srun`) — it bypasses the caps. Always go through `launch_jupyter.py` for Jupyter.
+- `scancel`, `scontrol` cancel/suspend, `gpu_dispatch.py kill`, or killing remote processes — agents **must not** cancel jobs, ever, without explicit user approval.
+- `gpu_dispatch.py run` and all training/inference job submission — unchanged, still needs approval.
 
 **Avoid duplicate dispatches** — a timed-out dispatch may have actually launched. Before re-dispatching, check `gpu_dispatch.py jobs --all` and wait at least 2 minutes.
 
