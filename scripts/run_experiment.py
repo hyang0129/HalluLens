@@ -2424,7 +2424,10 @@ def run_contrastive_actvit(
     from torch.utils.data import DataLoader
 
     from activation_research.act_vit import ContrastiveACTViT
-    from activation_research.contrastive_actvit_dataset import ContrastiveACTViTDataset
+    from activation_research.contrastive_actvit_dataset import (
+        ContrastiveACTViTDataset,
+        make_cav_augment,
+    )
     from activation_research.memmap_activation_parser import MemmapActivationParser
     from activation_research.metric_evaluator import MultiMetricHallucinationEvaluator
     from activation_research.training import train_contrastive_logprob_recon
@@ -2456,33 +2459,35 @@ def run_contrastive_actvit(
     relevant_layers = (
         parse_layer_range(data_cfg["relevant_layers"]) if data_cfg.get("relevant_layers") else None
     )
-    aug_kwargs = dict(
-        relevant_layers=relevant_layers,
-        view_aug=data_cfg.get("view_aug", "noise"),
+    design_aug = data_cfg.get("view_aug", "noise")     # CAV-0/1/2/3 — applied on GPU
+    # The dataset stays lean (fp16, raw grid copies, no CPU augmentation, like
+    # ACTViTDataset); augmentation runs batched on the GPU via augment_fn below.
+    ds_kwargs = dict(relevant_layers=relevant_layers, view_aug="raw")
+    num_views = data_cfg.get("num_views", 2)
+    train_ds = ContrastiveACTViTDataset(
+        icr_cfg["train_dir"], train_idx, num_views=num_views, seed=training_seed,
+        hashkey_map=_hmap(train_parser), **ds_kwargs,
+    )
+    val_ds = ContrastiveACTViTDataset(
+        icr_cfg["train_dir"], val_idx, num_views=num_views, seed=training_seed,
+        hashkey_map=_hmap(train_parser), **ds_kwargs,
+    )
+    # Eval embeddings: a single clean (un-augmented) view.
+    train_eval_ds = ContrastiveACTViTDataset(
+        icr_cfg["train_dir"], train_idx, num_views=1, seed=training_seed,
+        hashkey_map=_hmap(train_parser), **ds_kwargs,
+    )
+    test_eval_ds = ContrastiveACTViTDataset(
+        icr_cfg["test_dir"], test_idx, num_views=1, seed=training_seed,
+        hashkey_map=_hmap(test_parser), **ds_kwargs,
+    )
+    augment_fn = make_cav_augment(
+        design_aug, train_ds.n_layers, train_ds.n_tokens,
         keep_frac=data_cfg.get("keep_frac", 0.6),
         mask_frac=data_cfg.get("mask_frac", 0.5),
         noise_scale=data_cfg.get("noise_scale", 0.1),
         patch_h=model_params.get("patch_h", 2),
         patch_w=model_params.get("patch_w", 10),
-    )
-    num_views = data_cfg.get("num_views", 2)
-    train_ds = ContrastiveACTViTDataset(
-        icr_cfg["train_dir"], train_idx, num_views=num_views, seed=training_seed,
-        hashkey_map=_hmap(train_parser), **aug_kwargs,
-    )
-    val_ds = ContrastiveACTViTDataset(
-        icr_cfg["train_dir"], val_idx, num_views=num_views, seed=training_seed,
-        hashkey_map=_hmap(train_parser), **aug_kwargs,
-    )
-    # Eval embeddings: a single clean view (no augmentation).
-    eval_kwargs = dict(aug_kwargs); eval_kwargs["view_aug"] = "noise"; eval_kwargs["noise_scale"] = 0.0
-    train_eval_ds = ContrastiveACTViTDataset(
-        icr_cfg["train_dir"], train_idx, num_views=1, seed=training_seed,
-        hashkey_map=_hmap(train_parser), **eval_kwargs,
-    )
-    test_eval_ds = ContrastiveACTViTDataset(
-        icr_cfg["test_dir"], test_idx, num_views=1, seed=training_seed,
-        hashkey_map=_hmap(test_parser), **eval_kwargs,
     )
 
     # --- model (n_layers/n_tokens from the dataset; target ~act_vit size, <20M) ---
@@ -2503,15 +2508,16 @@ def run_contrastive_actvit(
     n_params = sum(p.numel() for p in model.parameters())
     logger.info(
         f"ContrastiveACTViT: {n_params / 1e6:.2f}M params "
-        f"(n_layers={train_ds.n_layers}, n_tokens={train_ds.n_tokens}, view_aug={aug_kwargs['view_aug']})"
+        f"(n_layers={train_ds.n_layers}, n_tokens={train_ds.n_tokens}, view_aug={design_aug})"
     )
 
+    nw = experiment_cfg.get("num_workers", 12)   # grid loading is I/O-heavy
     checkpoint_dir = os.path.join(output_dir, "artifacts")
     train_contrastive_logprob_recon(
         model=model, train_dataset=train_ds, test_dataset=val_ds,
         epochs=train_cfg["max_epochs"], batch_size=train_cfg["batch_size"], lr=train_cfg["lr"],
         temperature=train_cfg["temperature"], device=str(train_device),
-        num_workers=experiment_cfg.get("num_workers", 4),
+        num_workers=nw,
         sub_batch_size=train_cfg.get("sub_batch_size", train_cfg["batch_size"]),
         checkpoint_dir=checkpoint_dir, save_every=1, snapshot_every=10, snapshot_keep_last=3,
         use_labels=train_cfg.get("use_labels", True), ignore_label=train_cfg.get("ignore_label", 0),
@@ -2522,12 +2528,12 @@ def run_contrastive_actvit(
         steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
         balanced_sampling=train_cfg.get("balanced_sampling", False),
         grad_clip_norm=train_cfg.get("grad_clip_norm"),
+        augment_fn=augment_fn,
     )
 
     # --- eval: reuse the standard KNN/Mahalanobis evaluator (labels via prompt_hash) ---
     model.eval()
     ev_bs = eval_cfg.get("eval_batch_size", 64)
-    nw = experiment_cfg.get("num_workers", 4)
     train_loader = DataLoader(train_eval_ds, batch_size=ev_bs, shuffle=False, num_workers=nw)
     eval_loader = DataLoader(test_eval_ds, batch_size=ev_bs, shuffle=False, num_workers=nw)
 

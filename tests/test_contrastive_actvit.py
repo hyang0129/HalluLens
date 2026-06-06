@@ -11,7 +11,10 @@ import numpy as np
 import torch
 
 from activation_research.act_vit import ContrastiveACTViT
-from activation_research.contrastive_actvit_dataset import ContrastiveACTViTDataset
+from activation_research.contrastive_actvit_dataset import (
+    ContrastiveACTViTDataset,
+    make_cav_augment,
+)
 
 
 # --------------------------------------------------------------------------- model
@@ -95,6 +98,31 @@ def test_dataset_views_and_augmentations(tmp_path):
             for i in range(len(ds))
         )
         assert any_diff, f"{aug}: all views identical across samples"
+
+
+def test_gpu_augment_factory():
+    """make_cav_augment: preserves shape and diversifies the two views per design."""
+    B, V, L, N, D = 4, 2, 6, 8, 5
+    base = torch.randn(B, V, L * N, D)
+    for aug in ("noise", "token_crop", "layer_band", "patch_mask"):
+        fn = make_cav_augment(aug, L, N, keep_frac=0.6, mask_frac=0.5, patch_h=2, patch_w=2)
+        # feed identical views (as the dataset's raw mode does) → must come out different
+        x = base.clone()
+        out = fn(x, torch.zeros(B, dtype=torch.long))
+        assert out.shape == (B, V, L * N, D), aug
+        assert not torch.equal(out[:, 0], out[:, 1]), f"{aug}: views not diversified"
+    # raw is identity
+    raw = make_cav_augment("raw", L, N)
+    x = base.clone()
+    assert torch.equal(raw(x, None), x)
+
+
+def test_dataset_raw_mode_returns_copies(tmp_path):
+    _make_capture(tmp_path)
+    ds = ContrastiveACTViTDataset(tmp_path, indices=list(range(8)), num_views=2, view_aug="raw", seed=0)
+    v = ds[0]["views_activations"]
+    assert v.shape == (2, ds.n_layers * ds.n_tokens, ds.hidden_dim)
+    assert torch.equal(v[0], v[1]), "raw mode should return identical copies (GPU augment diversifies)"
 
 
 def test_dataset_hashkey_map(tmp_path):

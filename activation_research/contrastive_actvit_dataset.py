@@ -117,7 +117,13 @@ class ContrastiveACTViTDataset(Dataset):
         return len(self._indices)
 
     def _augment(self, grid: torch.Tensor) -> torch.Tensor:
-        """grid: (L, N, D) float32 → one augmented view (L, N, D) float32."""
+        """grid: (L, N, D) → one augmented view (L, N, D), same dtype.
+
+        CPU-side fallback. The fast path is ``view_aug="raw"`` (returns the grid
+        untouched) + a GPU ``augment_fn`` in the trainer; see make_cav_augment.
+        """
+        if self.view_aug in ("raw", "none"):
+            return grid
         L, N, D = grid.shape
         aug = self.view_aug
         if aug == "noise":
@@ -152,14 +158,18 @@ class ContrastiveACTViTDataset(Dataset):
 
     def __getitem__(self, i: int) -> dict:
         idx = int(self._indices[i])
-        # (n_layers, N, D) float32 grid for the selected transformer layers.
+        # (n_layers, N, D) fp16 grid for the selected transformer layers — kept
+        # fp16 (no float32 round-trip) so the loader stays as light as ACTViTDataset.
         grid = torch.from_numpy(
-            np.array(self._acts[idx, self._layer_rows, :, :], dtype=np.float32)
+            np.array(self._acts[idx, self._layer_rows, :, :], dtype=np.float16)
         )
-        views = []
-        for _ in range(self.num_views):
-            v = self._augment(grid)                          # (L, N, D)
-            views.append(v.reshape(self.n_layers * self.n_tokens, self.hidden_dim).half())
+        flat = lambda g: g.reshape(self.n_layers * self.n_tokens, self.hidden_dim)
+        if self.view_aug in ("raw", "none"):
+            # Cheap path: identical raw copies; the GPU augment_fn diversifies them.
+            v0 = flat(grid)
+            views = [v0.clone() for _ in range(self.num_views)]
+        else:
+            views = [flat(self._augment(grid)) for _ in range(self.num_views)]
         hashkey = self._hashkey_map.get(idx, str(idx)) if self._hashkey_map else str(idx)
         out = {
             "views_activations": torch.stack(views, dim=0),  # (num_views, L*N, D) fp16
@@ -171,3 +181,53 @@ class ContrastiveACTViTDataset(Dataset):
                 np.array(self._logprob[idx], dtype=np.float32)
             )                                                # (max_response_len,)
         return out
+
+
+def make_cav_augment(
+    view_aug: str,
+    n_layers: int,
+    n_tokens: int,
+    *,
+    keep_frac: float = 0.6,
+    mask_frac: float = 0.5,
+    noise_scale: float = 0.1,
+    patch_h: int = 2,
+    patch_w: int = 10,
+):
+    """Build a GPU-side ``augment_fn(views, labels) -> views`` for the trainer.
+
+    ``views`` is the batched ``(B, V, L*N, D)`` device tensor; we reshape to the
+    grid ``(B, V, L, N, D)``, apply the CAV-{0,1,2,3} augmentation independently
+    per (sample, view) — vectorized, so it's ~free on GPU — and reshape back.
+    Masked cells are filled with the per-(sample,view) minimum (pool-safe).
+    """
+    aug = str(view_aug).lower()
+    L, N = int(n_layers), int(n_tokens)
+
+    def fn(views: torch.Tensor, labels=None) -> torch.Tensor:
+        B, V, LN, D = views.shape
+        x = views.reshape(B, V, L, N, D)
+        if aug == "noise":
+            std = x.float().std(dim=(2, 3, 4), keepdim=True).to(x.dtype) + 1e-4
+            x = x + torch.randn_like(x) * (noise_scale * std)
+        elif aug == "token_crop":
+            keep = torch.rand(B, V, 1, N, 1, device=x.device) < keep_frac
+            x = torch.where(keep, x, x.amin(dim=(2, 3, 4), keepdim=True))
+        elif aug == "layer_band":
+            band = max(1, round(keep_frac * L))
+            starts = torch.randint(0, max(1, L - band + 1), (B, V), device=x.device)
+            ix = torch.arange(L, device=x.device).view(1, 1, L)
+            keep = ((ix >= starts.unsqueeze(-1)) & (ix < starts.unsqueeze(-1) + band)).view(B, V, L, 1, 1)
+            x = torch.where(keep, x, x.amin(dim=(2, 3, 4), keepdim=True))
+        elif aug == "patch_mask":
+            nH, nW = (L + patch_h - 1) // patch_h, (N + patch_w - 1) // patch_w
+            pkeep = torch.rand(B, V, nH, nW, device=x.device) >= mask_frac
+            keep = pkeep.repeat_interleave(patch_h, 2).repeat_interleave(patch_w, 3)[:, :, :L, :N].unsqueeze(-1)
+            x = torch.where(keep, x, x.amin(dim=(2, 3, 4), keepdim=True))
+        elif aug in ("raw", "none"):
+            pass
+        else:
+            raise ValueError(f"unknown view_aug: {view_aug}")
+        return x.reshape(B, V, LN, D)
+
+    return fn
