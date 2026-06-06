@@ -2398,6 +2398,171 @@ def run_icr_probe(
     return eval_metrics, predictions
 
 
+def run_contrastive_actvit(
+    ap,
+    dataset_cfg: dict,
+    method_cfg: dict,
+    experiment_cfg: dict,
+    output_dir: str,
+    device: str,
+    training_seed: int,
+    *,
+    test_ap=None,
+) -> tuple[dict, list[dict]]:
+    """Contrastive ACT-ViT (issue #134).
+
+    Trains the :class:`ACTViT` joint (layers × tokens) encoder with the existing
+    SupCon + logprob-reconstruction objective (not act_vit's BCE classifier) and
+    scores with the same KNN/Mahalanobis OOD evaluator as the b5 headline.
+
+    Each grid view is flattened to ``(L*N, D)`` so the standard 4-D contrastive
+    trainer/evaluator are reused unchanged; :class:`ContrastiveACTViT` reshapes
+    back to the grid internally. View augmentation (CAV-0/1/2/3) is set via
+    ``data.view_aug``.
+    """
+    import torch
+    from torch.utils.data import DataLoader
+
+    from activation_research.act_vit import ContrastiveACTViT
+    from activation_research.contrastive_actvit_dataset import ContrastiveACTViTDataset
+    from activation_research.memmap_activation_parser import MemmapActivationParser
+    from activation_research.metric_evaluator import MultiMetricHallucinationEvaluator
+    from activation_research.training import train_contrastive_logprob_recon
+
+    train_cfg = method_cfg["training"]
+    data_cfg = method_cfg.get("data", {})
+    eval_cfg = method_cfg["evaluation"]
+    model_params = method_cfg.get("model_params", {})
+    icr_cfg = dataset_cfg["icr_capture"]
+    split_seed = experiment_cfg.get("split_seed", 42)
+    train_device = torch.device(
+        device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+
+    # --- splits: identical pattern to run_act_vit / other runners ---
+    train_parser = MemmapActivationParser(
+        icr_cfg["train_dir"], random_seed=split_seed, split_strategy="three_way"
+    )
+    train_idx = train_parser.df[train_parser.df["split"] == "train"]["sample_index"].values
+    val_idx = train_parser.df[train_parser.df["split"] == "val"]["sample_index"].values
+    test_parser = MemmapActivationParser(
+        icr_cfg["test_dir"], random_seed=split_seed, split_strategy="none"
+    )
+    test_idx = test_parser.df["sample_index"].values
+
+    def _hmap(parser):
+        return dict(zip(parser.df["sample_index"].astype(int), parser.df["prompt_hash"].astype(str)))
+
+    relevant_layers = (
+        parse_layer_range(data_cfg["relevant_layers"]) if data_cfg.get("relevant_layers") else None
+    )
+    aug_kwargs = dict(
+        relevant_layers=relevant_layers,
+        view_aug=data_cfg.get("view_aug", "noise"),
+        keep_frac=data_cfg.get("keep_frac", 0.6),
+        mask_frac=data_cfg.get("mask_frac", 0.5),
+        noise_scale=data_cfg.get("noise_scale", 0.1),
+        patch_h=model_params.get("patch_h", 2),
+        patch_w=model_params.get("patch_w", 10),
+    )
+    num_views = data_cfg.get("num_views", 2)
+    train_ds = ContrastiveACTViTDataset(
+        icr_cfg["train_dir"], train_idx, num_views=num_views, seed=training_seed,
+        hashkey_map=_hmap(train_parser), **aug_kwargs,
+    )
+    val_ds = ContrastiveACTViTDataset(
+        icr_cfg["train_dir"], val_idx, num_views=num_views, seed=training_seed,
+        hashkey_map=_hmap(train_parser), **aug_kwargs,
+    )
+    # Eval embeddings: a single clean view (no augmentation).
+    eval_kwargs = dict(aug_kwargs); eval_kwargs["view_aug"] = "noise"; eval_kwargs["noise_scale"] = 0.0
+    train_eval_ds = ContrastiveACTViTDataset(
+        icr_cfg["train_dir"], train_idx, num_views=1, seed=training_seed,
+        hashkey_map=_hmap(train_parser), **eval_kwargs,
+    )
+    test_eval_ds = ContrastiveACTViTDataset(
+        icr_cfg["test_dir"], test_idx, num_views=1, seed=training_seed,
+        hashkey_map=_hmap(test_parser), **eval_kwargs,
+    )
+
+    # --- model (n_layers/n_tokens from the dataset; target ~act_vit size, <20M) ---
+    model = ContrastiveACTViT(
+        n_layers=train_ds.n_layers, n_tokens=train_ds.n_tokens,
+        input_dim=dataset_cfg["input_dim"],
+        final_dim=model_params.get("final_dim", 256),
+        recon_seq_len=model_params.get("recon_seq_len", 64),
+        recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+        recon_lambda=model_params.get("recon_lambda", 1.0),
+        logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
+        L_p=model_params.get("L_p", 8), N_p=model_params.get("N_p", 100),
+        patch_h=model_params.get("patch_h", 2), patch_w=model_params.get("patch_w", 10),
+        d_adapter=model_params.get("d_adapter", 256), d_model=model_params.get("d_model", 256),
+        num_heads=model_params.get("num_heads", 8), depth=model_params.get("depth", 4),
+        mlp_ratio=model_params.get("mlp_ratio", 4.0), dropout=model_params.get("dropout", 0.1),
+    )
+    n_params = sum(p.numel() for p in model.parameters())
+    logger.info(
+        f"ContrastiveACTViT: {n_params / 1e6:.2f}M params "
+        f"(n_layers={train_ds.n_layers}, n_tokens={train_ds.n_tokens}, view_aug={aug_kwargs['view_aug']})"
+    )
+
+    checkpoint_dir = os.path.join(output_dir, "artifacts")
+    train_contrastive_logprob_recon(
+        model=model, train_dataset=train_ds, test_dataset=val_ds,
+        epochs=train_cfg["max_epochs"], batch_size=train_cfg["batch_size"], lr=train_cfg["lr"],
+        temperature=train_cfg["temperature"], device=str(train_device),
+        num_workers=experiment_cfg.get("num_workers", 4),
+        sub_batch_size=train_cfg.get("sub_batch_size", train_cfg["batch_size"]),
+        checkpoint_dir=checkpoint_dir, save_every=1, snapshot_every=10, snapshot_keep_last=3,
+        use_labels=train_cfg.get("use_labels", True), ignore_label=train_cfg.get("ignore_label", 0),
+        persistent_workers=experiment_cfg.get("persistent_workers", True),
+        recon_lambda=model_params.get("recon_lambda", 1.0),
+        use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", True),
+        infinite_stream_shuffle=True, infinite_stream_seed=training_seed,
+        steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+        balanced_sampling=train_cfg.get("balanced_sampling", False),
+        grad_clip_norm=train_cfg.get("grad_clip_norm"),
+    )
+
+    # --- eval: reuse the standard KNN/Mahalanobis evaluator (labels via prompt_hash) ---
+    model.eval()
+    ev_bs = eval_cfg.get("eval_batch_size", 64)
+    nw = experiment_cfg.get("num_workers", 4)
+    train_loader = DataLoader(train_eval_ds, batch_size=ev_bs, shuffle=False, num_workers=nw)
+    eval_loader = DataLoader(test_eval_ds, batch_size=ev_bs, shuffle=False, num_workers=nw)
+
+    metrics_list: list = []
+    for m in eval_cfg["metrics"]:
+        if m == "knn":
+            knn_params = dict(eval_cfg.get("knn_params", {}))
+            knn_params["sample_seed"] = training_seed
+            knn_params["include_per_sample"] = True
+            metrics_list.append({"metric": "knn", "kwargs": knn_params, "train_selection": "all"})
+        else:
+            metrics_list.append(m)
+
+    flip_auroc = bool(eval_cfg.get("flip_auroc", False))
+    effective_outlier_class = 0 if flip_auroc else dataset_cfg.get("outlier_class", 1)
+    evaluator = MultiMetricHallucinationEvaluator(
+        activation_parser_df=test_parser.df, train_data_loader=train_loader, metrics=metrics_list,
+        batch_size=ev_bs, sub_batch_size=eval_cfg.get("sub_batch_size", 64),
+        device=str(train_device), num_workers=nw, persistent_workers=False,
+        outlier_class=effective_outlier_class,
+    )
+    ood_stats = evaluator.compute(eval_loader, model)
+    ood_stats.pop("knn_scores", None)
+    ood_stats.pop("knn_labels", None)
+
+    eval_metrics: dict = {
+        "method": method_cfg["name"], "dataset": dataset_cfg["name"], "seed": training_seed,
+        "flip_auroc": flip_auroc, "split_seed": split_seed,
+        "n_train": len(train_eval_ds), "n_test": len(test_eval_ds),
+        "n_params_M": round(n_params / 1e6, 3), "view_aug": aug_kwargs["view_aug"],
+    }
+    eval_metrics.update(ood_stats)
+    return eval_metrics, []
+
+
 def run_act_vit(
     ap,
     dataset_cfg: dict,
@@ -3770,6 +3935,11 @@ def main() -> None:
                         )
                     elif routine == "act_vit":
                         eval_metrics, predictions = run_act_vit(
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
+                            test_ap=test_ap,
+                        )
+                    elif routine == "contrastive_actvit":
+                        eval_metrics, predictions = run_contrastive_actvit(
                             ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
                         )

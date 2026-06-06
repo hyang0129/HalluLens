@@ -266,3 +266,120 @@ class ACTViT(nn.Module):
         cls_out = x[:, 0]                                   # (B, d_model)
         logit = self.head(cls_out)                          # (B, 1)
         return logit
+
+
+# ---------------------------------------------------------------------------
+# Contrastive ACT-ViT (issue #134)
+# ---------------------------------------------------------------------------
+
+
+class ContrastiveACTViT(nn.Module):
+    """ACT-ViT encoder trained with SupCon + logprob reconstruction (issue #134).
+
+    Reuses the :class:`ACTViT` joint (layers × tokens) encoder but, instead of
+    act_vit's BCE classifier head, exposes a contrastive embedding ``z`` (for
+    SupCon + KNN/Mahalanobis OOD scoring) plus the auxiliary logprob-recon
+    decoder used by the rest of the contrastive method.
+
+    To slot into the existing 4-D contrastive trainer/evaluator without forking
+    them, each grid view is **flattened to a sequence** ``(L*N, D)`` upstream
+    (in the dataset); this module reshapes it back to ``(L, N, D)`` before the
+    ACT-ViT encoder. ``n_layers`` and ``n_tokens`` are therefore fixed per run
+    (read from the capture and injected by the routine).
+
+    Interface mirrors :class:`LogprobReconProgressiveCompressor`:
+    ``forward(x) -> z`` (eval), ``forward_with_recon(x) -> (z, logprob_pred)``
+    (training), ``recon_loss(pred, target) -> (loss, diag)``. Both forward
+    methods accept and ignore ``layer_idx`` for trainer/eval call-site
+    compatibility.
+
+    Parameters
+    ----------
+    n_layers, n_tokens : int
+        The L and N of the flattened grid (so ``L*N`` = input sequence length).
+    final_dim : int
+        Contrastive embedding dimension (the SupCon/KNN vector).
+    recon_seq_len, recon_hidden_dim, recon_lambda, logprob_var_threshold :
+        Logprob-recon aux head config (same semantics as the progressive model).
+    Remaining kwargs are the :class:`ACTViTConfig` fields (defaults = paper /
+    ~5.5M-param base).
+    """
+
+    def __init__(
+        self,
+        n_layers: int,
+        n_tokens: int,
+        input_dim: int = 4096,
+        final_dim: int = 256,
+        recon_seq_len: int = 64,
+        recon_hidden_dim: int = 256,
+        recon_lambda: float = 1.0,
+        logprob_var_threshold: float = 1e-4,
+        *,
+        L_p: int = 8,
+        N_p: int = 100,
+        patch_h: int = 2,
+        patch_w: int = 10,
+        d_adapter: int = 256,
+        d_model: int = 256,
+        num_heads: int = 8,
+        depth: int = 4,
+        mlp_ratio: float = 4.0,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.n_layers = int(n_layers)
+        self.n_tokens = int(n_tokens)
+        self.input_dim = int(input_dim)
+        self.recon_seq_len = int(recon_seq_len)
+        self.recon_lambda = float(recon_lambda)
+        self.logprob_var_threshold = float(logprob_var_threshold)
+
+        cfg = ACTViTConfig(
+            input_dim=int(input_dim), L_p=int(L_p), N_p=int(N_p),
+            patch_h=int(patch_h), patch_w=int(patch_w), d_adapter=int(d_adapter),
+            d_model=int(d_model), num_heads=int(num_heads), depth=int(depth),
+            mlp_ratio=float(mlp_ratio), dropout=float(dropout),
+        )
+        self.encoder = ACTViT(cfg)
+        # Drop the BCE classifier: ACTViT.forward now returns the CLS embedding.
+        self.encoder.head = nn.Identity()
+
+        # SupCon projection head: CLS (d_model) → contrastive embedding.
+        self.proj = nn.Linear(int(d_model), int(final_dim))
+
+        # Auxiliary logprob decoder: z (final_dim) → (recon_seq_len,).
+        self.decoder = nn.Sequential(
+            nn.Linear(int(final_dim), int(recon_hidden_dim)),
+            nn.GELU(),
+            nn.Linear(int(recon_hidden_dim), self.recon_seq_len),
+        )
+
+    def _encode(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (B, L*N, D) flattened grid → z: (B, final_dim)."""
+        B = x.shape[0]
+        x = x.reshape(B, self.n_layers, self.n_tokens, self.input_dim)
+        cls = self.encoder(x)              # (B, d_model) — head is Identity
+        return self.proj(cls)             # (B, final_dim)
+
+    def forward(self, x: torch.Tensor, layer_idx=None) -> torch.Tensor:
+        return self._encode(x)
+
+    def forward_with_recon(self, x: torch.Tensor, layer_idx=None):
+        z = self._encode(x)
+        return z, self.decoder(z)
+
+    def recon_loss(self, logprob_pred: torch.Tensor, logprob_target: torch.Tensor):
+        """MSE logprob reconstruction with a variance gate (see progressive model)."""
+        target = logprob_target.float()
+        logprob_var = float(target.var())
+        if logprob_var < self.logprob_var_threshold:
+            zero = torch.zeros(1, device=logprob_pred.device).squeeze()
+            return zero, {"logprob_var": logprob_var, "suppressed": True}
+        if target.shape[-1] != self.recon_seq_len:
+            target = F.interpolate(
+                target.unsqueeze(1), size=self.recon_seq_len,
+                mode="linear", align_corners=False,
+            ).squeeze(1)
+        loss = F.mse_loss(logprob_pred, target)
+        return loss, {"logprob_var": logprob_var, "suppressed": False}
