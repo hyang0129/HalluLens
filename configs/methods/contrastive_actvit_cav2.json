@@ -35,7 +35,8 @@
     "view_aug": "layer_band",
     "noise_scale": 0.1,
     "keep_frac": 0.6,
-    "mask_frac": 0.5
+    "mask_frac": 0.5,
+    "relevant_layers": "14-29"
   },
   "evaluation": {
     "metrics": [
