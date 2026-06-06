@@ -205,6 +205,8 @@ ssh empire-ai 'cd ~/LLM_research/HalluLens && python scripts/launch_jupyter.py <
 
 Ports use the 88xx convention. A non-zero exit means a cap was hit — **do not** work around a refusal (no raw `sbatch`, no editing the caps).
 
+**When spinning up multiple nodes, give each a distinct port** (e.g. 8882, 8883, 8884, …). Do not reuse a port that another node already uses. The launcher refuses a port already serving a *running* job, but a node you just launched may still be PENDING (not yet "serving"), so a second launch on the same port can slip through and collide — always pick a fresh 88xx port per node.
+
 **Still requires explicit approval / still forbidden:**
 - Raw `sbatch ... empire_jupyter_lab.sh` (or any other `sbatch`/`srun`) — it bypasses the caps. Always go through `launch_jupyter.py` for Jupyter.
 - `scancel`, `scontrol` cancel/suspend, `gpu_dispatch.py kill`, or killing remote processes — agents **must not** cancel jobs, ever, without explicit user approval.
