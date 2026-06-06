@@ -2563,7 +2563,7 @@ def run_contrastive_actvit(
         "method": method_cfg["name"], "dataset": dataset_cfg["name"], "seed": training_seed,
         "flip_auroc": flip_auroc, "split_seed": split_seed,
         "n_train": len(train_eval_ds), "n_test": len(test_eval_ds),
-        "n_params_M": round(n_params / 1e6, 3), "view_aug": aug_kwargs["view_aug"],
+        "n_params_M": round(n_params / 1e6, 3), "view_aug": design_aug,
     }
     eval_metrics.update(ood_stats)
     return eval_metrics, []
