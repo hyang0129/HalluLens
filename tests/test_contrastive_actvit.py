@@ -59,6 +59,23 @@ def test_forward_accepts_layer_idx_kwarg():
     assert m(x, layer_idx=None).shape == (2, 16)
 
 
+def test_normalize_output_unit_sphere():
+    """normalize_output=True must return L2-unit embeddings; default keeps raw norms."""
+    kw = dict(n_layers=4, n_tokens=8, input_dim=32, final_dim=16,
+              d_model=64, d_adapter=16, depth=1, L_p=4, N_p=20, patch_h=2, patch_w=5)
+    x = torch.randn(5, 32, 32)
+    m_norm = ContrastiveACTViT(normalize_output=True, **kw)
+    z = m_norm(x)
+    norms = z.norm(dim=-1)
+    assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5)
+    # recon path uses the same (normalized) embedding without crashing
+    z2, recon = m_norm.forward_with_recon(x)
+    assert torch.allclose(z2.norm(dim=-1), torch.ones_like(norms), atol=1e-5)
+    # default (legacy) does NOT normalize — at least one norm clearly off unit
+    m_raw = ContrastiveACTViT(**kw)
+    assert not torch.allclose(m_raw(x).norm(dim=-1), torch.ones(5), atol=1e-2)
+
+
 # --------------------------------------------------------------------------- dataset
 
 

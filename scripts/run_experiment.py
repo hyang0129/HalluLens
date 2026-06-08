@@ -2504,6 +2504,7 @@ def run_contrastive_actvit(
         d_adapter=model_params.get("d_adapter", 256), d_model=model_params.get("d_model", 256),
         num_heads=model_params.get("num_heads", 8), depth=model_params.get("depth", 4),
         mlp_ratio=model_params.get("mlp_ratio", 4.0), dropout=model_params.get("dropout", 0.1),
+        normalize_output=model_params.get("normalize_output", False),
     )
     n_params = sum(p.numel() for p in model.parameters())
     logger.info(
@@ -2529,6 +2530,11 @@ def run_contrastive_actvit(
         balanced_sampling=train_cfg.get("balanced_sampling", False),
         grad_clip_norm=train_cfg.get("grad_clip_norm"),
         augment_fn=augment_fn,
+        optimizer_name=train_cfg.get("optimizer", "adam"),
+        weight_decay=train_cfg.get("weight_decay", 0.0),
+        lr_schedule=train_cfg.get("lr_schedule"),
+        base_temperature=train_cfg.get("base_temperature", 0.07),
+        select_on_val=train_cfg.get("select_on_val", False),
     )
 
     # --- eval: reuse the standard KNN/Mahalanobis evaluator (labels via prompt_hash) ---
@@ -2549,8 +2555,16 @@ def run_contrastive_actvit(
 
     flip_auroc = bool(eval_cfg.get("flip_auroc", False))
     effective_outlier_class = 0 if flip_auroc else dataset_cfg.get("outlier_class", 1)
+    # Label both the test embeddings AND the KNN train-reference embeddings: the
+    # reference records carry train-split prompt_hashes, which only resolve if
+    # the parser df also contains the train rows. Passing test_parser.df alone
+    # leaves the reference unlabeled, which silently disables knn calibrate_k
+    # (train_labels_binary stays None). train/test prompt sets are disjoint, so
+    # the concat introduces no duplicate-hash ambiguity.
+    import pandas as pd
+    eval_parser_df = pd.concat([train_parser.df, test_parser.df], ignore_index=True)
     evaluator = MultiMetricHallucinationEvaluator(
-        activation_parser_df=test_parser.df, train_data_loader=train_loader, metrics=metrics_list,
+        activation_parser_df=eval_parser_df, train_data_loader=train_loader, metrics=metrics_list,
         batch_size=ev_bs, sub_batch_size=eval_cfg.get("sub_batch_size", 64),
         device=str(train_device), num_workers=nw, persistent_workers=False,
         outlier_class=effective_outlier_class,

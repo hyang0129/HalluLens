@@ -326,6 +326,7 @@ class ContrastiveACTViT(nn.Module):
         depth: int = 4,
         mlp_ratio: float = 4.0,
         dropout: float = 0.1,
+        normalize_output: bool = False,
     ) -> None:
         super().__init__()
         self.n_layers = int(n_layers)
@@ -334,6 +335,11 @@ class ContrastiveACTViT(nn.Module):
         self.recon_seq_len = int(recon_seq_len)
         self.recon_lambda = float(recon_lambda)
         self.logprob_var_threshold = float(logprob_var_threshold)
+        # When True, the returned embedding is L2-normalized (unit sphere), so
+        # SupCon operates on cosine similarity (textbook geometry) and the KNN
+        # eval scores the same normalized vectors. Default False = legacy raw
+        # dot-product behavior, preserved for existing cav0-3 configs.
+        self.normalize_output = bool(normalize_output)
 
         cfg = ACTViTConfig(
             input_dim=int(input_dim), L_p=int(L_p), N_p=int(N_p),
@@ -360,7 +366,10 @@ class ContrastiveACTViT(nn.Module):
         B = x.shape[0]
         x = x.reshape(B, self.n_layers, self.n_tokens, self.input_dim)
         cls = self.encoder(x)              # (B, d_model) — head is Identity
-        return self.proj(cls)             # (B, final_dim)
+        z = self.proj(cls)                 # (B, final_dim)
+        if self.normalize_output:
+            z = F.normalize(z, dim=-1)
+        return z
 
     def forward(self, x: torch.Tensor, layer_idx=None) -> torch.Tensor:
         return self._encode(x)
