@@ -475,14 +475,24 @@ def knn_ood_stats(
     test_z = torch.stack([_record_embedding(r) for r in test_records]).detach().cpu().numpy()
     test_labels = torch.tensor([r["halu"] for r in test_records], dtype=torch.int32).squeeze()
 
+    # Calibration uses the labeled subset of the train reference. Requiring
+    # *every* record to be labeled (old `all(...)`) silently disabled
+    # calibration whenever a handful of train hashkeys failed to resolve
+    # (e.g. duplicate prompts kept unlabeled), so calibrate_k was dead config.
     train_labels_binary = None
-    if train_records and all("halu" in record for record in train_records):
-        train_labels = torch.tensor([r["halu"] for r in train_records], dtype=torch.int32).squeeze()
-        train_labels_binary = _binary_outlier_labels(train_labels, outlier_class=outlier_class)
+    calib_z = train_z
+    if train_records:
+        labeled_idx = [i for i, r in enumerate(train_records) if "halu" in r]
+        if labeled_idx:
+            train_labels = torch.tensor(
+                [train_records[i]["halu"] for i in labeled_idx], dtype=torch.int32
+            ).squeeze()
+            train_labels_binary = _binary_outlier_labels(train_labels, outlier_class=outlier_class)
+            calib_z = train_z[labeled_idx]
 
     if bool(calibrate_k) and train_labels_binary is not None:
         k = _calibrate_knn_k(
-            train_z,
+            calib_z,
             train_labels_binary,
             base_k=k,
             metric=metric,
