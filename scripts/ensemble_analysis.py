@@ -135,11 +135,11 @@ def cell_name(bench_dir):
     return nm
 
 
-def discover(root):
+def discover(root, exclude=("mmlu",)):
     cells = {}
     for bench in sorted(glob.glob(os.path.join(root, "baseline_comparison_*memmap*"))):
         nm = cell_name(bench)
-        if "mmlu" in nm:
+        if any(x in nm for x in exclude):
             continue
         inner = glob.glob(os.path.join(bench, "*"))
         inner = [d for d in inner if os.path.isdir(d)]
@@ -161,9 +161,10 @@ def discover(root):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="runs")
+    ap.add_argument("--exclude", default="mmlu", help="comma-separated substrings to drop")
     a = ap.parse_args()
 
-    cells = discover(a.root)
+    cells = discover(a.root, exclude=tuple(x for x in a.exclude.split(",") if x))
     print(f"# cells with both methods (mmlu excluded): {len(cells)}")
     hdr = ("cell", "av", "clr", "spear", "ens_z", "stack", "stk_gain", "p_med", "sig/n",
            "ctl_av", "ctl_clr")
