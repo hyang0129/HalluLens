@@ -138,6 +138,8 @@ def cell_name(bench_dir):
 def discover(root, exclude=("mmlu",)):
     cells = {}
     for bench in sorted(glob.glob(os.path.join(root, "baseline_comparison_*memmap*"))):
+        if "flipped" in bench:  # flipped dirs are only a b5 source, not their own cell
+            continue
         nm = cell_name(bench)
         if any(x in nm for x in exclude):
             continue
@@ -146,13 +148,20 @@ def discover(root, exclude=("mmlu",)):
         if not inner:
             continue
         base = inner[0]
-        seeds = {AV: {}, CLR: {}}
+        innername = os.path.basename(base)
+        seeds = {AV: {}, CLR: {}, "clr_b5": {}}
         for meth in (AV, CLR):
             for sd in sorted(glob.glob(os.path.join(base, meth, "seed_*"))):
                 p = os.path.join(sd, "predictions.csv")
                 if os.path.exists(p):
                     m = re.search(r"seed_(\d+)", sd)
                     seeds[meth][int(m.group(1))] = p
+        # b5 (flipped) contrastive for the same inner cell, gathered across the
+        # (inconsistently-named) *flipped* dirs.
+        for p in glob.glob(os.path.join(
+                root, "baseline_comparison_*flipped*", innername,
+                "contrastive_logprob_recon_b5", "seed_*", "predictions.csv")):
+            seeds["clr_b5"][int(re.search(r"seed_(\d+)", p).group(1))] = p
         if seeds[AV] and seeds[CLR]:
             cells[nm] = seeds
     return cells
@@ -162,7 +171,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="runs")
     ap.add_argument("--exclude", default="mmlu", help="comma-separated substrings to drop")
+    ap.add_argument("--clr-b5", default="", help="comma-separated cell substrings to source "
+                    "contrastive from the flipped b5 runs instead of non-flipped")
     a = ap.parse_args()
+    b5_for = [x for x in a.clr_b5.split(",") if x]
 
     cells = discover(a.root, exclude=tuple(x for x in a.exclude.split(",") if x))
     print(f"# cells with both methods (mmlu excluded): {len(cells)}")
@@ -172,10 +184,13 @@ def main():
 
     agg = defaultdict(list)
     for nm, seeds in cells.items():
-        common_seeds = sorted(set(seeds[AV]) & set(seeds[CLR]))
+        use_b5 = bool(b5_for) and any(x in nm for x in b5_for) and seeds["clr_b5"]
+        clr_seeds = seeds["clr_b5"] if use_b5 else seeds[CLR]
+        tag = "*b5" if use_b5 else ""
+        common_seeds = sorted(set(seeds[AV]) & set(clr_seeds))
         av_aucs, clr_aucs, ens_z_aucs, stk_aucs, spears, dgains, pvals = ([] for _ in range(7))
         for s in common_seeds:
-            av = load_pred(seeds[AV][s]); clr = load_pred(seeds[CLR][s])
+            av = load_pred(seeds[AV][s]); clr = load_pred(clr_seeds[s])
             ids = sorted(set(av) & set(clr))
             y = np.array([av[i][1] for i in ids])
             sa = orient(np.array([av[i][0] for i in ids], float), y)
@@ -192,9 +207,9 @@ def main():
             dgains.append(st_auc - max(a_auc, c_auc)); pvals.append(p)
 
         # same-family control: ensemble distinct seed pairs within a method
-        def ctl(method):
-            ss = sorted(seeds[method]); gains = []
-            preds = {s: load_pred(seeds[method][s]) for s in ss}
+        def ctl(seedmap):
+            ss = sorted(seedmap); gains = []
+            preds = {s: load_pred(seedmap[s]) for s in ss}
             for i in range(len(ss)):
                 for j in range(i + 1, len(ss)):
                     ids = sorted(set(preds[ss[i]]) & set(preds[ss[j]]))
@@ -205,10 +220,10 @@ def main():
                     gains.append(auroc(zavg(s1, s2), y) - base)
             return float(np.mean(gains)) if gains else float("nan")
 
-        ctl_av = ctl(AV); ctl_clr = ctl(CLR)
+        ctl_av = ctl(seeds[AV]); ctl_clr = ctl(clr_seeds)
         n = len(common_seeds)
         sig = sum(1 for k in range(n) if pvals[k] < 0.05 and dgains[k] > 0)
-        row = (nm[:24], np.mean(av_aucs), np.mean(clr_aucs), np.mean(spears),
+        row = ((nm[:21] + tag), np.mean(av_aucs), np.mean(clr_aucs), np.mean(spears),
                np.mean(ens_z_aucs), np.mean(stk_aucs), np.mean(dgains),
                float(np.median(pvals)), f"{sig}/{n}", ctl_av, ctl_clr)
         print("{:24} {:6.3f} {:6.3f} {:6.3f} {:6.3f} {:6.3f} {:+8.3f} {:6.3f} {:>6} {:+6.3f} {:+6.3f}".format(*row))
