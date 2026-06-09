@@ -21,6 +21,8 @@ from collections import defaultdict
 
 import numpy as np
 from scipy import stats
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import StratifiedKFold
 
 CLR = "contrastive_logprob_recon"
 AV = "act_vit"
@@ -103,6 +105,19 @@ def ravg(a, b):
     return ra + rb
 
 
+def stack_oof(a, b, y, folds=5):
+    """Leakage-free learned ensemble: out-of-fold logistic-regression stack of the
+    two methods' scores. Returns OOF predicted prob (used as the ensemble score)."""
+    X = np.column_stack([stats.zscore(a), stats.zscore(b)])
+    oof = np.zeros(len(y))
+    skf = StratifiedKFold(n_splits=folds, shuffle=True, random_state=0)
+    for tr, te in skf.split(X, y):
+        lr = LogisticRegression(max_iter=1000)
+        lr.fit(X[tr], y[tr])
+        oof[te] = lr.predict_proba(X[te])[:, 1]
+    return oof
+
+
 # ---------- data loading ----------
 def load_pred(path):
     out = {}
@@ -150,14 +165,14 @@ def main():
 
     cells = discover(a.root)
     print(f"# cells with both methods (mmlu excluded): {len(cells)}")
-    hdr = ("cell", "av", "clr", "spear", "ens_z", "ens_r", "d_best", "p_med", "sig/n",
+    hdr = ("cell", "av", "clr", "spear", "ens_z", "stack", "stk_gain", "p_med", "sig/n",
            "ctl_av", "ctl_clr")
-    print("{:24} {:>6} {:>6} {:>6} {:>6} {:>6} {:>7} {:>6} {:>6} {:>6} {:>6}".format(*hdr))
+    print("{:24} {:>6} {:>6} {:>6} {:>6} {:>6} {:>8} {:>6} {:>6} {:>6} {:>6}".format(*hdr))
 
     agg = defaultdict(list)
     for nm, seeds in cells.items():
         common_seeds = sorted(set(seeds[AV]) & set(seeds[CLR]))
-        av_aucs, clr_aucs, ens_z_aucs, ens_r_aucs, spears, dgains, pvals = ([] for _ in range(7))
+        av_aucs, clr_aucs, ens_z_aucs, stk_aucs, spears, dgains, pvals = ([] for _ in range(7))
         for s in common_seeds:
             av = load_pred(seeds[AV][s]); clr = load_pred(seeds[CLR][s])
             ids = sorted(set(av) & set(clr))
@@ -165,14 +180,15 @@ def main():
             sa = orient(np.array([av[i][0] for i in ids], float), y)
             sc = orient(np.array([clr[i][0] for i in ids], float), y)
             a_auc = auroc(sa, y); c_auc = auroc(sc, y)
-            ez = zavg(sa, sc); er = ravg(sa, sc)
-            ez_auc = auroc(ez, y); er_auc = auroc(er, y)
+            ez = zavg(sa, sc); st = stack_oof(sa, sc, y)
+            ez_auc = auroc(ez, y); st_auc = auroc(st, y)
             best = sa if a_auc >= c_auc else sc
-            _, _, p = delong_test(ez, best, y)
+            # DeLong: does the learned stack beat the best single method?
+            _, _, p = delong_test(st, best, y)
             av_aucs.append(a_auc); clr_aucs.append(c_auc)
-            ens_z_aucs.append(ez_auc); ens_r_aucs.append(er_auc)
+            ens_z_aucs.append(ez_auc); stk_aucs.append(st_auc)
             spears.append(stats.spearmanr(sa, sc).statistic)
-            dgains.append(ez_auc - max(a_auc, c_auc)); pvals.append(p)
+            dgains.append(st_auc - max(a_auc, c_auc)); pvals.append(p)
 
         # same-family control: ensemble distinct seed pairs within a method
         def ctl(method):
@@ -192,23 +208,24 @@ def main():
         n = len(common_seeds)
         sig = sum(1 for k in range(n) if pvals[k] < 0.05 and dgains[k] > 0)
         row = (nm[:24], np.mean(av_aucs), np.mean(clr_aucs), np.mean(spears),
-               np.mean(ens_z_aucs), np.mean(ens_r_aucs), np.mean(dgains),
+               np.mean(ens_z_aucs), np.mean(stk_aucs), np.mean(dgains),
                float(np.median(pvals)), f"{sig}/{n}", ctl_av, ctl_clr)
-        print("{:24} {:6.3f} {:6.3f} {:6.3f} {:6.3f} {:6.3f} {:+7.3f} {:6.3f} {:>6} {:+6.3f} {:+6.3f}".format(*row))
+        print("{:24} {:6.3f} {:6.3f} {:6.3f} {:6.3f} {:6.3f} {:+8.3f} {:6.3f} {:>6} {:+6.3f} {:+6.3f}".format(*row))
         agg["av"].append(np.mean(av_aucs)); agg["clr"].append(np.mean(clr_aucs))
-        agg["ens_z"].append(np.mean(ens_z_aucs)); agg["spear"].append(np.mean(spears))
+        agg["ens_z"].append(np.mean(ens_z_aucs)); agg["stk"].append(np.mean(stk_aucs))
+        agg["spear"].append(np.mean(spears))
         agg["dgain"].append(np.mean(dgains)); agg["ctl_av"].append(ctl_av); agg["ctl_clr"].append(ctl_clr)
         agg["sig"].append(sig); agg["n"].append(n)
 
     print("-" * 100)
     print(f"# MEAN over {len(cells)} cells:")
     print(f"#   act_vit={np.mean(agg['av']):.3f}  clr={np.mean(agg['clr']):.3f}  "
-          f"ensemble_z={np.mean(agg['ens_z']):.3f}")
-    print(f"#   ensemble gain over best-single = {np.mean(agg['dgain']):+.3f}  "
+          f"ensemble_z={np.mean(agg['ens_z']):.3f}  stack={np.mean(agg['stk']):.3f}")
+    print(f"#   STACK gain over best-single (per cell) = {np.mean(agg['dgain']):+.3f}  "
           f"(spearman corr = {np.mean(agg['spear']):.3f})")
-    print(f"#   same-family control gain: av+av={np.nanmean(agg['ctl_av']):+.3f}  "
+    print(f"#   same-family control gain (z-avg): av+av={np.nanmean(agg['ctl_av']):+.3f}  "
           f"clr+clr={np.nanmean(agg['ctl_clr']):+.3f}")
-    print(f"#   cells with majority-seed significant cross-ensemble gain: "
+    print(f"#   cells where stack significantly (DeLong p<.05, majority seeds) beats best single: "
           f"{sum(1 for i in range(len(agg['sig'])) if agg['sig'][i] > agg['n'][i]/2)}/{len(cells)}")
 
 
