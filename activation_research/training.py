@@ -731,6 +731,11 @@ def train_contrastive_logprob_recon(
     steps_per_epoch_override: int = None,
     grad_clip_norm: float = None,
     augment_fn=None,
+    optimizer_name: str = "adam",
+    weight_decay: float = 0.0,
+    lr_schedule: str = None,
+    base_temperature: float = 0.07,
+    select_on_val: bool = False,
 ):
     """Train a ``LogprobReconProgressiveCompressor`` with auxiliary logprob reconstruction.
 
@@ -789,9 +794,18 @@ def train_contrastive_logprob_recon(
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    if str(optimizer_name).lower() == "adamw":
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    else:
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = (
+        torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, epochs))
+        if str(lr_schedule).lower() == "cosine"
+        else None
+    )
     loss_fn = SupConLoss(
         temperature=temperature,
+        base_temperature=base_temperature,
         ignore_label=ignore_label,
         same_sample_weight=same_sample_weight,
         same_class_weight=same_class_weight,
@@ -799,6 +813,12 @@ def train_contrastive_logprob_recon(
 
     start_epoch = 0
     best_loss = float("inf")
+    # Best-val checkpoint selection (opt-in): track lowest validation loss and
+    # restore those weights at the end, so eval uses the best epoch instead of
+    # whatever epoch the loop ended on. Mirrors run_act_vit's best-val-AUROC
+    # selection (the analog here is best validation loss).
+    best_val_loss = float("inf")
+    best_state = None
 
     if resume_from is not None:
         checkpoint_path = (
@@ -1074,6 +1094,16 @@ def train_contrastive_logprob_recon(
 
             if cleanup_legacy_checkpoints:
                 _cleanup_legacy_checkpoints(checkpoint_dir, keep_filenames={"contrastive_last.pt"})
+
+        if select_on_val and test_loader is not None and test_loss < best_val_loss:
+            best_val_loss = test_loss
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        if scheduler is not None:
+            scheduler.step()
+
+    if select_on_val and best_state is not None:
+        model.load_state_dict(best_state)
+        logger.info("Restored best-val checkpoint (val_loss=%.4f)" % best_val_loss)
 
 
 def _contrastive_collate_with_logprob_attn(batch):

@@ -42,6 +42,11 @@ MAX_TOTAL_JOBS = 6       # all jobs in any state, including PENDING/queued
 
 # --- Submission shape (matches the approved sbatch line) ---------------------
 JUPYTER_SCRIPT = Path.home() / "rit_rc_scripts" / "empire_jupyter_lab.sh"
+# Worker variant: same allocation, but also drains a cell-worker queue on launch
+# (see scripts/dispatch/jupyter_with_worker.sbatch). Submitted only when
+# --dispatch-root is given; the caps below are enforced identically either way.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+WORKER_SCRIPT = REPO_ROOT / "scripts" / "dispatch" / "jupyter_with_worker.sbatch"
 SBATCH_FLAGS = ["--cpus-per-task=16", "--mem-per-cpu=24g", "--time=0-72:00:00"]
 PORT_MIN, PORT_MAX = 8800, 8899  # 88xx convention (see gpu_dispatch._port_is_88xx)
 
@@ -107,6 +112,10 @@ def main():
     parser.add_argument("port", help=f"Jupyter port ({PORT_MIN}-{PORT_MAX})")
     parser.add_argument("--dry-run", action="store_true",
                         help="Run the cap checks and print the sbatch command, but do not submit.")
+    parser.add_argument("--dispatch-root", default=None,
+                        help="If set, submit the jupyter+worker variant: the allocation also "
+                             "drains this cell-worker dispatch queue on launch, then keeps "
+                             "Jupyter running. Relative paths resolve against the repo root.")
     args = parser.parse_args()
 
     # Validate the port.
@@ -117,7 +126,17 @@ def main():
     if not (PORT_MIN <= port <= PORT_MAX):
         sys.exit(_fail(13, f"port {port} outside the {PORT_MIN}-{PORT_MAX} range."))
 
-    if not JUPYTER_SCRIPT.is_file():
+    # Choose the allocation script: plain jupyter, or jupyter+worker.
+    dispatch_root = None
+    if args.dispatch_root is not None:
+        dispatch_root = Path(args.dispatch_root)
+        if not dispatch_root.is_absolute():
+            dispatch_root = (REPO_ROOT / dispatch_root).resolve()
+        if not dispatch_root.is_dir():
+            sys.exit(_fail(12, f"dispatch root not found: {dispatch_root}"))
+        if not WORKER_SCRIPT.is_file():
+            sys.exit(_fail(12, f"worker launch script not found: {WORKER_SCRIPT}"))
+    elif not JUPYTER_SCRIPT.is_file():
         sys.exit(_fail(12, f"launch script not found: {JUPYTER_SCRIPT}"))
 
     jobs = query_jobs()
@@ -139,7 +158,11 @@ def main():
         sys.exit(_fail(11, f"port {port} is already served by a running jupyter "
                            f"job. Pick another port."))
 
-    cmd = ["sbatch", *SBATCH_FLAGS, str(JUPYTER_SCRIPT), str(port)]
+    if dispatch_root is not None:
+        cmd = ["sbatch", *SBATCH_FLAGS, str(WORKER_SCRIPT), str(port),
+               str(dispatch_root), str(REPO_ROOT)]
+    else:
+        cmd = ["sbatch", *SBATCH_FLAGS, str(JUPYTER_SCRIPT), str(port)]
     printable = " ".join(cmd)
 
     if args.dry_run:

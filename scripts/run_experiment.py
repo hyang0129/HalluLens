@@ -338,6 +338,22 @@ def run_contrastive_logprob_recon(
             pre_norm=model_params.get("pre_norm", False),
             pool_num_queries=model_params.get("pool_num_queries", 1),
         )
+    elif model_class == "logprob_recon_mlp_intake":
+        from activation_research.model import LogprobReconMLPIntake
+
+        model = LogprobReconMLPIntake(
+            input_dim=dataset_cfg["input_dim"],
+            final_dim=model_params.get("final_dim", 256),
+            intake_type=model_params.get("intake_type", "mlp"),
+            hidden_dim=model_params.get("hidden_dim", 512),
+            depth=model_params.get("depth", 2),
+            normalize_input=model_params.get("normalize_input", False),
+            input_dropout=model_params.get("input_dropout", 0.3),
+            recon_seq_len=model_params.get("recon_seq_len", 64),
+            recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
+        )
     else:
         from activation_research.model import LogprobReconProgressiveCompressor
 
@@ -728,6 +744,220 @@ def run_contrastive_logprob_recon_shared_trunk(
     eval_metrics.update(ood_stats)
 
     predictions: list[dict] = []
+    return eval_metrics, predictions
+
+
+def run_contrastive_logprob_recon_dualhead_fusion(
+    ap,
+    dataset_cfg: dict,
+    method_cfg: dict,
+    experiment_cfg: dict,
+    output_dir: str,
+    device: str,
+    training_seed: int,
+    test_ap=None,
+) -> tuple[dict, list[dict]]:
+    """SS-1 (issue #129): train a ``SharedSpineDualHeadCompressor`` and evaluate
+    the two convention-heads SEPARATELY, then fuse their per-sample KNN scores.
+
+    The fix over the D2 shared-trunk routine (#102/#128): the spine is protected
+    (``spine_supcon_grad_scale`` on the model) and **eval scores each head's own
+    embedding** (head A under ignore=1 → std convention; head B under ignore=0 →
+    flip convention), fusing at the SCORE level via an a-priori equal-weight
+    percentile-rank average — never the trunk, never concat (the #128 lesson).
+    """
+    import numpy as np
+    import torch.nn as nn
+    from sklearn.metrics import roc_auc_score
+    from torch.utils.data import DataLoader
+    from activation_research.metric_evaluator import MultiMetricHallucinationEvaluator
+    from activation_research.model import SharedSpineDualHeadCompressor, SharedStemDualBranchCompressor
+    from activation_research.training import train_contrastive_logprob_recon_dualloss
+
+    data_cfg = method_cfg["data"]
+    train_cfg = method_cfg["training"]
+    eval_cfg = method_cfg["evaluation"]
+    model_params = method_cfg.get("model_params", {})
+
+    relevant_layers = parse_layer_range(data_cfg["relevant_layers"])
+    target_layers = data_cfg["target_layers"]
+    ds_kwargs = dict(
+        relevant_layers=relevant_layers,
+        num_views=data_cfg.get("num_views", 2),
+        pad_length=data_cfg.get("pad_length", 63),
+        preload=data_cfg.get("preload", True),
+        include_response_logprobs=True,
+        response_logprobs_top_k=data_cfg.get("response_logprobs_top_k", 20),
+        check_ram=False,
+    )
+    train_ds = ap.get_dataset("train", **ds_kwargs)
+    eval_ap = test_ap if test_ap is not None else ap
+    test_ds = eval_ap.get_dataset("test", **ds_kwargs)
+    has_val = ap.split_strategy == "three_way"
+    val_ds = ap.get_dataset("val", **ds_kwargs) if has_val else test_ds
+
+    train_device = device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
+
+    model_class = method_cfg.get("model_class", "shared_spine_dual_head")
+    if model_class == "shared_stem_dual_branch":
+        # SS-1b: early split — shared input stem, two independent branch sub-encoders.
+        model = SharedStemDualBranchCompressor(
+            input_dim=dataset_cfg["input_dim"],
+            stem_dim=model_params.get("stem_dim", 2048),
+            stem_type=model_params.get("stem_type", "transformer"),
+            branch_block_dims=model_params.get("branch_block_dims", [1024, 512]),
+            final_dim=model_params.get("final_dim", 512),
+            input_dropout=model_params.get("input_dropout", 0.3),
+            recon_seq_len=model_params.get("recon_seq_len", 64),
+            recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
+        )
+    else:
+        # SS-1: shared spine + two heads, with protected-spine grad scale.
+        model = SharedSpineDualHeadCompressor(
+            input_dim=dataset_cfg["input_dim"],
+            trunk_dim=model_params.get("trunk_dim", 512),
+            head_dim=model_params.get("head_dim", 512),
+            head_hidden_dim=model_params.get("head_hidden_dim", 512),
+            head_depth=model_params.get("head_depth", 2),
+            spine_supcon_grad_scale=model_params.get("spine_supcon_grad_scale", 0.0),
+            input_dropout=model_params.get("input_dropout", 0.3),
+            recon_seq_len=model_params.get("recon_seq_len", 64),
+            recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
+        )
+
+    artifacts_dir = os.path.join(output_dir, "artifacts")
+    final_weights = os.path.join(artifacts_dir, "final_weights.pt")
+    if os.path.exists(final_weights):
+        logger.info("final_weights.pt found — skipping training, loading weights for eval")
+        model.load_state_dict(torch.load(final_weights, map_location=train_device)["model_state_dict"])
+    else:
+        os.makedirs(artifacts_dir, exist_ok=True)
+        train_contrastive_logprob_recon_dualloss(
+            model=model,
+            train_dataset=train_ds,
+            test_dataset=val_ds,
+            epochs=train_cfg["max_epochs"],
+            batch_size=train_cfg["batch_size"],
+            lr=train_cfg["lr"],
+            temperature=train_cfg["temperature"],
+            device=train_device,
+            num_workers=experiment_cfg.get("num_workers", 4),
+            sub_batch_size=train_cfg.get("sub_batch_size", 64),
+            checkpoint_dir=artifacts_dir,
+            save_every=1,
+            snapshot_every=10,
+            snapshot_keep_last=3,
+            persistent_workers=experiment_cfg.get("persistent_workers", True),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", True),
+            infinite_stream_shuffle=True,
+            infinite_stream_seed=training_seed,
+            steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+            balanced_sampling=train_cfg.get("balanced_sampling", False),
+            grad_clip_norm=train_cfg.get("grad_clip_norm"),
+            augment_fn=None,
+            ignore_labels=tuple(train_cfg.get("ignore_labels", (1, 0))),
+        )
+        torch.save({"model_state_dict": model.state_dict()}, final_weights)
+
+    model.eval().to(train_device)
+
+    # --- Dual-head score-fusion eval ---------------------------------------
+    # A thin view exposing one head as the eval embedding model, so we can reuse
+    # the proven single-head evaluator (per-sample KNN) once per convention.
+    class _HeadView(nn.Module):
+        def __init__(self, base, which):
+            super().__init__()
+            self.base = base
+            self.which = which
+
+        def forward(self, x):
+            # Works for both SS-1 (head on trunk) and SS-1b (branch on stem seq).
+            return self.base.embed_head(x, self.which)
+
+    train_loader = DataLoader(train_ds.slice_layers(target_layers), batch_size=64, shuffle=False)
+    eval_loader = DataLoader(test_ds.slice_layers(target_layers), batch_size=64, shuffle=False)
+
+    def _head_scores(which, outlier_class, flip):
+        knn_params = dict(eval_cfg.get("knn_params", {}))
+        knn_params["sample_seed"] = training_seed
+        knn_params["include_per_sample"] = True
+        evaluator = MultiMetricHallucinationEvaluator(
+            activation_parser_df=eval_ap.df,
+            train_data_loader=train_loader,
+            metrics=[{"metric": "knn", "kwargs": knn_params, "train_selection": "all"}],
+            batch_size=eval_cfg.get("eval_batch_size", 256),
+            sub_batch_size=eval_cfg.get("sub_batch_size", 64),
+            device=train_device,
+            num_workers=experiment_cfg.get("num_workers", 4),
+            persistent_workers=False,
+            outlier_class=outlier_class,
+        )
+        stats = evaluator.compute(eval_loader, _HeadView(model, which))
+        s = np.asarray(stats.pop("knn_scores"), dtype=np.float64)
+        l = np.asarray(stats.pop("knn_labels"), dtype=np.int64)
+        # Orient to "higher = more halu" (mirror the headline routine's flip rule).
+        if flip:
+            return -s, 1 - l, float(stats["knn_auroc"])
+        return s, l, float(stats["knn_auroc"])
+
+    s_std, lab, auroc_std = _head_scores("A", outlier_class=1, flip=False)
+    s_flip, lab_b, auroc_flip = _head_scores("B", outlier_class=0, flip=True)
+
+    # Both passes iterate the same shuffle=False eval_loader → index-aligned.
+    assert np.array_equal(lab, lab_b), "head A/B eval ordering diverged — cannot fuse"
+
+    def _pct_rank(a):
+        order = np.empty(len(a), dtype=np.float64)
+        order[np.argsort(a, kind="mergesort")] = np.arange(len(a))
+        return order / max(1, len(a) - 1)
+
+    pr_std, pr_flip = _pct_rank(s_std), _pct_rank(s_flip)
+    fused = 0.5 * pr_std + 0.5 * pr_flip          # a-priori EQUAL weight (#127/#129)
+    auroc_fused = float(roc_auc_score(lab, fused))
+    # Diagnostics: how correlated are the two heads (the thing that determines
+    # whether fusion can help), and would the test-optimal weight — UPPER BOUND
+    # ONLY, not a usable result — beat equal weight?
+    head_score_corr = float(np.corrcoef(pr_std, pr_flip)[0, 1])
+    _ws = np.linspace(0.0, 1.0, 21)
+    _oa = [roc_auc_score(lab, w * pr_std + (1.0 - w) * pr_flip) for w in _ws]
+    _j = int(np.argmax(_oa))
+    auroc_fused_oracle, fusion_oracle_weight_std = float(_oa[_j]), float(_ws[_j])
+
+    eval_metrics: dict = {
+        "method": method_cfg["name"],
+        "dataset": dataset_cfg["name"],
+        "seed": training_seed,
+        "split_seed": experiment_cfg.get("split_seed", 42),
+        "n_train": len(train_ds),
+        "n_test": len(test_ds),
+        "model_class": model_class,
+        "spine_supcon_grad_scale": float(model_params.get("spine_supcon_grad_scale", 0.0)),
+        "knn_auroc_head_std": auroc_std,
+        "knn_auroc_head_flip": auroc_flip,
+        # Headline = the fused score (the SS-1 method output).
+        "knn_auroc": auroc_fused,
+        "knn_auroc_fused": auroc_fused,
+        "fusion_delta_vs_best": auroc_fused - max(auroc_std, auroc_flip),
+        # head-correlation + best-weight diagnostics (the "why doesn't fusion help" probe)
+        "head_score_corr": head_score_corr,
+        "knn_auroc_fused_oracle": auroc_fused_oracle,
+        "fusion_oracle_weight_std": fusion_oracle_weight_std,
+        "fusion_oracle_delta_vs_best": auroc_fused_oracle - max(auroc_std, auroc_flip),
+    }
+    predictions = [
+        {"example_id": i, "score_halu": float(f), "label_halu": int(l)}
+        for i, (f, l) in enumerate(zip(fused, lab))
+    ]
+    logger.info(
+        f"SS-1 dual-head: std={auroc_std:.4f} flip={auroc_flip:.4f} "
+        f"fused={auroc_fused:.4f} (Δvs_best={auroc_fused-max(auroc_std,auroc_flip):+.4f}) "
+        f"head_corr={head_score_corr:.3f} oracle={auroc_fused_oracle:.4f}@w_std={fusion_oracle_weight_std:.2f}"
+    )
     return eval_metrics, predictions
 
 
@@ -2168,6 +2398,191 @@ def run_icr_probe(
     return eval_metrics, predictions
 
 
+def run_contrastive_actvit(
+    ap,
+    dataset_cfg: dict,
+    method_cfg: dict,
+    experiment_cfg: dict,
+    output_dir: str,
+    device: str,
+    training_seed: int,
+    *,
+    test_ap=None,
+) -> tuple[dict, list[dict]]:
+    """Contrastive ACT-ViT (issue #134).
+
+    Trains the :class:`ACTViT` joint (layers × tokens) encoder with the existing
+    SupCon + logprob-reconstruction objective (not act_vit's BCE classifier) and
+    scores with the same KNN/Mahalanobis OOD evaluator as the b5 headline.
+
+    Each grid view is flattened to ``(L*N, D)`` so the standard 4-D contrastive
+    trainer/evaluator are reused unchanged; :class:`ContrastiveACTViT` reshapes
+    back to the grid internally. View augmentation (CAV-0/1/2/3) is set via
+    ``data.view_aug``.
+    """
+    import torch
+    from torch.utils.data import DataLoader
+
+    from activation_research.act_vit import ContrastiveACTViT
+    from activation_research.contrastive_actvit_dataset import (
+        ContrastiveACTViTDataset,
+        make_cav_augment,
+    )
+    from activation_research.memmap_activation_parser import MemmapActivationParser
+    from activation_research.metric_evaluator import MultiMetricHallucinationEvaluator
+    from activation_research.training import train_contrastive_logprob_recon
+
+    train_cfg = method_cfg["training"]
+    data_cfg = method_cfg.get("data", {})
+    eval_cfg = method_cfg["evaluation"]
+    model_params = method_cfg.get("model_params", {})
+    icr_cfg = dataset_cfg["icr_capture"]
+    split_seed = experiment_cfg.get("split_seed", 42)
+    train_device = torch.device(
+        device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+
+    # --- splits: identical pattern to run_act_vit / other runners ---
+    train_parser = MemmapActivationParser(
+        icr_cfg["train_dir"], random_seed=split_seed, split_strategy="three_way"
+    )
+    train_idx = train_parser.df[train_parser.df["split"] == "train"]["sample_index"].values
+    val_idx = train_parser.df[train_parser.df["split"] == "val"]["sample_index"].values
+    test_parser = MemmapActivationParser(
+        icr_cfg["test_dir"], random_seed=split_seed, split_strategy="none"
+    )
+    test_idx = test_parser.df["sample_index"].values
+
+    def _hmap(parser):
+        return dict(zip(parser.df["sample_index"].astype(int), parser.df["prompt_hash"].astype(str)))
+
+    relevant_layers = (
+        parse_layer_range(data_cfg["relevant_layers"]) if data_cfg.get("relevant_layers") else None
+    )
+    design_aug = data_cfg.get("view_aug", "noise")     # CAV-0/1/2/3 — applied on GPU
+    # The dataset stays lean (fp16, raw grid copies, no CPU augmentation, like
+    # ACTViTDataset); augmentation runs batched on the GPU via augment_fn below.
+    ds_kwargs = dict(relevant_layers=relevant_layers, view_aug="raw")
+    num_views = data_cfg.get("num_views", 2)
+    train_ds = ContrastiveACTViTDataset(
+        icr_cfg["train_dir"], train_idx, num_views=num_views, seed=training_seed,
+        hashkey_map=_hmap(train_parser), **ds_kwargs,
+    )
+    val_ds = ContrastiveACTViTDataset(
+        icr_cfg["train_dir"], val_idx, num_views=num_views, seed=training_seed,
+        hashkey_map=_hmap(train_parser), **ds_kwargs,
+    )
+    # Eval embeddings: a single clean (un-augmented) view.
+    train_eval_ds = ContrastiveACTViTDataset(
+        icr_cfg["train_dir"], train_idx, num_views=1, seed=training_seed,
+        hashkey_map=_hmap(train_parser), **ds_kwargs,
+    )
+    test_eval_ds = ContrastiveACTViTDataset(
+        icr_cfg["test_dir"], test_idx, num_views=1, seed=training_seed,
+        hashkey_map=_hmap(test_parser), **ds_kwargs,
+    )
+    augment_fn = make_cav_augment(
+        design_aug, train_ds.n_layers, train_ds.n_tokens,
+        keep_frac=data_cfg.get("keep_frac", 0.6),
+        mask_frac=data_cfg.get("mask_frac", 0.5),
+        noise_scale=data_cfg.get("noise_scale", 0.1),
+        patch_h=model_params.get("patch_h", 2),
+        patch_w=model_params.get("patch_w", 10),
+    )
+
+    # --- model (n_layers/n_tokens from the dataset; target ~act_vit size, <20M) ---
+    model = ContrastiveACTViT(
+        n_layers=train_ds.n_layers, n_tokens=train_ds.n_tokens,
+        input_dim=dataset_cfg["input_dim"],
+        final_dim=model_params.get("final_dim", 256),
+        recon_seq_len=model_params.get("recon_seq_len", 64),
+        recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+        recon_lambda=model_params.get("recon_lambda", 1.0),
+        logprob_var_threshold=model_params.get("logprob_var_threshold", 1e-4),
+        L_p=model_params.get("L_p", 8), N_p=model_params.get("N_p", 100),
+        patch_h=model_params.get("patch_h", 2), patch_w=model_params.get("patch_w", 10),
+        d_adapter=model_params.get("d_adapter", 256), d_model=model_params.get("d_model", 256),
+        num_heads=model_params.get("num_heads", 8), depth=model_params.get("depth", 4),
+        mlp_ratio=model_params.get("mlp_ratio", 4.0), dropout=model_params.get("dropout", 0.1),
+        normalize_output=model_params.get("normalize_output", False),
+    )
+    n_params = sum(p.numel() for p in model.parameters())
+    logger.info(
+        f"ContrastiveACTViT: {n_params / 1e6:.2f}M params "
+        f"(n_layers={train_ds.n_layers}, n_tokens={train_ds.n_tokens}, view_aug={design_aug})"
+    )
+
+    nw = experiment_cfg.get("num_workers", 12)   # grid loading is I/O-heavy
+    checkpoint_dir = os.path.join(output_dir, "artifacts")
+    train_contrastive_logprob_recon(
+        model=model, train_dataset=train_ds, test_dataset=val_ds,
+        epochs=train_cfg["max_epochs"], batch_size=train_cfg["batch_size"], lr=train_cfg["lr"],
+        temperature=train_cfg["temperature"], device=str(train_device),
+        num_workers=nw,
+        sub_batch_size=train_cfg.get("sub_batch_size", train_cfg["batch_size"]),
+        checkpoint_dir=checkpoint_dir, save_every=1, snapshot_every=10, snapshot_keep_last=3,
+        use_labels=train_cfg.get("use_labels", True), ignore_label=train_cfg.get("ignore_label", 0),
+        persistent_workers=experiment_cfg.get("persistent_workers", True),
+        recon_lambda=model_params.get("recon_lambda", 1.0),
+        use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", True),
+        infinite_stream_shuffle=True, infinite_stream_seed=training_seed,
+        steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+        balanced_sampling=train_cfg.get("balanced_sampling", False),
+        grad_clip_norm=train_cfg.get("grad_clip_norm"),
+        augment_fn=augment_fn,
+        optimizer_name=train_cfg.get("optimizer", "adam"),
+        weight_decay=train_cfg.get("weight_decay", 0.0),
+        lr_schedule=train_cfg.get("lr_schedule"),
+        base_temperature=train_cfg.get("base_temperature", 0.07),
+        select_on_val=train_cfg.get("select_on_val", False),
+    )
+
+    # --- eval: reuse the standard KNN/Mahalanobis evaluator (labels via prompt_hash) ---
+    model.eval()
+    ev_bs = eval_cfg.get("eval_batch_size", 64)
+    train_loader = DataLoader(train_eval_ds, batch_size=ev_bs, shuffle=False, num_workers=nw)
+    eval_loader = DataLoader(test_eval_ds, batch_size=ev_bs, shuffle=False, num_workers=nw)
+
+    metrics_list: list = []
+    for m in eval_cfg["metrics"]:
+        if m == "knn":
+            knn_params = dict(eval_cfg.get("knn_params", {}))
+            knn_params["sample_seed"] = training_seed
+            knn_params["include_per_sample"] = True
+            metrics_list.append({"metric": "knn", "kwargs": knn_params, "train_selection": "all"})
+        else:
+            metrics_list.append(m)
+
+    flip_auroc = bool(eval_cfg.get("flip_auroc", False))
+    effective_outlier_class = 0 if flip_auroc else dataset_cfg.get("outlier_class", 1)
+    # Label both the test embeddings AND the KNN train-reference embeddings: the
+    # reference records carry train-split prompt_hashes, which only resolve if
+    # the parser df also contains the train rows. Passing test_parser.df alone
+    # leaves the reference unlabeled, which silently disables knn calibrate_k
+    # (train_labels_binary stays None). train/test prompt sets are disjoint, so
+    # the concat introduces no duplicate-hash ambiguity.
+    import pandas as pd
+    eval_parser_df = pd.concat([train_parser.df, test_parser.df], ignore_index=True)
+    evaluator = MultiMetricHallucinationEvaluator(
+        activation_parser_df=eval_parser_df, train_data_loader=train_loader, metrics=metrics_list,
+        batch_size=ev_bs, sub_batch_size=eval_cfg.get("sub_batch_size", 64),
+        device=str(train_device), num_workers=nw, persistent_workers=False,
+        outlier_class=effective_outlier_class,
+    )
+    ood_stats = evaluator.compute(eval_loader, model)
+    ood_stats.pop("knn_scores", None)
+    ood_stats.pop("knn_labels", None)
+
+    eval_metrics: dict = {
+        "method": method_cfg["name"], "dataset": dataset_cfg["name"], "seed": training_seed,
+        "flip_auroc": flip_auroc, "split_seed": split_seed,
+        "n_train": len(train_eval_ds), "n_test": len(test_eval_ds),
+        "n_params_M": round(n_params / 1e6, 3), "view_aug": design_aug,
+    }
+    eval_metrics.update(ood_stats)
+    return eval_metrics, []
+
+
 def run_act_vit(
     ap,
     dataset_cfg: dict,
@@ -3478,6 +3893,11 @@ def main() -> None:
                             ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
                         )
+                    elif routine == "contrastive_logprob_recon_dualhead_fusion":
+                        eval_metrics, predictions = run_contrastive_logprob_recon_dualhead_fusion(
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
+                            test_ap=test_ap,
+                        )
                     elif routine == "linear_probe":
                         eval_metrics, predictions = run_linear_probe(
                             ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
@@ -3535,6 +3955,11 @@ def main() -> None:
                         )
                     elif routine == "act_vit":
                         eval_metrics, predictions = run_act_vit(
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
+                            test_ap=test_ap,
+                        )
+                    elif routine == "contrastive_actvit":
+                        eval_metrics, predictions = run_contrastive_actvit(
                             ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
                         )

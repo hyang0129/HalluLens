@@ -779,6 +779,416 @@ class SharedTrunkProjectionHeadCompressor(nn.Module):
         return self._inner.forward_with_recon(x)
 
 
+class SharedSpineDualHeadCompressor(nn.Module):
+    """SS-1: shared spine + two *deep* heads with a **protected spine** and
+    **head-separate eval** (issue #129).
+
+    This is the fixed successor to ``SharedTrunkProjectionHeadCompressor`` (D2),
+    which failed (#128) for two reasons this class corrects:
+
+    1. **Gradient conflict at the shared trunk.** D2 lets both SupCon
+       convention-losses update the trunk, producing a mushy compromise. Here
+       the head→spine gradient is scaled by ``spine_supcon_grad_scale`` (0.0 =
+       full stop-grad). The spine is trained primarily by the convention-AGNOSTIC
+       log-prob reconstruction (whose gradient always flows through the full
+       ``z``), while each head's SupCon specialises only its own branch.
+    2. **Shallow heads + trunk-eval.** D2 heads are a single MLP and eval was on
+       the trunk (one representation, zero diversity). Here the heads are deep
+       (``head_depth`` hidden layers) so the two embedding spaces can diverge,
+       and **eval scores each head separately** (see the dual-head-fusion routine)
+       — never the trunk.
+
+    Training objective (assembled by ``train_contrastive_logprob_recon_dualloss``)::
+
+        z  = spine(x)                                   # (B, trunk_dim)
+        zc = grad_scale(z, spine_supcon_grad_scale)     # forward=z, backward·=scale
+        zA = head_A(zc) ; zB = head_B(zc)               # (B, head_dim)
+        L  = SupCon(zA, y, ignore=1) + SupCon(zB, y, ignore=0) + λ·recon(decoder(z), ℓ)
+
+    The trainer dispatches on ``forward_with_heads`` for any non-D1 model, so no
+    trainer change is needed. Eval uses ``head_embeddings`` (no grad scaling).
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 4096,
+        trunk_dim: int = 512,
+        head_dim: int = 512,
+        head_hidden_dim: int = 512,
+        head_depth: int = 2,
+        spine_supcon_grad_scale: float = 0.0,
+        dropout: float = 0.1,
+        input_dropout: float = 0.3,
+        normalize_input: bool = False,
+        recon_seq_len: int = 64,
+        recon_hidden_dim: int = 256,
+        recon_lambda: float = 1.0,
+        logprob_var_threshold: float = 1e-4,
+    ):
+        super().__init__()
+        self.trunk_dim = int(trunk_dim)
+        self.head_dim = int(head_dim)
+        self.recon_lambda = float(recon_lambda)
+        self.spine_supcon_grad_scale = float(spine_supcon_grad_scale)
+
+        self._inner = LogprobReconProgressiveCompressor(
+            input_dim=int(input_dim),
+            final_dim=int(trunk_dim),
+            dropout=float(dropout),
+            input_dropout=float(input_dropout),
+            normalize_input=bool(normalize_input),
+            recon_seq_len=int(recon_seq_len),
+            recon_hidden_dim=int(recon_hidden_dim),
+            recon_lambda=float(recon_lambda),
+            logprob_var_threshold=float(logprob_var_threshold),
+        )
+
+        self.head_A = self._make_head(self.trunk_dim, int(head_hidden_dim), self.head_dim, int(head_depth))
+        self.head_B = self._make_head(self.trunk_dim, int(head_hidden_dim), self.head_dim, int(head_depth))
+
+    @staticmethod
+    def _make_head(in_dim: int, hidden_dim: int, out_dim: int, depth: int) -> nn.Module:
+        """``depth`` hidden ``Linear→GELU`` blocks then a final linear projection."""
+        depth = max(1, int(depth))
+        layers = []
+        d = in_dim
+        for _ in range(depth):
+            layers += [nn.Linear(d, hidden_dim), nn.GELU()]
+            d = hidden_dim
+        layers += [nn.Linear(d, out_dim)]
+        return nn.Sequential(*layers)
+
+    @staticmethod
+    def _grad_scale(z: torch.Tensor, scale: float) -> torch.Tensor:
+        """Identity in forward; multiplies the gradient by ``scale`` in backward.
+
+        ``scale=1.0`` → unmodified (gradient fully reaches the spine, like D2).
+        ``scale=0.0`` → ``z.detach()`` (spine receives NO SupCon gradient).
+        """
+        if scale >= 1.0:
+            return z
+        if scale <= 0.0:
+            return z.detach()
+        return z * scale + z.detach() * (1.0 - scale)
+
+    def recon_loss(self, logprob_pred: torch.Tensor, logprob_target: torch.Tensor):
+        """Delegate to the inner module's ``recon_loss``."""
+        return self._inner.recon_loss(logprob_pred, logprob_target)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return the trunk embedding ``z`` (recon surface / D2-compat).
+
+        NOT the eval surface — SS-1 evaluates the heads (``head_embeddings``).
+        """
+        return self._inner(x)
+
+    def head_embeddings(self, x: torch.Tensor):
+        """Return ``(zA, zB)`` head embeddings for EVAL (no grad scaling)."""
+        z = self._inner(x)
+        return self.head_A(z), self.head_B(z)
+
+    def embed_head(self, x: torch.Tensor, which: str) -> torch.Tensor:
+        """Return one convention head's eval embedding (``which`` in {'A','B'})."""
+        z = self._inner(x)
+        return self.head_A(z) if which == "A" else self.head_B(z)
+
+    def forward_with_heads(self, x: torch.Tensor):
+        """Return ``(z, zA, zB, logprob_pred)`` for the dual-loss trainer.
+
+        ``zA``/``zB`` are computed from a gradient-scaled view of the trunk so the
+        SupCon losses only partially (or not at all) update the spine; ``z`` and
+        ``logprob_pred`` carry full gradient for the convention-agnostic recon.
+        """
+        z, logprob_pred = self._inner.forward_with_recon(x)
+        zc = self._grad_scale(z, self.spine_supcon_grad_scale)
+        zA = self.head_A(zc)
+        zB = self.head_B(zc)
+        return z, zA, zB, logprob_pred
+
+    def forward_with_recon(self, x: torch.Tensor):
+        """Return ``(z, logprob_pred)`` from the inner module."""
+        return self._inner.forward_with_recon(x)
+
+
+class _DualBranch(nn.Module):
+    """Independent transformer sub-encoder: ``(B, L, in_dim) -> (B, final_dim)``.
+
+    A stack of ``TransformerBlock``s (per ``block_dims``) over the sequence, then
+    mean-pool over L and a final linear projection. Used as one per-convention
+    branch of :class:`SharedStemDualBranchCompressor`.
+    """
+
+    def __init__(self, in_dim: int, block_dims, final_dim: int, dropout: float = 0.1):
+        super().__init__()
+        bd = [int(d) for d in block_dims]
+        dims = [(int(in_dim), bd[0])] + [(bd[i], bd[i + 1]) for i in range(len(bd) - 1)]
+        self.blocks = nn.ModuleList([
+            TransformerBlock(d_in, d_out, dropout=float(dropout)) for (d_in, d_out) in dims
+        ])
+        self.final_proj = nn.Linear(bd[-1], int(final_dim))
+
+    def forward(self, seq: torch.Tensor) -> torch.Tensor:
+        for blk in self.blocks:
+            seq = blk(seq)
+        return self.final_proj(seq.mean(dim=1))  # mean-pool over L -> (B, final_dim)
+
+
+class SharedStemDualBranchCompressor(nn.Module):
+    """SS-1b (issue #129): EARLY split — share only the first ``4096 -> stem_dim``
+    block, then two INDEPENDENT per-convention sub-encoders.
+
+    SS-1 (:class:`SharedSpineDualHeadCompressor`) shares ~everything (one 512-d
+    trunk; ~0.8M heads), so the two convention-embeddings couple and the fusion
+    benefit vanishes at full gradient (#129). SS-1b shares only the **generic input
+    stem** (where both conventions agree) and gives each convention a real ~18M
+    sub-encoder (where they diverge), aiming to recover SP-1's decorrelation in a
+    single model. No grad-scale band-aid: the shared stem gets full, cooperative
+    gradient from both branches plus the convention-agnostic logprob reconstruction.
+
+        seq   = stem(pos(dropout(x)))                 # (B, L, stem_dim) — NOT pooled
+        zA    = branch_A(seq) ; zB = branch_B(seq)    # each (B, final_dim)
+        recon = decoder(seq.mean(1))                  # convention-agnostic, on the stem
+        L     = SupCon(zA, ignore=1) + SupCon(zB, ignore=0) + λ·recon(decoder, ℓ)
+        eval  = rankavg( KNN(zA), KNN(zB) )           # head-separate score fusion (#128)
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 4096,
+        stem_dim: int = 2048,
+        stem_type: str = "transformer",
+        branch_block_dims=(1024, 512),
+        final_dim: int = 512,
+        dropout: float = 0.1,
+        input_dropout: float = 0.3,
+        normalize_input: bool = False,
+        recon_seq_len: int = 64,
+        recon_hidden_dim: int = 256,
+        recon_lambda: float = 1.0,
+        logprob_var_threshold: float = 1e-4,
+    ):
+        super().__init__()
+        self.recon_seq_len = int(recon_seq_len)
+        self.recon_lambda = float(recon_lambda)
+        self.logprob_var_threshold = float(logprob_var_threshold)
+        self.normalize_input = bool(normalize_input)
+        self.stem_type = str(stem_type)
+        if self.normalize_input:
+            self.input_norm = nn.LayerNorm(int(input_dim))
+        self.input_dropout = nn.Dropout(p=float(input_dropout))
+        # ``transformer`` stem: attention at input_dim then project to stem_dim.
+        # ``linear`` stem (SS-1c): cheap Linear input_dim->stem_dim, NO attention —
+        # imposes no discriminative structure, so the per-convention branches learn
+        # ~everything independently (maximises decorrelation among shared designs).
+        if self.stem_type == "linear":
+            self.stem = nn.Linear(int(input_dim), int(stem_dim))
+            self.pos_encodings = PositionalEncoding(int(stem_dim))
+        else:
+            self.stem = TransformerBlock(int(input_dim), int(stem_dim), dropout=float(dropout))
+            self.pos_encodings = PositionalEncoding(int(input_dim))
+        self.branch_A = _DualBranch(int(stem_dim), branch_block_dims, int(final_dim), dropout=float(dropout))
+        self.branch_B = _DualBranch(int(stem_dim), branch_block_dims, int(final_dim), dropout=float(dropout))
+        self.decoder = nn.Sequential(
+            nn.Linear(int(stem_dim), int(recon_hidden_dim)),
+            nn.GELU(),
+            nn.Linear(int(recon_hidden_dim), self.recon_seq_len),
+        )
+
+    def stem_seq(self, x: torch.Tensor) -> torch.Tensor:
+        """Shared stem → pre-pool sequence ``(B, L, stem_dim)``."""
+        x = x.float()
+        if self.normalize_input:
+            x = self.input_norm(x)
+        x = self.input_dropout(x)
+        if self.stem_type == "linear":
+            return self.pos_encodings(self.stem(x))  # Linear→stem_dim, then pos at stem_dim
+        return self.stem(self.pos_encodings(x))      # pos at input_dim, then TransformerBlock
+
+    def embed_head(self, x: torch.Tensor, which: str) -> torch.Tensor:
+        """One convention branch's eval embedding (``which`` in {'A','B'})."""
+        seq = self.stem_seq(x)
+        return self.branch_A(seq) if which == "A" else self.branch_B(seq)
+
+    def head_embeddings(self, x: torch.Tensor):
+        seq = self.stem_seq(x)
+        return self.branch_A(seq), self.branch_B(seq)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Default single-tensor surface = branch A (eval uses ``embed_head``)."""
+        return self.embed_head(x, "A")
+
+    def forward_with_heads(self, x: torch.Tensor):
+        """Return ``(stem_pooled, zA, zB, logprob_pred)`` for the dual-loss trainer."""
+        seq = self.stem_seq(x)
+        zA = self.branch_A(seq)
+        zB = self.branch_B(seq)
+        stem_pooled = seq.mean(dim=1)               # (B, stem_dim) — recon surface
+        logprob_pred = self.decoder(stem_pooled)
+        return stem_pooled, zA, zB, logprob_pred
+
+    def forward_with_recon(self, x: torch.Tensor):
+        seq = self.stem_seq(x)
+        stem_pooled = seq.mean(dim=1)
+        return stem_pooled, self.decoder(stem_pooled)
+
+    def recon_loss(self, logprob_pred: torch.Tensor, logprob_target: torch.Tensor):
+        """MSE reconstruction loss with variance diagnostic (mirrors the
+        :class:`LogprobReconProgressiveCompressor` implementation)."""
+        target = logprob_target.float()
+        logprob_var = float(target.var())
+        if logprob_var < self.logprob_var_threshold:
+            zero = torch.zeros(1, device=logprob_pred.device).squeeze()
+            return zero, {"logprob_var": logprob_var, "suppressed": True}
+        if target.shape[-1] != self.recon_seq_len:
+            target = F.interpolate(
+                target.unsqueeze(1), size=self.recon_seq_len, mode="linear", align_corners=False,
+            ).squeeze(1)
+        loss = F.mse_loss(logprob_pred, target)
+        return loss, {"logprob_var": logprob_var, "suppressed": False}
+
+
+class _SwiGLUIntake(nn.Module):
+    """SwiGLU channel-compression block: ``down(SiLU(gate(x)) * up(x))``.
+
+    The gated-linear unit used in modern LLM FFNs — multiplicative feature
+    interaction for high-dimensional, no-locality features. Applied per layer
+    position; maps the last dim ``in_dim -> out_dim``.
+    """
+
+    def __init__(self, in_dim: int, hidden: int, out_dim: int):
+        super().__init__()
+        self.gate = nn.Linear(in_dim, hidden)
+        self.up = nn.Linear(in_dim, hidden)
+        self.down = nn.Linear(hidden, out_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.down(F.silu(self.gate(x)) * self.up(x))
+
+
+class _ResNetMLPIntake(nn.Module):
+    """ResNet-style MLP channel compressor (the strong tabular-DL baseline):
+    project to ``hidden``, then ``depth`` pre-norm residual MLP blocks, then
+    project to ``out_dim``. Applied per layer position."""
+
+    def __init__(self, in_dim: int, hidden: int, out_dim: int, depth: int):
+        super().__init__()
+        self.proj_in = nn.Linear(in_dim, hidden)
+        self.blocks = nn.ModuleList([
+            nn.Sequential(
+                nn.LayerNorm(hidden), nn.Linear(hidden, hidden), nn.GELU(), nn.Linear(hidden, hidden)
+            ) for _ in range(max(1, int(depth)))
+        ])
+        self.proj_out = nn.Linear(hidden, out_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.proj_in(x)
+        for blk in self.blocks:
+            x = x + blk(x)
+        return self.proj_out(x)
+
+
+class _MLPIntakeEncoder(nn.Module):
+    """Per-position intake block + mean-pool over L → ``(B, final_dim)``.
+
+    ``forward(x, layer_idx=None)`` matches the encoder call convention used by the
+    contrastive trainer (``m.encoder(x, layer_idx=...)``); ``layer_idx`` is ignored
+    (this encoder is not layer-aware).
+    """
+
+    def __init__(self, input_dim, final_dim, intake_type, hidden_dim, depth,
+                 normalize_input, input_dropout):
+        super().__init__()
+        self.normalize_input = bool(normalize_input)
+        self.intake_type = str(intake_type).lower()
+        if self.normalize_input:
+            self.input_norm = nn.LayerNorm(int(input_dim))
+        self.input_dropout = nn.Dropout(p=float(input_dropout))
+        if self.intake_type == "swiglu":
+            self.intake = _SwiGLUIntake(int(input_dim), int(hidden_dim), int(final_dim))
+        elif self.intake_type == "resnet":
+            self.intake = _ResNetMLPIntake(int(input_dim), int(hidden_dim), int(final_dim), int(depth))
+        else:
+            self.intake = nn.Sequential(
+                nn.Linear(int(input_dim), int(hidden_dim)), nn.GELU(),
+                nn.Linear(int(hidden_dim), int(final_dim)),
+            )
+
+    def forward(self, x, layer_idx=None):
+        x = x.float()
+        if self.normalize_input:
+            x = self.input_norm(x)
+        x = self.input_dropout(x)
+        x = self.intake(x)          # (B, L, final_dim)
+        return x.mean(dim=1)        # mean-pool over L
+
+
+class LogprobReconMLPIntake(nn.Module):
+    """Single-head contrastive compressor with a configurable per-position INTAKE
+    block, for the intake-architecture ablation (#132).
+
+    No cross-layer attention: each layer position's 4096-d activation is compressed
+    by the same intake network, then mean-pooled over L. Plus the logprob-recon
+    auxiliary head (same interface as ``LogprobReconProgressiveCompressor``).
+
+    ``intake_type``:
+      - ``"mlp"``    — plain ``Linear→GELU→Linear`` (the base channel compressor)
+      - ``"swiglu"`` — gated-linear-unit block (:class:`_SwiGLUIntake`)
+      - ``"resnet"`` — pre-norm residual MLP stack (:class:`_ResNetMLPIntake`)
+    ``normalize_input=True`` adds an input ``LayerNorm`` (the normalization fix —
+    activations vary ~50→200 in magnitude across layers).
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 4096,
+        final_dim: int = 256,
+        intake_type: str = "mlp",
+        hidden_dim: int = 512,
+        depth: int = 2,
+        normalize_input: bool = False,
+        input_dropout: float = 0.3,
+        recon_seq_len: int = 64,
+        recon_hidden_dim: int = 256,
+        recon_lambda: float = 1.0,
+        logprob_var_threshold: float = 1e-4,
+    ):
+        super().__init__()
+        self.recon_seq_len = int(recon_seq_len)
+        self.recon_lambda = float(recon_lambda)
+        self.logprob_var_threshold = float(logprob_var_threshold)
+        self.intake_type = str(intake_type).lower()
+        self.encoder = _MLPIntakeEncoder(
+            input_dim=int(input_dim), final_dim=int(final_dim), intake_type=str(intake_type),
+            hidden_dim=int(hidden_dim), depth=int(depth), normalize_input=bool(normalize_input),
+            input_dropout=float(input_dropout),
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(int(final_dim), int(recon_hidden_dim)),
+            nn.GELU(),
+            nn.Linear(int(recon_hidden_dim), self.recon_seq_len),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encoder(x)
+
+    def forward_with_recon(self, x: torch.Tensor):
+        z = self.encoder(x)
+        return z, self.decoder(z)
+
+    def recon_loss(self, logprob_pred: torch.Tensor, logprob_target: torch.Tensor):
+        target = logprob_target.float()
+        logprob_var = float(target.var())
+        if logprob_var < self.logprob_var_threshold:
+            zero = torch.zeros(1, device=logprob_pred.device).squeeze()
+            return zero, {"logprob_var": logprob_var, "suppressed": True}
+        if target.shape[-1] != self.recon_seq_len:
+            target = F.interpolate(
+                target.unsqueeze(1), size=self.recon_seq_len, mode="linear", align_corners=False,
+            ).squeeze(1)
+        loss = F.mse_loss(logprob_pred, target)
+        return loss, {"logprob_var": logprob_var, "suppressed": False}
+
+
 class LogprobAttnReconProgressiveCompressor(nn.Module):
     """ProgressiveCompressor with combined logprob (Mechanism F) + attention
     summary (Mechanism K) auxiliary reconstruction heads.
