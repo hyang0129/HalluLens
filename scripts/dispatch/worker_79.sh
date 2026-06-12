@@ -22,6 +22,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 DISPATCH_ROOT="${DISPATCH_ROOT:-$PROJECT_ROOT/shared/issue_79_dispatch}"
 
+# run_experiment.py writes outputs to paths RELATIVE to the cwd (e.g.
+# runs/<exp>/...). The output_check below is resolved against $PROJECT_ROOT, so
+# the worker must run from $PROJECT_ROOT or the trained outputs land elsewhere
+# (e.g. $HOME/runs) and every cell is falsely marked failed. Anchor cwd here.
+cd "$PROJECT_ROOT"
+
 # Why: the Jupyter kernel's default `python` is the `ml` miniconda env which
 # lacks our project deps (loguru, transformers pin, etc.). Pin to the p311
 # mamba env unless overridden — same pattern as worker.sh.
