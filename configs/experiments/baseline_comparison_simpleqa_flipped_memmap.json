@@ -2,7 +2,8 @@
   "experiment_name": "baseline_comparison_simpleqa_flipped_memmap",
   "dataset": "simpleqa_memmap",
   "methods": [
-    "contrastive_logprob_recon_b5"
+    "contrastive_logprob_recon_b5",
+    "contrastive_logprob_recon_b5_norm"
   ],
   "split_seed": 42,
   "training_seeds": [

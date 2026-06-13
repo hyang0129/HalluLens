@@ -4,7 +4,8 @@
   "persistent_workers": true,
   "output_dir": "runs",
   "methods": [
-    "contrastive_logprob_recon_b5"
+    "contrastive_logprob_recon_b5",
+    "contrastive_logprob_recon_b5_norm"
   ],
   "split_seed": 42,
   "experiment_name": "baseline_comparison_popqa_flipped_memmap_fill234",
