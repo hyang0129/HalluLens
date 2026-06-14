@@ -1,0 +1,25 @@
+{
+  "name": "act_vit_cw",
+  "routine": "act_vit",
+  "model_params": {
+    "L_p": 8,
+    "N_p": 100,
+    "patch_h": 2,
+    "patch_w": 10,
+    "d_adapter": 256,
+    "d_model": 256,
+    "num_heads": 8,
+    "depth": 4,
+    "dropout": 0.1
+  },
+  "training": {
+    "max_epochs": 50,
+    "batch_size": 64,
+    "lr": 1e-4,
+    "weight_decay": 1e-2,
+    "pos_weight": "auto"
+  },
+  "evaluation": {
+    "metrics": ["auroc"]
+  }
+}

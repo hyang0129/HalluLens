@@ -2,7 +2,8 @@
   "experiment_name": "baseline_comparison_popqa_flipped_memmap_seed0",
   "dataset": "popqa_memmap",
   "methods": [
-    "contrastive_logprob_recon_b5"
+    "contrastive_logprob_recon_b5",
+    "contrastive_logprob_recon_b5_norm"
   ],
   "split_seed": 42,
   "training_seeds": [
