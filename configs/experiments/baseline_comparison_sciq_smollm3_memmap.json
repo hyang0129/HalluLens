@@ -1,0 +1,33 @@
+{
+  "experiment_name": "baseline_comparison_sciq_smollm3_memmap",
+  "dataset": "sciq_smollm3_memmap",
+  "methods": [
+    "contrastive_logprob_recon",
+    "linear_probe",
+    "token_entropy",
+    "logprob_baseline",
+    "saplma",
+    "llmsknow_probe",
+    "icr_probe",
+    "act_vit"
+  ],
+  "split_seed": 42,
+  "training_seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs",
+  "split_seeds": [
+    42,
+    1,
+    2,
+    3,
+    4
+  ]
+}

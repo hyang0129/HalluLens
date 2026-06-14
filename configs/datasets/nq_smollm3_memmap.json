@@ -1,0 +1,11 @@
+{
+  "name": "nq_smollm3_memmap",
+  "model_name": "SmolLM3-3B",
+  "input_dim": 2048,
+  "backend": "memmap",
+  "outlier_class": 1,
+  "icr_capture": {
+    "train_dir": "shared/icr_capture/natural_questions_train_SmolLM3-3B",
+    "test_dir": "shared/icr_capture/natural_questions_test_SmolLM3-3B"
+  }
+}
