@@ -1,0 +1,26 @@
+{
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs",
+  "methods": [
+    "act_vit",
+    "act_vit_cw",
+    "contrastive_logprob_recon_b5"
+  ],
+  "split_seed": 42,
+  "experiment_name": "imbalance_triviaqa_prev10",
+  "dataset": "triviaqa_memmap",
+  "training_seeds": [
+    0,
+    1,
+    2
+  ],
+  "split_seeds": [
+    42,
+    1,
+    2
+  ],
+  "train_prevalence": 0.1,
+  "train_total_n": 2200
+}

@@ -268,6 +268,54 @@ def run_contrastive(
     return eval_metrics, predictions
 
 
+def _apply_train_prevalence(parser, experiment_cfg, run_seed=None):
+    """In-place subsample of a parser's 'train'-split rows to a target positive
+    (halu) prevalence at a fixed total N — for the P1 imbalance sweep (#140).
+
+    Non-selected train rows are re-labeled split='__unused__' so get_dataset()
+    never returns them for any split. Val/test are left untouched (held fixed
+    across all prevalence conditions). No-op when experiment_cfg has no
+    'train_prevalence', so all other experiments are unaffected.
+
+    Reads from experiment_cfg: train_prevalence (float in (0,1)), train_total_n
+    (int; default = all available), resample_seed (default split_seed).
+    """
+    prev = experiment_cfg.get("train_prevalence", None)
+    if prev is None:
+        return
+    import numpy as np
+
+    total_n = experiment_cfg.get("train_total_n", None)
+    # Per-run resample seed so each training seed draws a distinct subsample
+    # (gives honest resample-variance error bars across seeds).
+    seed = run_seed if run_seed is not None else \
+        experiment_cfg.get("resample_seed", experiment_cfg.get("split_seed", 42))
+    df = parser.df
+    tr = df[df["split"] == "train"]
+    pos_idx = tr.index[tr["halu"] == 1].to_numpy()
+    neg_idx = tr.index[tr["halu"] == 0].to_numpy()
+    avail_pos, avail_neg = len(pos_idx), len(neg_idx)
+    if total_n is None:
+        total_n = avail_pos + avail_neg
+    n_pos = int(round(prev * total_n))
+    n_neg = total_n - n_pos
+    # Cap to availability while preserving the target ratio as closely as possible.
+    if n_pos > avail_pos or n_neg > avail_neg:
+        scale = min(avail_pos / max(n_pos, 1), avail_neg / max(n_neg, 1), 1.0)
+        n_pos, n_neg = int(n_pos * scale), int(n_neg * scale)
+    rng = np.random.default_rng(seed)
+    keep_pos = rng.choice(pos_idx, size=n_pos, replace=False) if n_pos > 0 else pos_idx[:0]
+    keep_neg = rng.choice(neg_idx, size=n_neg, replace=False) if n_neg > 0 else neg_idx[:0]
+    keep = set(keep_pos.tolist()) | set(keep_neg.tolist())
+    drop = [i for i in tr.index if i not in keep]
+    df.loc[drop, "split"] = "__unused__"
+    logger.info(
+        f"[P1 prevalence] target_prev={prev} N={total_n} seed={seed} -> "
+        f"kept pos={n_pos} neg={n_neg} (achieved_prev={n_pos/max(n_pos+n_neg,1):.3f}; "
+        f"avail pos={avail_pos} neg={avail_neg}); dropped {len(drop)} train rows"
+    )
+
+
 def run_contrastive_logprob_recon(
     ap,
     dataset_cfg: dict,
@@ -279,6 +327,7 @@ def run_contrastive_logprob_recon(
     test_ap=None,
 ) -> tuple[dict, list[dict]]:
     """Train and evaluate a LogprobReconProgressiveCompressor model."""
+    _apply_train_prevalence(ap, experiment_cfg, run_seed=training_seed)  # P1 sweep (#140); no-op otherwise
     data_cfg = method_cfg["data"]
     train_cfg = method_cfg["training"]
     eval_cfg = method_cfg["evaluation"]
@@ -2622,6 +2671,7 @@ def run_act_vit(
         random_seed=split_seed,
         split_strategy="three_way",
     )
+    _apply_train_prevalence(train_parser, experiment_cfg, run_seed=training_seed)  # P1 sweep (#140); no-op otherwise
     train_df = train_parser.df[train_parser.df["split"] == "train"]
     val_df = train_parser.df[train_parser.df["split"] == "val"]
     train_idx = train_df["sample_index"].values
@@ -2706,7 +2756,24 @@ def run_act_vit(
     artifact_dir = os.path.join(output_dir, "artifacts")
     os.makedirs(artifact_dir, exist_ok=True)
 
-    loss_fn = torch.nn.BCEWithLogitsLoss()
+    # pos_weight knob (P1 sweep #140): "auto" = inverse-frequency from the
+    # (possibly subsampled) train labels; a float sets it explicitly; absent =
+    # plain unweighted BCE (the naive baseline arm).
+    _pw_cfg = train_cfg.get("pos_weight", None)
+    if _pw_cfg == "auto":
+        _n_pos = int((train_df["halu"] == 1).sum())
+        _n_neg = int((train_df["halu"] == 0).sum())
+        _pw = _n_neg / max(_n_pos, 1)
+    elif _pw_cfg is not None:
+        _pw = float(_pw_cfg)
+    else:
+        _pw = None
+    if _pw is not None:
+        loss_fn = torch.nn.BCEWithLogitsLoss(
+            pos_weight=torch.tensor([_pw], dtype=torch.float32, device=eval_device))
+        logger.info(f"[act_vit] pos_weight={_pw:.3f}")
+    else:
+        loss_fn = torch.nn.BCEWithLogitsLoss()
     best_val_auroc = -1.0
     best_epoch = -1
 
