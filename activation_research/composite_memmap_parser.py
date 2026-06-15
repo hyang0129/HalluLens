@@ -260,10 +260,14 @@ class CompositeMemmapActivationParser:
                     "captures (split_strategy='three_way'). Use a separate "
                     "MemmapActivationParser for the test capture."
                 )
+            # Derive from the live df (single source of truth) so in-place split
+            # edits (e.g. _apply_train_prevalence's P1 subsample, #140) are
+            # honored. The df's 0..N-1 RangeIndex aligns with self._row_map
+            # positions, so this is drop-in-equivalent for an unmodified parser.
             if split == "train":
-                idx = self._train_idx
+                idx = self._df.index[self._df["split"] == "train"].to_numpy()
             elif split == "val":
-                idx = self._val_idx
+                idx = self._df.index[self._df["split"] == "val"].to_numpy()
             else:
                 raise ValueError(f"Unknown split: {split!r}")
         else:

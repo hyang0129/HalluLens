@@ -191,10 +191,16 @@ class MemmapActivationParser:
                 "test capture directory — construct a second parser with "
                 "split_strategy='none' for test data."
             )
+        # Derive split indices from the LIVE df (single source of truth) so
+        # in-place split edits are honored — e.g. _apply_train_prevalence's P1
+        # subsample (#140) re-labels dropped train rows to '__unused__' on
+        # self._df. self._df carries a 0..N-1 RangeIndex aligned with the
+        # positional indices used downstream, so for an unmodified parser this
+        # is drop-in-equivalent to the cached self._train_idx/_val_idx.
         if split == "train":
-            indices = self._train_idx
+            indices = self._df.index[self._df["split"] == "train"].to_numpy()
         elif split == "val":
-            indices = self._val_idx
+            indices = self._df.index[self._df["split"] == "val"].to_numpy()
         else:
             raise ValueError(f"Unknown split: {split!r}")
 

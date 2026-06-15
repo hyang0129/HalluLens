@@ -279,10 +279,13 @@ def _apply_train_prevalence(parser, experiment_cfg, run_seed=None):
 
     Reads from experiment_cfg: train_prevalence (float in (0,1)), train_total_n
     (int; default = all available), resample_seed (default split_seed).
+
+    Returns the realized kept train-row count, or None when no subsample is
+    applied — so callers can assert their built train set matches it. (#140)
     """
     prev = experiment_cfg.get("train_prevalence", None)
     if prev is None:
-        return
+        return None
     import numpy as np
 
     total_n = experiment_cfg.get("train_total_n", None)
@@ -314,6 +317,9 @@ def _apply_train_prevalence(parser, experiment_cfg, run_seed=None):
         f"kept pos={n_pos} neg={n_neg} (achieved_prev={n_pos/max(n_pos+n_neg,1):.3f}; "
         f"avail pos={avail_pos} neg={avail_neg}); dropped {len(drop)} train rows"
     )
+    # Realized kept train-row count — runners assert their built train set
+    # matches this so a future subsample-propagation regression fails loudly. (#140)
+    return int((df["split"] == "train").sum())
 
 
 def run_contrastive_logprob_recon(
@@ -327,7 +333,7 @@ def run_contrastive_logprob_recon(
     test_ap=None,
 ) -> tuple[dict, list[dict]]:
     """Train and evaluate a LogprobReconProgressiveCompressor model."""
-    _apply_train_prevalence(ap, experiment_cfg, run_seed=training_seed)  # P1 sweep (#140); no-op otherwise
+    _p1_expected_train_n = _apply_train_prevalence(ap, experiment_cfg, run_seed=training_seed)  # P1 sweep (#140); no-op otherwise
     data_cfg = method_cfg["data"]
     train_cfg = method_cfg["training"]
     eval_cfg = method_cfg["evaluation"]
@@ -346,6 +352,12 @@ def run_contrastive_logprob_recon(
     )
 
     train_ds = ap.get_dataset("train", **ds_kwargs)
+    if _p1_expected_train_n is not None and len(train_ds) != _p1_expected_train_n:
+        raise RuntimeError(
+            f"[P1 guard] train_prevalence set (expected {_p1_expected_train_n} train rows) "
+            f"but get_dataset('train') returned {len(train_ds)} — subsample did not "
+            f"propagate to the contrastive train set."
+        )
     eval_ap = test_ap if test_ap is not None else ap
     test_ds = eval_ap.get_dataset("test", **ds_kwargs)
 
@@ -2671,10 +2683,15 @@ def run_act_vit(
         random_seed=split_seed,
         split_strategy="three_way",
     )
-    _apply_train_prevalence(train_parser, experiment_cfg, run_seed=training_seed)  # P1 sweep (#140); no-op otherwise
+    _p1_expected_train_n = _apply_train_prevalence(train_parser, experiment_cfg, run_seed=training_seed)  # P1 sweep (#140); no-op otherwise
     train_df = train_parser.df[train_parser.df["split"] == "train"]
     val_df = train_parser.df[train_parser.df["split"] == "val"]
     train_idx = train_df["sample_index"].values
+    if _p1_expected_train_n is not None and len(train_idx) != _p1_expected_train_n:
+        raise RuntimeError(
+            f"[P1 guard] train_prevalence set (expected {_p1_expected_train_n} train rows) "
+            f"but act_vit train split has {len(train_idx)} — subsample did not propagate."
+        )
     val_idx = val_df["sample_index"].values
 
     if test_ap is not None:
