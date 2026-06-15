@@ -110,6 +110,17 @@ ssh empire-ai 'squeue --me'
 ssh empire-ai 'cd ~/LLM_research/HalluLens && python scripts/results_table.py'
 ```
 
+### Deploying code changes to Empire AI
+
+**Prefer git for deploying code to the Empire AI checkout (`~/LLM_research/HalluLens`) — not `scp` or manual remote edits.** Workflow:
+
+1. Commit and push the change from this repo (branch + PR as usual).
+2. Update the remote checkout via git on the login node:
+   - merged to `main`: `ssh empire-ai 'cd ~/LLM_research/HalluLens && git pull --ff-only'`
+   - deploying a branch before merge: `ssh empire-ai 'cd ~/LLM_research/HalluLens && git fetch && git checkout <branch>'`
+
+`scp`-ing files or editing them directly on the remote leaves the checkout dirty and untracked: the next `git pull` conflicts, and a dispatched run can silently execute code that exists in no commit — producing results you cannot reproduce or trace to a diff. Reserve direct file copies for throwaway scratch (e.g. one-off smoketest scripts), never for code that generates logged results.
+
 ### Claude Code GPU execution (REMOTE_GPU only)
 
 GPU nodes (`alphagpuXX`) are not directly reachable from this dev container — they are only accessible from the Empire AI login node. Before using `jupyter_exec.py`, first SSH into the login node to open a tunnel:
