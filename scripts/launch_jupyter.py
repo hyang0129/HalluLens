@@ -47,7 +47,7 @@ JUPYTER_SCRIPT = Path.home() / "rit_rc_scripts" / "empire_jupyter_lab.sh"
 # --dispatch-root is given; the caps below are enforced identically either way.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKER_SCRIPT = REPO_ROOT / "scripts" / "dispatch" / "jupyter_with_worker.sbatch"
-SBATCH_FLAGS = ["--cpus-per-task=16", "--mem-per-cpu=24g", "--time=0-72:00:00"]
+SBATCH_FLAGS = ["--cpus-per-task=16", "--mem-per-cpu=24g", "--time=0-72:00:00", "--qos=rit"]
 PORT_MIN, PORT_MAX = 8800, 8899  # 88xx convention (see gpu_dispatch._port_is_88xx)
 
 # A jupyter allocation's name is "jupyter_empire_<port>" once the job's own

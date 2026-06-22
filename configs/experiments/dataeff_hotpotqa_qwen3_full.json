@@ -1,0 +1,20 @@
+{
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs",
+  "methods": [
+    "act_vit",
+    "contrastive_logprob_recon_b5"
+  ],
+  "split_seed": 42,
+  "experiment_name": "dataeff_hotpotqa_qwen3_full",
+  "dataset": "hotpotqa_qwen3_full_memmap",
+  "training_seeds": [
+    0
+  ],
+  "split_seeds": [
+    42
+  ],
+  "train_prevalence": 0.67
+}
