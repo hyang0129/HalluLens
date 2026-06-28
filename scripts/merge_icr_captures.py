@@ -25,7 +25,7 @@ Usage:
 import argparse, json, shutil, sys
 from pathlib import Path
 
-SKIP_DEFAULT = ["prompt_activations.npy"]
+SKIP_DEFAULT = ["icr_scores.npy", "prompt_activations.npy", "prompt_token_ids.npy"]
 CHUNK = 1 << 26  # 64 MiB
 
 def _meta_count(d):
