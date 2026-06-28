@@ -5,7 +5,7 @@
   "backend": "memmap",
   "outlier_class": 1,
   "icr_capture": {
-    "train_dir": "shared/icr_capture/hotpotqa_train_Llama-3.1-8B-Instruct_0-90447_merged",
+    "train_dir": "shared/icr_capture/hotpotqa_train_Llama-3.1-8B-Instruct_0-90447_aligned",
     "test_dir": "shared/icr_capture/hotpotqa_test_Llama-3.1-8B-Instruct"
   }
 }
