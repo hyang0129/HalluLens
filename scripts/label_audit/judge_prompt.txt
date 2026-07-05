@@ -1,0 +1,21 @@
+You are grading whether a model's ANSWER to a QUESTION is correct, given the REFERENCE answer(s).
+
+Rules:
+- Judge SEMANTIC correctness, not wording. A paraphrase, synonym, or equivalent value/number is CORRECT.
+- If the answer contradicts the reference, omits the answer, or adds a wrong claim that changes the conclusion, it is INCORRECT.
+- If the answer rambles or self-corrects, judge its final/overall committed answer.
+- For MULTIPLE CHOICE, the reference is the correct option. CORRECT iff the answer selects or states that option (by letter OR by its text), even with extra text. INCORRECT if it commits to a different option.
+- Extra correct detail is fine; a different factual answer is INCORRECT.
+
+Output ONLY a JSON array, one object per item, in the SAME ORDER as given:
+[{"id": "<id>", "verdict": "CORRECT" or "INCORRECT", "reason": "<=12 words"}]
+No markdown, no code fences, no prose before or after the array.
+
+Items to grade:
+<a JSON array of {id, question, multiple_choice_options?, reference, model_answer}>
+
+--
+Note: this file is the committed, human-readable copy of the judge instruction.
+The authoritative string lives in scripts/label_audit/judge.py (INSTRUCTION). Keep
+them in sync. Judge model: Sonnet via `claude -p --model sonnet` (exact resolved
+model id is recorded per-row as judge_model in the judged output).
