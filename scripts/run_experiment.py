@@ -2676,12 +2676,14 @@ def run_act_vit(
 
     icr_cfg = dataset_cfg["icr_capture"]
     split_seed = experiment_cfg.get("split_seed", 42)
+    label_source = dataset_cfg.get("label_source", "substring")  # substring | llm_judge (#145)
 
     # Build split indices from MemmapActivationParser (same pattern as other runners).
     train_parser = MemmapActivationParser(
         icr_cfg["train_dir"],
         random_seed=split_seed,
         split_strategy="three_way",
+        label_source=label_source,
     )
     _p1_expected_train_n = _apply_train_prevalence(train_parser, experiment_cfg, run_seed=training_seed)  # P1 sweep (#140); no-op otherwise
     train_df = train_parser.df[train_parser.df["split"] == "train"]
@@ -2700,19 +2702,21 @@ def run_act_vit(
             icr_cfg["test_dir"],
             random_seed=split_seed,
             split_strategy="none",
+            label_source=label_source,
         )
     else:
         test_parser = MemmapActivationParser(
             icr_cfg["test_dir"],
             random_seed=split_seed,
             split_strategy="none",
+            label_source=label_source,
         )
     test_df = test_parser.df
     test_idx = test_df["sample_index"].values
 
-    train_ds = ACTViTDataset(icr_cfg["train_dir"], train_idx)
-    val_ds = ACTViTDataset(icr_cfg["train_dir"], val_idx)
-    test_ds = ACTViTDataset(icr_cfg["test_dir"], test_idx)
+    train_ds = ACTViTDataset(icr_cfg["train_dir"], train_idx, label_source=label_source)
+    val_ds = ACTViTDataset(icr_cfg["train_dir"], val_idx, label_source=label_source)
+    test_ds = ACTViTDataset(icr_cfg["test_dir"], test_idx, label_source=label_source)
 
     num_workers = experiment_cfg.get("num_workers", 4)
     persistent_workers = experiment_cfg.get("persistent_workers", True) and num_workers > 0
@@ -3695,6 +3699,7 @@ def main() -> None:
                 capture_dir=_resolve_shared(dataset_cfg["icr_capture"]["test_dir"]),
                 random_seed=global_split_seed,
                 split_strategy="none",
+                label_source=dataset_cfg.get("label_source", "substring"),  # #145
                 verbose=True,
             )
         elif has_train_test and "test" in dataset_cfg and isinstance(dataset_cfg["test"], dict):
@@ -3814,6 +3819,7 @@ def main() -> None:
                         capture_dir=_resolve_shared(icr_cfg_block["train_dir"]),
                         random_seed=actual_split_seed,
                         split_strategy="three_way",
+                        label_source=dataset_cfg.get("label_source", "substring"),  # #145
                         verbose=True,
                     )
             elif has_train_test:

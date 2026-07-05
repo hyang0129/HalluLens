@@ -36,6 +36,7 @@ import torch
 from torch.utils.data import Dataset
 
 from activation_research.icr_dataset import _make_split_indices
+from activation_research.labels import load_meta
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +157,7 @@ class MemmapContrastiveDataset(Dataset):
         split: Literal["train", "val", "test", "all"] = "train",
         val_fraction: Optional[float] = None,
         random_seed: int = 42,
+        label_source: str = "substring",
         # Contrastive view sampling
         num_views: int = 2,
         relevant_layers: Optional[List[int]] = None,
@@ -199,12 +201,9 @@ class MemmapContrastiveDataset(Dataset):
         stored_top_k: int = cfg.get("response_logprobs_top_k", response_logprobs_top_k)
 
         # --- meta.jsonl (authoritative valid-rows list) ---
-        meta_rows: List[dict] = []
-        with (capture_dir / "meta.jsonl").open() as fh:
-            for line in fh:
-                line = line.strip()
-                if line:
-                    meta_rows.append(json.loads(line))
+        # hallucinated set per label_source (substring | llm_judge); see
+        # activation_research/labels.py and issue #145.
+        meta_rows = load_meta(capture_dir, label_source)
         if not meta_rows:
             raise ValueError(f"meta.jsonl in {capture_dir} contains no rows")
         self._meta = meta_rows
