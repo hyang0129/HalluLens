@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 
 PROMPT_VERSION = "v1"
 
@@ -83,14 +84,27 @@ def extract_json_array(text: str):
     return None
 
 
-def call_claude(prompt: str, model: str, timeout: int) -> str:
-    r = subprocess.run(
-        ["claude", "-p", "--model", model],
-        input=prompt, capture_output=True, text=True, timeout=timeout,
-    )
-    if r.returncode != 0:
-        raise RuntimeError(f"claude rc={r.returncode}: {r.stderr[:200]}")
-    return r.stdout
+def call_claude(prompt: str, model: str, timeout: int, max_retries: int = 5) -> str:
+    """Call `claude -p`, retrying transient failures (rate-limit / overload /
+    timeout) with exponential backoff before giving up. Raises RuntimeError only
+    after exhausting retries."""
+    last = "unknown error"
+    for attempt in range(max_retries):
+        try:
+            r = subprocess.run(
+                ["claude", "-p", "--model", model],
+                input=prompt, capture_output=True, text=True, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            last = "timeout"
+            time.sleep(min(45, 3 * (2 ** attempt)))
+            continue
+        if r.returncode == 0:
+            return r.stdout
+        last = (r.stderr or r.stdout or "")[:200]
+        # rc != 0 is typically a transient rate-limit / overload → backoff + retry
+        time.sleep(min(45, 3 * (2 ** attempt)))
+    raise RuntimeError(f"claude failed after {max_retries} retries: {last}")
 
 
 def judge_batch(batch: list[dict], model: str, timeout: int, *, id_key: str) -> dict[str, dict]:

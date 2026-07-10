@@ -39,18 +39,32 @@ def _load_generation(cap: Path) -> list[dict]:
     return recs
 
 
-def _done_indices(sidecar: Path) -> set[int]:
-    done: set[int] = set()
-    if sidecar.exists():
-        with sidecar.open(encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if line:
-                    try:
-                        done.add(int(json.loads(line)["sample_index"]))
-                    except (json.JSONDecodeError, KeyError, ValueError):
-                        pass
-    return done
+def _compact_sidecar(sidecar: Path) -> set[int]:
+    """Rewrite the sidecar keeping only the last CORRECT/INCORRECT verdict per
+    sample_index (drops UNKNOWN rows + duplicates). Returns the finalized
+    sample_indexes, so a continue-run re-judges UNKNOWN and missing samples."""
+    if not sidecar.exists():
+        return set()
+    good: dict[int, dict] = {}
+    with sidecar.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+                si = int(o["sample_index"])
+            except (json.JSONDecodeError, KeyError, ValueError):
+                continue
+            if str(o.get("judge_verdict", "")).upper() == "UNKNOWN":
+                continue
+            good[si] = o  # last write wins
+    tmp = sidecar.with_suffix(".jsonl.tmp")
+    with tmp.open("w", encoding="utf-8") as w:
+        for si in sorted(good):
+            w.write(json.dumps(good[si]) + "\n")
+    tmp.replace(sidecar)
+    return set(good)
 
 
 def _judge_record(rec: dict) -> dict:
@@ -75,7 +89,7 @@ def backfill_one(cap: Path, model: str, batch_size: int, workers: int, timeout: 
         return f"SKIP  {cap.name}: no generation.jsonl"
     recs = [_judge_record(r) for r in _load_generation(cap)]
     sidecar = cap / "judge_labels.jsonl"
-    done = _done_indices(sidecar)
+    done = _compact_sidecar(sidecar)  # drops prior UNKNOWN/dupes; retries them
     todo = [r for r in recs if r["sample_index"] not in done]
     if not todo:
         return f"OK    {cap.name}: all {len(recs)} already judged"
