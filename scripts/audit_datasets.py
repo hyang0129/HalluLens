@@ -6,6 +6,9 @@ Usage:
     python scripts/audit_datasets.py --model meta-llama/Llama-3.1-8B-Instruct
     python scripts/audit_datasets.py --model Qwen/Qwen3-8B --zarr          # fast: sample count only
     python scripts/audit_datasets.py --model Qwen/Qwen3-8B --zarr-size     # slow: also runs du on each store
+
+The ``judge`` and ``unk`` columns report finalized LLM-judge coverage and
+UNKNOWN verdicts from the canonical ``shared/icr_capture`` sidecar.
 """
 
 import argparse
@@ -16,6 +19,8 @@ from typing import Optional
 
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
+
+from scripts.label_audit.backfill_status import inspect_capture
 
 # (output_dir_name, hf_split_label, expected_size)
 # Canonical sizes from Qwen3-8B complete run (2026-04-30).
@@ -101,6 +106,39 @@ def _model_suffix(model_name: str) -> str:
     if "smollm" in low:
         return "_smollm3"
     return ""  # Llama / default
+
+
+def capture_dir_for(root: Path, dataset: str, model_name: str) -> Optional[Path]:
+    """Resolve an audit dataset row to its canonical icr_capture directory.
+
+    Most ``*_train`` output directories are train captures. SearchQA is the
+    historical exception: its output directory names predate the split-role
+    correction, so ``searchqa`` is train and ``searchqa_train`` is test.
+    Large train captures may carry the ``_0-50000`` shard suffix.
+    """
+    if dataset == "movies":  # excluded from the icr_capture pipeline
+        return None
+    if dataset == "searchqa":
+        base, role = "searchqa", "train"
+    elif dataset == "searchqa_train":
+        base, role = "searchqa", "test"
+    else:
+        base = dataset.removesuffix("_train")
+        role = "train" if dataset.endswith("_train") else "test"
+
+    capture_root = root / "shared" / "icr_capture"
+    stem = f"{base}_{role}_{model_name}"
+    candidates = [capture_root / stem]
+    if role == "train":
+        candidates.append(capture_root / f"{stem}_0-50000")
+    return next((path for path in candidates if path.is_dir()), None)
+
+
+def judge_coverage(capture_dir: Optional[Path]) -> Optional[dict]:
+    """Return sidecar coverage, or None when no capture/sidecar is present."""
+    if capture_dir is None or not (capture_dir / "judge_labels.jsonl").exists():
+        return None
+    return inspect_capture(capture_dir)
 
 
 def _print_runs_section(root: Path, model_name: str) -> None:
@@ -197,7 +235,8 @@ def main():
     print()
 
     col_w = 26
-    header = f"  {'dataset':<{col_w}} {'split':<16}  {'gen':>8}  {'eval':>4}  {'zarr':>4}  {'mem':>4}"
+    header = (f"  {'dataset':<{col_w}} {'split':<16}  {'gen':>8}  {'eval':>4}"
+              f"  {'zarr':>4}  {'mem':>4}  {'judge':>17}  {'unk':>6}")
     if show_zarr_n:
         header += f"  {'zarr_n':>8}"
     if show_zarr_size:
@@ -206,6 +245,8 @@ def main():
     print("  " + "-" * (len(header) - 2))
 
     n_complete = n_partial = n_missing = 0
+    judge_finalized = judge_total = judge_unknown = 0
+    judge_full = judge_partial = 0
 
     for dataset, split, expected in DATASETS:
         gen_path  = root / "output" / dataset / model_name / "generation.jsonl"
@@ -215,6 +256,7 @@ def main():
         lines    = count_lines(gen_path)
         has_eval = eval_path.exists()
         has_zarr = zarr_path.exists()
+        coverage = judge_coverage(capture_dir_for(root, dataset, model_name))
 
         is_train  = dataset.endswith("_train")
         tolerance = TRAIN_TOLERANCE if is_train else TEST_TOLERANCE
@@ -244,6 +286,21 @@ def main():
                f"  {'✓' if has_eval else '✗':>4}  {'✓' if has_zarr else '✗':>4}"
                f"  {'✓' if has_mem else '✗':>4}")
 
+        if coverage is None:
+            row += f"  {'—':>17}  {'—':>6}"
+        else:
+            finalized = coverage["finalized"]
+            total_judge = coverage["generation"]
+            unknown = coverage["unknown"]
+            row += f"  {f'{finalized:,}/{total_judge:,}':>17}  {unknown:>6,}"
+            judge_finalized += finalized
+            judge_total += total_judge
+            judge_unknown += unknown
+            if finalized == total_judge:
+                judge_full += 1
+            else:
+                judge_partial += 1
+
         if show_zarr_n:
             zn = zarr_samples(zarr_path) if has_zarr else None
             row += f"  {str(zn) if zn else '—':>8}"
@@ -260,6 +317,10 @@ def main():
         print(f"Needs eval:          {n_partial}")
     if n_missing:
         print(f"Missing gen:         {n_missing}")
+    print(f"LLM judge:           {judge_finalized:,}/{judge_total:,} finalized"
+          f" ({100 * judge_finalized / max(1, judge_total):.2f}%),"
+          f" {judge_unknown:,} UNKNOWN")
+    print(f"Judge sidecars:      {judge_full} complete, {judge_partial} partial")
 
     if args.runs:
         print()
