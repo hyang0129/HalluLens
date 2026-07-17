@@ -11,6 +11,7 @@ answer(s), reference-grounded ("answer matching"). Verdict: CORRECT | INCORRECT.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import time
@@ -85,15 +86,24 @@ def extract_json_array(text: str):
 
 
 def call_claude(prompt: str, model: str, timeout: int, max_retries: int = 5) -> str:
-    """Call `claude -p`, retrying transient failures (rate-limit / overload /
-    timeout) with exponential backoff before giving up. Raises RuntimeError only
-    after exhausting retries."""
+    """Call `claude -p` as a stateless, no-logging function, retrying transient
+    failures (rate-limit / overload / timeout) with exponential backoff before
+    giving up. Raises RuntimeError only after exhausting retries.
+
+    Grading fans this out tens of thousands of times. By default each call writes
+    a session transcript to ~/.claude/projects/<slug>/<uuid>.jsonl plus a
+    prompt-history entry; at ~50k calls that flood is enough to crash the VSCode
+    extension that watches the directory. `--no-session-persistence` (print mode
+    only) skips the transcript and CLAUDE_CODE_SKIP_PROMPT_HISTORY=1 skips the
+    history append, so each invocation leaves no on-disk trace."""
+    env = {**os.environ, "CLAUDE_CODE_SKIP_PROMPT_HISTORY": "1"}
     last = "unknown error"
     for attempt in range(max_retries):
         try:
             r = subprocess.run(
-                ["claude", "-p", "--model", model],
+                ["claude", "-p", "--no-session-persistence", "--model", model],
                 input=prompt, capture_output=True, text=True, timeout=timeout,
+                env=env,
             )
         except subprocess.TimeoutExpired:
             last = "timeout"
