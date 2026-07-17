@@ -1,6 +1,6 @@
 import json
 
-from scripts.audit_datasets import capture_dir_for, judge_coverage
+from scripts.audit_datasets import DATASETS, capture_dir_for, judge_coverage
 
 
 def _write_jsonl(path, rows):
@@ -19,6 +19,15 @@ def test_capture_dir_resolves_sharded_train_and_searchqa_flip(tmp_path):
 
     assert capture_dir_for(root, "mmlu_train", "Qwen3-8B") == mmlu
     assert capture_dir_for(root, "searchqa_train", "Qwen3-8B") == searchqa
+
+
+def test_audit_includes_simpleqa_and_triviaqa_splits():
+    rows = {(dataset, split, expected) for dataset, split, expected in DATASETS}
+
+    assert ("simpleqa", "test", 866) in rows
+    assert ("simpleqa_train", "train", 3_460) in rows
+    assert ("triviaqa", "test", 9_954) in rows
+    assert ("triviaqa_train", "train", 11_000) in rows
 
 
 def test_judge_coverage_counts_finalized_and_unknown(tmp_path):

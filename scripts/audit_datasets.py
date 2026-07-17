@@ -42,6 +42,12 @@ DATASETS = [
     # for the post-flip role mapping (151K dir → train, 43K dir → test).
     ("searchqa",               "train",         151_295),  # HF train split → used as train (post #60)
     ("searchqa_train",         "test",           43_228),  # HF test split  → used as test  (post #60)
+    # Added directly through the icr_capture pipeline; legacy output/ generation
+    # files may be absent even when their canonical captures are complete.
+    ("simpleqa",               "test",              866),
+    ("simpleqa_train",         "train",            3_460),
+    ("triviaqa",               "test",            9_954),
+    ("triviaqa_train",         "train",           11_000),
 ]
 
 # Train splits tolerate 0.25% variance; test splits must be exact.
