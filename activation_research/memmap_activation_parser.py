@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
 import numpy as np
 from sklearn.model_selection import train_test_split
 
+from activation_research.labels import load_meta
 from activation_research.memmap_contrastive_dataset import MemmapContrastiveDataset
 
 if TYPE_CHECKING:
@@ -48,6 +49,7 @@ class MemmapActivationParser:
         *,
         random_seed: int,
         split_strategy: Literal["none", "three_way"] = "three_way",
+        label_source: str = "substring",
         verbose: bool = False,
     ) -> None:
         self._capture_dir = Path(capture_dir)
@@ -57,18 +59,16 @@ class MemmapActivationParser:
             )
         self._split_strategy = split_strategy
         self._random_seed = random_seed
+        self._label_source = label_source
 
         # Load config and meta.
         with (self._capture_dir / "config.json").open() as fh:
             self._cfg: dict = json.load(fh)
         n_samples: int = self._cfg["n_samples"]
 
-        meta_rows: List[dict] = []
-        with (self._capture_dir / "meta.jsonl").open() as fh:
-            for line in fh:
-                line = line.strip()
-                if line:
-                    meta_rows.append(json.loads(line))
+        # meta rows with hallucinated set per label_source (substring | llm_judge);
+        # feeds the stratified split, self._df["halu"], and downstream labels.
+        meta_rows = load_meta(self._capture_dir, label_source)
         if not meta_rows:
             raise ValueError(f"meta.jsonl is empty in {self._capture_dir}")
         self._meta = meta_rows
@@ -180,6 +180,7 @@ class MemmapActivationParser:
                 pad_length=pad_length,
                 include_response_logprobs=include_response_logprobs,
                 response_logprobs_top_k=response_logprobs_top_k,
+                label_source=self._label_source,
                 _override_split_name="test",
             )
 
@@ -214,6 +215,7 @@ class MemmapActivationParser:
             pad_length=pad_length,
             include_response_logprobs=include_response_logprobs,
             response_logprobs_top_k=response_logprobs_top_k,
+            label_source=self._label_source,
             _override_indices=indices,
             _override_split_name=split,
         )

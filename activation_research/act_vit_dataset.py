@@ -22,6 +22,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from activation_research.labels import load_meta
+
 
 class ACTViTDataset(Dataset):
     """Dataset returning full activation tensors (L, N, D) per sample.
@@ -43,6 +45,7 @@ class ACTViTDataset(Dataset):
         indices: Sequence[int],
         *,
         cfg: dict | None = None,
+        label_source: str = "substring",
     ) -> None:
         self._capture_dir = Path(capture_dir)
 
@@ -72,15 +75,13 @@ class ACTViTDataset(Dataset):
             shape=(n_samples,),
         )
 
-        # Load labels from meta.jsonl.
-        labels: List[int] = []
-        with (self._capture_dir / "meta.jsonl").open() as fh:
-            for line in fh:
-                line = line.strip()
-                if line:
-                    obj = json.loads(line)
-                    labels.append(int(bool(obj["hallucinated"])))
-        self._labels = np.array(labels, dtype=np.int32)
+        # Load labels from meta.jsonl (or the LLM-judge sidecar when
+        # label_source == "llm_judge"; load_meta overrides hallucinated by
+        # sample_index — see activation_research/labels.py and issue #145).
+        meta_rows = load_meta(self._capture_dir, label_source)
+        self._labels = np.array(
+            [int(bool(r["hallucinated"])) for r in meta_rows], dtype=np.int32
+        )
 
         # meta.jsonl may have fewer committed rows than config.json's n_samples
         # (e.g. partial capture or interrupted write). Clip indices to the

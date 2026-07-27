@@ -35,6 +35,15 @@ python scripts/label_audit/judge.py --model sonnet --batch-size 20 --workers 8
 python scripts/label_audit/report.py
 ```
 
+For a full-capture backfill, inspect coverage and sidecar integrity without
+calling Claude:
+
+```bash
+python scripts/label_audit/backfill_status.py \
+  output/label_audit/backfill_staging/shared/icr_capture
+# Add --json for automation or --strict to require complete, valid sidecars.
+```
+
 `judge.py` is resumable — re-running skips audit_ids already judged, so an
 interrupted pass just continues.
 
