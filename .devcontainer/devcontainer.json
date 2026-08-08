@@ -1,5 +1,5 @@
 {
-  "name": "HalluLens",
+  "name": "HalluLens (GPU)",
   "build": {
     "dockerfile": "Dockerfile",
     "context": ".."
