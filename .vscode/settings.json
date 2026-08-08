@@ -1,7 +1,13 @@
 {
     "jupyter.notebookFileRoot": "${workspaceFolder}",
-    "python.languageServer": "None",
+    "python.languageServer": "Pylance",
+    "python.analysis.exclude": [
+        "**/output/**",
+        "**/results/**"
+    ],
     "files.watcherExclude": {
-        "**": true
+        "**/output/**": true,
+        "**/results/**": true,
+        "**/.git/objects/**": true
     }
 }
