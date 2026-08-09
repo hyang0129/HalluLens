@@ -285,10 +285,10 @@ def test_compressor_ignores_padded_tokens_end_to_end():
     from activation_research.model import ProgressiveCompressor
 
     torch.manual_seed(0)
-    m = ProgressiveCompressor(input_dim=32, final_dim=16).eval()
+    m = ProgressiveCompressor(input_dim=256, final_dim=64).eval()
 
-    short = torch.randn(2, 16, 32)
-    padded = torch.zeros(2, 64, 32)
+    short = torch.randn(2, 16, 256)
+    padded = torch.zeros(2, 64, 256)
     padded[:, :16] = short
     mask = torch.zeros(2, 64, dtype=torch.bool)
     mask[:, :16] = True
@@ -305,8 +305,8 @@ def test_compressor_default_path_is_unchanged():
     from activation_research.model import ProgressiveCompressor
 
     torch.manual_seed(0)
-    m = ProgressiveCompressor(input_dim=32, final_dim=16).eval()
-    x = torch.randn(2, 64, 32)
+    m = ProgressiveCompressor(input_dim=256, final_dim=64).eval()
+    x = torch.randn(2, 64, 256)
     with torch.no_grad():
         a = m(x)
         b = m(x, token_mask=torch.ones(2, 64, dtype=torch.bool))
@@ -318,9 +318,9 @@ def test_padding_without_mask_changes_the_embedding():
     from activation_research.model import ProgressiveCompressor
 
     torch.manual_seed(0)
-    m = ProgressiveCompressor(input_dim=32, final_dim=16).eval()
-    short = torch.randn(2, 16, 32)
-    padded = torch.zeros(2, 64, 32)
+    m = ProgressiveCompressor(input_dim=256, final_dim=64).eval()
+    short = torch.randn(2, 16, 256)
+    padded = torch.zeros(2, 64, 256)
     padded[:, :16] = short
     with torch.no_grad():
         assert not torch.allclose(m(short), m(padded), atol=1e-5)
