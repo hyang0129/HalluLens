@@ -339,10 +339,16 @@ def _merge_extended_metrics(run_dir: Path, metrics: dict[str, float]) -> None:
 
 
 def _model_from_config_name(cfg_name: str) -> str:
+    # Detect the model token as a delimited component anywhere in the stem, not
+    # just as a trailing suffix: label-convention configs append their own
+    # suffix after the model token (e.g. ``..._sciq_qwen3_judge_memmap``,
+    # ``..._qwen3_flipped_memmap``), so an ``endswith("_qwen3")`` check misses
+    # them and mislabels the run as the Llama default.
     stem = cfg_name.removesuffix(".json").removesuffix("_memmap")
-    if stem.endswith("_qwen3"):
+    tokens = stem.split("_")
+    if "qwen3" in tokens:
         return "Qwen3-8B"
-    if stem.endswith("_smollm3"):
+    if "smollm3" in tokens:
         return "SmolLM3"
     return "Llama-3.1-8B-Instruct"
 
