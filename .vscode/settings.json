@@ -3,11 +3,17 @@
     "python.languageServer": "Pylance",
     "python.analysis.exclude": [
         "**/output/**",
-        "**/results/**"
+        "**/results/**",
+        "**/runs/**",
+        "**/runs_archive/**",
+        "**/shared/**"
     ],
     "files.watcherExclude": {
         "**/output/**": true,
         "**/results/**": true,
+        "**/runs/**": true,
+        "**/runs_archive/**": true,
+        "**/shared/**": true,
         "**/.git/objects/**": true
     }
 }
