@@ -14,8 +14,8 @@ from activation_research.prefix_views import (
     EVAL_PREFIX_LENGTHS,
     PrefixPairSampler,
     PrefixViewSpec,
+    apply_prefix_views,
     resolve_eval_prefixes,
-    slice_views,
 )
 
 
@@ -142,70 +142,188 @@ def test_eval_spec_is_uniform():
 
 
 # --------------------------------------------------------------------- #
-# slice_views
+# apply_prefix_views
 # --------------------------------------------------------------------- #
 def _ramp(b=3, k=2, seq=64, d=5) -> torch.Tensor:
     """Views whose values encode their token position, so leakage is visible."""
-    t = torch.arange(seq, dtype=torch.float32).view(1, 1, seq, 1)
+    t = torch.arange(1, seq + 1, dtype=torch.float32).view(1, 1, seq, 1)
     return t.expand(b, k, seq, d).clone()
 
 
-def test_slice_shapes_match_spec():
+def test_shapes_are_preserved_for_the_fused_encode():
+    """Shape preservation is the whole point — the trainer's fused
+    reshape(B*K, L, D) must keep working untouched."""
     views = _ramp()
-    out = slice_views(views, PrefixViewSpec((16, 48)))
-    assert [tuple(o.shape) for o in out] == [(3, 16, 5), (3, 48, 5)]
+    out, mask = apply_prefix_views(views, PrefixViewSpec((16, 48)))
+    assert tuple(out.shape) == (3, 2, 64, 5)
+    assert tuple(mask.shape) == (3, 2, 64)
+    assert mask.dtype == torch.bool
 
 
-def test_slice_preserves_prefix_content_exactly():
+def test_mask_reshapes_alongside_activations():
+    """(B,K,L) must flatten under the same reshape as (B,K,L,D)."""
     views = _ramp()
-    out = slice_views(views, PrefixViewSpec((16, 32)))
-    assert torch.equal(out[0], views[:, 0, :16, :])
-    assert torch.equal(out[1], views[:, 1, :32, :])
+    out, mask = apply_prefix_views(views, PrefixViewSpec((16, 48)))
+    b, k, l, d = out.shape
+    assert tuple(out.reshape(b * k, l, d).shape) == (6, 64, 5)
+    assert tuple(mask.reshape(b * k, l).shape) == (6, 64)
 
 
-def test_slice_never_leaks_future_tokens():
-    """The fairness invariant: no view may contain a token beyond its own k."""
+def test_mask_marks_exactly_the_prefix():
+    views = _ramp()
+    _, mask = apply_prefix_views(views, PrefixViewSpec((16, 32)))
+    assert mask[:, 0].sum(dim=-1).unique().tolist() == [16]
+    assert mask[:, 1].sum(dim=-1).unique().tolist() == [32]
+    assert mask[:, 0, :16].all() and not mask[:, 0, 16:].any()
+
+
+def test_prefix_content_is_preserved_exactly():
+    views = _ramp()
+    out, _ = apply_prefix_views(views, PrefixViewSpec((16, 32)))
+    assert torch.equal(out[:, 0, :16], views[:, 0, :16])
+    assert torch.equal(out[:, 1, :32], views[:, 1, :32])
+
+
+def test_never_leaks_future_tokens():
+    """The fairness invariant: no view may retain a token beyond its own k."""
     views = _ramp(seq=64)
     for prefix in (1, 16, 32, 48, 64):
-        (out,) = slice_views(views[:, :1], PrefixViewSpec((prefix,)))
-        assert out.max().item() == float(prefix - 1)
+        out, _ = apply_prefix_views(views[:, :1], PrefixViewSpec((prefix,)))
+        assert out.max().item() == float(prefix)
+        assert (out[:, 0, prefix:] == 0).all()
 
 
 def test_zero_prefix_falls_back_to_single_token():
+    """A fully-masked row has no mean and NaNs the attention softmax."""
     views = _ramp()
-    out = slice_views(views, PrefixViewSpec((0, 32)))
-    assert tuple(out[0].shape) == (3, 1, 5)
+    _, mask = apply_prefix_views(views, PrefixViewSpec((0, 32)))
+    assert mask[:, 0].sum(dim=-1).unique().tolist() == [1]
 
 
 def test_zero_prefix_can_be_made_hard_error():
     views = _ramp()
     with pytest.raises(ValueError, match="prompt_fallback"):
-        slice_views(views, PrefixViewSpec((0, 32)), prompt_fallback=False)
+        apply_prefix_views(views, PrefixViewSpec((0, 32)), prompt_fallback=False)
 
 
-def test_slice_rejects_prefix_longer_than_sequence():
+def test_rejects_prefix_longer_than_sequence():
     views = _ramp(seq=32)
     with pytest.raises(ValueError, match="only 32 tokens"):
-        slice_views(views, PrefixViewSpec((48, 16)))
+        apply_prefix_views(views, PrefixViewSpec((48, 16)))
 
 
-def test_slice_rejects_view_count_mismatch():
+def test_rejects_view_count_mismatch():
     views = _ramp(k=2)
     with pytest.raises(ValueError, match="K=2"):
-        slice_views(views, PrefixViewSpec((16, 32, 48)))
+        apply_prefix_views(views, PrefixViewSpec((16, 32, 48)))
 
 
-def test_slice_rejects_wrong_rank():
+def test_rejects_wrong_rank():
     with pytest.raises(ValueError, match=r"\(B, K, L, D\)"):
-        slice_views(torch.zeros(3, 64, 5), PrefixViewSpec((16,)))
+        apply_prefix_views(torch.zeros(3, 64, 5), PrefixViewSpec((16,)))
 
 
-def test_full_prefix_slice_is_identity():
+def test_full_prefix_is_identity_with_all_true_mask():
     """k=max must reproduce the current post-hoc setup bit-for-bit."""
     views = _ramp(seq=64)
-    out = slice_views(views, PrefixViewSpec((64, 64)))
-    assert torch.equal(out[0], views[:, 0])
-    assert torch.equal(out[1], views[:, 1])
+    out, mask = apply_prefix_views(views, PrefixViewSpec((64, 64)))
+    assert torch.equal(out, views)
+    assert mask.all()
+
+
+# --------------------------------------------------------------------- #
+# masked pooling / attention (activation_research.model)
+# --------------------------------------------------------------------- #
+def test_masked_mean_matches_plain_mean_when_all_valid():
+    from activation_research.model import masked_mean
+
+    x = torch.randn(4, 16, 8)
+    mask = torch.ones(4, 16, dtype=torch.bool)
+    assert torch.allclose(masked_mean(x, mask), x.mean(dim=1), atol=1e-6)
+    assert torch.equal(masked_mean(x, None), x.mean(dim=1))
+
+
+def test_masked_mean_ignores_padding():
+    """The k-leak guard: pooled value must not be diluted by pad positions."""
+    from activation_research.model import masked_mean
+
+    x = torch.randn(4, 64, 8)
+    x_padded = x.clone()
+    x_padded[:, 16:] = 0.0
+    mask = torch.zeros(4, 64, dtype=torch.bool)
+    mask[:, :16] = True
+    assert torch.allclose(masked_mean(x_padded, mask), x[:, :16].mean(dim=1), atol=1e-6)
+
+
+def test_unmasked_mean_would_have_leaked_k():
+    """Documents the failure mode masking exists to prevent: the plain mean
+    scales with k/L, putting the prefix length into the embedding norm."""
+    x = torch.randn(4, 64, 8)
+    x_padded = x.clone()
+    x_padded[:, 16:] = 0.0
+    naive = x_padded.mean(dim=1)
+    true_mean = x[:, :16].mean(dim=1)
+    assert torch.allclose(naive, true_mean * (16 / 64), atol=1e-6)
+
+
+def test_masked_mean_survives_fully_masked_row():
+    from activation_research.model import masked_mean
+
+    x = torch.randn(2, 8, 4)
+    mask = torch.zeros(2, 8, dtype=torch.bool)
+    out = masked_mean(x, mask)
+    assert torch.isfinite(out).all()
+
+
+def test_compressor_ignores_padded_tokens_end_to_end():
+    """Padding must not change the embedding: a 16-token input and the same
+    16 tokens zero-padded to 64 with a mask must encode identically.
+
+    This is the real guarantee — it covers attention contamination, not just
+    the pool.
+    """
+    from activation_research.model import ProgressiveCompressor
+
+    torch.manual_seed(0)
+    m = ProgressiveCompressor(input_dim=32, final_dim=16).eval()
+
+    short = torch.randn(2, 16, 32)
+    padded = torch.zeros(2, 64, 32)
+    padded[:, :16] = short
+    mask = torch.zeros(2, 64, dtype=torch.bool)
+    mask[:, :16] = True
+
+    with torch.no_grad():
+        z_short = m(short)
+        z_padded = m(padded, token_mask=mask)
+    assert torch.allclose(z_short, z_padded, atol=1e-5)
+
+
+def test_compressor_default_path_is_unchanged():
+    """token_mask=None must reproduce pre-masking behaviour bit-for-bit, so
+    the layer_only arm remains a true control."""
+    from activation_research.model import ProgressiveCompressor
+
+    torch.manual_seed(0)
+    m = ProgressiveCompressor(input_dim=32, final_dim=16).eval()
+    x = torch.randn(2, 64, 32)
+    with torch.no_grad():
+        a = m(x)
+        b = m(x, token_mask=torch.ones(2, 64, dtype=torch.bool))
+    assert torch.allclose(a, b, atol=1e-6)
+
+
+def test_padding_without_mask_changes_the_embedding():
+    """Control for the test above: without the mask, padding leaks."""
+    from activation_research.model import ProgressiveCompressor
+
+    torch.manual_seed(0)
+    m = ProgressiveCompressor(input_dim=32, final_dim=16).eval()
+    short = torch.randn(2, 16, 32)
+    padded = torch.zeros(2, 64, 32)
+    padded[:, :16] = short
+    with torch.no_grad():
+        assert not torch.allclose(m(short), m(padded), atol=1e-5)
 
 
 # --------------------------------------------------------------------- #

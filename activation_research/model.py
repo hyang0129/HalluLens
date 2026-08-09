@@ -18,6 +18,34 @@ class PositionalEncoding(nn.Module):
     def forward(self, x):
         return x + self.pe[:, :x.size(1)]
 
+def masked_mean(x: torch.Tensor, token_mask: torch.Tensor | None) -> torch.Tensor:
+    """Mean over the sequence axis, ignoring padded positions.
+
+    Parameters
+    ----------
+    x : Tensor (B, L, D)
+    token_mask : Tensor (B, L) bool | None
+        ``True`` marks a *real* token. ``None`` means "no padding" and falls
+        through to a plain ``x.mean(dim=1)`` so existing callers are unchanged.
+
+    Notes
+    -----
+    Padded positions cannot be detected by value: ``input_proj`` has a bias and
+    ``PositionalEncoding`` adds to every slot, so a zero-filled pad row is
+    non-zero by the time it reaches the pool. The mask must be carried
+    explicitly from the input.
+
+    Rows with no valid tokens would divide by zero; the denominator is clamped
+    so they yield a finite (zero) vector rather than NaN. Callers should avoid
+    fully-masked rows — see ``prefix_views`` which floors prefixes at 1 token.
+    """
+    if token_mask is None:
+        return x.mean(dim=1)
+    m = token_mask.unsqueeze(-1).to(x.dtype)
+    denom = m.sum(dim=1).clamp(min=1.0)
+    return (x * m).sum(dim=1) / denom
+
+
 class TransformerBlock(nn.Module):
     def __init__(self, d_model_in, d_model_out, nhead=8, ff_multiplier=4, dropout=0.1, pre_norm: bool = False):
         super().__init__()
@@ -32,9 +60,18 @@ class TransformerBlock(nn.Module):
         )
         self.norm = nn.LayerNorm(d_model_out)
 
-    def forward(self, x):
+    def forward(self, x, token_mask: torch.Tensor | None = None):
+        """token_mask : (B, L) bool, ``True`` = real token, or ``None``.
+
+        Padding must be excluded from self-attention, not merely from the
+        final pool — otherwise pad slots act as keys/values and contaminate
+        the representations of the real tokens.
+        """
         x = self.input_proj(x)
-        x = self.encoder(x)
+        # nn.TransformerEncoderLayer's convention is the inverse of ours:
+        # True marks positions to IGNORE.
+        src_key_padding_mask = None if token_mask is None else ~token_mask
+        x = self.encoder(x, src_key_padding_mask=src_key_padding_mask)
         return self.norm(x)
 
 class ProgressiveCompressor(nn.Module):
@@ -90,9 +127,12 @@ class ProgressiveCompressor(nn.Module):
 
         self.dropout = nn.Dropout(p=input_dropout)
 
-    def forward(self, x):
+    def forward(self, x, token_mask: torch.Tensor | None = None):
         """
         x: (B, L, 4096)
+        token_mask: (B, L) bool, ``True`` = real token. ``None`` (default)
+            means every position is real, reproducing the pre-masking
+            behaviour bit-for-bit.
         returns: (B, 512)
         """
         x = x.float()
@@ -101,13 +141,13 @@ class ProgressiveCompressor(nn.Module):
             x = self.input_norm(x)
 
         x = self.dropout(x)
-    
+
         x = self.pos_encodings(x)
         for block in self.blocks:
-            x = block(x)
+            x = block(x, token_mask=token_mask)
 
-        # Mean pooling over sequence dimension (L)
-        x_pooled = x.mean(dim=1)  # (B, dim)
+        # Mean pooling over sequence dimension (L), ignoring padded positions.
+        x_pooled = masked_mean(x, token_mask)  # (B, dim)
         return self.final_proj(x_pooled)  # (B, 512)
 
 class LogprobReconProgressiveCompressor(nn.Module):
@@ -187,18 +227,20 @@ class LogprobReconProgressiveCompressor(nn.Module):
             nn.Linear(int(recon_hidden_dim), self.recon_seq_len),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, token_mask: torch.Tensor | None = None) -> torch.Tensor:
         """Standard forward — identical to ProgressiveCompressor.
 
         The auxiliary decoder is **not** called.  Use this path for
         inference and for evaluation utilities that expect a single tensor.
 
         x : (B, L, input_dim)
+        token_mask : (B, L) bool | None
+            ``True`` = real token; ``None`` treats every position as real.
         returns : (B, final_dim)
         """
-        return self.encoder(x)
+        return self.encoder(x, token_mask=token_mask)
 
-    def forward_with_recon(self, x: torch.Tensor):
+    def forward_with_recon(self, x: torch.Tensor, token_mask: torch.Tensor | None = None):
         """Forward pass with auxiliary reconstruction.
 
         Returns
@@ -206,7 +248,7 @@ class LogprobReconProgressiveCompressor(nn.Module):
         z : (B, final_dim)
         logprob_pred : (B, recon_seq_len)
         """
-        z = self.encoder(x)
+        z = self.encoder(x, token_mask=token_mask)
         logprob_pred = self.decoder(z)
         return z, logprob_pred
 

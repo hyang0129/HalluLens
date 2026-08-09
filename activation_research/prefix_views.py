@@ -11,22 +11,36 @@ depends only on positions ``<= i``, so ``h[:k]`` sliced out of an existing
 64-token capture is bit-identical to what a k-token generation would have
 produced. The whole study is a slice of the token axis on existing memmaps.
 
-Design decision — batch-level k sampling
-----------------------------------------
-The contrastive encoder (``ProgressiveCompressor`` and friends) is
-``PositionalEncoding -> TransformerBlock* -> x.mean(dim=1)``. Every stage is
-length-agnostic, so a *sliced* prefix ``(B, k, D)`` flows through unchanged.
+Design decision — zero-pad plus an explicit mask, keeping the fused encode
+--------------------------------------------------------------------------
+The trainer fuses the batch and view axes into a single encoder call
+(``views_full.reshape(bsz * num_views, seq_len, hidden_dim)`` in
+``activation_research/training.py``). Keeping that fused path is worth more than
+per-view slicing, so a prefix view is represented as the full ``max_response_len``
+tensor with positions ``>= k`` zeroed, carried alongside a boolean token mask.
 
-Zero-padding to ``max_response_len`` instead would be wrong twice over:
-``x.mean(dim=1)`` is unmasked (``activation_research/model.py``), so the pooled
-vector would be scaled by ``k / max_response_len`` — leaking k directly into the
-embedding norm — and the TransformerBlocks would attend over pad positions.
+The mask must be explicit — padding cannot be recovered by testing for zeros
+downstream. ``TransformerBlock.input_proj`` has a bias and ``PositionalEncoding``
+adds to every slot, so a zero-filled pad row is non-zero by the first block.
 
-Slicing forces one constraint: all views in a stacked batch tensor must share a
-length. We therefore sample the prefix pair **once per batch**, not per item.
-Every item in a batch sees the same ``(k_1, ..., k_K)``, each view slot is
-sliced to its own k, and the K slots are encoded independently. No model change,
-no masking, no k-leak.
+The mask is threaded to two places (see ``activation_research/model.py``):
+
+* ``nn.TransformerEncoderLayer(src_key_padding_mask=...)`` — without this, pad
+  slots act as attention keys/values and contaminate the real tokens. Note the
+  inverted convention: torch marks positions to *ignore*, we mark real tokens.
+* ``masked_mean`` in place of ``x.mean(dim=1)`` — an unmasked mean would scale
+  the pooled vector by ``k / max_response_len``, leaking k straight into the
+  embedding norm as a shortcut.
+
+A ``(B, K, L)`` mask flattens under the same reshape as the activations, so the
+fused call is untouched. ``token_mask=None`` reproduces the pre-masking
+behaviour bit-for-bit, which is what keeps the ``layer_only`` control arm a true
+control.
+
+Prefix pairs are still drawn **once per batch** rather than per item. Nothing in
+the masked path requires it, but it keeps k constant across a gradient
+accumulation window (``torch.cat`` of buffered sub-batches in the trainer) and
+makes the geometry of each step reportable.
 
 Sampling contract
 -----------------
@@ -184,13 +198,17 @@ class PrefixPairSampler:
 
 
 # ---------------------------------------------------------------------- #
-def slice_views(
+def apply_prefix_views(
     views: torch.Tensor,
     spec: PrefixViewSpec,
     *,
     prompt_fallback: bool = True,
-) -> List[torch.Tensor]:
-    """Slice a stacked view tensor down to per-slot prefixes.
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Zero out post-prefix tokens and build the matching token mask.
+
+    Shapes are preserved so the trainer's fused
+    ``reshape(B * K, L, D)`` encode continues to work untouched — the mask
+    reshapes to ``(B * K, L)`` under exactly the same call.
 
     Parameters
     ----------
@@ -199,17 +217,17 @@ def slice_views(
     spec : PrefixViewSpec
         Per-slot prefix lengths. ``spec.num_views`` must equal ``K``.
     prompt_fallback : bool
-        When a slot's prefix is 0 (the k=0 "prompt only, before any response
-        token" condition) a zero-length slice has no mean. With this flag the
-        slot falls back to a single token so the encoder still receives a valid
-        sequence; the caller is responsible for substituting prompt-side
+        A prefix of 0 (the "prompt only, before any response token" arm) would
+        leave a row with no valid tokens, which has no mean and produces NaN
+        under attention softmax. With this flag such a slot keeps a single
+        token; the caller is responsible for substituting prompt-side
         activations for a true k=0 arm.
 
     Returns
     -------
-    list[Tensor]
-        K tensors of shape ``(B, k_i, D)``. Lengths differ across slots by
-        design, which is why this returns a list rather than a stacked tensor.
+    (masked_views, token_mask)
+        ``masked_views`` is ``(B, K, L, D)`` with positions ``>= k`` zeroed.
+        ``token_mask`` is ``(B, K, L)`` bool, ``True`` at real tokens.
 
     Raises
     ------
@@ -221,13 +239,15 @@ def slice_views(
         raise ValueError(
             f"expected views of shape (B, K, L, D), got {tuple(views.shape)}"
         )
-    _, k_slots, seq_len, _ = views.shape
+    bsz, k_slots, seq_len, _ = views.shape
     if k_slots != spec.num_views:
         raise ValueError(
             f"view tensor has K={k_slots} but spec declares {spec.num_views}"
         )
 
-    out: List[torch.Tensor] = []
+    token_mask = torch.zeros(
+        (bsz, k_slots, seq_len), dtype=torch.bool, device=views.device
+    )
     for slot, prefix in enumerate(spec.prefix_lens):
         if prefix > seq_len:
             raise ValueError(
@@ -241,8 +261,10 @@ def slice_views(
                     f"view slot {slot} has prefix 0 and prompt_fallback=False"
                 )
             eff = 1
-        out.append(views[:, slot, :eff, :])
-    return out
+        token_mask[:, slot, :eff] = True
+
+    masked_views = views * token_mask.unsqueeze(-1).to(views.dtype)
+    return masked_views, token_mask
 
 
 def resolve_eval_prefixes(
