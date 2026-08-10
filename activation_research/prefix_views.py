@@ -59,7 +59,13 @@ from typing import List, Literal, Optional, Sequence
 import torch
 
 # Prefix lengths the evaluation reports on. Training never pins to these.
-EVAL_PREFIX_LENGTHS: tuple[int, ...] = (0, 16, 32, 48, 64)
+#
+# k=0 ("prompt only, before any response token") is deliberately absent. It is
+# the crux of issue #149 — if k=0 matches k=64 the method class is measuring a
+# prompt-difficulty prior rather than anything about the generation — but it
+# cannot be expressed as a response-token slice. It needs prompt-side
+# activations (prompt_activations.npy), which is a separate arm, not a k value.
+EVAL_PREFIX_LENGTHS: tuple[int, ...] = (16, 32, 48, 64)
 
 ViewMode = Literal["layer_only", "prefix_only", "mixed"]
 
@@ -281,6 +287,54 @@ def apply_prefix_views(
     return masked_views, token_mask
 
 
+class PrefixEvalWrapper(torch.nn.Module):
+    """Wrap a trained encoder so it only ever sees the first ``k`` tokens.
+
+    At evaluation time the prefix is *uniform* — every view of every item is cut
+    at the same k, because the question being asked is "what is knowable from
+    the first k tokens?". That makes the token mask a pure function of the input
+    shape, so it can be built inside the wrapper instead of threaded through the
+    dataloaders, the collate, and the metric evaluator. The whole eval stack
+    keeps calling ``model(x)`` unchanged.
+
+    Post-prefix activations are additionally zeroed. The mask alone is
+    sufficient — masked attention and masked pooling already ignore them — but
+    zeroing makes the eval-time input byte-identical in construction to what
+    training produced, so a discrepancy shows up as a shape/mask bug rather than
+    as a silent distribution shift.
+
+    Parameters
+    ----------
+    model : nn.Module
+        A trained encoder accepting ``token_mask``.
+    prefix_len : int
+        Tokens to retain. Must be >= 1; see ``resolve_eval_prefixes`` for why
+        k=0 is not expressible here (it needs prompt-side activations, which
+        live in a different memmap).
+    """
+
+    def __init__(self, model: torch.nn.Module, prefix_len: int) -> None:
+        super().__init__()
+        if int(prefix_len) < 1:
+            raise ValueError(
+                f"prefix_len must be >= 1, got {prefix_len}. A true k=0 arm "
+                "requires prompt-side activations (prompt_activations.npy), "
+                "not a zero-length response slice."
+            )
+        self.model = model
+        self.prefix_len = int(prefix_len)
+
+    def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        seq_len = x.shape[1]
+        k = min(self.prefix_len, seq_len)
+        mask = torch.zeros(
+            (x.shape[0], seq_len), dtype=torch.bool, device=x.device
+        )
+        mask[:, :k] = True
+        x = x * mask.unsqueeze(-1).to(x.dtype)
+        return self.model(x, *args, token_mask=mask, **kwargs)
+
+
 def resolve_eval_prefixes(
     requested: Optional[Sequence[int]], max_prefix: int
 ) -> List[int]:
@@ -294,8 +348,11 @@ def resolve_eval_prefixes(
     seen: set[int] = set()
     out: List[int] = []
     for k in grid:
-        if k < 0:
-            raise ValueError(f"evaluation prefix must be >= 0, got {k}")
+        if k < 1:
+            raise ValueError(
+                f"evaluation prefix must be >= 1, got {k}. k=0 is a separate "
+                "prompt-only arm (prompt_activations.npy), not a response slice."
+            )
         if k > max_prefix or k in seen:
             continue
         seen.add(k)

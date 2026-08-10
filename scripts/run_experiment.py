@@ -543,6 +543,55 @@ def run_contrastive_logprob_recon(
     knn_scores_arr = ood_stats.pop("knn_scores", None)
     knn_labels_arr = ood_stats.pop("knn_labels", None)
 
+    # ---- Issue #149: AUROC as a function of the response prefix ------------
+    # The headline question is whether a hallucination is detectable at token 16,
+    # before the generation finishes. The full-length numbers above are the k=64
+    # point of that curve; the loop below fills in the rest.
+    #
+    # Both the train (KNN reference) and test loaders are re-encoded at each k.
+    # Scoring a k-truncated test set against a full-length KNN base would
+    # measure distribution shift between the two, not early detectability.
+    prefix_curve: dict = {}
+    eval_prefixes_cfg = eval_cfg.get("eval_prefix_lengths", None)
+    if eval_cfg.get("eval_prefix_curve", False):
+        from activation_research.prefix_views import (
+            PrefixEvalWrapper,
+            resolve_eval_prefixes,
+        )
+
+        _capture_r_max = getattr(test_ds, "_max_resp", None) or 64
+        _ks = resolve_eval_prefixes(eval_prefixes_cfg, int(_capture_r_max))
+        logger.info(f"prefix curve: evaluating at k={_ks} (capture width {_capture_r_max})")
+
+        for _k in _ks:
+            _wrapped = PrefixEvalWrapper(model, _k).to(train_device)
+            _wrapped.eval()
+            _evaluator_k = MultiMetricHallucinationEvaluator(
+                activation_parser_df=eval_ap.df,
+                train_data_loader=DataLoader(
+                    train_ds_target, batch_size=64, shuffle=False
+                ),
+                metrics=metrics_list,
+                batch_size=eval_cfg.get("eval_batch_size", 256),
+                sub_batch_size=eval_cfg.get("sub_batch_size", 64),
+                device=train_device,
+                num_workers=experiment_cfg.get("num_workers", 4),
+                persistent_workers=False,
+                outlier_class=effective_outlier_class,
+            )
+            _stats_k = _evaluator_k.compute(
+                DataLoader(test_ds_target, batch_size=64, shuffle=False), _wrapped
+            )
+            _stats_k.pop("knn_scores", None)
+            _stats_k.pop("knn_labels", None)
+            for _metric_name, _v in _stats_k.items():
+                prefix_curve[f"k{_k}_{_metric_name}"] = _v
+            logger.info(
+                f"  k={_k}: knn_auroc={_stats_k.get('knn_auroc')} "
+                f"cosine_auroc={_stats_k.get('cosine_auroc')} "
+                f"mahalanobis_auroc={_stats_k.get('mahalanobis_auroc')}"
+            )
+
     eval_metrics: dict = {
         "method": method_cfg["name"],
         "dataset": dataset_cfg["name"],
@@ -553,6 +602,9 @@ def run_contrastive_logprob_recon(
         "n_test": len(test_ds),
     }
     eval_metrics.update(ood_stats)
+    # Prefix-curve cells are namespaced k{K}_* so they never collide with the
+    # full-length metrics above.
+    eval_metrics.update(prefix_curve)
 
     predictions: list[dict] = []
     if knn_scores_arr is not None and knn_labels_arr is not None:

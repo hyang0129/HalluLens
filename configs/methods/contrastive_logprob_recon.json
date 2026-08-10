@@ -8,12 +8,12 @@
     "recon_seq_len": 64,
     "recon_hidden_dim": 256,
     "recon_lambda": 1.0,
-    "logprob_var_threshold": 1e-4
+    "logprob_var_threshold": 0.0001
   },
   "training": {
     "max_epochs": 100,
     "batch_size": 512,
-    "lr": 1e-5,
+    "lr": 1e-05,
     "temperature": 0.25,
     "sub_batch_size": 64,
     "use_labels": true,
@@ -25,7 +25,10 @@
   },
   "data": {
     "relevant_layers": "14-29",
-    "target_layers": [22, 26],
+    "target_layers": [
+      22,
+      26
+    ],
     "num_views": 2,
     "pad_length": 63,
     "preload": true,
@@ -33,16 +36,33 @@
     "response_logprobs_top_k": 20
   },
   "evaluation": {
-    "metrics": ["cosine", "mds", "knn"],
+    "metrics": [
+      "cosine",
+      "mds",
+      "knn"
+    ],
     "knn_params": {
       "k": 50,
       "metric": "euclidean",
       "calibrate_k": true,
-      "k_candidates": [50, 100, 200, 500, 1000],
+      "k_candidates": [
+        50,
+        100,
+        200,
+        500,
+        1000
+      ],
       "max_train_size": 200000
     },
     "eval_batch_size": 256,
     "sub_batch_size": 64,
-    "dump_embeddings": true
+    "dump_embeddings": true,
+    "eval_prefix_curve": true,
+    "eval_prefix_lengths": [
+      16,
+      32,
+      48,
+      64
+    ]
   }
 }

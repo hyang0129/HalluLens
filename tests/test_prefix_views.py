@@ -346,3 +346,79 @@ def test_resolve_rejects_negative_and_empty_result():
         resolve_eval_prefixes([-1], 64)
     with pytest.raises(ValueError, match="no evaluation prefixes"):
         resolve_eval_prefixes([128], 64)
+
+
+# --------------------------------------------------------------------- #
+# PrefixEvalWrapper
+# --------------------------------------------------------------------- #
+def test_eval_wrapper_matches_a_genuinely_short_input():
+    """The eval guarantee: scoring a 64-token capture at k=16 must equal
+    encoding only those 16 tokens."""
+    from activation_research.model import ProgressiveCompressor
+    from activation_research.prefix_views import PrefixEvalWrapper
+
+    torch.manual_seed(0)
+    m = ProgressiveCompressor(input_dim=256, final_dim=64).eval()
+    full = torch.randn(2, 64, 256)
+
+    with torch.no_grad():
+        z_wrapped = PrefixEvalWrapper(m, 16).eval()(full)
+        z_short = m(full[:, :16])
+    assert torch.allclose(z_wrapped, z_short, atol=1e-5)
+
+
+def test_eval_wrapper_ignores_content_beyond_k():
+    """Changing tokens after k must not move the embedding at all."""
+    from activation_research.model import ProgressiveCompressor
+    from activation_research.prefix_views import PrefixEvalWrapper
+
+    torch.manual_seed(0)
+    m = ProgressiveCompressor(input_dim=256, final_dim=64).eval()
+    w = PrefixEvalWrapper(m, 16).eval()
+
+    a = torch.randn(2, 64, 256)
+    b = a.clone()
+    b[:, 16:] = torch.randn(2, 48, 256) * 100.0
+    with torch.no_grad():
+        assert torch.allclose(w(a), w(b), atol=1e-6)
+
+
+def test_eval_wrapper_at_full_width_is_the_unmasked_model():
+    from activation_research.model import ProgressiveCompressor
+    from activation_research.prefix_views import PrefixEvalWrapper
+
+    torch.manual_seed(0)
+    m = ProgressiveCompressor(input_dim=256, final_dim=64).eval()
+    x = torch.randn(2, 64, 256)
+    with torch.no_grad():
+        assert torch.allclose(PrefixEvalWrapper(m, 64).eval()(x), m(x), atol=1e-6)
+
+
+def test_eval_wrapper_clamps_k_to_sequence_length():
+    from activation_research.model import ProgressiveCompressor
+    from activation_research.prefix_views import PrefixEvalWrapper
+
+    torch.manual_seed(0)
+    m = ProgressiveCompressor(input_dim=256, final_dim=64).eval()
+    x = torch.randn(2, 32, 256)
+    with torch.no_grad():
+        assert torch.allclose(PrefixEvalWrapper(m, 64).eval()(x), m(x), atol=1e-6)
+
+
+def test_eval_wrapper_rejects_zero_prefix():
+    """k=0 is a prompt-only arm, not a zero-length response slice."""
+    from activation_research.model import ProgressiveCompressor
+    from activation_research.prefix_views import PrefixEvalWrapper
+
+    m = ProgressiveCompressor(input_dim=256, final_dim=64)
+    with pytest.raises(ValueError, match="prompt-side activations"):
+        PrefixEvalWrapper(m, 0)
+
+
+def test_eval_grid_excludes_zero():
+    from activation_research.prefix_views import EVAL_PREFIX_LENGTHS
+
+    assert 0 not in EVAL_PREFIX_LENGTHS
+    assert resolve_eval_prefixes(None, 64) == [16, 32, 48, 64]
+    with pytest.raises(ValueError, match="prompt-only arm"):
+        resolve_eval_prefixes([0, 16], 64)

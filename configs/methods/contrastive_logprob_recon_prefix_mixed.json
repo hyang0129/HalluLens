@@ -2,19 +2,19 @@
   "name": "contrastive_logprob_recon_prefix_mixed",
   "routine": "contrastive_logprob_recon",
   "model_class": "logprob_recon_progressive_compressor",
-  "_comment": "Issue #149 — mixed layer x prefix contrastive views. Identical to contrastive_logprob_recon except prefix_view_mode=mixed, so any delta is attributable to the view geometry alone. k is sampled per batch (never pinned to the 0/16/32/48/64 eval grid) and post-prefix tokens are zero-padded with an explicit mask threaded to both attention and pooling.",
+  "_comment": "Issue #149 \u2014 mixed layer x prefix contrastive views. Identical to contrastive_logprob_recon except prefix_view_mode=mixed, so any delta is attributable to the view geometry alone. k is sampled per batch (never pinned to the 0/16/32/48/64 eval grid) and post-prefix tokens are zero-padded with an explicit mask threaded to both attention and pooling.",
   "model_params": {
     "final_dim": 512,
     "input_dropout": 0.3,
     "recon_seq_len": 64,
     "recon_hidden_dim": 256,
     "recon_lambda": 1.0,
-    "logprob_var_threshold": 1e-4
+    "logprob_var_threshold": 0.0001
   },
   "training": {
     "max_epochs": 100,
     "batch_size": 512,
-    "lr": 1e-5,
+    "lr": 1e-05,
     "temperature": 0.25,
     "sub_batch_size": 64,
     "use_labels": true,
@@ -29,7 +29,10 @@
   },
   "data": {
     "relevant_layers": "14-29",
-    "target_layers": [22, 26],
+    "target_layers": [
+      22,
+      26
+    ],
     "num_views": 2,
     "pad_length": 63,
     "preload": true,
@@ -37,16 +40,33 @@
     "response_logprobs_top_k": 20
   },
   "evaluation": {
-    "metrics": ["cosine", "mds", "knn"],
+    "metrics": [
+      "cosine",
+      "mds",
+      "knn"
+    ],
     "knn_params": {
       "k": 50,
       "metric": "euclidean",
       "calibrate_k": true,
-      "k_candidates": [50, 100, 200, 500, 1000],
+      "k_candidates": [
+        50,
+        100,
+        200,
+        500,
+        1000
+      ],
       "max_train_size": 200000
     },
     "eval_batch_size": 256,
     "sub_batch_size": 64,
-    "dump_embeddings": true
+    "dump_embeddings": true,
+    "eval_prefix_curve": true,
+    "eval_prefix_lengths": [
+      16,
+      32,
+      48,
+      64
+    ]
   }
 }
