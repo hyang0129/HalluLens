@@ -24,10 +24,20 @@ Seeds are bundled inside a cell (``"seed": "0,1,2,3,4"``) so a re-claimed cell
 resumes at the first seed lacking predictions.csv rather than redoing the whole
 bundle, matching build_issue_135_cells.py.
 
+act_vit is queued as an EVAL-ONLY arm (cell prefix "2_"). It reuses the existing
+full-length checkpoints — link_actvit_checkpoints_149.py symlinks them into the
+new experiment path and the act_vit routine skips training when final_weights.pt
+is present — and only re-scores at each k. Truncation there is a slice of the
+token axis, which act_vit's adaptive max-pool absorbs, so nothing is retrained
+and no mask is involved.
+
+That places act_vit in the "train at full length, test on a prefix"
+(deployability) regime, which is exactly the regime the contrastive layer_only
+control is evaluated in, so those two are directly comparable. It is NOT
+matched-k: the patch geometry (N_p=100, patch_w=10) was tuned for the full width
+and a per-k retune would be required to claim a matched-k comparison.
+
 Deliberately NOT queued here:
-  - act_vit. Its activation tensor is adaptive-pooled to a fixed (L_p, N_p)
-    grid, so evaluating a 64-token-tuned patch geometry at k=16 would handicap
-    the strongest competitor. It needs a per-k retune first.
   - the k=0 prompt-only arm. It is not a response-token slice; it needs
     prompt_activations.npy and is a separate arm.
 
@@ -59,6 +69,15 @@ _TARGETS = [
     ("prefix149_sciq", "sciq_memmap"),
     ("prefix149_hotpotqa", "hotpotqa_memmap"),
 ]
+
+# act_vit is EVAL-ONLY: its cells reuse existing full-length checkpoints
+# (symlinked by link_actvit_checkpoints_149.py) and only re-score at each k.
+# Separate target list because the method list differs.
+_ACTVIT_TARGETS = [
+    ("prefix149_actvit_sciq", "sciq_memmap"),
+    ("prefix149_actvit_hotpotqa", "hotpotqa_memmap"),
+]
+_ACTVIT_METHOD = "act_vit_prefix_eval"
 
 _SEEDS_CSV = "0,1,2,3,4"
 _LAST_SEED = 4
@@ -111,6 +130,33 @@ def build(dispatch_root: Path) -> int:
             )
             written += 1
             print(f"  queued: {cell_id}")
+
+    for experiment_name, dataset_key in _ACTVIT_TARGETS:
+        cfg_rel = f"configs/experiments/{experiment_name}.json"
+        if not (_PROJECT_ROOT / cfg_rel).exists():
+            print(f"  skip (config missing): {cfg_rel}", file=sys.stderr)
+            continue
+        cell_id = f"2_issue149__{dataset_key}__{_ACTVIT_METHOD}"
+        if _dispatch_has_cell(dispatch_root, cell_id):
+            print(f"  skip (already queued): {cell_id}")
+            continue
+        cell = {
+            "cell_id": cell_id,
+            "experiment_config": cfg_rel,
+            "dataset": dataset_key,
+            "method": _ACTVIT_METHOD,
+            "seed": _SEEDS_CSV,
+            "output_check": (
+                f"runs/{experiment_name}/{dataset_key}/{_ACTVIT_METHOD}/"
+                f"seed_{_LAST_SEED}/predictions.csv"
+            ),
+        }
+        (dispatch_root / "pending" / f"{cell_id}.json").write_text(
+            json.dumps(cell, indent=2) + "\n"
+        )
+        written += 1
+        print(f"  queued (eval-only): {cell_id}")
+
     return written
 
 

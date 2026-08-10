@@ -1,0 +1,34 @@
+{
+  "name": "act_vit_prefix_eval",
+  "routine": "act_vit",
+  "model_params": {
+    "L_p": 8,
+    "N_p": 100,
+    "patch_h": 2,
+    "patch_w": 10,
+    "d_adapter": 256,
+    "d_model": 256,
+    "num_heads": 8,
+    "depth": 4,
+    "dropout": 0.1
+  },
+  "training": {
+    "max_epochs": 50,
+    "batch_size": 64,
+    "lr": 0.0001,
+    "weight_decay": 0.01
+  },
+  "evaluation": {
+    "metrics": [
+      "auroc"
+    ],
+    "eval_prefix_curve": true,
+    "eval_prefix_lengths": [
+      16,
+      32,
+      48,
+      64
+    ]
+  },
+  "_comment": "Issue #149 eval-only arm. Identical model and hyperparameters to act_vit; run against an EXISTING full-length checkpoint (training is skipped when final_weights.pt is present) and scored at k=16/32/48/64. Truncation is a slice of the token axis \u2014 act_vit's adaptive max-pool absorbs the narrower width, so no retraining and no mask are involved. This is the deployability regime (train full, test on prefix), directly comparable to the contrastive layer_only control; it is NOT matched-k."
+}

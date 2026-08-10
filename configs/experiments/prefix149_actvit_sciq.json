@@ -1,0 +1,27 @@
+{
+  "_comment": "Issue #149 act_vit EVAL-ONLY prefix curve. Training is skipped: link_actvit_checkpoints_149.py symlinks the existing baseline_comparison_* act_vit weights into this experiment's path, so the model is byte-identical to the published full-length one and only the test-time input changes. Deployability regime (train full, test on prefix) \u2014 comparable to the contrastive layer_only arm, not to matched-k.",
+  "experiment_name": "prefix149_actvit_sciq",
+  "dataset": "sciq_memmap",
+  "methods": [
+    "act_vit_prefix_eval"
+  ],
+  "split_seed": 42,
+  "training_seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs",
+  "split_seeds": [
+    42,
+    1,
+    2,
+    3,
+    4
+  ]
+}
