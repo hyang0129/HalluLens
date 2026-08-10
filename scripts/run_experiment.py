@@ -1153,22 +1153,14 @@ def run_linear_probe(
         save_every=1,
     )
 
-    # Issue #149: reuse an existing checkpoint instead of retraining. This is
-    # what makes the act_vit prefix curve an *eval-only* arm — the model stays
-    # exactly the one trained at full length, and we only change what it is
-    # shown at test time.
-    _final_weights = os.path.join(output_dir, "artifacts", "final_weights.pt")
-    if os.path.exists(_final_weights):
-        logger.info(f"final_weights.pt found — skipping act_vit training, loading {_final_weights}")
-        _ckpt = torch.load(_final_weights, map_location="cpu")
-        model.load_state_dict(_ckpt["model_state_dict"])
-    else:
-        trainer = LinearProbeTrainer(model, config=config)
-        trainer.fit(train_dataset=probe_train, val_dataset=probe_val)
-        torch.save(
-            {"model_state_dict": model.state_dict()},
-            _final_weights,
-        )
+    trainer = LinearProbeTrainer(model, config=config)
+    trainer.fit(train_dataset=probe_train, val_dataset=probe_val)
+
+    # Save final weights
+    torch.save(
+        {"model_state_dict": model.state_dict()},
+        os.path.join(output_dir, "artifacts", "final_weights.pt"),
+    )
 
     # Evaluate
     from sklearn.metrics import roc_auc_score
@@ -1200,42 +1192,8 @@ def run_linear_probe(
     else:
         auroc = roc_auc_score(all_labels_np, all_preds_np)
 
-    # ---- Issue #149: AUROC vs response prefix, eval-only -------------------
-    # act_vit adaptive-max-pools the (L, N) plane to a fixed (L_p, N_p) grid, so
-    # truncation here is a SLICE of the token axis, not a mask — the pooling
-    # absorbs the narrower width on its own. No mask is threaded and the model
-    # is unchanged.
-    #
-    # This is the "train at full length, test on a prefix" (deployability)
-    # regime, which is exactly the regime the contrastive layer_only control arm
-    # is evaluated in — so the two are directly comparable. It is NOT the
-    # matched-k regime: a per-k retune would be needed for that, and the patch
-    # geometry (N_p=100, patch_w=10) was tuned for the full 64-token width.
-    act_vit_prefix_curve: dict = {}
-    if eval_cfg.get("eval_prefix_curve", False):
-        from activation_research.prefix_views import resolve_eval_prefixes
-
-        _ks = resolve_eval_prefixes(eval_cfg.get("eval_prefix_lengths"), 64)
-        logger.info(f"act_vit prefix curve (eval-only): k={_ks}")
-        for _k in _ks:
-            _p, _l = [], []
-            with torch.no_grad():
-                for batch in probe_eval_loader:
-                    x = batch["views_activations"].to(eval_device)
-                    if x.dim() == 4 and x.shape[1] == 1:
-                        x = x.squeeze(1)
-                    # (B, L, N, D) -> keep the first k response tokens.
-                    x = x[:, :, : min(_k, x.shape[2]), :]
-                    _p.append(model(x).cpu())
-                    _l.append(batch["halu"].cpu())
-            _pn = torch.cat(_p).squeeze().numpy()
-            _ln = torch.cat(_l).numpy()
-            _a = float("nan") if len(set(_ln)) < 2 else float(roc_auc_score(_ln, _pn))
-            act_vit_prefix_curve[f"k{_k}_auroc"] = _a
-            logger.info(f"  act_vit k={_k}: auroc={_a}")
 
     eval_metrics = {
-        **act_vit_prefix_curve,
         "method": method_cfg["name"],
         "dataset": dataset_cfg["name"],
         "seed": training_seed,
@@ -3008,7 +2966,46 @@ def run_act_vit(
     else:
         auroc = float("nan")
 
+    # ---- Issue #149: AUROC vs response prefix, eval-only ------------------
+    # Truncation here is a SLICE of the token axis of (B, L, N, D), not a mask:
+    # act_vit adaptive-max-pools the (L, N) plane to a fixed (L_p, N_p) grid, so
+    # a narrower N is absorbed by the pooling. The model is untouched and
+    # nothing is retrained — run_act_vit already skips training when
+    # final_weights.pt is present, which is what makes this arm eval-only.
+    #
+    # Regime: "train at full length, test on a prefix" (deployability), the same
+    # regime the contrastive layer_only control is scored in, so those two are
+    # directly comparable. NOT matched-k — the patch geometry (N_p, patch_w) was
+    # tuned for the full width and a per-k retune is required for that claim.
+    act_vit_prefix_curve: dict = {}
+    if eval_cfg.get("eval_prefix_curve", False):
+        from activation_research.prefix_views import resolve_eval_prefixes
+
+        _n_tokens = int(getattr(test_ds, "max_response_len", 64))
+        _ks = resolve_eval_prefixes(eval_cfg.get("eval_prefix_lengths"), _n_tokens)
+        logger.info(
+            f"[act_vit] prefix curve (eval-only): k={_ks} over N={_n_tokens} tokens"
+        )
+        for _k in _ks:
+            _p, _l = [], []
+            with torch.no_grad():
+                for batch in test_loader:
+                    x = batch["activations"].to(eval_device)   # (B, L, N, D)
+                    x = x[:, :, : min(_k, x.shape[2]), :]
+                    _p.append(torch.sigmoid(model(x).squeeze(1)).cpu())
+                    _l.append(batch["label"].cpu())
+            _sn = torch.cat(_p).numpy()
+            _ln = torch.cat(_l).numpy()
+            _a = (
+                float(roc_auc_score(_ln, _sn))
+                if len(set(_ln.tolist())) >= 2
+                else float("nan")
+            )
+            act_vit_prefix_curve[f"k{_k}_auroc"] = _a
+            logger.info(f"  [act_vit] k={_k}: auroc={_a}")
+
     eval_metrics = {
+        **act_vit_prefix_curve,
         "method": method_cfg["name"],
         "dataset": dataset_cfg["name"],
         "seed": training_seed,
