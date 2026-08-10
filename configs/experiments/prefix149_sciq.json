@@ -1,0 +1,29 @@
+{
+  "_comment": "Issue #149 pilot on sciq \u2014 substring labels, 5 seeds. Ablation grid over the (layer, prefix) view space; every arm is evaluated at k=16/32/48/64 via eval_prefix_curve. act_vit is deliberately absent: its (L_p, N_p) patch grid must be retuned per k before the comparison is fair, tracked separately.",
+  "experiment_name": "prefix149_sciq",
+  "dataset": "sciq_memmap",
+  "methods": [
+    "contrastive_logprob_recon_prefix_mixed",
+    "contrastive_logprob_recon_prefix_only",
+    "contrastive_logprob_recon"
+  ],
+  "split_seed": 42,
+  "training_seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs",
+  "split_seeds": [
+    42,
+    1,
+    2,
+    3,
+    4
+  ]
+}
