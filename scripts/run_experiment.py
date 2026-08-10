@@ -481,6 +481,12 @@ def run_contrastive_logprob_recon(
             balanced_sampling=train_cfg.get("balanced_sampling", False),
             grad_clip_norm=train_cfg.get("grad_clip_norm"),
             augment_fn=augment_fn,
+            # Issue #149 prefix views. Default "layer_only" keeps every existing
+            # config byte-identical to its pre-#149 behaviour.
+            prefix_view_mode=train_cfg.get("prefix_view_mode", "layer_only"),
+            prefix_min_tokens=train_cfg.get("prefix_min_tokens", 8),
+            prefix_min_gap=train_cfg.get("prefix_min_gap", 8),
+            prefix_seed=training_seed,
         )
 
         torch.save(

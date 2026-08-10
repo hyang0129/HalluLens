@@ -59,6 +59,54 @@ class InfiniteIndexStream(IterableDataset):
             epoch += 1
 
 
+def _apply_prefix_views_to_collated(out, prefix_sampler):
+    """Apply issue-#149 prefix views to an already-collated contrastive batch.
+
+    Draws one :class:`PrefixViewSpec` per batch, zeroes post-prefix tokens, and
+    attaches ``views_token_mask`` (B, K, L). Shapes are unchanged, so the
+    trainer's fused ``reshape(B * K, L, D)`` encode is untouched — the mask
+    flattens under the identical call.
+
+    A ``None`` sampler is a no-op and leaves the batch byte-identical, which is
+    what keeps the non-prefix methods a true control.
+    """
+    if prefix_sampler is None:
+        return out
+    from activation_research.prefix_views import apply_prefix_views
+
+    spec = prefix_sampler.sample()
+    masked, token_mask = apply_prefix_views(out["views_activations"], spec)
+    out["views_activations"] = masked
+    out["views_token_mask"] = token_mask
+    out["view_prefix_lens"] = torch.tensor(spec.prefix_lens, dtype=torch.long)
+    return out
+
+
+def make_contrastive_collate(base_collate, prefix_sampler=None):
+    """Wrap a collate so each batch gets its own sampled prefix geometry.
+
+    Worker-aware seeding matters here: ``DataLoader`` forks worker processes,
+    and a plain ``random.Random(seed)`` would be *copied*, so all workers would
+    emit the identical k sequence in lockstep — collapsing prefix diversity by a
+    factor of ``num_workers``. Each worker therefore re-seeds its own sampler
+    from its worker id on first use.
+    """
+    if prefix_sampler is None:
+        return base_collate
+
+    state = {"pid_seeded": False}
+
+    def _collate(batch):
+        if not state["pid_seeded"]:
+            info = torch.utils.data.get_worker_info()
+            if info is not None:
+                prefix_sampler.reseed_for_worker(info.id)
+            state["pid_seeded"] = True
+        return _apply_prefix_views_to_collated(base_collate(batch), prefix_sampler)
+
+    return _collate
+
+
 def _contrastive_collate_kview(batch):
     """Collate only the fields used by contrastive training.
 
@@ -712,6 +760,10 @@ def train_contrastive_logprob_recon(
     device="cuda",
     num_workers=16,
     sub_batch_size=64,
+    prefix_view_mode="layer_only",
+    prefix_min_tokens=8,
+    prefix_min_gap=8,
+    prefix_seed=None,
     checkpoint_dir="checkpoints",
     save_every=1,
     resume_from=None,
@@ -778,15 +830,51 @@ def train_contrastive_logprob_recon(
         base_dataset_len = len(train_dataset)
         sub_batch_size = batch_size
 
-    def _call_model(m, x, layer_idx=None):
+    def _call_model(m, x, layer_idx=None, token_mask=None):
+        """Encode a flattened view batch, optionally with a prefix token mask.
+
+        The ``token_mask`` path must never fail silently. Existing code here
+        falls back to a mask-free call on ``TypeError``, which for issue #149
+        would drop the prefix mask, unmask the padding, and leak prefix length
+        into the embedding — producing plausible but invalid AUROC numbers with
+        no error. When a mask is supplied and the model cannot consume it we
+        raise instead.
+        """
+        mask_kw = {} if token_mask is None else {"token_mask": token_mask}
+
         if layer_idx is None:
-            return m.forward_with_recon(x)
+            if token_mask is None:
+                return m.forward_with_recon(x)
+            try:
+                return m.forward_with_recon(x, **mask_kw)
+            except TypeError as e:
+                raise TypeError(
+                    f"{type(m).__name__}.forward_with_recon does not accept "
+                    "token_mask, but prefix views (issue #149) require it. "
+                    "Silently dropping the mask would unmask padding and leak "
+                    "prefix length into the embedding."
+                ) from e
+
         try:
             # LayerAware wrapper: inject layer_idx into encoder, then call decoder
-            z = m.encoder(x, layer_idx=layer_idx) if hasattr(m.encoder, "forward") else m.encoder(x)
+            z = (
+                m.encoder(x, layer_idx=layer_idx, **mask_kw)
+                if hasattr(m.encoder, "forward")
+                else m.encoder(x, **mask_kw)
+            )
             logprob_pred = m.decoder(z)
             return z, logprob_pred
         except TypeError:
+            if token_mask is not None:
+                # Retry without layer_idx but KEEP the mask; only raise if the
+                # model cannot take the mask either.
+                try:
+                    return m.forward_with_recon(x, **mask_kw)
+                except TypeError as e:
+                    raise TypeError(
+                        f"{type(m).__name__} does not accept token_mask, but "
+                        "prefix views (issue #149) require it."
+                    ) from e
             return m.forward_with_recon(x)
 
     assert batch_size % sub_batch_size == 0, "batch_size must be divisible by sub_batch_size"
@@ -848,6 +936,33 @@ def train_contrastive_logprob_recon(
         if balanced_sampling and use_labels and not is_iterable
         else None
     )
+    # Issue #149 prefix views. "layer_only" yields a None sampler, so the
+    # collate, the batch contents, and the encoder call are all byte-identical
+    # to the pre-#149 path — the ablation's control arm is a true control.
+    _prefix_sampler = None
+    if str(prefix_view_mode) != "layer_only":
+        from activation_research.prefix_views import PrefixPairSampler
+
+        # View count and capture width are properties of the dataset, not of
+        # this trainer's signature.
+        _r_max = getattr(train_dataset, "_max_resp", None) or 64
+        _n_views = getattr(train_dataset, "_num_views", None) or 2
+        _prefix_sampler = PrefixPairSampler(
+            mode=str(prefix_view_mode),
+            num_views=int(_n_views),
+            max_prefix=int(_r_max),
+            min_prefix=int(prefix_min_tokens),
+            min_gap=int(prefix_min_gap),
+            seed=prefix_seed,
+        )
+        logger.info(
+            "prefix views: mode=%s max_prefix=%d min_prefix=%d min_gap=%d seed=%s",
+            prefix_view_mode, _r_max, prefix_min_tokens, prefix_min_gap, prefix_seed,
+        )
+    _train_collate = make_contrastive_collate(
+        _contrastive_collate_with_logprob, _prefix_sampler
+    )
+
     use_persistent_workers = bool(persistent_workers and num_workers and num_workers > 0)
     train_loader = DataLoader(
         train_dataset,
@@ -857,7 +972,7 @@ def train_contrastive_logprob_recon(
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=use_persistent_workers,
-        collate_fn=_contrastive_collate_with_logprob,
+        collate_fn=_train_collate,
     )
 
     steps_per_epoch = None
@@ -905,6 +1020,7 @@ def train_contrastive_logprob_recon(
         buffer_views = []
         buffer_view_indices = []
         buffer_logprobs = []
+        buffer_token_masks = []
         buffer_labels = [] if use_labels else None
         buffer_sample_ids = [] if use_labels else None
 
@@ -915,6 +1031,14 @@ def train_contrastive_logprob_recon(
 
             views = batch["views_activations"].to(device, non_blocking=True)
             buffer_views.append(views)
+
+            # Issue #149: prefix views arrive zero-padded with an explicit mask.
+            # Buffered alongside the activations so a gradient-accumulation
+            # window concatenates masks and activations consistently.
+            if "views_token_mask" in batch:
+                buffer_token_masks.append(
+                    batch["views_token_mask"].to(device, non_blocking=True)
+                )
 
             if "view_indices" in batch:
                 buffer_view_indices.append(batch["view_indices"].to(device, non_blocking=True))
@@ -943,9 +1067,13 @@ def train_contrastive_logprob_recon(
 
             if buffer_full or last_batch:
                 views_full = torch.cat(buffer_views, dim=0)
+                token_mask_full = (
+                    torch.cat(buffer_token_masks, dim=0) if buffer_token_masks else None
+                )
                 view_idx_full = torch.cat(buffer_view_indices, dim=0) if buffer_view_indices else None
                 logprob_full = torch.cat(buffer_logprobs, dim=0) if buffer_logprobs else None
                 buffer_views = []
+                buffer_token_masks = []
                 buffer_view_indices = []
                 buffer_logprobs = []
 
@@ -979,9 +1107,17 @@ def train_contrastive_logprob_recon(
 
                 bsz, num_views, seq_len, hidden_dim = views_full.shape
                 x_flat = views_full.reshape(bsz * num_views, seq_len, hidden_dim)
+                # (B, K, L) flattens under the same reshape as (B, K, L, D).
+                token_mask_flat = (
+                    token_mask_full.reshape(bsz * num_views, seq_len)
+                    if token_mask_full is not None
+                    else None
+                )
                 view_idx_flat = view_idx_full.reshape(bsz * num_views) if view_idx_full is not None else None
 
-                z_flat, logprob_pred_flat = _call_model(model, x_flat, layer_idx=view_idx_flat)
+                z_flat, logprob_pred_flat = _call_model(
+                    model, x_flat, layer_idx=view_idx_flat, token_mask=token_mask_flat
+                )
                 z_views = z_flat.reshape(bsz, num_views, -1)
 
                 # SupCon loss

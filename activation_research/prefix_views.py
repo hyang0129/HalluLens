@@ -157,7 +157,21 @@ class PrefixPairSampler:
         self.max_prefix = int(max_prefix)
         self.min_prefix = int(min_prefix)
         self.min_gap = int(min_gap)
+        self._seed = seed
         self._rng = random.Random(seed)
+
+    # ------------------------------------------------------------------ #
+    def reseed_for_worker(self, worker_id: int) -> None:
+        """Re-seed this sampler inside a forked DataLoader worker.
+
+        ``DataLoader`` forks workers, so every worker inherits a *copy* of this
+        object with an identical RNG state and would emit the same k sequence in
+        lockstep — cutting effective prefix diversity by ``num_workers``.
+        Mixing the worker id into the seed decorrelates the streams while
+        keeping the run reproducible.
+        """
+        base = 0 if self._seed is None else int(self._seed)
+        self._rng = random.Random((base + 1) * 100003 + int(worker_id))
 
     # ------------------------------------------------------------------ #
     def sample(self) -> PrefixViewSpec:
