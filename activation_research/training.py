@@ -955,9 +955,11 @@ def train_contrastive_logprob_recon(
             min_gap=int(prefix_min_gap),
             seed=prefix_seed,
         )
+        # loguru formats with {}, not %-style; %-args render literally.
         logger.info(
-            "prefix views: mode=%s max_prefix=%d min_prefix=%d min_gap=%d seed=%s",
-            prefix_view_mode, _r_max, prefix_min_tokens, prefix_min_gap, prefix_seed,
+            f"prefix views: mode={prefix_view_mode} num_views={_n_views} "
+            f"max_prefix={_r_max} min_prefix={prefix_min_tokens} "
+            f"min_gap={prefix_min_gap} seed={prefix_seed}"
         )
     _train_collate = make_contrastive_collate(
         _contrastive_collate_with_logprob, _prefix_sampler
