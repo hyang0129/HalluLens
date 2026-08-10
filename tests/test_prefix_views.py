@@ -330,11 +330,11 @@ def test_padding_without_mask_changes_the_embedding():
 # resolve_eval_prefixes
 # --------------------------------------------------------------------- #
 def test_resolve_defaults_to_eval_grid():
-    assert resolve_eval_prefixes(None, 64) == [0, 16, 32, 48, 64]
+    assert resolve_eval_prefixes(None, 64) == [16, 32, 48, 64]
 
 
 def test_resolve_drops_prefixes_above_capture_width():
-    assert resolve_eval_prefixes(None, 32) == [0, 16, 32]
+    assert resolve_eval_prefixes(None, 32) == [16, 32]
 
 
 def test_resolve_dedupes_and_preserves_order():
@@ -344,6 +344,8 @@ def test_resolve_dedupes_and_preserves_order():
 def test_resolve_rejects_negative_and_empty_result():
     with pytest.raises(ValueError):
         resolve_eval_prefixes([-1], 64)
+    with pytest.raises(ValueError):
+        resolve_eval_prefixes([0], 64)
     with pytest.raises(ValueError, match="no evaluation prefixes"):
         resolve_eval_prefixes([128], 64)
 
