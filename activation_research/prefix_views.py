@@ -60,12 +60,22 @@ import torch
 
 # Prefix lengths the evaluation reports on. Training never pins to these.
 #
-# k=0 ("prompt only, before any response token") is deliberately absent. It is
-# the crux of issue #149 — if k=0 matches k=64 the method class is measuring a
-# prompt-difficulty prior rather than anything about the generation — but it
-# cannot be expressed as a response-token slice. It needs prompt-side
-# activations (prompt_activations.npy), which is a separate arm, not a k value.
-EVAL_PREFIX_LENGTHS: tuple[int, ...] = (16, 32, 48, 64)
+# The low end (1, 4, 8) is where the curve is actually informative: measurements
+# on HotpotQA show it is already flat from k=16 upward, so the question is how
+# far down detection survives, not what happens between 16 and 64.
+#
+# k=0 is not a value here and never will be. With zero response tokens the
+# encoder receives nothing — it is degenerate, not the k->0 limit of this curve.
+# A "prompt only" number would require feeding prompt_activations.npy, i.e. a
+# different input space and therefore a different method, which belongs as its
+# own baseline rather than as a point on this curve.
+#
+# Note also that prompt conditioning is not a confound for these measurements.
+# The encoder sees response activations only, but those are hidden states of a
+# causal LM that attended over the full prompt, so prompt information is
+# legitimately present in every response token's representation. That is the
+# model's own state being read, not information smuggled in from outside it.
+EVAL_PREFIX_LENGTHS: tuple[int, ...] = (1, 4, 8, 16, 32, 48, 64)
 
 ViewMode = Literal["layer_only", "prefix_only", "mixed"]
 

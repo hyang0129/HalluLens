@@ -59,6 +59,9 @@
     "dump_embeddings": true,
     "eval_prefix_curve": true,
     "eval_prefix_lengths": [
+      1,
+      4,
+      8,
       16,
       32,
       48,

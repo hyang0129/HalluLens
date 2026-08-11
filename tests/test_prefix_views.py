@@ -330,11 +330,11 @@ def test_padding_without_mask_changes_the_embedding():
 # resolve_eval_prefixes
 # --------------------------------------------------------------------- #
 def test_resolve_defaults_to_eval_grid():
-    assert resolve_eval_prefixes(None, 64) == [16, 32, 48, 64]
+    assert resolve_eval_prefixes(None, 64) == [1, 4, 8, 16, 32, 48, 64]
 
 
 def test_resolve_drops_prefixes_above_capture_width():
-    assert resolve_eval_prefixes(None, 32) == [16, 32]
+    assert resolve_eval_prefixes(None, 32) == [1, 4, 8, 16, 32]
 
 
 def test_resolve_dedupes_and_preserves_order():
@@ -424,3 +424,40 @@ def test_eval_grid_excludes_zero():
     assert resolve_eval_prefixes(None, 64) == [16, 32, 48, 64]
     with pytest.raises(ValueError, match="prompt-only arm"):
         resolve_eval_prefixes([0, 16], 64)
+
+
+def test_eval_wrapper_handles_single_token_prefix():
+    """k=1 is the degenerate case for both stages: attention over a length-1
+    sequence and a mean over a single position. It must stay finite and must
+    equal encoding that one token directly."""
+    from activation_research.model import ProgressiveCompressor
+    from activation_research.prefix_views import PrefixEvalWrapper
+
+    torch.manual_seed(0)
+    m = ProgressiveCompressor(input_dim=256, final_dim=64).eval()
+    full = torch.randn(2, 64, 256)
+    with torch.no_grad():
+        z_wrapped = PrefixEvalWrapper(m, 1).eval()(full)
+        z_direct = m(full[:, :1])
+    assert torch.isfinite(z_wrapped).all()
+    assert torch.allclose(z_wrapped, z_direct, atol=1e-5)
+
+
+def test_low_k_grid_is_covered_end_to_end():
+    """The informative region is the low end — guard that 1/4/8 survive
+    resolution and produce distinct, finite embeddings."""
+    from activation_research.model import ProgressiveCompressor
+    from activation_research.prefix_views import PrefixEvalWrapper
+
+    torch.manual_seed(0)
+    m = ProgressiveCompressor(input_dim=256, final_dim=64).eval()
+    x = torch.randn(2, 64, 256)
+    zs = []
+    for k in (1, 4, 8):
+        with torch.no_grad():
+            z = PrefixEvalWrapper(m, k).eval()(x)
+        assert torch.isfinite(z).all()
+        zs.append(z)
+    # Different prefixes must not collapse to the same embedding.
+    assert not torch.allclose(zs[0], zs[1], atol=1e-6)
+    assert not torch.allclose(zs[1], zs[2], atol=1e-6)
