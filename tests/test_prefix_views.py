@@ -421,7 +421,7 @@ def test_eval_grid_excludes_zero():
     from activation_research.prefix_views import EVAL_PREFIX_LENGTHS
 
     assert 0 not in EVAL_PREFIX_LENGTHS
-    assert resolve_eval_prefixes(None, 64) == [16, 32, 48, 64]
+    assert resolve_eval_prefixes(None, 64) == [1, 4, 8, 16, 32, 48, 64]
     with pytest.raises(ValueError, match="prompt-only arm"):
         resolve_eval_prefixes([0, 16], 64)
 
