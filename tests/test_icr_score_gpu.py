@@ -45,6 +45,7 @@ def _numpy_reference(
     delta_h: torch.Tensor,         # (B, L, r_max, hidden_dim)
     response_lens: torch.Tensor,   # (B,)
     top_p: float = 0.1,
+    prompt_lens: torch.Tensor | None = None,
 ) -> np.ndarray:
     """Per-sample numpy loop matching the reference spec §3 contract."""
     from activation_research.icr_score import compute_icr_score
@@ -54,11 +55,17 @@ def _numpy_reference(
     h_np = h_block_input.cpu().numpy()
     dh_np = delta_h.cpu().numpy()
     rlens = response_lens.cpu().numpy()
+    plens = (
+        np.zeros_like(rlens)
+        if prompt_lens is None
+        else prompt_lens.cpu().numpy()
+    )
 
     return np.stack([
         np.array([
             compute_icr_score(
-                attn_np[b, l], h_np[b, l], dh_np[b, l], int(rlens[b]), top_p=top_p
+                attn_np[b, l], h_np[b, l], dh_np[b, l], int(rlens[b]),
+                top_p=top_p, prompt_len=int(plens[b]),
             )
             for l in range(L)
         ])
@@ -215,6 +222,25 @@ def test_gpu_matches_numpy_realistic_r_max():
     assert max_diff < 1e-5, (
         f"r_max=64 GPU vs numpy max|diff|={max_diff:.2e} >= 1e-5"
     )
+
+
+def test_gpu_matches_numpy_with_prompt_lengths_and_prefixes():
+    """Prompt length affects top-p count; response length still clips the key set."""
+    from activation_research.icr_score_gpu import compute_icr_per_layer_batched_gpu
+
+    B, L, r_max, D = 3, 3, 16, 48
+    attn, h, dh = _make_tensors(B=B, L=L, r_max=r_max, hidden_dim=D, seed=19)
+    rlens = torch.tensor([1, 4, 8], dtype=torch.int64)
+    plens = torch.tensor([3, 24, 80], dtype=torch.int64)
+
+    gpu_out = compute_icr_per_layer_batched_gpu(
+        attn, h, dh, rlens, top_p=0.1, prompt_lens=plens
+    ).numpy()
+    numpy_out = _numpy_reference(
+        attn, h, dh, rlens, top_p=0.1, prompt_lens=plens
+    )
+
+    np.testing.assert_allclose(gpu_out, numpy_out, atol=1e-5, rtol=1e-5)
 
 
 # ---------------------------------------------------------------------------

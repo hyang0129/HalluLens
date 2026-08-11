@@ -1,0 +1,18 @@
+{
+  "name": "llmsknow_prefix_per_k",
+  "routine": "llmsknow_probe",
+  "seeded": true,
+  "_comment": "Issue #149 generous per-k oracle: location selection and logistic probe fitting are constrained and repeated within each visible response prefix.",
+  "data": {
+    "relevant_layers": "14-29",
+    "pad_length": 63,
+    "preload": true,
+    "include_response_logprobs": false,
+    "response_logprobs_top_k": 20
+  },
+  "sweep": {"dev_size": 2000, "val_size": 1000, "C": 1.0, "max_iter": 100},
+  "evaluation": {
+    "eval_prefix_curve": true,
+    "eval_prefix_lengths": [1, 4, 8, 16, 32, 48, 64]
+  }
+}

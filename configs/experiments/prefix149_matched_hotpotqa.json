@@ -1,0 +1,21 @@
+{
+  "_comment": "Issue #149 fair baseline comparison. Learned sequence/tensor baselines train across response prefixes; LLMsKnow and ICR receive favorable per-k oracle fits; nonlearned scores are recomputed on exactly the visible tokens.",
+  "experiment_name": "prefix149_matched_hotpotqa",
+  "dataset": "hotpotqa_memmap",
+  "methods": [
+    "linear_probe_prefix_multik",
+    "saplma_prefix_multik",
+    "act_vit_prefix_multik",
+    "llmsknow_prefix_per_k",
+    "icr_probe_prefix_per_k",
+    "token_entropy_prefix_eval",
+    "logprob_baseline_prefix_eval"
+  ],
+  "split_seed": 42,
+  "training_seeds": [0, 1, 2, 3, 4],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs",
+  "split_seeds": [42, 1, 2, 3, 4]
+}

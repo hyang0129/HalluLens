@@ -15,6 +15,7 @@ from activation_research.prefix_views import (
     PrefixPairSampler,
     PrefixViewSpec,
     apply_prefix_views,
+    build_prefix_mask,
     resolve_eval_prefixes,
 )
 
@@ -231,6 +232,26 @@ def test_full_prefix_is_identity_with_all_true_mask():
     assert mask.all()
 
 
+def test_response_lengths_cap_each_prefix_without_leaking_padding():
+    views = _ramp(b=2, k=2, seq=8)
+    out, mask = apply_prefix_views(
+        views,
+        PrefixViewSpec((4, 8)),
+        response_lens=torch.tensor([2, 5]),
+    )
+    assert mask.sum(dim=-1).tolist() == [[2, 2], [4, 5]]
+    assert (out[0, :, 2:] == 0).all()
+    assert (out[1, 1, 5:] == 0).all()
+
+
+def test_build_prefix_mask_caps_by_response_length_and_sequence_width():
+    mask = build_prefix_mask(
+        torch.tensor([2, 5, 20]), seq_len=8, prefix_len=4, device="cpu"
+    )
+    assert mask.dtype == torch.bool
+    assert mask.sum(dim=-1).tolist() == [2, 4, 4]
+
+
 # --------------------------------------------------------------------- #
 # masked pooling / attention (activation_research.model)
 # --------------------------------------------------------------------- #
@@ -273,6 +294,31 @@ def test_masked_mean_survives_fully_masked_row():
     mask = torch.zeros(2, 8, dtype=torch.bool)
     out = masked_mean(x, mask)
     assert torch.isfinite(out).all()
+
+
+def test_linear_probe_mean_uses_only_real_prefix_tokens():
+    from activation_research.model import LinearProbe
+
+    model = LinearProbe(input_dim=2, pooling="mean").eval()
+    with torch.no_grad():
+        model.linear.weight.copy_(torch.tensor([[1.0, 0.0]]))
+        model.linear.bias.zero_()
+    x = torch.tensor([[[1.0, 0.0], [3.0, 0.0], [100.0, 0.0]]])
+    mask = torch.tensor([[True, True, False]])
+    assert torch.allclose(model(x, token_mask=mask), torch.sigmoid(torch.tensor([[2.0]])))
+
+
+def test_saplma_uses_last_real_token_not_padded_tail():
+    from activation_research.model import SimpleHaluClassifier
+
+    model = SimpleHaluClassifier(input_dim=2, hidden_dims=[], dropout=0.0).eval()
+    final = model.classifier[-1]
+    with torch.no_grad():
+        final.weight.copy_(torch.tensor([[1.0, 0.0]]))
+        final.bias.zero_()
+    x = torch.tensor([[[1.0, 0.0], [3.0, 0.0], [100.0, 0.0]]])
+    mask = torch.tensor([[True, True, False]])
+    assert torch.allclose(model(x, token_mask=mask), torch.sigmoid(torch.tensor([[3.0]])))
 
 
 def test_compressor_ignores_padded_tokens_end_to_end():
@@ -441,6 +487,21 @@ def test_eval_wrapper_handles_single_token_prefix():
         z_direct = m(full[:, :1])
     assert torch.isfinite(z_wrapped).all()
     assert torch.allclose(z_wrapped, z_direct, atol=1e-5)
+
+
+def test_eval_wrapper_infers_early_eos_padding_length():
+    from activation_research.model import ProgressiveCompressor
+    from activation_research.prefix_views import PrefixEvalWrapper
+
+    torch.manual_seed(0)
+    model = ProgressiveCompressor(input_dim=256, final_dim=64).eval()
+    short = torch.randn(2, 3, 256)
+    padded = torch.zeros(2, 8, 256)
+    padded[:, :3] = short
+    with torch.no_grad():
+        inferred = PrefixEvalWrapper(model, 8).eval()(padded)
+        direct = model(short)
+    assert torch.allclose(inferred, direct, atol=1e-5)
 
 
 def test_low_k_grid_is_covered_end_to_end():

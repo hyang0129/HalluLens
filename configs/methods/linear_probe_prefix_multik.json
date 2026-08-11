@@ -1,0 +1,32 @@
+{
+  "name": "linear_probe_prefix_multik",
+  "routine": "linear_probe",
+  "model_class": "linear_probe",
+  "_comment": "Issue #149 matched multi-k arm. Mean-pooling linear probe sees two response prefixes per batch during training and is evaluated on the shared k grid.",
+  "model_params": {"pooling": "mean"},
+  "training": {
+    "max_epochs": 100,
+    "batch_size": 512,
+    "lr": 0.001,
+    "balanced_sampling": true,
+    "use_infinite_index_stream": true,
+    "min_total_steps": 3000,
+    "prefix_training": true,
+    "prefix_min_tokens": 8,
+    "prefix_min_gap": 8,
+    "prefix_max_tokens": 64
+  },
+  "data": {
+    "relevant_layers": "14-29",
+    "probe_layer": 22,
+    "pad_length": 63,
+    "preload": true,
+    "include_response_logprobs": true,
+    "response_logprobs_top_k": 20
+  },
+  "evaluation": {
+    "metrics": ["auroc"],
+    "eval_prefix_curve": true,
+    "eval_prefix_lengths": [1, 4, 8, 16, 32, 48, 64]
+  }
+}

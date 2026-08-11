@@ -1636,13 +1636,25 @@ class SimpleHaluClassifier(nn.Module):
         
         self.classifier = nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x, token_mask: torch.Tensor | None = None):
         """
         x: (B, L, D)
         returns: (B, 1) sigmoid probability
         """
         x = x.float()
-        last_token = x[:, -1, :]  # (B, D)
+        if token_mask is None:
+            last_token = x[:, -1, :]  # (B, D)
+        else:
+            mask = token_mask.to(device=x.device, dtype=torch.bool)
+            if mask.shape != x.shape[:2]:
+                raise ValueError(
+                    f"token_mask shape {tuple(mask.shape)} does not match "
+                    f"sequence shape {tuple(x.shape[:2])}"
+                )
+            last_idx = mask.long().sum(dim=1).clamp(min=1) - 1
+            last_token = x[
+                torch.arange(x.shape[0], device=x.device), last_idx
+            ]
         logits = self.classifier(last_token)
         return torch.sigmoid(logits)
 
@@ -1817,16 +1829,28 @@ class LinearProbe(nn.Module):
         self.pooling = pooling
         self.linear = nn.Linear(input_dim, 1)
 
-    def forward(self, x):
+    def forward(self, x, token_mask: torch.Tensor | None = None):
         """
         x: (B, L, D)
         returns: (B, 1) sigmoid probability
         """
         x = x.float()
         if self.pooling == "mean":
-            pooled = x.mean(dim=1)      # (B, D)
+            pooled = masked_mean(x, token_mask)
         else:
-            pooled = x[:, -1, :]         # (B, D)
+            if token_mask is None:
+                pooled = x[:, -1, :]     # (B, D)
+            else:
+                mask = token_mask.to(device=x.device, dtype=torch.bool)
+                if mask.shape != x.shape[:2]:
+                    raise ValueError(
+                        f"token_mask shape {tuple(mask.shape)} does not match "
+                        f"sequence shape {tuple(x.shape[:2])}"
+                    )
+                last_idx = mask.long().sum(dim=1).clamp(min=1) - 1
+                pooled = x[
+                    torch.arange(x.shape[0], device=x.device), last_idx
+                ]
         return torch.sigmoid(self.linear(pooled))
 
 

@@ -75,7 +75,11 @@ def _apply_prefix_views_to_collated(out, prefix_sampler):
     from activation_research.prefix_views import apply_prefix_views
 
     spec = prefix_sampler.sample()
-    masked, token_mask = apply_prefix_views(out["views_activations"], spec)
+    masked, token_mask = apply_prefix_views(
+        out["views_activations"],
+        spec,
+        response_lens=out.get("response_len"),
+    )
     out["views_activations"] = masked
     out["views_token_mask"] = token_mask
     out["view_prefix_lens"] = torch.tensor(spec.prefix_lens, dtype=torch.long)
@@ -130,6 +134,10 @@ def _contrastive_collate_kview(batch):
         out["view_indices"] = torch.stack([b["view_indices"] for b in batch], dim=0).to(dtype=torch.long)
     if "input_length" in batch[0]:
         out["input_length"] = torch.tensor([b["input_length"] for b in batch], dtype=torch.long)
+    if "response_len" in batch[0]:
+        out["response_len"] = torch.tensor(
+            [b["response_len"] for b in batch], dtype=torch.long
+        )
 
     return out
 

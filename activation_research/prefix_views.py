@@ -232,6 +232,7 @@ def apply_prefix_views(
     views: torch.Tensor,
     spec: PrefixViewSpec,
     *,
+    response_lens: Optional[torch.Tensor] = None,
     prompt_fallback: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Zero out post-prefix tokens and build the matching token mask.
@@ -252,6 +253,11 @@ def apply_prefix_views(
         under attention softmax. With this flag such a slot keeps a single
         token; the caller is responsible for substituting prompt-side
         activations for a true k=0 arm.
+    response_lens : Tensor (B,), optional
+        Number of real response tokens in each sample.  When present, the
+        valid region is ``min(prefix, response_len[b])`` rather than the
+        requested prefix alone.  This prevents early-EOS padding from being
+        treated as generated content.
 
     Returns
     -------
@@ -275,23 +281,43 @@ def apply_prefix_views(
             f"view tensor has K={k_slots} but spec declares {spec.num_views}"
         )
 
+    if response_lens is not None:
+        response_lens = torch.as_tensor(response_lens, device=views.device)
+        if response_lens.ndim != 1 or int(response_lens.shape[0]) != bsz:
+            raise ValueError(
+                f"response_lens must have shape ({bsz},), got "
+                f"{tuple(response_lens.shape)}"
+            )
+        response_lens = response_lens.to(dtype=torch.long).clamp(
+            min=0, max=seq_len
+        )
+
     token_mask = torch.zeros(
         (bsz, k_slots, seq_len), dtype=torch.bool, device=views.device
     )
+    positions = torch.arange(seq_len, device=views.device).unsqueeze(0)
     for slot, prefix in enumerate(spec.prefix_lens):
         if prefix > seq_len:
             raise ValueError(
                 f"view slot {slot} requests prefix {prefix} but only "
                 f"{seq_len} tokens are available"
             )
-        eff = prefix
+        eff = int(prefix)
         if eff == 0:
             if not prompt_fallback:
                 raise ValueError(
                     f"view slot {slot} has prefix 0 and prompt_fallback=False"
                 )
             eff = 1
-        token_mask[:, slot, :eff] = True
+        if response_lens is None:
+            token_mask[:, slot, :eff] = True
+        else:
+            effective_lens = torch.minimum(
+                response_lens, torch.full_like(response_lens, eff)
+            )
+            if prompt_fallback:
+                effective_lens = effective_lens.clamp(min=1)
+            token_mask[:, slot] = positions < effective_lens.unsqueeze(1)
 
     masked_views = views * token_mask.unsqueeze(-1).to(views.dtype)
     return masked_views, token_mask
@@ -337,12 +363,55 @@ class PrefixEvalWrapper(torch.nn.Module):
     def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         seq_len = x.shape[1]
         k = min(self.prefix_len, seq_len)
-        mask = torch.zeros(
-            (x.shape[0], seq_len), dtype=torch.bool, device=x.device
+        response_lens = kwargs.pop("response_lens", None)
+        positions = torch.arange(seq_len, device=x.device).unsqueeze(0)
+        if response_lens is None:
+            # Memmap captures use exact zero rows after response_len.  Infer the
+            # raw-input validity before projection/positional encodings make
+            # those rows non-zero.  Callers with explicit lengths can pass
+            # response_lens to avoid relying on this storage invariant.
+            raw_valid = x.detach().ne(0).any(dim=-1)
+            inferred = raw_valid.long().sum(dim=-1).clamp(min=1, max=seq_len)
+            response_lens = inferred
+        else:
+            response_lens = torch.as_tensor(
+                response_lens, dtype=torch.long, device=x.device
+            ).clamp(min=1, max=seq_len)
+        effective = torch.minimum(
+            response_lens, torch.full_like(response_lens, k)
         )
-        mask[:, :k] = True
+        mask = positions < effective.unsqueeze(1)
         x = x * mask.unsqueeze(-1).to(x.dtype)
         return self.model(x, *args, token_mask=mask, **kwargs)
+
+
+def build_prefix_mask(
+    response_lens: torch.Tensor,
+    *,
+    seq_len: int,
+    prefix_len: int,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """Return a response-length-aware ``(B, seq_len)`` prefix mask.
+
+    The helper is shared by supervised baselines whose batches retain the
+    fixed capture width.  Every row keeps exactly
+    ``min(response_len[b], prefix_len, seq_len)`` positions, with a one-token
+    floor because all response-prefix experiments require ``k >= 1``.
+    """
+    if int(seq_len) < 1:
+        raise ValueError(f"seq_len must be >= 1, got {seq_len}")
+    if int(prefix_len) < 1:
+        raise ValueError(f"prefix_len must be >= 1, got {prefix_len}")
+    lens = torch.as_tensor(response_lens, dtype=torch.long, device=device)
+    if lens.ndim != 1:
+        raise ValueError(
+            f"response_lens must be one-dimensional, got {tuple(lens.shape)}"
+        )
+    cap = min(int(prefix_len), int(seq_len))
+    lens = lens.clamp(min=1, max=cap)
+    positions = torch.arange(int(seq_len), device=lens.device).unsqueeze(0)
+    return positions < lens.unsqueeze(1)
 
 
 def resolve_eval_prefixes(

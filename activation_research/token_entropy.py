@@ -50,6 +50,7 @@ class TokenEntropyDetector:
         *,
         batch_size: int = 256,
         num_workers: int = 0,
+        prefix_len: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Iterate over *dataset*, collect logprob fields, and compute AUROC.
 
@@ -63,6 +64,10 @@ class TokenEntropyDetector:
             DataLoader batch size.
         num_workers : int
             DataLoader workers.
+        prefix_len : int, optional
+            Restrict every token-level statistic to the first ``prefix_len``
+            response positions.  The stored response mask is retained, so
+            early-EOS padding remains excluded.
 
         Returns
         -------
@@ -86,6 +91,14 @@ class TokenEntropyDetector:
                     "response_token_logprobs": batch["response_token_logprobs"][j],
                     "response_logprob_mask": batch["response_logprob_mask"][j],
                 }
+                if prefix_len is not None:
+                    if int(prefix_len) < 1:
+                        raise ValueError(
+                            f"prefix_len must be >= 1, got {prefix_len}"
+                        )
+                    mask = record["response_logprob_mask"].clone().bool()
+                    mask[int(prefix_len):] = False
+                    record["response_logprob_mask"] = mask
                 if "response_topk_logprobs" in batch:
                     record["response_topk_logprobs"] = batch["response_topk_logprobs"][j]
                 records.append(record)

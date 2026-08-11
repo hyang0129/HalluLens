@@ -1,0 +1,21 @@
+{
+  "name": "icr_probe_prefix_per_k",
+  "routine": "icr_probe",
+  "seeded": true,
+  "_comment": "Issue #149 generous per-k oracle. ICR features are recomputed from raw attention/activations at each prefix, then a separate probe is fitted for each k.",
+  "training": {
+    "max_epochs": 50,
+    "batch_size": 256,
+    "lr": 0.001,
+    "weight_decay": 0.0,
+    "plateau_patience": 5,
+    "plateau_factor": 0.5,
+    "early_stop_patience": 10
+  },
+  "data": {"val_fraction": 0.1},
+  "evaluation": {
+    "eval_prefix_curve": true,
+    "eval_prefix_lengths": [1, 4, 8, 16, 32, 48, 64],
+    "prefix_icr_cache_root": "shared/prefix149_icr"
+  }
+}

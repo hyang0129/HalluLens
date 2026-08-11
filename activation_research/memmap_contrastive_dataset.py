@@ -404,6 +404,7 @@ class MemmapContrastiveDataset(Dataset):
             layer_pos=layer_id,
             layer_id=layer_id,
             _row_indices=row_idx,
+            response_lens=np.asarray(self._resp_len[row_idx], dtype=np.int32),
         )
 
     # ------------------------------------------------------------------ #
@@ -618,6 +619,7 @@ class MemmapContrastiveDataset(Dataset):
             "views_activations": views_activations,
             "view_indices": torch.tensor(view_positions, dtype=torch.long),
             "input_length": int(self._prompt_len[sample_row]),
+            "response_len": int(self._resp_len[sample_row]),
         }
 
         # --- Logprob fields (Mechanism F) ---
