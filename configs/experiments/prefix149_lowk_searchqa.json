@@ -1,0 +1,16 @@
+{
+  "_comment": "Issue #149 symmetric low-k retraining.",
+  "experiment_name": "prefix149_lowk_searchqa",
+  "dataset": "searchqa_memmap",
+  "methods": [
+    "contrastive_logprob_recon_prefix_mixed_lowk",
+    "act_vit_prefix_multik_lowk"
+  ],
+  "split_seed": 42,
+  "split_seeds": [42, 1, 2, 3, 4],
+  "training_seeds": [0, 1, 2, 3, 4],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs"
+}

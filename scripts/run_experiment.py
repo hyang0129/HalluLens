@@ -635,6 +635,7 @@ def run_contrastive_logprob_recon(
             prefix_view_mode=train_cfg.get("prefix_view_mode", "layer_only"),
             prefix_min_tokens=train_cfg.get("prefix_min_tokens", 8),
             prefix_min_gap=train_cfg.get("prefix_min_gap", 8),
+            prefix_sampling_lengths=train_cfg.get("prefix_sampling_lengths"),
             prefix_seed=training_seed,
         )
 
@@ -3194,13 +3195,16 @@ def run_act_vit(
             max_prefix=int(train_ds.max_response_len),
             min_prefix=int(train_cfg.get("prefix_min_tokens", 8)),
             min_gap=int(train_cfg.get("prefix_min_gap", 8)),
+            sampling_prefixes=train_cfg.get("prefix_sampling_lengths"),
             seed=training_seed,
         )
         logger.info(
             "[act_vit] multi-k training enabled: "
             f"min={train_cfg.get('prefix_min_tokens', 8)} "
             f"gap={train_cfg.get('prefix_min_gap', 8)} "
-            f"max={train_ds.max_response_len} seed={training_seed}"
+            f"max={train_ds.max_response_len} "
+            f"support={train_cfg.get('prefix_sampling_lengths', 'continuous')} "
+            f"seed={training_seed}"
         )
 
     num_workers = experiment_cfg.get("num_workers", 4)

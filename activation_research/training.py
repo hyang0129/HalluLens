@@ -771,6 +771,7 @@ def train_contrastive_logprob_recon(
     prefix_view_mode="layer_only",
     prefix_min_tokens=8,
     prefix_min_gap=8,
+    prefix_sampling_lengths=None,
     prefix_seed=None,
     checkpoint_dir="checkpoints",
     save_every=1,
@@ -961,13 +962,15 @@ def train_contrastive_logprob_recon(
             max_prefix=int(_r_max),
             min_prefix=int(prefix_min_tokens),
             min_gap=int(prefix_min_gap),
+            sampling_prefixes=prefix_sampling_lengths,
             seed=prefix_seed,
         )
         # loguru formats with {}, not %-style; %-args render literally.
         logger.info(
             f"prefix views: mode={prefix_view_mode} num_views={_n_views} "
             f"max_prefix={_r_max} min_prefix={prefix_min_tokens} "
-            f"min_gap={prefix_min_gap} seed={prefix_seed}"
+            f"min_gap={prefix_min_gap} "
+            f"support={prefix_sampling_lengths or 'continuous'} seed={prefix_seed}"
         )
     _train_collate = make_contrastive_collate(
         _contrastive_collate_with_logprob, _prefix_sampler

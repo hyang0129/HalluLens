@@ -129,6 +129,11 @@ class PrefixPairSampler:
     min_gap : int
         Minimum ``k_max - k_min`` when more than one distinct prefix is drawn.
         Prevents near-identical positives that make the InfoNCE task trivial.
+    sampling_prefixes : sequence of int, optional
+        When supplied, draw prefixes only from this explicit support instead
+        of from every integer in ``[min_prefix, max_prefix]``.  This is used
+        by the matched low-k experiment so HalluLens and ACT-ViT see the same
+        seven-point training distribution as the reported evaluation grid.
     seed : int | None
         Seeds a private RNG so view geometry is reproducible per run and
         independent of global ``random`` state (which the layer sampler uses).
@@ -147,6 +152,7 @@ class PrefixPairSampler:
         max_prefix: int = 64,
         min_prefix: int = 8,
         min_gap: int = 8,
+        sampling_prefixes: Optional[Sequence[int]] = None,
         seed: Optional[int] = None,
     ) -> None:
         if mode not in ("layer_only", "prefix_only", "mixed"):
@@ -173,6 +179,31 @@ class PrefixPairSampler:
         self.max_prefix = int(max_prefix)
         self.min_prefix = int(min_prefix)
         self.min_gap = int(min_gap)
+        self.sampling_prefixes: Optional[tuple[int, ...]] = None
+        self._sampling_pairs: Optional[tuple[tuple[int, int], ...]] = None
+        if sampling_prefixes is not None:
+            resolved = tuple(sorted({int(k) for k in sampling_prefixes}))
+            if not resolved:
+                raise ValueError("sampling_prefixes must be non-empty")
+            if resolved[0] < self.min_prefix or resolved[-1] > self.max_prefix:
+                raise ValueError(
+                    "sampling_prefixes must lie within "
+                    f"[{self.min_prefix}, {self.max_prefix}], got {resolved}"
+                )
+            if self.num_views > 1:
+                pairs = tuple(
+                    (lo, hi)
+                    for i, lo in enumerate(resolved)
+                    for hi in resolved[i + 1 :]
+                    if hi - lo >= self.min_gap
+                )
+                if not pairs:
+                    raise ValueError(
+                        "sampling_prefixes contain no distinct pair satisfying "
+                        f"min_gap={self.min_gap}: {resolved}"
+                    )
+                self._sampling_pairs = pairs
+            self.sampling_prefixes = resolved
         self._seed = seed
         self._rng = random.Random(seed)
 
@@ -196,8 +227,28 @@ class PrefixPairSampler:
             return PrefixViewSpec(tuple([self.max_prefix] * self.num_views))
 
         if self.num_views == 1:
-            k = self._rng.randint(self.min_prefix, self.max_prefix)
+            if self.sampling_prefixes is not None:
+                k = self._rng.choice(self.sampling_prefixes)
+            else:
+                k = self._rng.randint(self.min_prefix, self.max_prefix)
             return PrefixViewSpec((k,))
+
+        if self._sampling_pairs is not None:
+            k_lo, k_hi = self._rng.choice(self._sampling_pairs)
+            if self.num_views == 2:
+                return PrefixViewSpec((k_lo, k_hi))
+            # The issue-#149 matched arms use two views.  Preserve sensible
+            # behavior for callers with K>2 by sampling additional supported
+            # values inside the selected endpoints (with replacement when
+            # there are fewer candidates than interior slots).
+            interior = tuple(
+                k for k in self.sampling_prefixes or () if k_lo < k < k_hi
+            )
+            middle = [
+                self._rng.choice(interior or (k_lo, k_hi))
+                for _ in range(self.num_views - 2)
+            ]
+            return PrefixViewSpec(tuple([k_lo, *sorted(middle), k_hi]))
 
         # Draw the short prefix, then the gap independently of it, so gap size
         # carries no information about k_1 (shortcut avoidance).

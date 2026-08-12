@@ -111,6 +111,25 @@ def test_sampler_is_reproducible_by_seed():
     ]
 
 
+def test_sampler_can_restrict_training_to_explicit_low_k_grid():
+    grid = (1, 4, 8, 16, 32, 48, 64)
+    sampler = PrefixPairSampler(
+        mode="mixed",
+        max_prefix=64,
+        min_prefix=1,
+        min_gap=1,
+        sampling_prefixes=grid,
+        seed=149,
+    )
+    seen = set()
+    for _ in range(300):
+        spec = sampler.sample()
+        assert spec.prefix_lens[0] < spec.prefix_lens[1]
+        assert set(spec.prefix_lens).issubset(grid)
+        seen.update(spec.prefix_lens)
+    assert seen == set(grid)
+
+
 def test_sampler_does_not_consume_global_random_state():
     """View geometry must not perturb the layer sampler's global RNG stream."""
     import random as _random

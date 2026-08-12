@@ -185,3 +185,55 @@ def test_matched_cell_builders_are_isolated_and_idempotent(tmp_path: Path):
     assert len(learned) == 2
     assert all(cell["seed"] == "0,1,2,3,4" for cell in learned)
     assert all(cell["output_check"].endswith("seed_4/eval_metrics.json") for cell in learned)
+
+
+def test_lowk_cells_cover_canonical_datasets_and_prioritize_hotpotqa(tmp_path: Path):
+    from scripts.dispatch.build_issue_149_lowk_cells import build
+
+    root = tmp_path / "lowk-dispatch"
+    assert build(root) == 12
+    assert build(root) == 0
+
+    cells = sorted((root / "pending").glob("*.json"))
+    assert len(cells) == 12
+    assert all("hotpotqa_memmap" in path.name for path in cells[:2])
+    assert {
+        json.loads(path.read_text())["dataset"] for path in cells
+    } == {
+        "hotpotqa_memmap",
+        "mmlu_memmap",
+        "nq_memmap",
+        "popqa_memmap",
+        "sciq_memmap",
+        "searchqa_memmap",
+    }
+    assert {
+        json.loads(path.read_text())["method"] for path in cells
+    } == {
+        "act_vit_prefix_multik_lowk",
+        "contrastive_logprob_recon_prefix_mixed_lowk",
+    }
+    assert all(
+        json.loads(path.read_text())["seed"] == "0,1,2,3,4" for path in cells
+    )
+
+
+def test_lowk_methods_share_exact_prefix_training_support():
+    root = Path(__file__).resolve().parents[1]
+    methods = (
+        "act_vit_prefix_multik_lowk",
+        "contrastive_logprob_recon_prefix_mixed_lowk",
+    )
+    configs = [
+        json.loads((root / "configs" / "methods" / f"{name}.json").read_text())
+        for name in methods
+    ]
+    expected = [1, 4, 8, 16, 32, 48, 64]
+    assert all(cfg["training"]["prefix_min_tokens"] == 1 for cfg in configs)
+    assert all(cfg["training"]["prefix_min_gap"] == 1 for cfg in configs)
+    assert all(
+        cfg["training"]["prefix_sampling_lengths"] == expected for cfg in configs
+    )
+    assert all(
+        cfg["evaluation"]["eval_prefix_lengths"] == expected for cfg in configs
+    )
