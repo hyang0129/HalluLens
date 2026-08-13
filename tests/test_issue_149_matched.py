@@ -187,21 +187,20 @@ def test_matched_cell_builders_are_isolated_and_idempotent(tmp_path: Path):
     assert all(cell["output_check"].endswith("seed_4/eval_metrics.json") for cell in learned)
 
 
-def test_lowk_cells_cover_canonical_datasets_and_prioritize_hotpotqa(tmp_path: Path):
+def test_lowk_cells_cover_benchmark_datasets_and_prioritize_hotpotqa(tmp_path: Path):
     from scripts.dispatch.build_issue_149_lowk_cells import build
 
     root = tmp_path / "lowk-dispatch"
-    assert build(root) == 12
+    assert build(root) == 10
     assert build(root) == 0
 
     cells = sorted((root / "pending").glob("*.json"))
-    assert len(cells) == 12
+    assert len(cells) == 10
     assert all("hotpotqa_memmap" in path.name for path in cells[:2])
     assert {
         json.loads(path.read_text())["dataset"] for path in cells
     } == {
         "hotpotqa_memmap",
-        "mmlu_memmap",
         "nq_memmap",
         "popqa_memmap",
         "sciq_memmap",

@@ -1,8 +1,9 @@
 """Build the symmetric low-k HalluLens/ACT-ViT queue for issue #149.
 
-The queue covers the six canonical Llama memmap datasets.  Each cell bundles
-seeds 0-4.  Numeric cell priorities put both HotpotQA methods first under the
-filesystem queue's lexicographic claiming rule.
+The queue covers the five in-scope Llama memmap benchmark datasets (MMLU is
+explicitly excluded). Each cell bundles seeds 0-4. Numeric cell priorities put
+both HotpotQA methods first under the filesystem queue's lexicographic claiming
+rule.
 """
 
 from __future__ import annotations
@@ -20,7 +21,6 @@ from scripts.dispatch.claim import init_dispatch_dirs  # noqa: E402
 
 _DATASETS = (
     ("00", "hotpotqa_memmap"),
-    ("10", "mmlu_memmap"),
     ("20", "nq_memmap"),
     ("30", "popqa_memmap"),
     ("40", "sciq_memmap"),
@@ -35,7 +35,7 @@ _SEEDS = "0,1,2,3,4"
 
 def _dispatch_has_cell(dispatch_root: Path, cell_id: str) -> bool:
     filename = f"{cell_id}.json"
-    for subdir in ("pending", "done", "failed"):
+    for subdir in ("pending", "done", "failed", "cancelled"):
         if (dispatch_root / subdir / filename).exists():
             return True
     claimed = dispatch_root / "claimed"
