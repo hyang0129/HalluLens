@@ -191,12 +191,12 @@ def test_lowk_cells_cover_benchmark_datasets_and_prioritize_hotpotqa(tmp_path: P
     from scripts.dispatch.build_issue_149_lowk_cells import build
 
     root = tmp_path / "lowk-dispatch"
-    assert build(root) == 10
+    assert build(root) == 50
     assert build(root) == 0
 
     cells = sorted((root / "pending").glob("*.json"))
-    assert len(cells) == 10
-    assert all("hotpotqa_memmap" in path.name for path in cells[:2])
+    assert len(cells) == 50
+    assert all("hotpotqa_memmap" in path.name for path in cells[:10])
     assert {
         json.loads(path.read_text())["dataset"] for path in cells
     } == {
@@ -212,8 +212,83 @@ def test_lowk_cells_cover_benchmark_datasets_and_prioritize_hotpotqa(tmp_path: P
         "act_vit_prefix_multik_lowk",
         "contrastive_logprob_recon_prefix_mixed_lowk",
     }
+    payloads = [json.loads(path.read_text()) for path in cells]
+    assert {cell["seed"] for cell in payloads} == {0, 1, 2, 3, 4}
+    assert len(
+        {
+            (cell["dataset"], cell["method"], cell["seed"])
+            for cell in payloads
+        }
+    ) == 50
     assert all(
-        json.loads(path.read_text())["seed"] == "0,1,2,3,4" for path in cells
+        f"seed_{cell['seed']}" in cell["output_check"] for cell in payloads
+    )
+
+
+def test_lowk_builder_preserves_claimed_bundle_and_deletes_only_nonrunning(
+    tmp_path: Path,
+):
+    from scripts.dispatch.build_issue_149_lowk_cells import (
+        build,
+        remove_nonrunning_bundled_cells,
+    )
+    from scripts.dispatch.claim import init_dispatch_dirs
+
+    root = tmp_path / "lowk-dispatch"
+    init_dispatch_dirs(root)
+    (root / "cancelled").mkdir()
+    bundled = {
+        "dataset": "hotpotqa_memmap",
+        "method": "act_vit_prefix_multik_lowk",
+        "seed": "0,1,2,3,4",
+    }
+    for state in ("pending", "done", "failed", "cancelled"):
+        (root / state / f"legacy_{state}.json").write_text(
+            json.dumps(bundled)
+        )
+    claimed = root / "claimed" / "live-worker"
+    claimed.mkdir()
+    active_path = claimed / "legacy_active.json"
+    active_path.write_text(json.dumps(bundled))
+
+    removed = remove_nonrunning_bundled_cells(root)
+    assert len(removed) == 4
+    assert active_path.exists()
+    # Five active HotpotQA ACT-ViT seeds are suppressed; every other
+    # dataset/method/seed cell is emitted.
+    assert build(root) == 45
+    assert not any(
+        "hotpotqa_memmap__act_vit_prefix_multik_lowk" in path.name
+        for path in (root / "pending").glob("*.json")
+    )
+
+
+def test_lowk_seed_completion_is_method_specific(tmp_path: Path):
+    from scripts.dispatch.build_issue_149_lowk_cells import _seed_is_complete
+
+    act_run = tmp_path / "runs" / "act" / "seed_0"
+    act_run.mkdir(parents=True)
+    (act_run / "eval_metrics.json").write_text("{}")
+    assert _seed_is_complete(
+        tmp_path,
+        Path("runs/act/seed_0"),
+        "act_vit_prefix_multik_lowk",
+    )
+
+    contrastive_run = tmp_path / "runs" / "contrastive" / "seed_0"
+    contrastive_run.mkdir(parents=True)
+    (contrastive_run / "eval_metrics.json").write_text("{}")
+    method = "contrastive_logprob_recon_prefix_mixed_lowk"
+    assert not _seed_is_complete(
+        tmp_path, Path("runs/contrastive/seed_0"), method
+    )
+    (contrastive_run / "predictions.csv").write_text("score\n")
+    assert _seed_is_complete(
+        tmp_path, Path("runs/contrastive/seed_0"), method
+    )
+    (contrastive_run / "run_error.json").write_text("{}")
+    assert not _seed_is_complete(
+        tmp_path, Path("runs/contrastive/seed_0"), method
     )
 
 

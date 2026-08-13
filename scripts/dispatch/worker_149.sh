@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # worker_149.sh — coordinator-free GPU worker for the issue #149 early-detection
-# pilot: mixed layer x prefix contrastive views, AUROC at k=16/32/48/64.
+# pilot: mixed layer x prefix contrastive views, AUROC at
+# k=1/4/8/16/32/48/64.
 #
 # Queue the cells first:
 #   python scripts/dispatch/build_issue_149_cells.py --dispatch-root shared/issue_149_dispatch
@@ -8,8 +9,9 @@
 # Dispatched via:
 #   gpu_dispatch.py run --node NODE -- bash scripts/dispatch/worker_149.sh
 #
-# Each cell is (dataset x view-geometry) with seeds 0-4 bundled, so a re-claimed
-# cell resumes at the first seed lacking predictions.csv.
+# The worker accepts either a scalar seed (the current dataset x method x seed
+# design) or a legacy comma-separated seed bundle. Cell names are opaque here;
+# the JSON payload controls the run.
 #
 # Env vars (override defaults):
 #   DISPATCH_ROOT — (default: shared/issue_149_dispatch)
