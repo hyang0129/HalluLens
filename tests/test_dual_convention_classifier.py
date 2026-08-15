@@ -1,0 +1,175 @@
+"""CPU-only contracts for the issue #149 dual-convention scope expansion."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import torch
+
+from activation_research.model import (
+    DualConventionContrastiveClassifier,
+    LogprobReconProgressiveCompressor,
+)
+
+
+def _make_model() -> DualConventionContrastiveClassifier:
+    torch.manual_seed(149)
+    return DualConventionContrastiveClassifier(
+        input_dim=128,
+        final_dim=64,
+        classifier_hidden_dim=16,
+        recon_seq_len=10,
+        recon_hidden_dim=16,
+        input_dropout=0.0,
+        classifier_dropout=0.0,
+    )
+
+
+def test_two_full_branches_plus_classifier_parameter_contract():
+    base = LogprobReconProgressiveCompressor(
+        input_dim=128,
+        final_dim=64,
+        recon_seq_len=10,
+        recon_hidden_dim=16,
+        input_dropout=0.0,
+    )
+    model = _make_model()
+    base_count = sum(p.numel() for p in base.parameters())
+    classifier_count = sum(p.numel() for p in model.classifier.parameters())
+    assert sum(p.numel() for p in model.standard_encoder.parameters()) == base_count
+    assert sum(p.numel() for p in model.mirrored_encoder.parameters()) == base_count
+    assert sum(p.numel() for p in model.parameters()) == 2 * base_count + classifier_count
+    assert next(model.standard_encoder.parameters()).data_ptr() != next(
+        model.mirrored_encoder.parameters()
+    ).data_ptr()
+
+
+def test_forward_exposes_two_64d_representations_and_128d_concat():
+    model = _make_model().eval()
+    x = torch.randn(8, 10, 128)
+    with torch.no_grad():
+        concat, standard, mirrored, recon = model.forward_with_heads(x)
+        logits = model.classifier_logits_from_views(
+            standard.reshape(4, 2, -1), mirrored.reshape(4, 2, -1)
+        )
+    assert concat.shape == (8, 128)
+    assert standard.shape == mirrored.shape == (8, 64)
+    assert recon[0].shape == recon[1].shape == (8, 10)
+    assert logits.shape == (4,)
+
+
+def test_classifier_loss_backpropagates_into_both_encoders():
+    model = _make_model().train()
+    x = torch.randn(8, 10, 128)
+    _, standard, mirrored, _ = model.forward_with_heads(x)
+    logits = model.classifier_logits_from_views(
+        standard.reshape(4, 2, -1), mirrored.reshape(4, 2, -1)
+    )
+    loss = torch.nn.functional.binary_cross_entropy_with_logits(
+        logits, torch.tensor([0.0, 1.0, 0.0, 1.0])
+    )
+    loss.backward()
+    assert all(
+        p.grad is not None for p in model.standard_encoder.encoder.parameters()
+    )
+    assert all(
+        p.grad is not None for p in model.mirrored_encoder.encoder.parameters()
+    )
+    assert all(p.grad is not None for p in model.classifier.parameters())
+
+
+class _TinyDataset(torch.utils.data.Dataset):
+    _max_resp = 10
+    _num_views = 2
+
+    def __init__(self) -> None:
+        generator = torch.Generator().manual_seed(17)
+        self.views = torch.randn(8, 2, 10, 128, generator=generator)
+        self.labels = torch.tensor([0, 1, 0, 1, 0, 1, 0, 1])
+        self.logprobs = torch.randn(8, 10, generator=generator)
+
+    def __len__(self) -> int:
+        return len(self.labels)
+
+    def __getitem__(self, index: int) -> dict:
+        return {
+            "views_activations": self.views[index],
+            "halu": self.labels[index],
+            "logprob": self.logprobs[index],
+            "response_len": 10,
+            "hashkey": f"tiny-{index}",
+        }
+
+
+def test_joint_trainer_updates_branches_decoders_and_classifier(tmp_path: Path):
+    from activation_research.training import train_contrastive_logprob_recon_dualloss
+
+    model = _make_model()
+    before = {
+        "standard": next(model.standard_encoder.encoder.parameters()).detach().clone(),
+        "mirrored": next(model.mirrored_encoder.encoder.parameters()).detach().clone(),
+        "decoder": next(model.standard_encoder.decoder.parameters()).detach().clone(),
+        "classifier": next(model.classifier.parameters()).detach().clone(),
+    }
+    train_contrastive_logprob_recon_dualloss(
+        model=model,
+        train_dataset=_TinyDataset(),
+        test_dataset=None,
+        epochs=1,
+        batch_size=8,
+        lr=1e-3,
+        temperature=0.1,
+        device="cpu",
+        num_workers=0,
+        sub_batch_size=8,
+        checkpoint_dir=str(tmp_path),
+        persistent_workers=False,
+        use_infinite_index_stream=False,
+        recon_lambda=1.0,
+        classifier_lambda=1.0,
+        classifier_pos_weight=1.0,
+        ignore_labels=(1, 0),
+        prefix_view_mode="mixed",
+        prefix_min_tokens=1,
+        prefix_min_gap=1,
+        prefix_sampling_lengths=[1, 4, 8, 10],
+        prefix_seed=149,
+    )
+    after = {
+        "standard": next(model.standard_encoder.encoder.parameters()).detach(),
+        "mirrored": next(model.mirrored_encoder.encoder.parameters()).detach(),
+        "decoder": next(model.standard_encoder.decoder.parameters()).detach(),
+        "classifier": next(model.classifier.parameters()).detach(),
+    }
+    assert all(not torch.equal(before[name], after[name]) for name in before)
+    checkpoint = torch.load(tmp_path / "contrastive_last.pt", map_location="cpu")
+    assert checkpoint["train_classifier"] > 0
+    assert checkpoint["classifier_lambda"] == 1.0
+
+
+def test_issue149_config_keeps_full_size_branches_and_excludes_mmlu():
+    root = Path(__file__).resolve().parents[1]
+    method_path = (
+        root
+        / "configs/methods/dual_convention_contrastive_classifier_prefix_mixed_lowk.json"
+    )
+    method = json.loads(method_path.read_text())
+    assert method["model_params"]["final_dim"] == 512
+    assert method["model_params"]["classifier_hidden_dim"] == 128
+    assert method["training"]["ignore_labels"] == [1, 0]
+    assert method["training"]["classifier_lambda"] == 1.0
+    assert method["evaluation"]["eval_prefix_lengths"] == [1, 4, 8, 16, 32, 48, 64]
+
+    experiment_paths = sorted(
+        (root / "configs/experiments").glob("prefix149_dual_convention_*.json")
+    )
+    datasets = {json.loads(path.read_text())["dataset"] for path in experiment_paths}
+    assert datasets == {
+        "hotpotqa_memmap",
+        "nq_memmap",
+        "popqa_memmap",
+        "sciq_memmap",
+        "searchqa_memmap",
+    }
+    assert all("mmlu" not in path.name.lower() for path in experiment_paths)

@@ -631,6 +631,151 @@ class TwinConcatModel(nn.Module):
         return torch.cat([self.head_a(x), self.head_b(x)], dim=-1)
 
 
+class DualConventionContrastiveClassifier(nn.Module):
+    """Two full-size contrastive encoders plus a joint binary classifier.
+
+    The standard branch is trained with ``ignore_label=1`` (truthful examples
+    form the supervised class), while the mirrored branch is trained with
+    ``ignore_label=0`` (hallucinated examples form the supervised class).  The
+    branches share no parameters.  Their per-view embeddings are mean-pooled,
+    concatenated, and scored by a small MLP in the same end-to-end objective.
+
+    ``forward()`` returns the concatenated representation for evaluator
+    compatibility.  ``forward_with_heads()`` exposes both branch embeddings and
+    both reconstruction predictions to the existing dual-loss trainer.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 4096,
+        final_dim: int = 512,
+        classifier_hidden_dim: int = 128,
+        classifier_dropout: float = 0.1,
+        classifier_normalize_branches: bool = True,
+        dropout: float = 0.1,
+        input_dropout: float = 0.3,
+        normalize_input: bool = False,
+        recon_seq_len: int = 64,
+        recon_hidden_dim: int = 256,
+        recon_lambda: float = 1.0,
+        logprob_var_threshold: float = 1e-4,
+        block_dims: list | None = None,
+        pre_norm: bool = False,
+    ):
+        super().__init__()
+        self.final_dim = int(final_dim)
+        self.classifier_hidden_dim = int(classifier_hidden_dim)
+        self.recon_lambda = float(recon_lambda)
+        self.classifier_normalize_branches = bool(
+            classifier_normalize_branches
+        )
+
+        branch_kwargs = dict(
+            input_dim=int(input_dim),
+            final_dim=self.final_dim,
+            dropout=float(dropout),
+            input_dropout=float(input_dropout),
+            normalize_input=bool(normalize_input),
+            recon_seq_len=int(recon_seq_len),
+            recon_hidden_dim=int(recon_hidden_dim),
+            recon_lambda=float(recon_lambda),
+            logprob_var_threshold=float(logprob_var_threshold),
+            block_dims=block_dims,
+            pre_norm=bool(pre_norm),
+        )
+        self.standard_encoder = LogprobReconProgressiveCompressor(**branch_kwargs)
+        self.mirrored_encoder = LogprobReconProgressiveCompressor(**branch_kwargs)
+        self.classifier = nn.Sequential(
+            nn.Linear(2 * self.final_dim, self.classifier_hidden_dim),
+            nn.GELU(),
+            nn.Dropout(float(classifier_dropout)),
+            nn.Linear(self.classifier_hidden_dim, 1),
+        )
+
+    def _classifier_input(
+        self, z_standard: torch.Tensor, z_mirrored: torch.Tensor
+    ) -> torch.Tensor:
+        if self.classifier_normalize_branches:
+            z_standard = F.normalize(z_standard, dim=-1)
+            z_mirrored = F.normalize(z_mirrored, dim=-1)
+        return torch.cat([z_standard, z_mirrored], dim=-1)
+
+    def classifier_logits_from_views(
+        self, z_standard_views: torch.Tensor, z_mirrored_views: torch.Tensor
+    ) -> torch.Tensor:
+        """Score ``(B, K, D)`` branch embeddings with one logit per sample."""
+        if z_standard_views.ndim != 3 or z_mirrored_views.ndim != 3:
+            raise ValueError("classifier inputs must have shape (B, K, D)")
+        if z_standard_views.shape != z_mirrored_views.shape:
+            raise ValueError(
+                "standard and mirrored classifier inputs must have equal shapes"
+            )
+        if int(z_standard_views.shape[-1]) != self.final_dim:
+            raise ValueError(
+                f"classifier expected branch dim {self.final_dim}, got "
+                f"{z_standard_views.shape[-1]}"
+            )
+        z_standard = z_standard_views.mean(dim=1)
+        z_mirrored = z_mirrored_views.mean(dim=1)
+        return self.classifier(
+            self._classifier_input(z_standard, z_mirrored)
+        ).squeeze(-1)
+
+    def forward(
+        self, x: torch.Tensor, token_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        z_standard = self.standard_encoder(x, token_mask=token_mask)
+        z_mirrored = self.mirrored_encoder(x, token_mask=token_mask)
+        return torch.cat([z_standard, z_mirrored], dim=-1)
+
+    def forward_with_heads(
+        self, x: torch.Tensor, token_mask: torch.Tensor | None = None
+    ):
+        z_standard, recon_standard = self.standard_encoder.forward_with_recon(
+            x, token_mask=token_mask
+        )
+        z_mirrored, recon_mirrored = self.mirrored_encoder.forward_with_recon(
+            x, token_mask=token_mask
+        )
+        z_concat = torch.cat([z_standard, z_mirrored], dim=-1)
+        return (
+            z_concat,
+            z_standard,
+            z_mirrored,
+            (recon_standard, recon_mirrored),
+        )
+
+    def recon_loss(self, predictions, target: torch.Tensor):
+        """Sum both branch reconstruction losses without sharing decoders."""
+        pred_standard, pred_mirrored = predictions
+        loss_standard, diag_standard = self.standard_encoder.recon_loss(
+            pred_standard, target
+        )
+        loss_mirrored, diag_mirrored = self.mirrored_encoder.recon_loss(
+            pred_mirrored, target
+        )
+        return loss_standard + loss_mirrored, {
+            "suppressed": bool(
+                diag_standard.get("suppressed", False)
+                and diag_mirrored.get("suppressed", False)
+            ),
+            "standard": diag_standard,
+            "mirrored": diag_mirrored,
+        }
+
+    def embed_head(
+        self,
+        x: torch.Tensor,
+        which: str,
+        token_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if str(which).upper() == "A":
+            return self.standard_encoder(x, token_mask=token_mask)
+        if str(which).upper() == "B":
+            return self.mirrored_encoder(x, token_mask=token_mask)
+        raise ValueError("which must be 'A' (standard) or 'B' (mirrored)")
+
+
 class SharedTrunkSplitOutputCompressor(nn.Module):
     """D1 shared-trunk variant: a single trunk with ``final_dim = 2 * half_dim``.
 

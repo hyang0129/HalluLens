@@ -1026,10 +1026,9 @@ def run_contrastive_logprob_recon_dualhead_fusion(
     training_seed: int,
     test_ap=None,
 ) -> tuple[dict, list[dict]]:
-    """SS-1 (issue #129): train a ``SharedSpineDualHeadCompressor`` and evaluate
-    the two convention-heads SEPARATELY, then fuse their per-sample KNN scores.
+    """Train/evaluate models with standard and mirrored contrastive heads.
 
-    The fix over the D2 shared-trunk routine (#102/#128): the spine is protected
+    The SS-1 fix over the D2 shared-trunk routine (#102/#128): the spine is protected
     (``spine_supcon_grad_scale`` on the model) and **eval scores each head's own
     embedding** (head A under ignore=1 → std convention; head B under ignore=0 →
     flip convention), fusing at the SCORE level via an a-priori equal-weight
@@ -1040,7 +1039,11 @@ def run_contrastive_logprob_recon_dualhead_fusion(
     from sklearn.metrics import roc_auc_score
     from torch.utils.data import DataLoader
     from activation_research.metric_evaluator import MultiMetricHallucinationEvaluator
-    from activation_research.model import SharedSpineDualHeadCompressor, SharedStemDualBranchCompressor
+    from activation_research.model import (
+        DualConventionContrastiveClassifier,
+        SharedSpineDualHeadCompressor,
+        SharedStemDualBranchCompressor,
+    )
     from activation_research.training import train_contrastive_logprob_recon_dualloss
 
     data_cfg = method_cfg["data"]
@@ -1068,7 +1071,32 @@ def run_contrastive_logprob_recon_dualhead_fusion(
     train_device = device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
 
     model_class = method_cfg.get("model_class", "shared_spine_dual_head")
-    if model_class == "shared_stem_dual_branch":
+    if model_class == "dual_convention_contrastive_classifier":
+        # Issue-149 scope expansion: two complete headline-size encoders under
+        # one model, trained jointly with opposite label conventions and a
+        # supervised classifier over their concatenated representations.
+        model = DualConventionContrastiveClassifier(
+            input_dim=dataset_cfg["input_dim"],
+            final_dim=model_params.get("final_dim", 512),
+            classifier_hidden_dim=model_params.get(
+                "classifier_hidden_dim", 128
+            ),
+            classifier_dropout=model_params.get("classifier_dropout", 0.1),
+            classifier_normalize_branches=model_params.get(
+                "classifier_normalize_branches", True
+            ),
+            input_dropout=model_params.get("input_dropout", 0.3),
+            normalize_input=model_params.get("normalize_input", False),
+            recon_seq_len=model_params.get("recon_seq_len", 64),
+            recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            logprob_var_threshold=model_params.get(
+                "logprob_var_threshold", 1e-4
+            ),
+            block_dims=model_params.get("block_dims"),
+            pre_norm=model_params.get("pre_norm", False),
+        )
+    elif model_class == "shared_stem_dual_branch":
         # SS-1b: early split — shared input stem, two independent branch sub-encoders.
         model = SharedStemDualBranchCompressor(
             input_dim=dataset_cfg["input_dim"],
@@ -1105,6 +1133,16 @@ def run_contrastive_logprob_recon_dualhead_fusion(
         model.load_state_dict(torch.load(final_weights, map_location=train_device)["model_state_dict"])
     else:
         os.makedirs(artifacts_dir, exist_ok=True)
+        _classifier_pos_weight = train_cfg.get("classifier_pos_weight")
+        if _classifier_pos_weight == "auto":
+            _train_labels = ap.df.loc[ap.df["split"] == "train", "halu"]
+            _n_pos = int((_train_labels == 1).sum())
+            _n_neg = int((_train_labels == 0).sum())
+            _classifier_pos_weight = _n_neg / max(_n_pos, 1)
+            logger.info(
+                f"dual-convention classifier pos_weight="
+                f"{_classifier_pos_weight:.4f} ({_n_neg} truth/{_n_pos} halu)"
+            )
         train_contrastive_logprob_recon_dualloss(
             model=model,
             train_dataset=train_ds,
@@ -1126,10 +1164,18 @@ def run_contrastive_logprob_recon_dualhead_fusion(
             infinite_stream_shuffle=True,
             infinite_stream_seed=training_seed,
             steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+            min_total_steps=train_cfg.get("min_total_steps"),
             balanced_sampling=train_cfg.get("balanced_sampling", False),
             grad_clip_norm=train_cfg.get("grad_clip_norm"),
             augment_fn=None,
             ignore_labels=tuple(train_cfg.get("ignore_labels", (1, 0))),
+            classifier_lambda=train_cfg.get("classifier_lambda", 0.0),
+            classifier_pos_weight=_classifier_pos_weight,
+            prefix_view_mode=train_cfg.get("prefix_view_mode", "layer_only"),
+            prefix_min_tokens=train_cfg.get("prefix_min_tokens", 8),
+            prefix_min_gap=train_cfg.get("prefix_min_gap", 8),
+            prefix_sampling_lengths=train_cfg.get("prefix_sampling_lengths"),
+            prefix_seed=training_seed,
         )
         torch.save({"model_state_dict": model.state_dict()}, final_weights)
 
@@ -1144,17 +1190,22 @@ def run_contrastive_logprob_recon_dualhead_fusion(
             self.base = base
             self.which = which
 
-        def forward(self, x):
+        def forward(self, x, **kwargs):
             # Works for both SS-1 (head on trunk) and SS-1b (branch on stem seq).
-            return self.base.embed_head(x, self.which)
+            return self.base.embed_head(x, self.which, **kwargs)
 
     train_loader = DataLoader(train_ds.slice_layers(target_layers), batch_size=64, shuffle=False)
     eval_loader = DataLoader(test_ds.slice_layers(target_layers), batch_size=64, shuffle=False)
 
-    def _head_scores(which, outlier_class, flip):
+    def _head_scores(which, outlier_class, flip, prefix_len=None):
         knn_params = dict(eval_cfg.get("knn_params", {}))
         knn_params["sample_seed"] = training_seed
         knn_params["include_per_sample"] = True
+        head_model = _HeadView(model, which)
+        if prefix_len is not None:
+            from activation_research.prefix_views import PrefixEvalWrapper
+
+            head_model = PrefixEvalWrapper(head_model, int(prefix_len))
         evaluator = MultiMetricHallucinationEvaluator(
             activation_parser_df=eval_ap.df,
             train_data_loader=train_loader,
@@ -1166,7 +1217,7 @@ def run_contrastive_logprob_recon_dualhead_fusion(
             persistent_workers=False,
             outlier_class=outlier_class,
         )
-        stats = evaluator.compute(eval_loader, _HeadView(model, which))
+        stats = evaluator.compute(eval_loader, head_model)
         s = np.asarray(stats.pop("knn_scores"), dtype=np.float64)
         l = np.asarray(stats.pop("knn_labels"), dtype=np.int64)
         # Orient to "higher = more halu" (mirror the headline routine's flip rule).
@@ -1174,8 +1225,20 @@ def run_contrastive_logprob_recon_dualhead_fusion(
             return -s, 1 - l, float(stats["knn_auroc"])
         return s, l, float(stats["knn_auroc"])
 
-    s_std, lab, auroc_std = _head_scores("A", outlier_class=1, flip=False)
-    s_flip, lab_b, auroc_flip = _head_scores("B", outlier_class=0, flip=True)
+    # Prefix-trained models must mask zero-padded response rows even for their
+    # full-response score. k=r_max retains every real token while excluding
+    # padding, matching the training-time token-mask contract.
+    _full_prefix = (
+        int(getattr(test_ds, "_max_resp", None) or 64)
+        if model_class == "dual_convention_contrastive_classifier"
+        else None
+    )
+    s_std, lab, auroc_std = _head_scores(
+        "A", outlier_class=1, flip=False, prefix_len=_full_prefix
+    )
+    s_flip, lab_b, auroc_flip = _head_scores(
+        "B", outlier_class=0, flip=True, prefix_len=_full_prefix
+    )
 
     # Both passes iterate the same shuffle=False eval_loader → index-aligned.
     assert np.array_equal(lab, lab_b), "head A/B eval ordering diverged — cannot fuse"
@@ -1208,6 +1271,8 @@ def run_contrastive_logprob_recon_dualhead_fusion(
         "spine_supcon_grad_scale": float(model_params.get("spine_supcon_grad_scale", 0.0)),
         "knn_auroc_head_std": auroc_std,
         "knn_auroc_head_flip": auroc_flip,
+        "knn_auroc_standard": auroc_std,
+        "knn_auroc_mirrored": auroc_flip,
         # Headline = the fused score (the SS-1 method output).
         "knn_auroc": auroc_fused,
         "knn_auroc_fused": auroc_fused,
@@ -1218,12 +1283,129 @@ def run_contrastive_logprob_recon_dualhead_fusion(
         "fusion_oracle_weight_std": fusion_oracle_weight_std,
         "fusion_oracle_delta_vs_best": auroc_fused_oracle - max(auroc_std, auroc_flip),
     }
-    predictions = [
-        {"example_id": i, "score_halu": float(f), "label_halu": int(l)}
-        for i, (f, l) in enumerate(zip(fused, lab))
-    ]
+
+    classifier_scores = None
+    classifier_labels = None
+    if model_class == "dual_convention_contrastive_classifier":
+        from sklearn.metrics import average_precision_score
+
+        def _classifier_scores(prefix_len=None):
+            scores, labels = [], []
+            with torch.no_grad():
+                for batch in eval_loader:
+                    views = batch["views_activations"].to(
+                        train_device, non_blocking=True
+                    )
+                    bsz, num_views, seq_len, hidden_dim = views.shape
+                    # Always exclude padded rows. prefix_len=None means every
+                    # real response token, not every fixed-width storage row.
+                    raw_valid = views.detach().ne(0).any(dim=-1)
+                    response_lens = raw_valid.long().sum(dim=-1).clamp(
+                        min=1, max=seq_len
+                    )
+                    if prefix_len is None:
+                        effective = response_lens
+                    else:
+                        effective = torch.minimum(
+                            response_lens,
+                            torch.full_like(response_lens, int(prefix_len)),
+                        )
+                    positions = torch.arange(
+                        seq_len, device=views.device
+                    ).view(1, 1, -1)
+                    token_mask = positions < effective.unsqueeze(-1)
+                    views = views * token_mask.unsqueeze(-1).to(views.dtype)
+                    x_flat = views.reshape(
+                        bsz * num_views, seq_len, hidden_dim
+                    )
+                    mask_flat = (
+                        token_mask.reshape(bsz * num_views, seq_len)
+                        if token_mask is not None
+                        else None
+                    )
+                    _, z_std, z_mirror, _ = model.forward_with_heads(
+                        x_flat, token_mask=mask_flat
+                    )
+                    logits = model.classifier_logits_from_views(
+                        z_std.reshape(bsz, num_views, -1),
+                        z_mirror.reshape(bsz, num_views, -1),
+                    )
+                    scores.append(torch.sigmoid(logits).cpu())
+                    labels.append(batch["halu"].reshape(-1).cpu())
+            return (
+                torch.cat(scores).numpy(),
+                torch.cat(labels).numpy().astype(np.int64),
+            )
+
+        classifier_scores, classifier_labels = _classifier_scores()
+        classifier_auroc = float(
+            roc_auc_score(classifier_labels, classifier_scores)
+        )
+        classifier_auprc = float(
+            average_precision_score(classifier_labels, classifier_scores)
+        )
+        eval_metrics.update(
+            {
+                "auroc": classifier_auroc,
+                "auprc": classifier_auprc,
+                "classifier_auroc": classifier_auroc,
+                "classifier_auprc": classifier_auprc,
+                "primary_scorer": "binary_classifier",
+                "knn_fusion_role": "diagnostic",
+                "classifier_input_dim": 2 * int(model.final_dim),
+                "classifier_hidden_dim": int(
+                    model.classifier_hidden_dim
+                ),
+                "model_parameter_count": int(
+                    sum(p.numel() for p in model.parameters())
+                ),
+                "standard_encoder_parameter_count": int(
+                    sum(p.numel() for p in model.standard_encoder.parameters())
+                ),
+                "mirrored_encoder_parameter_count": int(
+                    sum(p.numel() for p in model.mirrored_encoder.parameters())
+                ),
+                "classifier_parameter_count": int(
+                    sum(p.numel() for p in model.classifier.parameters())
+                ),
+            }
+        )
+
+        if eval_cfg.get("eval_prefix_curve", False):
+            from activation_research.prefix_views import resolve_eval_prefixes
+
+            _r_max = getattr(test_ds, "_max_resp", None) or 64
+            for _k in resolve_eval_prefixes(
+                eval_cfg.get("eval_prefix_lengths"), int(_r_max)
+            ):
+                _scores_k, _labels_k = _classifier_scores(prefix_len=_k)
+                _, _, _std_k = _head_scores(
+                    "A", outlier_class=1, flip=False, prefix_len=_k
+                )
+                _, _, _mirror_k = _head_scores(
+                    "B", outlier_class=0, flip=True, prefix_len=_k
+                )
+                eval_metrics[f"k{_k}_classifier_auroc"] = float(
+                    roc_auc_score(_labels_k, _scores_k)
+                )
+                eval_metrics[f"k{_k}_classifier_auprc"] = float(
+                    average_precision_score(_labels_k, _scores_k)
+                )
+                eval_metrics[f"k{_k}_knn_auroc_head_std"] = _std_k
+                eval_metrics[f"k{_k}_knn_auroc_head_flip"] = _mirror_k
+
+    if classifier_scores is not None and classifier_labels is not None:
+        predictions = [
+            {"example_id": i, "score_halu": float(s), "label_halu": int(l)}
+            for i, (s, l) in enumerate(classifier_scores, classifier_labels)
+        ]
+    else:
+        predictions = [
+            {"example_id": i, "score_halu": float(f), "label_halu": int(l)}
+            for i, (f, l) in enumerate(zip(fused, lab))
+        ]
     logger.info(
-        f"SS-1 dual-head: std={auroc_std:.4f} flip={auroc_flip:.4f} "
+        f"{model_class} dual-head: std={auroc_std:.4f} flip={auroc_flip:.4f} "
         f"fused={auroc_fused:.4f} (Δvs_best={auroc_fused-max(auroc_std,auroc_flip):+.4f}) "
         f"head_corr={head_score_corr:.3f} oracle={auroc_fused_oracle:.4f}@w_std={fusion_oracle_weight_std:.2f}"
     )
@@ -4514,6 +4696,7 @@ def main() -> None:
                 needs_predictions = routine_for_skip in {
                     "contrastive_logprob_recon",
                     "contrastive_logprob_recon_twin",
+                    "contrastive_logprob_recon_dualhead_fusion",
                 }
                 have_predictions = (not needs_predictions) or os.path.exists(pred_path)
                 if os.path.exists(eval_metrics_path) and have_predictions and not args.force:
