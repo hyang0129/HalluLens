@@ -47,3 +47,13 @@ cause unless those ablations agree.
 
 MMLU remains outside the HalluLens benchmark suite. The configured datasets are
 HotpotQA, NQ, PopQA, SciQ, and SearchQA.
+
+## Dispatch contract
+
+The full sweep is a filesystem cell queue at
+`shared/issue_149_dual_convention_dispatch`, built by
+`scripts/dispatch/build_issue_149_dual_convention_cells.py`. Its 25 cells are
+the Cartesian product of five datasets and five seeds. Each cell runs one seed
+and requires `predictions.csv` as its terminal sentinel. Workers use
+`scripts/dispatch/worker_149_dual_convention.sh`, which delegates to the tested
+issue #149 claim/heartbeat/recovery worker with the isolated queue root.

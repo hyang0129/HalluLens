@@ -173,3 +173,67 @@ def test_issue149_config_keeps_full_size_branches_and_excludes_mmlu():
         "searchqa_memmap",
     }
     assert all("mmlu" not in path.name.lower() for path in experiment_paths)
+
+
+def test_dual_convention_cells_are_per_seed_idempotent_and_exclude_mmlu(
+    tmp_path: Path,
+):
+    from scripts.dispatch.build_issue_149_dual_convention_cells import build
+
+    dispatch_root = tmp_path / "dual-convention-dispatch"
+    assert build(dispatch_root) == 25
+    assert build(dispatch_root) == 0
+
+    cells = sorted((dispatch_root / "pending").glob("*.json"))
+    payloads = [json.loads(path.read_text()) for path in cells]
+    assert len(payloads) == 25
+    assert {cell["seed"] for cell in payloads} == {0, 1, 2, 3, 4}
+    assert {cell["dataset"] for cell in payloads} == {
+        "hotpotqa_memmap",
+        "nq_memmap",
+        "popqa_memmap",
+        "sciq_memmap",
+        "searchqa_memmap",
+    }
+    assert {cell["method"] for cell in payloads} == {
+        "dual_convention_contrastive_classifier_prefix_mixed_lowk"
+    }
+    assert len(
+        {(cell["dataset"], cell["seed"]) for cell in payloads}
+    ) == 25
+    assert all(cell["output_check"].endswith("predictions.csv") for cell in payloads)
+    assert all("mmlu" not in path.name.lower() for path in cells)
+
+
+def test_dual_convention_cell_builder_skips_complete_seed(tmp_path: Path):
+    from scripts.dispatch.build_issue_149_dual_convention_cells import build
+
+    project_root = tmp_path / "project"
+    source_root = Path(__file__).resolve().parents[1]
+    method_rel = Path(
+        "configs/methods/dual_convention_contrastive_classifier_prefix_mixed_lowk.json"
+    )
+    method_path = project_root / method_rel
+    method_path.parent.mkdir(parents=True)
+    method_path.write_text((source_root / method_rel).read_text())
+    for experiment in source_root.glob(
+        "configs/experiments/prefix149_dual_convention_*.json"
+    ):
+        target = project_root / "configs/experiments" / experiment.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(experiment.read_text())
+
+    completed = (
+        project_root
+        / "runs/prefix149_dual_convention_hotpotqa/hotpotqa_memmap"
+        / "dual_convention_contrastive_classifier_prefix_mixed_lowk/seed_0"
+    )
+    completed.mkdir(parents=True)
+    (completed / "eval_metrics.json").write_text("{}")
+    (completed / "predictions.csv").write_text("score_halu\n")
+
+    dispatch_root = tmp_path / "dispatch"
+    assert build(dispatch_root, project_root=project_root) == 24
+    assert not any("hotpotqa_memmap__seed_0" in path.name for path in (
+        dispatch_root / "pending"
+    ).glob("*.json"))
