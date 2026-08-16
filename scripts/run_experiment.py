@@ -480,15 +480,23 @@ def run_contrastive_logprob_recon(
     device: str,
     training_seed: int,
     test_ap=None,
+    *,
+    _tokenwise: bool = False,
 ) -> tuple[dict, list[dict]]:
-    """Train and evaluate a LogprobReconProgressiveCompressor model."""
+    """Train and evaluate a LogprobReconProgressiveCompressor model.
+
+    ``_tokenwise`` is used by the dedicated issue #151 entry point below.  It
+    changes only the memmap view geometry and evaluation surface; model size,
+    SupCon semantics, and full-response logprob reconstruction stay identical
+    to the established layer-wise routine.
+    """
     _p1_expected_train_n = _apply_train_prevalence(ap, experiment_cfg, run_seed=training_seed)  # P1 sweep (#140); no-op otherwise
     data_cfg = method_cfg["data"]
     train_cfg = method_cfg["training"]
     eval_cfg = method_cfg["evaluation"]
 
     relevant_layers = parse_layer_range(data_cfg["relevant_layers"])
-    target_layers = data_cfg["target_layers"]
+    target_layers = data_cfg.get("target_layers", [])
 
     ds_kwargs = dict(
         relevant_layers=relevant_layers,
@@ -500,18 +508,57 @@ def run_contrastive_logprob_recon(
         check_ram=False,
     )
 
+    if _tokenwise:
+        ds_kwargs.update(
+            view_axis="token",
+            token_pair_mode=data_cfg.get("token_pair_mode", "first_anchored"),
+            fixed_token=None,
+            # A valid contrastive pair needs two real decoding steps.  The
+            # fixed-token evaluation datasets below are constructed separately
+            # with min_response_tokens=1 so one-token generations are retained.
+            min_response_tokens=2,
+        )
+
     train_ds = ap.get_dataset("train", **ds_kwargs)
-    if _p1_expected_train_n is not None and len(train_ds) != _p1_expected_train_n:
+    if (
+        _p1_expected_train_n is not None
+        and not _tokenwise
+        and len(train_ds) != _p1_expected_train_n
+    ):
         raise RuntimeError(
             f"[P1 guard] train_prevalence set (expected {_p1_expected_train_n} train rows) "
             f"but get_dataset('train') returned {len(train_ds)} — subsample did not "
             f"propagate to the contrastive train set."
         )
-    eval_ap = test_ap if test_ap is not None else ap
-    test_ds = eval_ap.get_dataset("test", **ds_kwargs)
-
     has_val = ap.split_strategy == "three_way"
-    val_ds = ap.get_dataset("val", **ds_kwargs) if has_val else test_ds
+    eval_ap = test_ap if test_ap is not None else ap
+    if _tokenwise:
+        val_ds = (
+            ap.get_dataset("val", **ds_kwargs)
+            if has_val
+            else eval_ap.get_dataset("test", **ds_kwargs)
+        )
+        fixed_t0_kwargs = dict(ds_kwargs)
+        fixed_t0_kwargs.update(
+            num_views=1,
+            fixed_token=0,
+            min_response_tokens=1,
+        )
+        train_eval_ds = ap.get_dataset("train", **fixed_t0_kwargs)
+        test_ds = eval_ap.get_dataset("test", **fixed_t0_kwargs)
+        logger.info(
+            "token-wise geometry: pair_mode={} train_pairs={} "
+            "train_t0={} test_t0={} depth_sequence={}",
+            data_cfg.get("token_pair_mode", "first_anchored"),
+            len(train_ds),
+            len(train_eval_ds),
+            len(test_ds),
+            relevant_layers,
+        )
+    else:
+        test_ds = eval_ap.get_dataset("test", **ds_kwargs)
+        val_ds = ap.get_dataset("val", **ds_kwargs) if has_val else test_ds
+        train_eval_ds = None
 
     model_params = method_cfg.get("model_params", {})
     model_class = str(method_cfg.get("model_class", "logprob_recon_progressive_compressor")).strip().lower()
@@ -644,13 +691,19 @@ def run_contrastive_logprob_recon(
             os.path.join(output_dir, "artifacts", "final_weights.pt"),
         )
 
-    # OOD evaluation on target layers
+    # OOD evaluation.  The established routine averages target-layer views.
+    # Token-wise evaluation deliberately exposes exactly one view: token 0
+    # encoded across every selected post-block layer.
     from torch.utils.data import DataLoader
 
     from activation_research.metric_evaluator import MultiMetricHallucinationEvaluator
 
-    train_ds_target = train_ds.slice_layers(target_layers)
-    test_ds_target = test_ds.slice_layers(target_layers)
+    if _tokenwise:
+        train_ds_target = train_eval_ds
+        test_ds_target = test_ds
+    else:
+        train_ds_target = train_ds.slice_layers(target_layers)
+        test_ds_target = test_ds.slice_layers(target_layers)
 
     train_loader = DataLoader(train_ds_target, batch_size=64, shuffle=False)
     eval_loader = DataLoader(test_ds_target, batch_size=64, shuffle=False)
@@ -742,6 +795,58 @@ def run_contrastive_logprob_recon(
                 f"mahalanobis_auroc={_stats_k.get('mahalanobis_auroc')}"
             )
 
+    # ---- Issue #151: token-position diagnostic curve --------------------
+    # The primary score above is t=0.  Later-token diagnostics always rebuild
+    # BOTH the KNN reference bank and the test surface at the same token index;
+    # mixing token indices would confound detection with representation shift.
+    token_curve: dict = {}
+    if _tokenwise and eval_cfg.get("eval_token_curve", False):
+        token_positions = [
+            int(t) for t in eval_cfg.get(
+                "eval_token_positions", [0, 1, 3, 7, 15, 31, 63]
+            )
+        ]
+        for token_index in token_positions:
+            if token_index == 0:
+                token_curve["t0_n_train"] = len(train_ds_target)
+                token_curve["t0_n_test"] = len(test_ds_target)
+                for metric_name, value in ood_stats.items():
+                    token_curve[f"t0_{metric_name}"] = value
+                continue
+            try:
+                train_at_t = train_eval_ds.fixed_token_view(token_index)
+                test_at_t = test_ds.fixed_token_view(token_index)
+            except ValueError as exc:
+                logger.warning(
+                    "token curve t={}: no eligible rows ({})", token_index, exc
+                )
+                token_curve[f"t{token_index}_n_train"] = 0
+                token_curve[f"t{token_index}_n_test"] = 0
+                continue
+
+            evaluator_at_t = MultiMetricHallucinationEvaluator(
+                activation_parser_df=eval_ap.df,
+                train_data_loader=DataLoader(
+                    train_at_t, batch_size=64, shuffle=False
+                ),
+                metrics=metrics_list,
+                batch_size=eval_cfg.get("eval_batch_size", 256),
+                sub_batch_size=eval_cfg.get("sub_batch_size", 64),
+                device=train_device,
+                num_workers=experiment_cfg.get("num_workers", 4),
+                persistent_workers=False,
+                outlier_class=effective_outlier_class,
+            )
+            stats_at_t = evaluator_at_t.compute(
+                DataLoader(test_at_t, batch_size=64, shuffle=False), model
+            )
+            stats_at_t.pop("knn_scores", None)
+            stats_at_t.pop("knn_labels", None)
+            token_curve[f"t{token_index}_n_train"] = len(train_at_t)
+            token_curve[f"t{token_index}_n_test"] = len(test_at_t)
+            for metric_name, value in stats_at_t.items():
+                token_curve[f"t{token_index}_{metric_name}"] = value
+
     eval_metrics: dict = {
         "method": method_cfg["name"],
         "dataset": dataset_cfg["name"],
@@ -751,10 +856,27 @@ def run_contrastive_logprob_recon(
         "n_train": len(train_ds),
         "n_test": len(test_ds),
     }
+    if _tokenwise:
+        eval_metrics.update(
+            {
+                "view_axis": "token",
+                "token_pair_mode": data_cfg.get(
+                    "token_pair_mode", "first_anchored"
+                ),
+                "primary_eval_token": 0,
+                "n_train_pair_eligible": len(train_ds),
+                "n_train_t0": len(train_ds_target),
+                "model_total_params": sum(p.numel() for p in model.parameters()),
+                "model_encoder_params": sum(
+                    p.numel() for p in model.encoder.parameters()
+                ),
+            }
+        )
     eval_metrics.update(ood_stats)
     # Prefix-curve cells are namespaced k{K}_* so they never collide with the
     # full-length metrics above.
     eval_metrics.update(prefix_curve)
+    eval_metrics.update(token_curve)
 
     predictions: list[dict] = []
     if knn_scores_arr is not None and knn_labels_arr is not None:
@@ -826,6 +948,30 @@ def run_contrastive_logprob_recon(
             logger.exception("dump_embeddings failed; continuing without embeddings dump")
 
     return eval_metrics, predictions
+
+
+def run_tokenwise_contrastive_logprob_recon(
+    ap,
+    dataset_cfg: dict,
+    method_cfg: dict,
+    experiment_cfg: dict,
+    output_dir: str,
+    device: str,
+    training_seed: int,
+    test_ap=None,
+) -> tuple[dict, list[dict]]:
+    """Issue #151 token-pair contrastive training with token-0 KNN scoring."""
+    return run_contrastive_logprob_recon(
+        ap,
+        dataset_cfg,
+        method_cfg,
+        experiment_cfg,
+        output_dir,
+        device,
+        training_seed,
+        test_ap=test_ap,
+        _tokenwise=True,
+    )
 
 
 def run_contrastive_logprob_recon_shared_trunk(
@@ -4793,6 +4939,11 @@ def main() -> None:
                         )
                     elif routine == "contrastive_logprob_recon":
                         eval_metrics, predictions = run_contrastive_logprob_recon(
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
+                            test_ap=test_ap,
+                        )
+                    elif routine == "tokenwise_contrastive_logprob_recon":
+                        eval_metrics, predictions = run_tokenwise_contrastive_logprob_recon(
                             ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
                         )

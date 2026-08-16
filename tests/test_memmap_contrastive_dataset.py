@@ -22,6 +22,7 @@ from activation_research.memmap_contrastive_dataset import (
     _ATTN_STAT_DIM,
     _compute_attn_stats,
 )
+from activation_research.memmap_activation_parser import MemmapActivationParser
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +247,190 @@ def test_dataset_minimal_construction(tmp_path):
     assert sample["view_indices"].shape == (2,)
     assert sample["view_indices"].dtype == torch.long
     assert isinstance(sample["input_length"], int)
+
+
+def test_tokenwise_first_anchored_views_are_depth_sequences(tmp_path):
+    capture = _make_full_capture_dir(tmp_path, n_samples=8)
+    layers = [1, 2, 3, 4]  # deliberately excludes embedding row 0
+    ds = MemmapContrastiveDataset(
+        capture,
+        split="all",
+        num_views=2,
+        relevant_layers=layers,
+        view_axis="token",
+        token_pair_mode="first_anchored",
+        min_response_tokens=2,
+    )
+
+    item = ds[0]
+    token_indices = item["view_token_indices"].tolist()
+    assert token_indices[0] == 0
+    assert 1 <= token_indices[1] < item["response_len"]
+    assert item["views_activations"].shape == (
+        2,
+        len(layers),
+        _SMALL_CFG["hidden_dim"],
+    )
+    np.testing.assert_array_equal(
+        item["views_activations"][0].numpy(),
+        np.array(ds._resp_act[0, layers, 0, :], dtype=np.float32),
+    )
+
+
+def test_tokenwise_random_distinct_never_reuses_a_token(tmp_path):
+    capture = _make_full_capture_dir(tmp_path, n_samples=8)
+    ds = MemmapContrastiveDataset(
+        capture,
+        split="all",
+        num_views=2,
+        relevant_layers=[1, 2, 3, 4],
+        view_axis="token",
+        token_pair_mode="random_distinct",
+        min_response_tokens=2,
+    )
+
+    for i in range(len(ds)):
+        token_indices = ds[i]["view_token_indices"].tolist()
+        assert len(set(token_indices)) == 2
+        assert all(0 <= t < 8 for t in token_indices)
+
+
+def test_token_pair_filter_and_token0_eval_have_distinct_short_row_policy(tmp_path):
+    capture = _make_full_capture_dir(
+        tmp_path,
+        n_samples=4,
+        response_lengths=np.array([0, 1, 2, 3], dtype=np.int32),
+    )
+    common = dict(
+        capture_dir=capture,
+        split="all",
+        relevant_layers=[1, 2, 3, 4],
+        view_axis="token",
+    )
+    pair_ds = MemmapContrastiveDataset(
+        **common,
+        num_views=2,
+        token_pair_mode="first_anchored",
+        min_response_tokens=2,
+    )
+    token0_ds = MemmapContrastiveDataset(
+        **common,
+        num_views=1,
+        fixed_token=0,
+        min_response_tokens=1,
+    )
+
+    assert pair_ds.df["response_len"].tolist() == [2, 3]
+    assert token0_ds.df["response_len"].tolist() == [1, 2, 3]
+    assert token0_ds[0]["views_activations"].shape == (
+        1,
+        4,
+        _SMALL_CFG["hidden_dim"],
+    )
+    assert token0_ds[0]["view_token_indices"].tolist() == [0]
+
+
+def test_fixed_token_view_filters_to_rows_where_token_exists(tmp_path):
+    capture = _make_full_capture_dir(
+        tmp_path,
+        n_samples=5,
+        response_lengths=np.array([1, 2, 3, 4, 5], dtype=np.int32),
+    )
+    token0_ds = MemmapContrastiveDataset(
+        capture,
+        split="all",
+        num_views=1,
+        relevant_layers=[1, 2, 3, 4],
+        view_axis="token",
+        fixed_token=0,
+        min_response_tokens=1,
+    )
+    token3_ds = token0_ds.fixed_token_view(3)
+
+    assert token3_ds.df["response_len"].tolist() == [4, 5]
+    assert token3_ds[0]["view_indices"].tolist() == [3]
+
+
+def test_tokenwise_attention_reconstruction_is_rejected(tmp_path):
+    capture = _make_full_capture_dir(tmp_path, n_samples=5)
+    with pytest.raises(NotImplementedError, match="token-wise"):
+        MemmapContrastiveDataset(
+            capture,
+            split="all",
+            num_views=2,
+            relevant_layers=[1, 2, 3, 4],
+            view_axis="token",
+            include_response_attention=True,
+        )
+
+
+def test_memmap_parser_forwards_tokenwise_contract(tmp_path):
+    capture = _make_full_capture_dir(tmp_path, n_samples=20)
+    parser = MemmapActivationParser(
+        capture,
+        random_seed=42,
+        split_strategy="none",
+    )
+    ds = parser.get_dataset(
+        "test",
+        relevant_layers=[1, 2, 3, 4],
+        num_views=1,
+        view_axis="token",
+        fixed_token=0,
+        min_response_tokens=1,
+    )
+
+    assert len(ds) == 20
+    assert ds[0]["views_activations"].shape == (
+        1,
+        4,
+        _SMALL_CFG["hidden_dim"],
+    )
+
+
+def test_tokenwise_dataset_trains_through_standard_joint_objective(tmp_path):
+    from activation_research.model import LogprobReconProgressiveCompressor
+    from activation_research.training import train_contrastive_logprob_recon
+
+    capture = _make_full_capture_dir(tmp_path, n_samples=8)
+    ds = MemmapContrastiveDataset(
+        capture,
+        split="all",
+        num_views=2,
+        relevant_layers=[1, 2, 3, 4],
+        view_axis="token",
+        token_pair_mode="first_anchored",
+        min_response_tokens=2,
+        include_response_logprobs=True,
+        pad_length=12,
+    )
+    model = LogprobReconProgressiveCompressor(
+        input_dim=_SMALL_CFG["hidden_dim"],
+        final_dim=64,
+        block_dims=[128, 64],
+        input_dropout=0.0,
+        recon_seq_len=12,
+        recon_hidden_dim=32,
+    )
+
+    train_contrastive_logprob_recon(
+        model,
+        train_dataset=ds,
+        test_dataset=None,
+        epochs=1,
+        batch_size=4,
+        sub_batch_size=4,
+        lr=1e-4,
+        device="cpu",
+        num_workers=0,
+        checkpoint_dir=tmp_path / "checkpoints",
+        persistent_workers=False,
+        use_labels=True,
+        ignore_label=1,
+        use_infinite_index_stream=False,
+    )
+
+    assert (tmp_path / "checkpoints" / "contrastive_last.pt").is_file()
 
 
 def test_dataset_emits_logprob_fields(tmp_path):
