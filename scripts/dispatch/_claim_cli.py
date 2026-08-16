@@ -27,8 +27,29 @@ from scripts.dispatch.claim import (  # noqa: E402
     complete_cell,
     fail_cell,
     gc_stale_claims,
+    load_cell,
     touch_heartbeat,
 )
+
+_DUAL_CONVENTION_METHOD = (
+    "dual_convention_contrastive_classifier_prefix_mixed_lowk"
+)
+
+
+def _maybe_promote_dual_convention_eval(
+    root: Path, cell: dict, *, project_root: Path | None = None
+) -> int:
+    """Immediately turn a recoverable dual-convention failure into eval work."""
+    if (
+        cell.get("kind") != "experiment"
+        or cell.get("method") != _DUAL_CONVENTION_METHOD
+    ):
+        return 0
+    from scripts.dispatch.build_issue_149_dual_convention_eval_cells import build
+
+    if project_root is None:
+        project_root = _PROJECT_ROOT
+    return build(root, project_root=project_root)
 
 
 def cmd_claim(args: argparse.Namespace) -> int:
@@ -44,13 +65,19 @@ def cmd_complete(args: argparse.Namespace) -> int:
 
 
 def cmd_fail(args: argparse.Namespace) -> int:
+    root = Path(args.root)
+    cell_path = Path(args.cell)
+    cell = load_cell(cell_path)
     err_path = Path(args.err_file)
     err_text = err_path.read_text(encoding="utf-8", errors="replace") if err_path.exists() else ""
     # Why: spec says "last 500 lines"; slice here to keep sidecar manageable.
     lines = err_text.splitlines()
     if len(lines) > 500:
         err_text = "\n".join(lines[-500:])
-    fail_cell(Path(args.root), args.worker_id, Path(args.cell), err_text)
+    fail_cell(root, args.worker_id, cell_path, err_text)
+    promoted = _maybe_promote_dual_convention_eval(root, cell)
+    if promoted:
+        print(f"promoted {promoted} checkpoint-backed failure(s) to eval-only cells")
     return 0
 
 

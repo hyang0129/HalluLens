@@ -333,3 +333,56 @@ def test_eval_recovery_builder_refuses_missing_checkpoint(tmp_path: Path):
     assert build(dispatch_root, project_root=project_root) == 0
     assert source.exists()
     assert not list((dispatch_root / "pending").glob("*.json"))
+
+
+def test_running_worker_auto_promotes_checkpoint_backed_failure(
+    tmp_path: Path, monkeypatch
+):
+    from argparse import Namespace
+    from scripts.dispatch import _claim_cli
+
+    project_root = tmp_path / "project"
+    dispatch_root = project_root / "shared/issue_149_dual_convention_dispatch"
+    claimed_root = dispatch_root / "claimed/worker-1"
+    claimed_root.mkdir(parents=True)
+
+    run_rel = Path(
+        "runs/prefix149_dual_convention_sciq/sciq_memmap/"
+        "dual_convention_contrastive_classifier_prefix_mixed_lowk/seed_3"
+    )
+    checkpoint = project_root / run_rel / "artifacts/final_weights.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"checkpoint")
+
+    cell = {
+        "cell_id": "40_issue149_dual_convention__sciq_memmap__seed_3",
+        "kind": "experiment",
+        "experiment_config": (
+            "configs/experiments/prefix149_dual_convention_sciq.json"
+        ),
+        "dataset": "sciq_memmap",
+        "method": "dual_convention_contrastive_classifier_prefix_mixed_lowk",
+        "seed": 3,
+        "seeded": True,
+        "output_check": str(run_rel / "predictions.csv"),
+    }
+    cell_path = claimed_root / f"{cell['cell_id']}.json"
+    cell_path.write_text(json.dumps(cell))
+    err_path = tmp_path / "worker.log"
+    err_path.write_text("old process hit serializer bug")
+    monkeypatch.setattr(_claim_cli, "_PROJECT_ROOT", project_root)
+
+    args = Namespace(
+        root=str(dispatch_root),
+        worker_id="worker-1",
+        cell=str(cell_path),
+        err_file=str(err_path),
+    )
+    assert _claim_cli.cmd_fail(args) == 0
+
+    pending = list((dispatch_root / "pending").glob("000_eval_*.json"))
+    assert len(pending) == 1
+    recovery = json.loads(pending[0].read_text())
+    assert recovery["eval_only"] is True
+    assert recovery["recovery_of"] == cell["cell_id"]
+    assert not list((dispatch_root / "failed").glob("*.json"))
