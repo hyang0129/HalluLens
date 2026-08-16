@@ -74,6 +74,8 @@ while true; do
   METHOD=$(    "$PYTHON" -c "import json; d=json.load(open('$CELL_PATH')); print(d['method'])")
   SEED=$(      "$PYTHON" -c "import json; d=json.load(open('$CELL_PATH')); print(d['seed'])")
   OUTPUT_CHECK=$("$PYTHON" -c "import json; d=json.load(open('$CELL_PATH')); print(d['output_check'])")
+  EVAL_ONLY=$( "$PYTHON" -c "import json; d=json.load(open('$CELL_PATH')); print(str(d.get('eval_only', False)).lower())")
+  CHECKPOINT_CHECK=$("$PYTHON" -c "import json; d=json.load(open('$CELL_PATH')); print(d.get('checkpoint_check', ''))")
   ABS_OUTPUT="$PROJECT_ROOT/$OUTPUT_CHECK"
 
   if [ -f "$ABS_OUTPUT" ]; then
@@ -83,12 +85,24 @@ while true; do
     continue
   fi
 
-  echo "worker_149 $WORKER_ID: running experiment=$EXPERIMENT method=$METHOD seed=$SEED"
+  EXTRA_ARGS=()
+  if [ "$EVAL_ONLY" = "true" ]; then
+    if [ -z "$CHECKPOINT_CHECK" ] || [ ! -s "$PROJECT_ROOT/$CHECKPOINT_CHECK" ]; then
+      printf '%s\n' "eval_only checkpoint missing or empty: $CHECKPOINT_CHECK" > "$RUN_LOG"
+      "$PYTHON" "$CLI" fail --root "$DISPATCH_ROOT" --worker-id "$WORKER_ID" --cell "$CELL_PATH" --err-file "$RUN_LOG"
+      N_FAIL=$(( N_FAIL + 1 ))
+      continue
+    fi
+    EXTRA_ARGS+=(--eval-only)
+  fi
+
+  echo "worker_149 $WORKER_ID: running experiment=$EXPERIMENT method=$METHOD seed=$SEED eval_only=$EVAL_ONLY"
   set +e
   "$PYTHON" "$PROJECT_ROOT/scripts/run_experiment.py" \
       --experiment "$PROJECT_ROOT/$EXPERIMENT" \
       --methods    "$METHOD" \
       --seeds      "$SEED" \
+      "${EXTRA_ARGS[@]}" \
       > "$RUN_LOG" 2>&1 &
   RUN_PID=$!; wait "$RUN_PID"; EXIT_CODE=$?; RUN_PID=""
   set -e

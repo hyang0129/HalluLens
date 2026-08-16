@@ -57,3 +57,15 @@ the Cartesian product of five datasets and five seeds. Each cell runs one seed
 and requires `predictions.csv` as its terminal sentinel. Workers use
 `scripts/dispatch/worker_149_dual_convention.sh`, which delegates to the tested
 issue #149 claim/heartbeat/recovery worker with the isolated queue root.
+
+### Evaluation recovery
+
+The first completed training cells exposed a result-serialization error after
+evaluation but before `eval_metrics.json` and `predictions.csv` were written.
+Their complete `artifacts/final_weights.pt` checkpoints are recoverable without
+retraining. `scripts/dispatch/build_issue_149_dual_convention_eval_cells.py`
+promotes checkpoint-backed failures to lexicographically highest-priority,
+evaluation-only cells and archives the original failure evidence under the
+queue's `recovery_history/` directory. The runner refuses an evaluation-only
+cell without a nonempty checkpoint and clears the superseded `run_error.json`
+only after result files are written successfully.

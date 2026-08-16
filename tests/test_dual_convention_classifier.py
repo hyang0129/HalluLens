@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from activation_research.model import (
@@ -237,3 +238,98 @@ def test_dual_convention_cell_builder_skips_complete_seed(tmp_path: Path):
     assert not any("hotpotqa_memmap__seed_0" in path.name for path in (
         dispatch_root / "pending"
     ).glob("*.json"))
+
+
+def test_classifier_prediction_rows_zip_scores_and_labels():
+    from scripts.run_experiment import _build_classifier_predictions
+
+    rows = _build_classifier_predictions(
+        np.asarray([0.25, 0.75]), np.asarray([0, 1])
+    )
+    assert rows == [
+        {"example_id": 0, "score_halu": 0.25, "label_halu": 0},
+        {"example_id": 1, "score_halu": 0.75, "label_halu": 1},
+    ]
+
+
+def test_successful_recovery_clears_stale_run_error(tmp_path: Path):
+    from scripts.run_experiment import _clear_stale_run_error
+
+    marker = tmp_path / "run_error.json"
+    marker.write_text('{"error": "old failure"}')
+    assert _clear_stale_run_error(str(marker)) is True
+    assert not marker.exists()
+    assert _clear_stale_run_error(str(marker)) is False
+
+
+def test_eval_recovery_cells_are_high_priority_checkpoint_guarded_and_idempotent(
+    tmp_path: Path,
+):
+    from scripts.dispatch.build_issue_149_dual_convention_eval_cells import build
+
+    project_root = tmp_path / "project"
+    dispatch_root = project_root / "shared/issue_149_dual_convention_dispatch"
+    failed_root = dispatch_root / "failed"
+    failed_root.mkdir(parents=True)
+
+    run_rel = Path(
+        "runs/prefix149_dual_convention_hotpotqa/hotpotqa_memmap/"
+        "dual_convention_contrastive_classifier_prefix_mixed_lowk/seed_0"
+    )
+    checkpoint = project_root / run_rel / "artifacts/final_weights.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"checkpoint")
+
+    failed_cell = {
+        "cell_id": "00_issue149_dual_convention__hotpotqa_memmap__seed_0",
+        "kind": "experiment",
+        "experiment_config": (
+            "configs/experiments/prefix149_dual_convention_hotpotqa.json"
+        ),
+        "dataset": "hotpotqa_memmap",
+        "method": "dual_convention_contrastive_classifier_prefix_mixed_lowk",
+        "seed": 0,
+        "seeded": True,
+        "output_check": str(run_rel / "predictions.csv"),
+    }
+    source = failed_root / f"{failed_cell['cell_id']}.json"
+    source.write_text(json.dumps(failed_cell))
+    (failed_root / f"{source.name}.err").write_text("serialization failure")
+
+    assert build(dispatch_root, project_root=project_root) == 1
+    assert build(dispatch_root, project_root=project_root) == 0
+
+    pending = list((dispatch_root / "pending").glob("*.json"))
+    assert len(pending) == 1
+    assert pending[0].name.startswith("000_eval_")
+    recovery = json.loads(pending[0].read_text())
+    assert recovery["kind"] == "evaluation"
+    assert recovery["eval_only"] is True
+    assert recovery["checkpoint_check"] == str(
+        run_rel / "artifacts/final_weights.pt"
+    )
+    assert recovery["recovery_of"] == failed_cell["cell_id"]
+    assert not list(failed_root.glob("*.json"))
+    assert (dispatch_root / "recovery_history" / source.name).exists()
+    assert (dispatch_root / "recovery_history" / f"{source.name}.err").exists()
+
+
+def test_eval_recovery_builder_refuses_missing_checkpoint(tmp_path: Path):
+    from scripts.dispatch.build_issue_149_dual_convention_eval_cells import build
+
+    project_root = tmp_path / "project"
+    dispatch_root = project_root / "shared/issue_149_dual_convention_dispatch"
+    failed_root = dispatch_root / "failed"
+    failed_root.mkdir(parents=True)
+    failed_cell = {
+        "cell_id": "20_issue149_dual_convention__nq_memmap__seed_0",
+        "dataset": "nq_memmap",
+        "seed": 0,
+        "output_check": "runs/missing/seed_0/predictions.csv",
+    }
+    source = failed_root / f"{failed_cell['cell_id']}.json"
+    source.write_text(json.dumps(failed_cell))
+
+    assert build(dispatch_root, project_root=project_root) == 0
+    assert source.exists()
+    assert not list((dispatch_root / "pending").glob("*.json"))

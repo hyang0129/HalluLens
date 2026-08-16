@@ -1016,6 +1016,27 @@ def run_contrastive_logprob_recon_shared_trunk(
     return eval_metrics, predictions
 
 
+def _build_classifier_predictions(classifier_scores, classifier_labels) -> list[dict]:
+    """Convert aligned classifier arrays to the canonical prediction rows."""
+    if len(classifier_scores) != len(classifier_labels):
+        raise ValueError(
+            "classifier score/label length mismatch: "
+            f"{len(classifier_scores)} != {len(classifier_labels)}"
+        )
+    return [
+        {"example_id": i, "score_halu": float(s), "label_halu": int(l)}
+        for i, (s, l) in enumerate(zip(classifier_scores, classifier_labels))
+    ]
+
+
+def _clear_stale_run_error(run_error_path: str) -> bool:
+    """Remove a superseded failure marker after all result writes succeed."""
+    if not os.path.exists(run_error_path):
+        return False
+    os.remove(run_error_path)
+    return True
+
+
 def run_contrastive_logprob_recon_dualhead_fusion(
     ap,
     dataset_cfg: dict,
@@ -1395,10 +1416,9 @@ def run_contrastive_logprob_recon_dualhead_fusion(
                 eval_metrics[f"k{_k}_knn_auroc_head_flip"] = _mirror_k
 
     if classifier_scores is not None and classifier_labels is not None:
-        predictions = [
-            {"example_id": i, "score_halu": float(s), "label_halu": int(l)}
-            for i, (s, l) in enumerate(classifier_scores, classifier_labels)
-        ]
+        predictions = _build_classifier_predictions(
+            classifier_scores, classifier_labels
+        )
     else:
         predictions = [
             {"example_id": i, "score_halu": float(f), "label_halu": int(l)}
@@ -3761,6 +3781,14 @@ def parse_args() -> argparse.Namespace:
         help="Force re-run even if eval_metrics.json already exists",
     )
     parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help=(
+            "Require an existing artifacts/final_weights.pt checkpoint and run "
+            "evaluation without permitting training."
+        ),
+    )
+    parser.add_argument(
         "--max-epochs",
         type=int,
         default=None,
@@ -4725,6 +4753,18 @@ def main() -> None:
                 logger.info(f"Running {method_name} seed={effective_seed} -> {run_dir}")
 
                 try:
+                    if args.eval_only:
+                        required_checkpoint = os.path.join(
+                            run_dir, "artifacts", "final_weights.pt"
+                        )
+                        if not os.path.isfile(required_checkpoint) or os.path.getsize(
+                            required_checkpoint
+                        ) == 0:
+                            raise FileNotFoundError(
+                                "--eval-only requires a nonempty checkpoint at "
+                                f"{required_checkpoint}"
+                            )
+
                     if effective_seed is not None:
                         from utils.seeding import seed_everything
 
@@ -4853,6 +4893,14 @@ def main() -> None:
                             writer = csv.DictWriter(f, fieldnames=predictions[0].keys())
                             writer.writeheader()
                             writer.writerows(predictions)
+
+                    # A successful recovery supersedes a previous per-seed error.
+                    # Leaving this marker behind makes status tooling classify valid
+                    # eval outputs as failed and causes subsequent runs to repeat.
+                    if _clear_stale_run_error(run_error_path):
+                        logger.info(
+                            f"Removed stale run_error.json after successful {method_name} recovery"
+                        )
 
                     logger.info(f"Completed {method_name} seed={effective_seed}: {eval_metrics}")
 
