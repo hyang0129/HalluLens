@@ -38,9 +38,9 @@ _METHODS = (
 _SEEDS = (0, 1, 2, 3, 4)
 
 
-def _dispatch_has_cell(dispatch_root: Path, cell_id: str) -> bool:
+def _dispatch_has_nonpending_cell(dispatch_root: Path, cell_id: str) -> bool:
     filename = f"{cell_id}.json"
-    for subdir in ("pending", "done", "failed"):
+    for subdir in ("done", "failed"):
         if (dispatch_root / subdir / filename).exists():
             return True
     claimed = dispatch_root / "claimed"
@@ -66,9 +66,6 @@ def build(dispatch_root: Path) -> int:
                 cell_id = (
                     f"0_high_issue151__{dataset_name}__{method_name}__seed{seed}"
                 )
-                if _dispatch_has_cell(dispatch_root, cell_id):
-                    print(f"  skip (already queued): {cell_id}")
-                    continue
                 output_check = (
                     Path("runs")
                     / experiment_name
@@ -82,13 +79,31 @@ def build(dispatch_root: Path) -> int:
                     "kind": "experiment",
                     "priority": "high",
                     "issue": 151,
+                    "architecture": "tokenwise_shared_contrastive_cache_v2",
+                    "worker_script": "scripts/dispatch/worker_151_tokenwise.sh",
                     "experiment_config": experiment_rel,
                     "dataset": dataset_name,
                     "method": method_name,
                     "seed": str(seed),
                     "output_check": str(output_check),
                 }
-                (dispatch_root / "pending" / f"{cell_id}.json").write_text(
+                pending_path = dispatch_root / "pending" / f"{cell_id}.json"
+                if pending_path.exists():
+                    existing = json.loads(pending_path.read_text(encoding="utf-8"))
+                    if existing == cell:
+                        print(f"  skip (already queued): {cell_id}")
+                        continue
+                    pending_path.write_text(
+                        json.dumps(cell, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    written += 1
+                    print(f"  refreshed pending cell: {cell_id}")
+                    continue
+                if _dispatch_has_nonpending_cell(dispatch_root, cell_id):
+                    print(f"  skip (already claimed/completed): {cell_id}")
+                    continue
+                pending_path.write_text(
                     json.dumps(cell, indent=2) + "\n",
                     encoding="utf-8",
                 )

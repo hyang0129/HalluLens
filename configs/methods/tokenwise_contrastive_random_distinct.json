@@ -24,6 +24,7 @@
     "min_total_steps": 3000
   },
   "data": {
+    "view_adapter": "tokenwise_shared_contrastive_cache",
     "relevant_layers": "1-32",
     "num_views": 2,
     "token_pair_mode": "random_distinct",

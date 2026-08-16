@@ -388,21 +388,72 @@ def test_memmap_parser_forwards_tokenwise_contract(tmp_path):
     )
 
 
-def test_tokenwise_dataset_trains_through_standard_joint_objective(tmp_path):
-    from activation_research.model import LogprobReconProgressiveCompressor
-    from activation_research.training import train_contrastive_logprob_recon
+def test_tokenwise_adapter_reuses_one_contrastive_cache_for_train_and_eval(tmp_path):
+    from activation_research.tokenwise_contrastive_dataset import (
+        TokenwiseContrastiveDataset,
+    )
 
     capture = _make_full_capture_dir(tmp_path, n_samples=8)
-    ds = MemmapContrastiveDataset(
+    base = MemmapContrastiveDataset(
         capture,
         split="all",
         num_views=2,
         relevant_layers=[1, 2, 3, 4],
-        view_axis="token",
-        token_pair_mode="first_anchored",
-        min_response_tokens=2,
         include_response_logprobs=True,
         pad_length=12,
+    )
+    pairs = TokenwiseContrastiveDataset(
+        base,
+        layer_positions=[1, 2, 3, 4],
+        num_views=2,
+        token_pair_mode="first_anchored",
+        min_response_tokens=2,
+    )
+    token0 = TokenwiseContrastiveDataset(
+        base,
+        layer_positions=[1, 2, 3, 4],
+        num_views=1,
+        token_pair_mode="first_anchored",
+        fixed_token=0,
+        min_response_tokens=1,
+    )
+
+    assert pairs.base_dataset is token0.base_dataset is base
+    assert pairs.cache is token0.cache is base.cache
+    pair_item = pairs[0]
+    token0_item = token0[0]
+    assert pair_item["view_token_indices"][0].item() == 0
+    assert pair_item["views_activations"].shape == (
+        2,
+        4,
+        _SMALL_CFG["hidden_dim"],
+    )
+    assert token0_item["view_token_indices"].tolist() == [0]
+    assert token0_item["response_token_logprobs"].shape == (12,)
+
+
+def test_tokenwise_dataset_trains_through_standard_joint_objective(tmp_path):
+    from activation_research.model import LogprobReconProgressiveCompressor
+    from activation_research.tokenwise_contrastive_dataset import (
+        TokenwiseContrastiveDataset,
+    )
+    from activation_research.training import train_contrastive_logprob_recon
+
+    capture = _make_full_capture_dir(tmp_path, n_samples=8)
+    base = MemmapContrastiveDataset(
+        capture,
+        split="all",
+        num_views=2,
+        relevant_layers=[1, 2, 3, 4],
+        include_response_logprobs=True,
+        pad_length=12,
+    )
+    ds = TokenwiseContrastiveDataset(
+        base,
+        layer_positions=[1, 2, 3, 4],
+        num_views=2,
+        token_pair_mode="first_anchored",
+        min_response_tokens=2,
     )
     model = LogprobReconProgressiveCompressor(
         input_dim=_SMALL_CFG["hidden_dim"],

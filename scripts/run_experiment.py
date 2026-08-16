@@ -508,18 +508,12 @@ def run_contrastive_logprob_recon(
         check_ram=False,
     )
 
-    if _tokenwise:
-        ds_kwargs.update(
-            view_axis="token",
-            token_pair_mode=data_cfg.get("token_pair_mode", "first_anchored"),
-            fixed_token=None,
-            # A valid contrastive pair needs two real decoding steps.  The
-            # fixed-token evaluation datasets below are constructed separately
-            # with min_response_tokens=1 so one-token generations are retained.
-            min_response_tokens=2,
-        )
-
-    train_ds = ap.get_dataset("train", **ds_kwargs)
+    # Build the ordinary contrastive dataset exactly once per split.  In the
+    # token-wise routine, lightweight adapters below only transpose the final
+    # cache slice; they reuse the base cache, labels, hashes, split rows, and
+    # full-response logprob arrays.
+    train_base_ds = ap.get_dataset("train", **ds_kwargs)
+    train_ds = train_base_ds
     if (
         _p1_expected_train_n is not None
         and not _tokenwise
@@ -533,23 +527,74 @@ def run_contrastive_logprob_recon(
     has_val = ap.split_strategy == "three_way"
     eval_ap = test_ap if test_ap is not None else ap
     if _tokenwise:
-        val_ds = (
+        from activation_research.tokenwise_contrastive_dataset import (
+            TokenwiseContrastiveDataset,
+        )
+
+        view_adapter = data_cfg.get(
+            "view_adapter", "tokenwise_shared_contrastive_cache"
+        )
+        if view_adapter != "tokenwise_shared_contrastive_cache":
+            raise ValueError(
+                "token-wise routine requires "
+                "data.view_adapter='tokenwise_shared_contrastive_cache'; "
+                f"got {view_adapter!r}"
+            )
+
+        # MemmapContrastiveDataset.cache retains the complete model-layer axis,
+        # so model layer IDs are also cache positions. A RAM-preloaded base
+        # cache is already restricted to relevant_layers and uses 0..L-1.
+        layer_positions = (
+            list(relevant_layers)
+            if hasattr(train_base_ds, "_relevant_layers")
+            else list(range(len(relevant_layers)))
+        )
+        pair_mode = data_cfg.get("token_pair_mode", "first_anchored")
+
+        train_ds = TokenwiseContrastiveDataset(
+            train_base_ds,
+            layer_positions=layer_positions,
+            num_views=data_cfg.get("num_views", 2),
+            token_pair_mode=pair_mode,
+            min_response_tokens=2,
+        )
+        val_base_ds = (
             ap.get_dataset("val", **ds_kwargs)
             if has_val
             else eval_ap.get_dataset("test", **ds_kwargs)
         )
-        fixed_t0_kwargs = dict(ds_kwargs)
-        fixed_t0_kwargs.update(
+        val_ds = TokenwiseContrastiveDataset(
+            val_base_ds,
+            layer_positions=layer_positions,
+            num_views=data_cfg.get("num_views", 2),
+            token_pair_mode=pair_mode,
+            min_response_tokens=2,
+        )
+        test_base_ds = eval_ap.get_dataset("test", **ds_kwargs)
+        train_eval_ds = TokenwiseContrastiveDataset(
+            train_base_ds,
+            layer_positions=layer_positions,
             num_views=1,
+            token_pair_mode=pair_mode,
             fixed_token=0,
             min_response_tokens=1,
         )
-        train_eval_ds = ap.get_dataset("train", **fixed_t0_kwargs)
-        test_ds = eval_ap.get_dataset("test", **fixed_t0_kwargs)
+        test_ds = TokenwiseContrastiveDataset(
+            test_base_ds,
+            layer_positions=layer_positions,
+            num_views=1,
+            token_pair_mode=pair_mode,
+            fixed_token=0,
+            min_response_tokens=1,
+        )
         logger.info(
-            "token-wise geometry: pair_mode={} train_pairs={} "
-            "train_t0={} test_t0={} depth_sequence={}",
-            data_cfg.get("token_pair_mode", "first_anchored"),
+            "token-wise cache adapter={} pair_mode={} base_cache_id={} "
+            "train_base={} train_pairs={} train_t0={} test_t0={} "
+            "depth_sequence={}",
+            view_adapter,
+            pair_mode,
+            id(train_base_ds.cache),
+            len(train_base_ds),
             len(train_ds),
             len(train_eval_ds),
             len(test_ds),
@@ -860,10 +905,17 @@ def run_contrastive_logprob_recon(
         eval_metrics.update(
             {
                 "view_axis": "token",
+                "view_adapter": data_cfg.get(
+                    "view_adapter", "tokenwise_shared_contrastive_cache"
+                ),
                 "token_pair_mode": data_cfg.get(
                     "token_pair_mode", "first_anchored"
                 ),
                 "primary_eval_token": 0,
+                "activation_cache_reused": bool(
+                    train_ds.cache is train_eval_ds.cache
+                ),
+                "n_train_base": len(train_base_ds),
                 "n_train_pair_eligible": len(train_ds),
                 "n_train_t0": len(train_ds_target),
                 "model_total_params": sum(p.numel() for p in model.parameters()),

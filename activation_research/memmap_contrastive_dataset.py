@@ -455,6 +455,22 @@ class MemmapContrastiveDataset(Dataset):
         Exposed for _split_view compatibility."""
         return self._valid_sample_indices[self._split_indices]
 
+    def get_auxiliary_fields(self, idx: int) -> Dict[str, Any]:
+        """Return non-activation fields for a logical split row.
+
+        Token-wise adapters use this hook to reuse logprob targets and metadata
+        without calling ``__getitem__`` and triggering layer-view sampling.
+        """
+        meta_idx = int(self._split_indices[idx])
+        sample_row = int(self._valid_sample_indices[meta_idx])
+        fields: Dict[str, Any] = {
+            "input_length": int(self._prompt_len[sample_row]),
+            "response_len": int(self._resp_len[sample_row]),
+        }
+        if self._include_lp:
+            fields.update(self._get_logprob_fields(sample_row))
+        return fields
+
     # ------------------------------------------------------------------ #
     def get_single_layer_dataset(self, layer_id: int):
         """Return a SingleLayerDataset for one fixed layer (for linear_probe / saplma).

@@ -1,7 +1,9 @@
 # First-token token-wise contrastive learning
 
 Status: issue #151 implementation draft. The 50-cell queue builder is included;
-workers are intentionally not started by this change.
+workers are intentionally not started by this change. Architecture revision v2
+reuses one ordinary contrastive activation cache per split and applies only a
+token-wise indexing adapter.
 
 ## Motivation
 
@@ -378,7 +380,21 @@ The existing memmap layout already contains the necessary tensor:
 response_activations: (sample, layer + embedding, decoding_step, hidden_dim)
 ```
 
-A new token-wise dataset view should emit:
+The existing contrastive dataset remains the sole activation loader. For each
+split, it opens or preloads the full `(sample, layer, token, hidden)` cache once.
+Lightweight `TokenwiseContrastiveDataset` adapters share that exact cache,
+labels, hashes, split-row indirection, and logprob arrays:
+
+```text
+ordinary contrastive base dataset (one per split)
+    ├── pair adapter: samples (0,n) or distinct (k,n) for training
+    ├── token-0 adapter: fixed t=0 for the KNN reference/test surfaces
+    └── fixed-token adapters: t=1,3,7,... for matched diagnostics
+```
+
+No adapter reloads or duplicates activations; it changes only the final cache
+slice from `cache[row, layer, :, :]` to
+`cache[row, selected_layers, token, :]`. It emits:
 
 ```text
 views_activations:  (2, selected_layers, hidden_dim)
