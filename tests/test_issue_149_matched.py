@@ -311,3 +311,24 @@ def test_lowk_methods_share_exact_prefix_training_support():
     assert all(
         cfg["evaluation"]["eval_prefix_lengths"] == expected for cfg in configs
     )
+
+
+def test_standard_lowk_selects_fixed_k1_validation_knn_auroc():
+    root = Path(__file__).resolve().parents[1]
+    cfg = json.loads(
+        (
+            root
+            / "configs/methods/contrastive_logprob_recon_prefix_mixed_lowk.json"
+        ).read_text()
+    )
+    training = cfg["training"]
+    assert training["select_on_val"] is True
+    assert training["checkpoint_selection_metric"] == "knn_auroc"
+    assert training["validation_knn"] == {
+        "k": 50,
+        "metric": "euclidean",
+        "calibrate_k": False,
+        "train_selection": "all",
+        "max_train_size": 200000,
+        "prefix_length": 1,
+    }

@@ -22,7 +22,15 @@
     "balanced_sampling": false,
     "grad_clip_norm": 1.0,
     "min_total_steps": 3000,
-    "select_on_val": true
+    "select_on_val": true,
+    "checkpoint_selection_metric": "knn_auroc",
+    "validation_knn": {
+      "k": 50,
+      "metric": "euclidean",
+      "calibrate_k": false,
+      "train_selection": "all",
+      "max_train_size": 200000
+    }
   },
   "data": {
     "view_adapter": "tokenwise_shared_contrastive_cache",

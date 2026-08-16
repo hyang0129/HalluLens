@@ -39,6 +39,14 @@ def test_tokenwise_methods_match_standard_compressor_size_contract():
         assert method["evaluation"]["cosine_knn_params"]["l2_normalize"] is True
         assert method["training"]["min_total_steps"] == 3000
         assert method["training"]["select_on_val"] is True
+        assert method["training"]["checkpoint_selection_metric"] == "knn_auroc"
+        assert method["training"]["validation_knn"] == {
+            "k": 50,
+            "metric": "euclidean",
+            "calibrate_k": False,
+            "train_selection": "all",
+            "max_train_size": 200000,
+        }
 
 
 def test_issue_151_builder_creates_25_idempotent_non_mmlu_cells(tmp_path):

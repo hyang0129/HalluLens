@@ -70,6 +70,76 @@ def parse_layer_range(spec: str) -> list[int]:
     return list(range(int(start), int(end) + 1))
 
 
+def _make_validation_knn_scorer(
+    *,
+    activation_parser_df,
+    train_dataset,
+    val_dataset,
+    device: str,
+    num_workers: int,
+    eval_batch_size: int,
+    sub_batch_size: int,
+    outlier_class: int,
+    k: int,
+    max_train_size: int,
+    sample_seed: int,
+    prefix_length: int | None = None,
+):
+    """Build a fixed held-out KNN-AUROC checkpoint scorer.
+
+    The reference bank always contains all training examples. ``k`` and the
+    raw-Euclidean metric are fixed before training; validation labels are used
+    only to compute AUROC, never to tune the scorer. A prefix wrapper is used
+    for the layer-wise early-token model so selection matches its k=1 report.
+    """
+    from torch.utils.data import DataLoader
+
+    from activation_research.metric_evaluator import (
+        MultiMetricHallucinationEvaluator,
+    )
+
+    k = int(k)
+    if k <= 0:
+        raise ValueError("validation KNN k must be positive")
+
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
+    metric_spec = {
+        "metric": "knn",
+        "kwargs": {
+            "k": k,
+            "metric": "euclidean",
+            "calibrate_k": False,
+            "max_train_size": int(max_train_size),
+            "sample_seed": int(sample_seed),
+        },
+        "train_selection": "all",
+    }
+
+    def _score(model) -> float:
+        score_model = model
+        if prefix_length is not None:
+            from activation_research.prefix_views import PrefixEvalWrapper
+
+            score_model = PrefixEvalWrapper(model, int(prefix_length)).to(device)
+        evaluator = MultiMetricHallucinationEvaluator(
+            activation_parser_df=activation_parser_df,
+            train_activation_parser_df=activation_parser_df,
+            train_data_loader=train_loader,
+            metrics=[metric_spec],
+            batch_size=int(eval_batch_size),
+            sub_batch_size=int(sub_batch_size),
+            device=device,
+            num_workers=int(num_workers),
+            persistent_workers=False,
+            outlier_class=int(outlier_class),
+        )
+        stats = evaluator.compute(val_loader, score_model)
+        return float(stats["knn_auroc"])
+
+    return _score
+
+
 def write_run_manifest(output_dir: str) -> None:
     """Write run_manifest.json with environment metadata."""
     manifest = {
@@ -579,6 +649,14 @@ def run_contrastive_logprob_recon(
             fixed_token=0,
             min_response_tokens=1,
         )
+        val_eval_ds = TokenwiseContrastiveDataset(
+            val_base_ds,
+            layer_positions=layer_positions,
+            num_views=1,
+            token_pair_mode=pair_mode,
+            fixed_token=0,
+            min_response_tokens=1,
+        )
         test_ds = TokenwiseContrastiveDataset(
             test_base_ds,
             layer_positions=layer_positions,
@@ -604,6 +682,7 @@ def run_contrastive_logprob_recon(
         test_ds = eval_ap.get_dataset("test", **ds_kwargs)
         val_ds = ap.get_dataset("val", **ds_kwargs) if has_val else test_ds
         train_eval_ds = None
+        val_eval_ds = None
 
     model_params = method_cfg.get("model_params", {})
     model_class = str(method_cfg.get("model_class", "logprob_recon_progressive_compressor")).strip().lower()
@@ -679,10 +758,12 @@ def run_contrastive_logprob_recon(
     checkpoint_dir = os.path.join(output_dir, "artifacts")
     final_weights_path = os.path.join(checkpoint_dir, "final_weights.pt")
     training_skipped = os.path.exists(final_weights_path)
+    training_summary: dict = {}
     if training_skipped:
         logger.info(f"final_weights.pt found — skipping training, loading weights for eval")
         ckpt = torch.load(final_weights_path, map_location=train_device)
         model.load_state_dict(ckpt["model_state_dict"])
+        training_summary = dict(ckpt.get("training_summary", {}))
 
     aug_cfg = data_cfg.get("augmentations", None)
     augment_fn = None
@@ -695,8 +776,63 @@ def run_contrastive_logprob_recon(
 
     from activation_research.training import train_contrastive_logprob_recon
 
+    select_on_val = bool(train_cfg.get("select_on_val", False))
+    checkpoint_selection_metric = str(
+        train_cfg.get("checkpoint_selection_metric", "validation_loss")
+    ).strip().lower()
+    validation_score_fn = None
+    validation_score_name = "validation_score"
+    if select_on_val and checkpoint_selection_metric == "knn_auroc":
+        if not has_val:
+            raise ValueError(
+                "checkpoint_selection_metric='knn_auroc' requires a held-out "
+                "validation split; refusing to select on the test capture"
+            )
+        selection_cfg = dict(train_cfg.get("validation_knn", {}))
+        if str(selection_cfg.get("metric", "euclidean")).lower() != "euclidean":
+            raise ValueError("validation checkpoint KNN must use raw Euclidean distance")
+        if bool(selection_cfg.get("calibrate_k", False)):
+            raise ValueError("validation checkpoint KNN must use a fixed predeclared k")
+        if str(selection_cfg.get("train_selection", "all")).lower() != "all":
+            raise ValueError("validation checkpoint KNN must use the all-example bank")
+
+        if _tokenwise:
+            selection_train_ds = train_eval_ds
+            selection_val_ds = val_eval_ds
+            selection_prefix_length = None
+        else:
+            selection_train_ds = train_ds.slice_layers(target_layers)
+            selection_val_ds = val_ds.slice_layers(target_layers)
+            selection_prefix_length = selection_cfg.get("prefix_length")
+
+        selection_outlier_class = (
+            0
+            if bool(eval_cfg.get("flip_auroc", False))
+            else int(dataset_cfg.get("outlier_class", 1))
+        )
+        validation_score_fn = _make_validation_knn_scorer(
+            activation_parser_df=ap.df,
+            train_dataset=selection_train_ds,
+            val_dataset=selection_val_ds,
+            device=train_device,
+            num_workers=experiment_cfg.get("num_workers", 4),
+            eval_batch_size=eval_cfg.get("eval_batch_size", 256),
+            sub_batch_size=eval_cfg.get("sub_batch_size", 64),
+            outlier_class=selection_outlier_class,
+            k=selection_cfg.get("k", 50),
+            max_train_size=selection_cfg.get("max_train_size", 200000),
+            sample_seed=training_seed,
+            prefix_length=selection_prefix_length,
+        )
+        validation_score_name = "validation_knn_auroc"
+    elif select_on_val and checkpoint_selection_metric != "validation_loss":
+        raise ValueError(
+            "checkpoint_selection_metric must be one of "
+            "{'validation_loss', 'knn_auroc'}"
+        )
+
     if not training_skipped:
-        train_contrastive_logprob_recon(
+        training_summary = train_contrastive_logprob_recon(
             model=model,
             train_dataset=train_ds,
             test_dataset=val_ds,
@@ -730,11 +866,16 @@ def run_contrastive_logprob_recon(
             prefix_min_gap=train_cfg.get("prefix_min_gap", 8),
             prefix_sampling_lengths=train_cfg.get("prefix_sampling_lengths"),
             prefix_seed=training_seed,
-            select_on_val=train_cfg.get("select_on_val", False),
+            select_on_val=select_on_val,
+            validation_score_fn=validation_score_fn,
+            validation_score_name=validation_score_name,
         )
 
         torch.save(
-            {"model_state_dict": model.state_dict()},
+            {
+                "model_state_dict": model.state_dict(),
+                "training_summary": training_summary,
+            },
             os.path.join(output_dir, "artifacts", "final_weights.pt"),
         )
 
@@ -970,6 +1111,21 @@ def run_contrastive_logprob_recon(
         "split_seed": _resolve_run_split_seed(experiment_cfg, training_seed),
         "n_train": len(train_ds),
         "n_test": len(test_ds),
+        "training_min_total_steps": train_cfg.get("min_total_steps"),
+        "checkpoint_selection": training_summary.get(
+            "checkpoint_selection",
+            "maximum_validation_knn_auroc"
+            if select_on_val and checkpoint_selection_metric == "knn_auroc"
+            else "minimum_validation_loss"
+            if select_on_val
+            else "final_epoch",
+        ),
+        "best_validation_score": training_summary.get(
+            "best_validation_score"
+        ),
+        "best_validation_epoch": training_summary.get(
+            "best_validation_epoch"
+        ),
     }
     if _tokenwise:
         eval_metrics.update(
@@ -988,12 +1144,6 @@ def run_contrastive_logprob_recon(
                 "n_train_base": len(train_base_ds),
                 "n_train_pair_eligible": len(train_ds),
                 "n_train_t0": len(train_ds_target),
-                "training_min_total_steps": train_cfg.get("min_total_steps"),
-                "checkpoint_selection": (
-                    "minimum_validation_loss"
-                    if train_cfg.get("select_on_val", False)
-                    else "final_epoch"
-                ),
                 "model_total_params": sum(p.numel() for p in model.parameters()),
                 "model_encoder_params": sum(
                     p.numel() for p in model.encoder.parameters()
@@ -1512,6 +1662,7 @@ def run_contrastive_logprob_recon_dualhead_fusion(
             head_model = PrefixEvalWrapper(head_model, int(prefix_len))
         evaluator = MultiMetricHallucinationEvaluator(
             activation_parser_df=eval_ap.df,
+            train_activation_parser_df=ap.df,
             train_data_loader=train_loader,
             metrics=[{"metric": "knn", "kwargs": knn_params, "train_selection": "all"}],
             batch_size=eval_cfg.get("eval_batch_size", 256),

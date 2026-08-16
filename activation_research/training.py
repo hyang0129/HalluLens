@@ -798,6 +798,8 @@ def train_contrastive_logprob_recon(
     lr_schedule: str = None,
     base_temperature: float = 0.07,
     select_on_val: bool = False,
+    validation_score_fn=None,
+    validation_score_name: str = "validation_score",
 ):
     """Train a ``LogprobReconProgressiveCompressor`` with auxiliary logprob reconstruction.
 
@@ -830,6 +832,13 @@ def train_contrastive_logprob_recon(
     min_total_steps : int or None
         When set with the infinite stream, increase steps per epoch as needed
         so ``epochs * steps_per_epoch >= min_total_steps``.
+    validation_score_fn : callable or None
+        Optional callback invoked as ``validation_score_fn(model)`` after each
+        epoch. When supplied with ``select_on_val=True``, the checkpoint with
+        the maximum finite callback score is restored. Without a callback,
+        the legacy minimum-validation-loss rule is retained.
+    validation_score_name : str
+        Persisted name for ``validation_score_fn`` in checkpoint metadata.
     """
     _lambda = float(recon_lambda) if recon_lambda is not None else model.recon_lambda
 
@@ -914,12 +923,14 @@ def train_contrastive_logprob_recon(
 
     start_epoch = 0
     best_loss = float("inf")
-    # Best-val checkpoint selection (opt-in): track lowest validation loss and
-    # restore those weights at the end, so eval uses the best epoch instead of
-    # whatever epoch the loop ended on. Mirrors run_act_vit's best-val-AUROC
-    # selection (the analog here is best validation loss).
+    # Best-validation checkpoint selection is opt-in. A supplied scorer is
+    # maximized (the HalluLens/token-wise runners use held-out KNN AUROC);
+    # otherwise preserve the legacy minimum-validation-loss behavior.
     best_val_loss = float("inf")
+    best_val_score = -float("inf")
     best_state = None
+    best_val_epoch = None
+    last_val_score = None
 
     if resume_from is not None:
         checkpoint_path = (
@@ -1220,6 +1231,34 @@ def train_contrastive_logprob_recon(
                 f"- Test IntraCos: {test_intra_cos:.4f} - Test IntraInterMargin: {test_intra_inter:.4f}"
             )
 
+        last_val_score = None
+        if select_on_val and validation_score_fn is not None:
+            model.eval()
+            last_val_score = float(validation_score_fn(model))
+            if not math.isfinite(last_val_score):
+                raise RuntimeError(
+                    f"{validation_score_name} returned a non-finite value: "
+                    f"{last_val_score}"
+                )
+            print(
+                f"Epoch {epoch + 1}/{epochs} - "
+                f"{validation_score_name}: {last_val_score:.6f}"
+            )
+            if last_val_score > best_val_score:
+                best_val_score = last_val_score
+                best_val_epoch = epoch + 1
+                best_state = {
+                    k: v.detach().cpu().clone()
+                    for k, v in model.state_dict().items()
+                }
+        elif select_on_val and test_loader is not None and test_loss < best_val_loss:
+            best_val_loss = test_loss
+            best_val_epoch = epoch + 1
+            best_state = {
+                k: v.detach().cpu().clone()
+                for k, v in model.state_dict().items()
+            }
+
         is_last_epoch = epoch == epochs - 1
         if (epoch + 1) % save_every == 0 or is_last_epoch:
             checkpoint = {
@@ -1241,6 +1280,19 @@ def train_contrastive_logprob_recon(
                 "min_total_steps": min_total_steps,
                 "steps_per_epoch": steps_per_epoch,
                 "select_on_val": bool(select_on_val),
+                "validation_score_name": (
+                    str(validation_score_name)
+                    if validation_score_fn is not None
+                    else "validation_loss"
+                ),
+                "validation_score": last_val_score,
+                "best_validation_score": (
+                    best_val_score if validation_score_fn is not None else None
+                ),
+                "best_validation_loss": (
+                    best_val_loss if validation_score_fn is None else None
+                ),
+                "best_validation_epoch": best_val_epoch,
             }
 
             last_path = os.path.join(checkpoint_dir, "contrastive_last.pt")
@@ -1259,15 +1311,49 @@ def train_contrastive_logprob_recon(
             if cleanup_legacy_checkpoints:
                 _cleanup_legacy_checkpoints(checkpoint_dir, keep_filenames={"contrastive_last.pt"})
 
-        if select_on_val and test_loader is not None and test_loss < best_val_loss:
-            best_val_loss = test_loss
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         if scheduler is not None:
             scheduler.step()
 
     if select_on_val and best_state is not None:
         model.load_state_dict(best_state)
-        logger.info("Restored best-val checkpoint (val_loss=%.4f)" % best_val_loss)
+        if validation_score_fn is not None:
+            logger.info(
+                "Restored best-val checkpoint ({}={:.6f}, epoch={})",
+                validation_score_name,
+                best_val_score,
+                best_val_epoch,
+            )
+        else:
+            logger.info(
+                "Restored best-val checkpoint (val_loss={:.4f}, epoch={})",
+                best_val_loss,
+                best_val_epoch,
+            )
+
+    return {
+        "checkpoint_selection": (
+            f"maximum_{validation_score_name}"
+            if select_on_val and validation_score_fn is not None
+            else "minimum_validation_loss"
+            if select_on_val
+            else "final_epoch"
+        ),
+        "best_validation_score": (
+            best_val_score
+            if select_on_val
+            and validation_score_fn is not None
+            and best_val_epoch is not None
+            else None
+        ),
+        "best_validation_loss": (
+            best_val_loss
+            if select_on_val
+            and validation_score_fn is None
+            and best_val_epoch is not None
+            else None
+        ),
+        "best_validation_epoch": best_val_epoch,
+    }
 
 
 def _contrastive_collate_with_logprob_attn(batch):

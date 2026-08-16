@@ -452,9 +452,13 @@ The canonical token-zero scorer contract is:
   reference hashes resolve against the train-capture parser, while test hashes
   resolve independently against the test-capture parser.
 
-Training honors `min_total_steps=3000`. When a held-out validation split is
-available, the token-wise configuration restores the epoch with minimum
-validation loss before saving the weights used for final test evaluation.
+Training honors `min_total_steps=3000`. The token-wise configuration restores
+the epoch with maximum held-out validation KNN AUROC before saving the weights
+used for final test evaluation. This selection surface is predeclared: raw
+Euclidean distance, fixed `k=50`, and the all-example train bank at token zero.
+The matched layer-wise logprob-contrastive method uses the same rule at response
+prefix `k=1`. Neither rule calibrates KNN neighborhood size on validation or
+uses the test capture for checkpoint selection.
 
 For distance scoring, an all-example reference bank asks whether a test point
 is far from the complete observed training distribution: both truthful and
