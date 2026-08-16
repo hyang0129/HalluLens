@@ -32,6 +32,13 @@ def test_tokenwise_methods_match_standard_compressor_size_contract():
         assert method["training"]["ignore_label"] == 1
         assert method["evaluation"]["eval_token_positions"][0] == 0
         assert "knn" in method["evaluation"]["metrics"]
+        assert "cosine" not in method["evaluation"]["metrics"]
+        assert "linear_probe" in method["evaluation"]["metrics"]
+        assert method["evaluation"]["knn_params"]["metric"] == "euclidean"
+        assert method["evaluation"]["cosine_knn_params"]["metric"] == "cosine"
+        assert method["evaluation"]["cosine_knn_params"]["l2_normalize"] is True
+        assert method["training"]["min_total_steps"] == 3000
+        assert method["training"]["select_on_val"] is True
 
 
 def test_issue_151_builder_creates_25_idempotent_non_mmlu_cells(tmp_path):

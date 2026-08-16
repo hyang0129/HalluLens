@@ -82,7 +82,8 @@ def test_multi_metric_hallucination_evaluator_reuses_embeddings_once():
         calls["test"] += 1
         return test_embeddings
 
-    def fake_labels(records, keep_unlabeled=False):
+    def fake_labels(records, keep_unlabeled=False, lookup_df=None):
+        _ = keep_unlabeled, lookup_df
         calls["label"] += 1
         return [
             {**record, "halu": 0 if str(record["hashkey"]).startswith("id_") else 1}
@@ -127,3 +128,47 @@ def test_multi_metric_hallucination_evaluator_uses_id_only_default_for_mds():
 
     assert stats["mds_probe_n_train"] == 2
     assert stats["knn_probe_n_train"] == 4
+
+
+def test_train_bank_labels_use_train_parser_not_test_parser():
+    """A colliding hash must resolve independently in each capture."""
+    from activation_research.metric_evaluator import MultiMetricHallucinationEvaluator
+
+    class DummyLoader:
+        dataset = None
+
+    train_df = pd.DataFrame(
+        {"prompt_hash": ["shared", "train_only"], "halu": [0, 1]}
+    )
+    test_df = pd.DataFrame(
+        {"prompt_hash": ["shared", "test_only"], "halu": [1, 0]}
+    )
+    train_records = [
+        {"hashkey": "shared", "z1": torch.tensor([0.0])},
+        {"hashkey": "train_only", "z1": torch.tensor([1.0])},
+    ]
+    test_records = [
+        {"hashkey": "shared", "z1": torch.tensor([2.0])},
+        {"hashkey": "test_only", "z1": torch.tensor([3.0])},
+    ]
+
+    def report_labels(train_records, test_records, outlier_class=1):
+        _ = outlier_class
+        return {
+            "train_labels_seen": [int(r["halu"]) for r in train_records],
+            "test_labels_seen": [int(r["halu"]) for r in test_records],
+        }
+
+    evaluator = MultiMetricHallucinationEvaluator(
+        activation_parser_df=test_df,
+        train_activation_parser_df=train_df,
+        train_data_loader=DummyLoader(),
+        device="cpu",
+        metrics=[report_labels],
+    )
+    evaluator._baseline_embeddings = train_records
+
+    stats = evaluator.compute_from_embeddings(test_records)
+
+    assert stats["train_labels_seen"] == [0, 1]
+    assert stats["test_labels_seen"] == [1, 0]

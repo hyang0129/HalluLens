@@ -790,6 +790,7 @@ def train_contrastive_logprob_recon(
     infinite_stream_shuffle: bool = True,
     infinite_stream_seed: int = 0,
     steps_per_epoch_override: int = None,
+    min_total_steps: int = None,
     grad_clip_norm: float = None,
     augment_fn=None,
     optimizer_name: str = "adam",
@@ -826,6 +827,9 @@ def train_contrastive_logprob_recon(
         When set, use this fixed step count per epoch instead of
         ``ceil(dataset_len / batch_size)``.  Requires
         ``use_infinite_index_stream=True``.
+    min_total_steps : int or None
+        When set with the infinite stream, increase steps per epoch as needed
+        so ``epochs * steps_per_epoch >= min_total_steps``.
     """
     _lambda = float(recon_lambda) if recon_lambda is not None else model.recon_lambda
 
@@ -996,6 +1000,14 @@ def train_contrastive_logprob_recon(
             steps_per_epoch = int(steps_per_epoch_override)
         else:
             steps_per_epoch = inferred
+        if min_total_steps is not None:
+            required = int(math.ceil(int(min_total_steps) / max(1, int(epochs))))
+            if required > steps_per_epoch:
+                logger.info(
+                    f"min_total_steps={min_total_steps}: bumping logprob-recon "
+                    f"steps_per_epoch from {steps_per_epoch} to {required}"
+                )
+                steps_per_epoch = required
         train_iter = iter(train_loader)
 
     test_loader = None
@@ -1226,6 +1238,9 @@ def train_contrastive_logprob_recon(
                 "temperature": temperature,
                 "lr": lr,
                 "recon_lambda": _lambda,
+                "min_total_steps": min_total_steps,
+                "steps_per_epoch": steps_per_epoch,
+                "select_on_val": bool(select_on_val),
             }
 
             last_path = os.path.join(checkpoint_dir, "contrastive_last.pt")

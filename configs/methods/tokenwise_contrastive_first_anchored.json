@@ -21,7 +21,8 @@
     "use_infinite_index_stream": true,
     "balanced_sampling": false,
     "grad_clip_norm": 1.0,
-    "min_total_steps": 3000
+    "min_total_steps": 3000,
+    "select_on_val": true
   },
   "data": {
     "view_adapter": "tokenwise_shared_contrastive_cache",
@@ -35,9 +36,9 @@
   },
   "evaluation": {
     "metrics": [
-      "cosine",
       "mds",
-      "knn"
+      "knn",
+      "linear_probe"
     ],
     "knn_params": {
       "k": 50,
@@ -50,6 +51,26 @@
         500,
         1000
       ],
+      "max_train_size": 200000
+    },
+    "cosine_knn_params": {
+      "k": 50,
+      "metric": "cosine",
+      "l2_normalize": true,
+      "calibrate_k": true,
+      "k_candidates": [
+        50,
+        100,
+        200,
+        500,
+        1000
+      ],
+      "max_train_size": 200000
+    },
+    "linear_probe_params": {
+      "C": 1.0,
+      "max_iter": 1000,
+      "class_weight": null,
       "max_train_size": 200000
     },
     "eval_batch_size": 256,

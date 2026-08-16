@@ -440,6 +440,31 @@ Report AUROC and AUPRC on HotpotQA, NQ, PopQA, SciQ, and SearchQA. For the
 token-wise methods, report KNN as primary and a frozen linear probe only as a
 diagnostic.
 
+The canonical token-zero scorer contract is:
+
+- raw-embedding Euclidean KNN is the primary score;
+- explicitly L2-normalized cosine KNN is a secondary distance score;
+- a fixed-regularization logistic classifier fitted on frozen train
+  embeddings is a secondary supervised diagnostic (AUROC and AUPRC);
+- the legacy within-sample cosine scorer is omitted because a token-zero eval
+  record has exactly one view and therefore makes that statistic constant;
+- KNN calibration and the frozen classifier may use train labels only. Train
+  reference hashes resolve against the train-capture parser, while test hashes
+  resolve independently against the test-capture parser.
+
+Training honors `min_total_steps=3000`. When a held-out validation split is
+available, the token-wise configuration restores the epoch with minimum
+validation loss before saving the weights used for final test evaluation.
+
+For distance scoring, an all-example reference bank asks whether a test point
+is far from the complete observed training distribution: both truthful and
+hallucinated train embeddings can be neighbors. A truthful-only bank instead
+asks how far the point lies from the known-truth manifold. The latter matches
+the standard convention's compact truthful class more directly, but it uses a
+smaller labeled bank and makes a stronger deployment assumption. Report the
+all-example bank as the canonical KNN surface for this pilot; any truthful-only
+result is a predeclared secondary ablation selected without test labels.
+
 ### Necessary ablations
 
 - full logprob reconstruction versus `lambda_recon=0`;

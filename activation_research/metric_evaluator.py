@@ -2,7 +2,12 @@ from typing import List, Dict, Any, Optional, Union, Callable
 from abc import ABC, abstractmethod
 from loguru import logger
 from .evaluation import inference_embeddings
-from .metrics import mahalanobis_ood_stats, cosine_similarity_ood_stats, knn_ood_stats
+from .metrics import (
+    cosine_similarity_ood_stats,
+    frozen_linear_probe_stats,
+    knn_ood_stats,
+    mahalanobis_ood_stats,
+)
 
 
 def set_logging_level(level: str = "INFO"):
@@ -93,13 +98,16 @@ class HallucinationEvaluator(MetricEvaluator):
                  outlier_class: int = 1,
                  max_rows: int = 10000000,
                  metric: Union[str, Callable[..., Dict[str, Any]]] = "mahalanobis",
-                 metric_kwargs: Optional[Dict[str, Any]] = None):
+                 metric_kwargs: Optional[Dict[str, Any]] = None,
+                 train_activation_parser_df: Any = None):
         """
         Initialize the hallucination evaluator.
 
         Args:
             activation_parser_df: DataFrame containing prompt_hash and halu columns
             train_data_loader: DataLoader for training data (used for baseline embeddings)
+            train_activation_parser_df: Optional train-capture label dataframe.
+                Defaults to activation_parser_df for backward compatibility.
             layers: List of layer indices to analyze (if None, uses default z1/z2)
             batch_size: Batch size for inference
             sub_batch_size: Sub-batch size for processing
@@ -114,6 +122,14 @@ class HallucinationEvaluator(MetricEvaluator):
                 For KNN, common keys are {'k': int, 'metric': str}.
         """
         self.activation_parser_df = activation_parser_df
+        # Train-reference hashes and test hashes commonly come from separate
+        # captures. Keeping their lookup tables separate prevents train-bank
+        # calibration/probe labels from being resolved against the test parser.
+        self.train_activation_parser_df = (
+            activation_parser_df
+            if train_activation_parser_df is None
+            else train_activation_parser_df
+        )
         self.train_data_loader = train_data_loader
         self.layers = layers
         self.batch_size = batch_size
@@ -131,6 +147,7 @@ class HallucinationEvaluator(MetricEvaluator):
         self._baseline_embeddings = None
         self._labeled_baseline_embeddings = None
         self._labeled_test_embeddings = None
+        self._label_lookup_cache = {}
 
     @staticmethod
     def _resolve_metric(metric: Union[str, Callable[..., Dict[str, Any]]]):
@@ -146,6 +163,8 @@ class HallucinationEvaluator(MetricEvaluator):
             "knn": knn_ood_stats,
             "knn_halu": knn_ood_stats,
             "knn_hallucination": knn_ood_stats,
+            "linear_probe": frozen_linear_probe_stats,
+            "frozen_linear_probe": frozen_linear_probe_stats,
         }
         if metric_key not in metric_map:
             raise ValueError(
@@ -298,6 +317,7 @@ class HallucinationEvaluator(MetricEvaluator):
         embeddings: List[Dict[str, Any]],
         *,
         keep_unlabeled: bool = False,
+        lookup_df: Any = None,
     ) -> List[Dict[str, Any]]:
         """
         Assign hallucination labels to embeddings using activation parser data.
@@ -310,8 +330,21 @@ class HallucinationEvaluator(MetricEvaluator):
         """
         logger.info("Assigning hallucination labels...")
 
-        # Limit dataframe size for performance
-        df = self.activation_parser_df.head(self.max_rows)
+        # Limit dataframe size for performance. Build the hash map once: the
+        # previous per-record dataframe scan was O(N^2) on 50k-row captures.
+        # Repeated hashes are valid when every occurrence agrees on the label;
+        # conflicting duplicates stay unresolved instead of choosing a label.
+        source_df = self.activation_parser_df if lookup_df is None else lookup_df
+        df = source_df.head(self.max_rows)
+        cache_key = id(source_df)
+        label_lookup = self._label_lookup_cache.get(cache_key)
+        if label_lookup is None:
+            label_lookup = {}
+            for hashkey, group in df.groupby("prompt_hash", sort=False):
+                unique_labels = group["halu"].dropna().astype(int).unique()
+                if len(unique_labels) == 1:
+                    label_lookup[hashkey] = int(unique_labels[0])
+            self._label_lookup_cache[cache_key] = label_lookup
 
         labeled_embeddings = []
         for i, record in enumerate(embeddings):
@@ -327,18 +360,19 @@ class HallucinationEvaluator(MetricEvaluator):
                     logger.warning("Record missing hashkey and halu label. Skipping.")
                 continue
 
-            ishalu = df[df['prompt_hash'] == hashkey]['halu']
-
-            if len(ishalu) != 1:
+            ishalu = label_lookup.get(hashkey)
+            if ishalu is None:
                 if keep_unlabeled:
                     labeled_embeddings.append(record.copy())
                 else:
-                    logger.warning(f"Expected exactly 1 match for hashkey {hashkey}, found {len(ishalu)}. Skipping.")
+                    logger.warning(
+                        f"No unambiguous label match for hashkey {hashkey}. Skipping."
+                    )
                 continue
 
             # Create a copy of the record and add the label
             labeled_record = record.copy()
-            labeled_record['halu'] = ishalu.values[0]
+            labeled_record['halu'] = ishalu
             labeled_embeddings.append(labeled_record)
 
         logger.info(f"Successfully labeled {len(labeled_embeddings)} embeddings")
@@ -349,6 +383,7 @@ class HallucinationEvaluator(MetricEvaluator):
             self._labeled_baseline_embeddings = self._assign_hallucination_labels(
                 baseline_embeddings,
                 keep_unlabeled=True,
+                lookup_df=self.train_activation_parser_df,
             )
         return self._labeled_baseline_embeddings
 
@@ -380,6 +415,7 @@ class KNNHallucinationEvaluator(HallucinationEvaluator):
         activation_parser_df: Any,
         train_data_loader,
         *,
+        train_activation_parser_df: Any = None,
         layers: Optional[List[int]] = None,
         batch_size: int = 64,
         sub_batch_size: int = 32,
@@ -402,6 +438,7 @@ class KNNHallucinationEvaluator(HallucinationEvaluator):
         super().__init__(
             activation_parser_df=activation_parser_df,
             train_data_loader=train_data_loader,
+            train_activation_parser_df=train_activation_parser_df,
             layers=layers,
             batch_size=batch_size,
             sub_batch_size=sub_batch_size,
@@ -437,6 +474,7 @@ class MultiMetricHallucinationEvaluator(HallucinationEvaluator):
         activation_parser_df: Any,
         train_data_loader,
         *,
+        train_activation_parser_df: Any = None,
         metrics: List[Union[str, Callable[..., Dict[str, Any]], Dict[str, Any]]],
         layers: Optional[List[int]] = None,
         batch_size: int = 64,
@@ -455,6 +493,7 @@ class MultiMetricHallucinationEvaluator(HallucinationEvaluator):
         super().__init__(
             activation_parser_df=activation_parser_df,
             train_data_loader=train_data_loader,
+            train_activation_parser_df=train_activation_parser_df,
             layers=layers,
             batch_size=batch_size,
             sub_batch_size=sub_batch_size,

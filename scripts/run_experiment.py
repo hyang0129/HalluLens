@@ -719,6 +719,7 @@ def run_contrastive_logprob_recon(
             infinite_stream_shuffle=True,
             infinite_stream_seed=training_seed,
             steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+            min_total_steps=train_cfg.get("min_total_steps"),
             balanced_sampling=train_cfg.get("balanced_sampling", False),
             grad_clip_norm=train_cfg.get("grad_clip_norm"),
             augment_fn=augment_fn,
@@ -729,6 +730,7 @@ def run_contrastive_logprob_recon(
             prefix_min_gap=train_cfg.get("prefix_min_gap", 8),
             prefix_sampling_lengths=train_cfg.get("prefix_sampling_lengths"),
             prefix_seed=training_seed,
+            select_on_val=train_cfg.get("select_on_val", False),
         )
 
         torch.save(
@@ -757,6 +759,14 @@ def run_contrastive_logprob_recon(
 
     metrics_list: list = []
     for m in eval_cfg["metrics"]:
+        if _tokenwise and m == "cosine":
+            # A token-wise eval item deliberately has one view (t=0), so the
+            # legacy within-sample view-cosine scorer is identically zero.
+            logger.warning(
+                "ignoring invalid intra-view cosine metric for one-view "
+                "token-wise evaluation; use cosine KNN instead"
+            )
+            continue
         if m == "knn":
             knn_params = dict(eval_cfg.get("knn_params", {}))
             knn_params["sample_seed"] = training_seed
@@ -768,6 +778,42 @@ def run_contrastive_logprob_recon(
                     "train_selection": "all",
                 }
             )
+            if _tokenwise:
+                cosine_knn_params = dict(
+                    eval_cfg.get("cosine_knn_params", knn_params)
+                )
+                cosine_knn_params.update(
+                    {
+                        "metric": "cosine",
+                        "l2_normalize": True,
+                        "sample_seed": training_seed,
+                        "include_per_sample": True,
+                    }
+                )
+                metrics_list.append(
+                    {
+                        "name": "cosine_knn",
+                        "metric": "knn",
+                        "prefix": "cosine",
+                        "kwargs": cosine_knn_params,
+                        "train_selection": "all",
+                    }
+                )
+        elif _tokenwise and m == "linear_probe":
+            linear_probe_params = dict(eval_cfg.get("linear_probe_params", {}))
+            linear_probe_params.update(
+                {
+                    "sample_seed": training_seed,
+                    "include_per_sample": True,
+                }
+            )
+            metrics_list.append(
+                {
+                    "metric": "linear_probe",
+                    "kwargs": linear_probe_params,
+                    "train_selection": "all",
+                }
+            )
         else:
             metrics_list.append(m)
 
@@ -776,6 +822,7 @@ def run_contrastive_logprob_recon(
 
     evaluator = MultiMetricHallucinationEvaluator(
         activation_parser_df=eval_ap.df,
+        train_activation_parser_df=ap.df,
         train_data_loader=train_loader,
         metrics=metrics_list,
         batch_size=eval_cfg.get("eval_batch_size", 256),
@@ -790,6 +837,10 @@ def run_contrastive_logprob_recon(
 
     knn_scores_arr = ood_stats.pop("knn_scores", None)
     knn_labels_arr = ood_stats.pop("knn_labels", None)
+    cosine_knn_scores_arr = ood_stats.pop("cosine_knn_scores", None)
+    cosine_knn_labels_arr = ood_stats.pop("cosine_knn_labels", None)
+    linear_probe_scores_arr = ood_stats.pop("linear_probe_scores", None)
+    linear_probe_labels_arr = ood_stats.pop("linear_probe_labels", None)
 
     # ---- Issue #149: AUROC as a function of the response prefix ------------
     # The headline question is whether a hallucination is detectable at token 16,
@@ -816,6 +867,7 @@ def run_contrastive_logprob_recon(
             _wrapped.eval()
             _evaluator_k = MultiMetricHallucinationEvaluator(
                 activation_parser_df=eval_ap.df,
+                train_activation_parser_df=ap.df,
                 train_data_loader=DataLoader(
                     train_ds_target, batch_size=64, shuffle=False
                 ),
@@ -832,6 +884,10 @@ def run_contrastive_logprob_recon(
             )
             _stats_k.pop("knn_scores", None)
             _stats_k.pop("knn_labels", None)
+            _stats_k.pop("cosine_knn_scores", None)
+            _stats_k.pop("cosine_knn_labels", None)
+            _stats_k.pop("linear_probe_scores", None)
+            _stats_k.pop("linear_probe_labels", None)
             for _metric_name, _v in _stats_k.items():
                 prefix_curve[f"k{_k}_{_metric_name}"] = _v
             logger.info(
@@ -846,6 +902,17 @@ def run_contrastive_logprob_recon(
     # mixing token indices would confound detection with representation shift.
     token_curve: dict = {}
     if _tokenwise and eval_cfg.get("eval_token_curve", False):
+        # The requested frozen linear probe is a token-zero scorer. Avoid
+        # fitting six additional probes per run for the later-token diagnostic
+        # curve; distance metrics remain comparable at every position.
+        token_curve_metrics = [
+            spec
+            for spec in metrics_list
+            if not (
+                isinstance(spec, dict)
+                and str(spec.get("metric", "")).lower() == "linear_probe"
+            )
+        ]
         token_positions = [
             int(t) for t in eval_cfg.get(
                 "eval_token_positions", [0, 1, 3, 7, 15, 31, 63]
@@ -871,10 +938,11 @@ def run_contrastive_logprob_recon(
 
             evaluator_at_t = MultiMetricHallucinationEvaluator(
                 activation_parser_df=eval_ap.df,
+                train_activation_parser_df=ap.df,
                 train_data_loader=DataLoader(
                     train_at_t, batch_size=64, shuffle=False
                 ),
-                metrics=metrics_list,
+                metrics=token_curve_metrics,
                 batch_size=eval_cfg.get("eval_batch_size", 256),
                 sub_batch_size=eval_cfg.get("sub_batch_size", 64),
                 device=train_device,
@@ -887,6 +955,8 @@ def run_contrastive_logprob_recon(
             )
             stats_at_t.pop("knn_scores", None)
             stats_at_t.pop("knn_labels", None)
+            stats_at_t.pop("cosine_knn_scores", None)
+            stats_at_t.pop("cosine_knn_labels", None)
             token_curve[f"t{token_index}_n_train"] = len(train_at_t)
             token_curve[f"t{token_index}_n_test"] = len(test_at_t)
             for metric_name, value in stats_at_t.items():
@@ -918,6 +988,12 @@ def run_contrastive_logprob_recon(
                 "n_train_base": len(train_base_ds),
                 "n_train_pair_eligible": len(train_ds),
                 "n_train_t0": len(train_ds_target),
+                "training_min_total_steps": train_cfg.get("min_total_steps"),
+                "checkpoint_selection": (
+                    "minimum_validation_loss"
+                    if train_cfg.get("select_on_val", False)
+                    else "final_epoch"
+                ),
                 "model_total_params": sum(p.numel() for p in model.parameters()),
                 "model_encoder_params": sum(
                     p.numel() for p in model.encoder.parameters()
@@ -948,6 +1024,32 @@ def run_contrastive_logprob_recon(
                 for i, (s, l) in enumerate(zip(knn_scores_arr, knn_labels_arr))
             ]
 
+        def _secondary_halu_scores(scores, labels, *, probability: bool):
+            if scores is None or labels is None:
+                return None
+            if len(scores) != len(predictions) or len(labels) != len(predictions):
+                raise RuntimeError("secondary scorer output is not aligned with KNN predictions")
+            if flip_auroc:
+                # The positive outlier is label 0 under flip_auroc. Probability
+                # scores invert via 1-p; unbounded distance scores via negation.
+                return [
+                    1.0 - float(score) if probability else -float(score)
+                    for score in scores
+                ]
+            return [float(score) for score in scores]
+
+        cosine_halu_scores = _secondary_halu_scores(
+            cosine_knn_scores_arr, cosine_knn_labels_arr, probability=False
+        )
+        linear_halu_scores = _secondary_halu_scores(
+            linear_probe_scores_arr, linear_probe_labels_arr, probability=True
+        )
+        for i, prediction in enumerate(predictions):
+            if cosine_halu_scores is not None:
+                prediction["score_halu_cosine_knn"] = cosine_halu_scores[i]
+            if linear_halu_scores is not None:
+                prediction["score_halu_linear_probe"] = linear_halu_scores[i]
+
     # Optional: dump predicted train+test embeddings as memmap-friendly .npy files
     # for downstream reuse (e.g. KNN-k sweeps, cosine-collapse analysis). Opt-in via
     # eval_cfg["dump_embeddings"] — runs only at the final test eval, and downstream
@@ -965,26 +1067,9 @@ def run_contrastive_logprob_recon(
             # test parser's df, so test hashkeys resolve and labels are correct.
             test_records = getattr(evaluator, "_labeled_test_embeddings", None)
 
-            # Train records: the evaluator labels baseline embeddings using the
-            # same activation_parser_df (eval_ap.df, the test parser), so train
-            # hashkeys almost never match — _labeled_baseline_embeddings comes
-            # out >99% unlabeled and our dumper filter drops them all. Fix it
-            # here by re-labeling from ap.df (the train parser) before dumping.
-            train_records = None
-            train_records_raw = getattr(evaluator, "_baseline_embeddings", None)
-            if train_records_raw is not None and hasattr(ap, "df") and ap.df is not None:
-                train_hash_to_halu = dict(zip(ap.df["prompt_hash"], ap.df["halu"]))
-                train_records = []
-                for r in train_records_raw:
-                    h = r.get("hashkey")
-                    if h is None:
-                        continue
-                    halu = train_hash_to_halu.get(h)
-                    if halu is None:
-                        continue
-                    rec = dict(r)
-                    rec["halu"] = int(halu)
-                    train_records.append(rec)
+            # Baseline records were resolved against the train parser (ap.df),
+            # independently of the test parser used above.
+            train_records = getattr(evaluator, "_labeled_baseline_embeddings", None)
 
             if train_records:
                 train_meta = dump_embeddings_to_memmap(train_records, emb_dir, "train")
@@ -3453,6 +3538,7 @@ def run_contrastive_actvit(
         use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", True),
         infinite_stream_shuffle=True, infinite_stream_seed=training_seed,
         steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+        min_total_steps=train_cfg.get("min_total_steps"),
         balanced_sampling=train_cfg.get("balanced_sampling", False),
         grad_clip_norm=train_cfg.get("grad_clip_norm"),
         augment_fn=augment_fn,
@@ -4148,9 +4234,11 @@ def run_contrastive_logprob_recon_twin(
             infinite_stream_shuffle=True,
             infinite_stream_seed=training_seed,
             steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+            min_total_steps=train_cfg.get("min_total_steps"),
             balanced_sampling=train_cfg.get("balanced_sampling", False),
             grad_clip_norm=train_cfg.get("grad_clip_norm"),
             augment_fn=augment_fn,
+            select_on_val=train_cfg.get("select_on_val", False),
         )
         torch.save(
             {"model_state_dict": head.state_dict()},

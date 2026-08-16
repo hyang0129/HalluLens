@@ -478,10 +478,15 @@ def test_tokenwise_dataset_trains_through_standard_joint_objective(tmp_path):
         persistent_workers=False,
         use_labels=True,
         ignore_label=1,
-        use_infinite_index_stream=False,
+        use_infinite_index_stream=True,
+        min_total_steps=3,
     )
 
-    assert (tmp_path / "checkpoints" / "contrastive_last.pt").is_file()
+    checkpoint_path = tmp_path / "checkpoints" / "contrastive_last.pt"
+    assert checkpoint_path.is_file()
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert checkpoint["min_total_steps"] == 3
+    assert checkpoint["steps_per_epoch"] == 3
 
 
 def test_dataset_emits_logprob_fields(tmp_path):
