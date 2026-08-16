@@ -59,6 +59,58 @@ class InfiniteIndexStream(IterableDataset):
             epoch += 1
 
 
+def _apply_prefix_views_to_collated(out, prefix_sampler):
+    """Apply issue-#149 prefix views to an already-collated contrastive batch.
+
+    Draws one :class:`PrefixViewSpec` per batch, zeroes post-prefix tokens, and
+    attaches ``views_token_mask`` (B, K, L). Shapes are unchanged, so the
+    trainer's fused ``reshape(B * K, L, D)`` encode is untouched — the mask
+    flattens under the identical call.
+
+    A ``None`` sampler is a no-op and leaves the batch byte-identical, which is
+    what keeps the non-prefix methods a true control.
+    """
+    if prefix_sampler is None:
+        return out
+    from activation_research.prefix_views import apply_prefix_views
+
+    spec = prefix_sampler.sample()
+    masked, token_mask = apply_prefix_views(
+        out["views_activations"],
+        spec,
+        response_lens=out.get("response_len"),
+    )
+    out["views_activations"] = masked
+    out["views_token_mask"] = token_mask
+    out["view_prefix_lens"] = torch.tensor(spec.prefix_lens, dtype=torch.long)
+    return out
+
+
+def make_contrastive_collate(base_collate, prefix_sampler=None):
+    """Wrap a collate so each batch gets its own sampled prefix geometry.
+
+    Worker-aware seeding matters here: ``DataLoader`` forks worker processes,
+    and a plain ``random.Random(seed)`` would be *copied*, so all workers would
+    emit the identical k sequence in lockstep — collapsing prefix diversity by a
+    factor of ``num_workers``. Each worker therefore re-seeds its own sampler
+    from its worker id on first use.
+    """
+    if prefix_sampler is None:
+        return base_collate
+
+    state = {"pid_seeded": False}
+
+    def _collate(batch):
+        if not state["pid_seeded"]:
+            info = torch.utils.data.get_worker_info()
+            if info is not None:
+                prefix_sampler.reseed_for_worker(info.id)
+            state["pid_seeded"] = True
+        return _apply_prefix_views_to_collated(base_collate(batch), prefix_sampler)
+
+    return _collate
+
+
 def _contrastive_collate_kview(batch):
     """Collate only the fields used by contrastive training.
 
@@ -82,6 +134,10 @@ def _contrastive_collate_kview(batch):
         out["view_indices"] = torch.stack([b["view_indices"] for b in batch], dim=0).to(dtype=torch.long)
     if "input_length" in batch[0]:
         out["input_length"] = torch.tensor([b["input_length"] for b in batch], dtype=torch.long)
+    if "response_len" in batch[0]:
+        out["response_len"] = torch.tensor(
+            [b["response_len"] for b in batch], dtype=torch.long
+        )
 
     return out
 
@@ -712,6 +768,11 @@ def train_contrastive_logprob_recon(
     device="cuda",
     num_workers=16,
     sub_batch_size=64,
+    prefix_view_mode="layer_only",
+    prefix_min_tokens=8,
+    prefix_min_gap=8,
+    prefix_sampling_lengths=None,
+    prefix_seed=None,
     checkpoint_dir="checkpoints",
     save_every=1,
     resume_from=None,
@@ -778,15 +839,51 @@ def train_contrastive_logprob_recon(
         base_dataset_len = len(train_dataset)
         sub_batch_size = batch_size
 
-    def _call_model(m, x, layer_idx=None):
+    def _call_model(m, x, layer_idx=None, token_mask=None):
+        """Encode a flattened view batch, optionally with a prefix token mask.
+
+        The ``token_mask`` path must never fail silently. Existing code here
+        falls back to a mask-free call on ``TypeError``, which for issue #149
+        would drop the prefix mask, unmask the padding, and leak prefix length
+        into the embedding — producing plausible but invalid AUROC numbers with
+        no error. When a mask is supplied and the model cannot consume it we
+        raise instead.
+        """
+        mask_kw = {} if token_mask is None else {"token_mask": token_mask}
+
         if layer_idx is None:
-            return m.forward_with_recon(x)
+            if token_mask is None:
+                return m.forward_with_recon(x)
+            try:
+                return m.forward_with_recon(x, **mask_kw)
+            except TypeError as e:
+                raise TypeError(
+                    f"{type(m).__name__}.forward_with_recon does not accept "
+                    "token_mask, but prefix views (issue #149) require it. "
+                    "Silently dropping the mask would unmask padding and leak "
+                    "prefix length into the embedding."
+                ) from e
+
         try:
             # LayerAware wrapper: inject layer_idx into encoder, then call decoder
-            z = m.encoder(x, layer_idx=layer_idx) if hasattr(m.encoder, "forward") else m.encoder(x)
+            z = (
+                m.encoder(x, layer_idx=layer_idx, **mask_kw)
+                if hasattr(m.encoder, "forward")
+                else m.encoder(x, **mask_kw)
+            )
             logprob_pred = m.decoder(z)
             return z, logprob_pred
         except TypeError:
+            if token_mask is not None:
+                # Retry without layer_idx but KEEP the mask; only raise if the
+                # model cannot take the mask either.
+                try:
+                    return m.forward_with_recon(x, **mask_kw)
+                except TypeError as e:
+                    raise TypeError(
+                        f"{type(m).__name__} does not accept token_mask, but "
+                        "prefix views (issue #149) require it."
+                    ) from e
             return m.forward_with_recon(x)
 
     assert batch_size % sub_batch_size == 0, "batch_size must be divisible by sub_batch_size"
@@ -848,6 +945,37 @@ def train_contrastive_logprob_recon(
         if balanced_sampling and use_labels and not is_iterable
         else None
     )
+    # Issue #149 prefix views. "layer_only" yields a None sampler, so the
+    # collate, the batch contents, and the encoder call are all byte-identical
+    # to the pre-#149 path — the ablation's control arm is a true control.
+    _prefix_sampler = None
+    if str(prefix_view_mode) != "layer_only":
+        from activation_research.prefix_views import PrefixPairSampler
+
+        # View count and capture width are properties of the dataset, not of
+        # this trainer's signature.
+        _r_max = getattr(train_dataset, "_max_resp", None) or 64
+        _n_views = getattr(train_dataset, "_num_views", None) or 2
+        _prefix_sampler = PrefixPairSampler(
+            mode=str(prefix_view_mode),
+            num_views=int(_n_views),
+            max_prefix=int(_r_max),
+            min_prefix=int(prefix_min_tokens),
+            min_gap=int(prefix_min_gap),
+            sampling_prefixes=prefix_sampling_lengths,
+            seed=prefix_seed,
+        )
+        # loguru formats with {}, not %-style; %-args render literally.
+        logger.info(
+            f"prefix views: mode={prefix_view_mode} num_views={_n_views} "
+            f"max_prefix={_r_max} min_prefix={prefix_min_tokens} "
+            f"min_gap={prefix_min_gap} "
+            f"support={prefix_sampling_lengths or 'continuous'} seed={prefix_seed}"
+        )
+    _train_collate = make_contrastive_collate(
+        _contrastive_collate_with_logprob, _prefix_sampler
+    )
+
     use_persistent_workers = bool(persistent_workers and num_workers and num_workers > 0)
     train_loader = DataLoader(
         train_dataset,
@@ -857,7 +985,7 @@ def train_contrastive_logprob_recon(
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=use_persistent_workers,
-        collate_fn=_contrastive_collate_with_logprob,
+        collate_fn=_train_collate,
     )
 
     steps_per_epoch = None
@@ -905,6 +1033,7 @@ def train_contrastive_logprob_recon(
         buffer_views = []
         buffer_view_indices = []
         buffer_logprobs = []
+        buffer_token_masks = []
         buffer_labels = [] if use_labels else None
         buffer_sample_ids = [] if use_labels else None
 
@@ -915,6 +1044,14 @@ def train_contrastive_logprob_recon(
 
             views = batch["views_activations"].to(device, non_blocking=True)
             buffer_views.append(views)
+
+            # Issue #149: prefix views arrive zero-padded with an explicit mask.
+            # Buffered alongside the activations so a gradient-accumulation
+            # window concatenates masks and activations consistently.
+            if "views_token_mask" in batch:
+                buffer_token_masks.append(
+                    batch["views_token_mask"].to(device, non_blocking=True)
+                )
 
             if "view_indices" in batch:
                 buffer_view_indices.append(batch["view_indices"].to(device, non_blocking=True))
@@ -943,9 +1080,13 @@ def train_contrastive_logprob_recon(
 
             if buffer_full or last_batch:
                 views_full = torch.cat(buffer_views, dim=0)
+                token_mask_full = (
+                    torch.cat(buffer_token_masks, dim=0) if buffer_token_masks else None
+                )
                 view_idx_full = torch.cat(buffer_view_indices, dim=0) if buffer_view_indices else None
                 logprob_full = torch.cat(buffer_logprobs, dim=0) if buffer_logprobs else None
                 buffer_views = []
+                buffer_token_masks = []
                 buffer_view_indices = []
                 buffer_logprobs = []
 
@@ -979,9 +1120,17 @@ def train_contrastive_logprob_recon(
 
                 bsz, num_views, seq_len, hidden_dim = views_full.shape
                 x_flat = views_full.reshape(bsz * num_views, seq_len, hidden_dim)
+                # (B, K, L) flattens under the same reshape as (B, K, L, D).
+                token_mask_flat = (
+                    token_mask_full.reshape(bsz * num_views, seq_len)
+                    if token_mask_full is not None
+                    else None
+                )
                 view_idx_flat = view_idx_full.reshape(bsz * num_views) if view_idx_full is not None else None
 
-                z_flat, logprob_pred_flat = _call_model(model, x_flat, layer_idx=view_idx_flat)
+                z_flat, logprob_pred_flat = _call_model(
+                    model, x_flat, layer_idx=view_idx_flat, token_mask=token_mask_flat
+                )
                 z_views = z_flat.reshape(bsz, num_views, -1)
 
                 # SupCon loss
@@ -1158,23 +1307,30 @@ def train_contrastive_logprob_recon_dualloss(
     infinite_stream_shuffle: bool = True,
     infinite_stream_seed: int = 0,
     steps_per_epoch_override: int = None,
+    min_total_steps: int = None,
     grad_clip_norm: float = None,
     augment_fn=None,
     ignore_labels: tuple = (1, 0),
+    classifier_lambda: float = 0.0,
+    classifier_pos_weight: float | None = None,
+    prefix_view_mode: str = "layer_only",
+    prefix_min_tokens: int = 8,
+    prefix_min_gap: int = 8,
+    prefix_sampling_lengths=None,
+    prefix_seed: int | None = None,
 ):
-    """Train a ``SharedTrunkSplitOutputCompressor`` or ``SharedTrunkProjectionHeadCompressor``
-    with a dual SupCon loss over two output heads plus auxiliary logprob reconstruction.
+    """Train a dual-convention model with two SupCon losses and optional BCE.
 
     Loss per step:
 
         L_A = SupCon(z_A, labels, ignore_label=ignore_labels[0])
         L_B = SupCon(z_B, labels, ignore_label=ignore_labels[1])
         L   = L_A + L_B + λ · L_recon(decoder(z), ℓ)
+              + λ_cls · BCE(classifier(mean_views(z_A, z_B)), y)
 
-    For ``SharedTrunkSplitOutputCompressor`` (D1), ``z`` is the full 2D output,
-    ``z_A`` and ``z_B`` are sliced halves.  For
-    ``SharedTrunkProjectionHeadCompressor`` (D2), ``z`` is the trunk, ``z_A``
-    and ``z_B`` are projection head outputs.
+    For the dual-convention classifier, A and B are independent full-size
+    encoders and every term is optimized in one backward pass. Older shared
+    trunk/head variants remain supported by this trainer.
 
     All other training mechanics (checkpointing, AMP, grad clip, infinite stream,
     balanced sampler, augmentations) mirror ``train_contrastive_logprob_recon``.
@@ -1188,7 +1344,8 @@ def train_contrastive_logprob_recon_dualloss(
     cleanup_legacy_checkpoints, snapshot_every, snapshot_keep_last,
     same_sample_weight, same_class_weight, balanced_sampling,
     use_infinite_index_stream, infinite_stream_shuffle,
-    infinite_stream_seed, steps_per_epoch_override, grad_clip_norm, augment_fn :
+    infinite_stream_seed, steps_per_epoch_override, min_total_steps,
+    grad_clip_norm, augment_fn :
         Same semantics as ``train_contrastive_logprob_recon``.
     recon_lambda : float or None
         Override ``model.recon_lambda``.  Pass ``None`` to use the model default.
@@ -1207,6 +1364,7 @@ def train_contrastive_logprob_recon_dualloss(
         raise ValueError("steps_per_epoch_override requires use_infinite_index_stream=True")
 
     base_dataset_len = None
+    prefix_source_dataset = train_dataset
     if use_infinite_index_stream:
         if not hasattr(train_dataset, "__len__"):
             raise TypeError("use_infinite_index_stream=True requires train_dataset to have __len__")
@@ -1216,12 +1374,24 @@ def train_contrastive_logprob_recon_dualloss(
     # Choose how to call the model depending on its variant.
     _is_d1 = isinstance(model, SharedTrunkSplitOutputCompressor)
 
-    def _call_model_dual(m, x):
+    def _call_model_dual(m, x, token_mask=None):
         """Return (z, z_A, z_B, logprob_pred) from the appropriate helper."""
         if _is_d1:
+            if token_mask is not None:
+                raise TypeError(
+                    "SharedTrunkSplitOutputCompressor does not support prefix masks"
+                )
             return m.forward_slices(x)  # (z_full, z_A, z_B, logprob_pred)
         else:
-            return m.forward_with_heads(x)  # (z_trunk, z_A, z_B, logprob_pred)
+            if token_mask is None:
+                return m.forward_with_heads(x)
+            try:
+                return m.forward_with_heads(x, token_mask=token_mask)
+            except TypeError as e:
+                raise TypeError(
+                    f"{type(m).__name__}.forward_with_heads does not accept "
+                    "token_mask, but issue-149 prefix views require it"
+                ) from e
 
     assert batch_size % sub_batch_size == 0, "batch_size must be divisible by sub_batch_size"
 
@@ -1242,6 +1412,18 @@ def train_contrastive_logprob_recon_dualloss(
         same_sample_weight=same_sample_weight,
         same_class_weight=same_class_weight,
     )
+    classifier_loss_fn = None
+    if float(classifier_lambda) > 0.0:
+        if not hasattr(model, "classifier_logits_from_views"):
+            raise TypeError(
+                "classifier_lambda > 0 requires model.classifier_logits_from_views"
+            )
+        pos_weight = None
+        if classifier_pos_weight is not None:
+            pos_weight = torch.tensor(
+                [float(classifier_pos_weight)], dtype=torch.float32, device=device
+            )
+        classifier_loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     start_epoch = 0
     best_loss = float("inf")
@@ -1275,6 +1457,30 @@ def train_contrastive_logprob_recon_dualloss(
         else None
     )
     use_persistent_workers = bool(persistent_workers and num_workers and num_workers > 0)
+    _prefix_sampler = None
+    if str(prefix_view_mode) != "layer_only":
+        from activation_research.prefix_views import PrefixPairSampler
+
+        _r_max = getattr(prefix_source_dataset, "_max_resp", None) or 64
+        _n_views = getattr(prefix_source_dataset, "_num_views", None) or 2
+        _prefix_sampler = PrefixPairSampler(
+            mode=str(prefix_view_mode),
+            num_views=int(_n_views),
+            max_prefix=int(_r_max),
+            min_prefix=int(prefix_min_tokens),
+            min_gap=int(prefix_min_gap),
+            sampling_prefixes=prefix_sampling_lengths,
+            seed=prefix_seed,
+        )
+        logger.info(
+            f"dual-loss prefix views: mode={prefix_view_mode} "
+            f"num_views={_n_views} max_prefix={_r_max} "
+            f"support={prefix_sampling_lengths or 'continuous'} seed={prefix_seed}"
+        )
+    _train_collate = make_contrastive_collate(
+        _contrastive_collate_with_logprob, _prefix_sampler
+    )
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=sub_batch_size,
@@ -1283,7 +1489,7 @@ def train_contrastive_logprob_recon_dualloss(
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=use_persistent_workers,
-        collate_fn=_contrastive_collate_with_logprob,
+        collate_fn=_train_collate,
     )
 
     steps_per_epoch = None
@@ -1294,6 +1500,14 @@ def train_contrastive_logprob_recon_dualloss(
             steps_per_epoch = int(steps_per_epoch_override)
         else:
             steps_per_epoch = inferred
+        if min_total_steps is not None:
+            required = int(math.ceil(int(min_total_steps) / max(1, int(epochs))))
+            if required > steps_per_epoch:
+                logger.info(
+                    f"min_total_steps={min_total_steps}: bumping dual-loss "
+                    f"steps_per_epoch from {steps_per_epoch} to {required}"
+                )
+                steps_per_epoch = required
         train_iter = iter(train_loader)
 
     test_loader = None
@@ -1315,6 +1529,7 @@ def train_contrastive_logprob_recon_dualloss(
         model.train()
 
         total_loss = total_supcon_a = total_supcon_b = total_recon = 0.0
+        total_classifier = 0.0
         total_intra_cos = total_intra_inter = 0.0
         n_batches = 0
         _diag_steps = 0  # count of steps where per-head cosine diagnostics are logged
@@ -1332,6 +1547,7 @@ def train_contrastive_logprob_recon_dualloss(
         buffer_views = []
         buffer_view_indices = []
         buffer_logprobs = []
+        buffer_token_masks = []
         buffer_labels = []
         buffer_sample_ids = []
 
@@ -1342,6 +1558,11 @@ def train_contrastive_logprob_recon_dualloss(
 
             views = batch["views_activations"].to(device, non_blocking=True)
             buffer_views.append(views)
+
+            if "views_token_mask" in batch:
+                buffer_token_masks.append(
+                    batch["views_token_mask"].to(device, non_blocking=True)
+                )
 
             if "view_indices" in batch:
                 buffer_view_indices.append(batch["view_indices"].to(device, non_blocking=True))
@@ -1369,12 +1590,18 @@ def train_contrastive_logprob_recon_dualloss(
 
             if buffer_full or last_batch:
                 views_full = torch.cat(buffer_views, dim=0)
+                token_mask_full = (
+                    torch.cat(buffer_token_masks, dim=0)
+                    if buffer_token_masks
+                    else None
+                )
                 view_idx_full = torch.cat(buffer_view_indices, dim=0) if buffer_view_indices else None
                 logprob_full = torch.cat(buffer_logprobs, dim=0) if buffer_logprobs else None
                 labels_full = torch.cat(buffer_labels, dim=0)
                 sample_ids_full = torch.cat(buffer_sample_ids, dim=0)
 
                 buffer_views = []
+                buffer_token_masks = []
                 buffer_view_indices = []
                 buffer_logprobs = []
                 buffer_labels = []
@@ -1398,8 +1625,15 @@ def train_contrastive_logprob_recon_dualloss(
 
                 bsz, num_views, seq_len, hidden_dim = views_full.shape
                 x_flat = views_full.reshape(bsz * num_views, seq_len, hidden_dim)
+                token_mask_flat = (
+                    token_mask_full.reshape(bsz * num_views, seq_len)
+                    if token_mask_full is not None
+                    else None
+                )
 
-                z_flat, zA_flat, zB_flat, logprob_pred_flat = _call_model_dual(model, x_flat)
+                z_flat, zA_flat, zB_flat, logprob_pred_flat = _call_model_dual(
+                    model, x_flat, token_mask=token_mask_flat
+                )
 
                 # Reshape for SupCon: (B, num_views, dim)
                 z_views = z_flat.reshape(bsz, num_views, -1)
@@ -1421,6 +1655,15 @@ def train_contrastive_logprob_recon_dualloss(
                 supcon_A = loss_fn_A(zA_views, labels=labels_full, sample_ids=sample_ids_full)
                 supcon_B = loss_fn_B(zB_views, labels=labels_full, sample_ids=sample_ids_full)
 
+                classifier_loss = torch.zeros((), device=device)
+                if classifier_loss_fn is not None:
+                    classifier_logits = model.classifier_logits_from_views(
+                        zA_views, zB_views
+                    )
+                    classifier_loss = classifier_loss_fn(
+                        classifier_logits, labels_full.float()
+                    )
+
                 # Auxiliary reconstruction loss
                 recon = torch.zeros(1, device=device).squeeze()
                 recon_diag = {}
@@ -1434,7 +1677,12 @@ def train_contrastive_logprob_recon_dualloss(
                         logprob_expanded = logprob_expanded + nan_mask.float() * row_means
                     recon, recon_diag = model.recon_loss(logprob_pred_flat, logprob_expanded)
 
-                loss = supcon_A + supcon_B + _lambda * recon
+                loss = (
+                    supcon_A
+                    + supcon_B
+                    + _lambda * recon
+                    + float(classifier_lambda) * classifier_loss
+                )
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -1448,6 +1696,7 @@ def train_contrastive_logprob_recon_dualloss(
                 total_supcon_a += supcon_A.item()
                 total_supcon_b += supcon_B.item()
                 total_recon += float(recon.detach())
+                total_classifier += float(classifier_loss.detach())
                 total_intra_cos += intra_sample_cosine_mean(z_views)
                 total_intra_inter += intra_inter_margin(z_views)
                 n_batches += 1
@@ -1458,6 +1707,7 @@ def train_contrastive_logprob_recon_dualloss(
                     supcon_a=total_supcon_a / n_batches,
                     supcon_b=total_supcon_b / n_batches,
                     recon=total_recon / n_batches,
+                    classifier=total_classifier / n_batches,
                     suppressed=recon_diag.get("suppressed", "N/A"),
                 )
 
@@ -1465,28 +1715,94 @@ def train_contrastive_logprob_recon_dualloss(
         avg_supcon_a = total_supcon_a / max(1, n_batches)
         avg_supcon_b = total_supcon_b / max(1, n_batches)
         avg_recon = total_recon / max(1, n_batches)
+        avg_classifier = total_classifier / max(1, n_batches)
         avg_intra_cos = total_intra_cos / max(1, n_batches)
         avg_intra_inter = total_intra_inter / max(1, n_batches)
         print(
             f"Epoch {epoch + 1}/{epochs} - Loss: {avg_loss:.4f} "
-            f"(SupConA={avg_supcon_a:.4f}, SupConB={avg_supcon_b:.4f}, Recon={avg_recon:.4f}) "
+            f"(SupConA={avg_supcon_a:.4f}, SupConB={avg_supcon_b:.4f}, "
+            f"Recon={avg_recon:.4f}, Classifier={avg_classifier:.4f}) "
             f"- IntraCos: {avg_intra_cos:.4f} - IntraInterMargin: {avg_intra_inter:.4f}"
         )
 
-        # Test evaluation uses head A's loss_fn by convention (no eval for dual loss)
+        # Validation measures the same joint objective used for optimization.
         test_loss = float("inf")
         test_intra_cos = test_intra_inter = 0.0
         if test_loader is not None:
-            test_loss, test_intra_cos, test_intra_inter = evaluate(
-                model,
-                test_loader,
-                batch_size=batch_size,
-                loss_fn=loss_fn_A,
-                device=device,
-                sub_batch_size=sub_batch_size,
-                use_labels=True,
-                ignore_label=int(ignore_labels[0]),
-            )
+            model.eval()
+            val_total = val_intra_cos = val_intra_inter = 0.0
+            val_batches = 0
+            with torch.no_grad():
+                for val_batch in test_loader:
+                    val_views = val_batch["views_activations"].to(
+                        device, non_blocking=True
+                    )
+                    val_labels = val_batch["halu"].to(
+                        device, non_blocking=True
+                    ).reshape(-1)
+                    val_bsz, val_num_views, val_seq_len, val_hidden_dim = (
+                        val_views.shape
+                    )
+                    val_x = val_views.reshape(
+                        val_bsz * val_num_views, val_seq_len, val_hidden_dim
+                    )
+                    val_z, val_z_a, val_z_b, val_recon_pred = _call_model_dual(
+                        model, val_x
+                    )
+                    val_z_views = val_z.reshape(val_bsz, val_num_views, -1)
+                    val_z_a_views = val_z_a.reshape(
+                        val_bsz, val_num_views, -1
+                    )
+                    val_z_b_views = val_z_b.reshape(
+                        val_bsz, val_num_views, -1
+                    )
+                    val_hashkeys = val_batch["hashkey"]
+                    if isinstance(val_hashkeys, str):
+                        val_hashkeys = [val_hashkeys]
+                    val_sample_ids = torch.tensor(
+                        [hash(hk) % 1_000_000 for hk in val_hashkeys],
+                        dtype=torch.long,
+                        device=device,
+                    )
+                    val_loss = loss_fn_A(
+                        val_z_a_views,
+                        labels=val_labels,
+                        sample_ids=val_sample_ids,
+                    ) + loss_fn_B(
+                        val_z_b_views,
+                        labels=val_labels,
+                        sample_ids=val_sample_ids,
+                    )
+                    if classifier_loss_fn is not None:
+                        val_logits = model.classifier_logits_from_views(
+                            val_z_a_views, val_z_b_views
+                        )
+                        val_loss = val_loss + float(classifier_lambda) * (
+                            classifier_loss_fn(val_logits, val_labels.float())
+                        )
+                    if "logprob" in val_batch and _lambda > 0.0:
+                        val_logprob = val_batch["logprob"].to(
+                            device, non_blocking=True
+                        )
+                        val_target = val_logprob.unsqueeze(1).expand(
+                            -1, val_num_views, -1
+                        ).reshape(val_bsz * val_num_views, -1)
+                        val_nan = val_target.isnan()
+                        if val_nan.any():
+                            val_means = val_target.nanmean(dim=-1, keepdim=True)
+                            val_target = val_target.masked_fill(val_nan, 0.0)
+                            val_target = val_target + val_nan.float() * val_means
+                        val_recon, _ = model.recon_loss(
+                            val_recon_pred, val_target
+                        )
+                        val_loss = val_loss + _lambda * val_recon
+                    val_total += float(val_loss)
+                    val_intra_cos += intra_sample_cosine_mean(val_z_views)
+                    val_intra_inter += intra_inter_margin(val_z_views)
+                    val_batches += 1
+            test_loss = val_total / max(1, val_batches)
+            test_intra_cos = val_intra_cos / max(1, val_batches)
+            test_intra_inter = val_intra_inter / max(1, val_batches)
             print(
                 f"Epoch {epoch + 1}/{epochs} - Test Loss: {test_loss:.4f} "
                 f"- Test IntraCos: {test_intra_cos:.4f} - Test IntraInterMargin: {test_intra_inter:.4f}"
@@ -1502,6 +1818,7 @@ def train_contrastive_logprob_recon_dualloss(
                 "train_supcon_a": avg_supcon_a,
                 "train_supcon_b": avg_supcon_b,
                 "train_recon": avg_recon,
+                "train_classifier": avg_classifier,
                 "train_intra_cos": avg_intra_cos,
                 "train_intra_inter_margin": avg_intra_inter,
                 "test_loss": test_loss,
@@ -1511,6 +1828,8 @@ def train_contrastive_logprob_recon_dualloss(
                 "temperature": temperature,
                 "lr": lr,
                 "recon_lambda": _lambda,
+                "classifier_lambda": float(classifier_lambda),
+                "min_total_steps": min_total_steps,
             }
 
             last_path = os.path.join(checkpoint_dir, "contrastive_last.pt")

@@ -23,6 +23,7 @@ def compute_icr_per_layer_batched_gpu(
     delta_h: torch.Tensor,         # (B, L, r_max, hidden_dim) fp32
     response_lens: torch.Tensor,   # (B,) int64
     top_p: float = 0.1,
+    prompt_lens: torch.Tensor | None = None,  # (B,) int64; upstream top-p rule
 ) -> torch.Tensor:                  # (B, L) float32
     """Batched GPU equivalent of icr_score.compute_icr_score looped over B×L.
 
@@ -38,7 +39,26 @@ def compute_icr_per_layer_batched_gpu(
     h_in = h_block_input.to(dtype=torch.float32, device=device)
     dh = delta_h.to(dtype=torch.float32, device=device)
 
+    if not (0 < top_p <= 1):
+        raise ValueError(f"top_p must be in (0, 1], got {top_p}")
+
     rlens = response_lens.to(dtype=torch.int64, device=device)   # (B,)
+    if rlens.shape != (B,):
+        raise ValueError(f"response_lens must have shape ({B},), got {tuple(rlens.shape)}")
+    if bool((rlens < 0).any()) or bool((rlens > r_max).any()):
+        raise ValueError(
+            f"response_lens must be in [0, {r_max}], got {rlens.tolist()}"
+        )
+    if prompt_lens is None:
+        plens = torch.zeros_like(rlens)
+    else:
+        plens = prompt_lens.to(dtype=torch.int64, device=device)
+        if plens.shape != (B,):
+            raise ValueError(
+                f"prompt_lens must have shape ({B},), got {tuple(plens.shape)}"
+            )
+        if bool((plens < 0).any()):
+            raise ValueError(f"prompt_lens must be non-negative, got {plens.tolist()}")
 
     # Why: padding-zero rows in the attention matrix must not be selected by top-k;
     # without this mask, a response_len=2 sample still contributes r_max-2 zero rows
@@ -47,15 +67,19 @@ def compute_icr_per_layer_batched_gpu(
     row_mask = pos.unsqueeze(0) < rlens.unsqueeze(1)  # (B, r_max)
     attn_masked = attn * row_mask[:, None, :, None] * row_mask[:, None, None, :]
 
-    # Per-sample k = max(1, int(top_p * response_len)) — matches the numpy reference
-    # exactly. k varies per sample. Use k_max (largest k in the batch) for a unified
-    # top-k gather, then zero out positions beyond each sample's true k.
-    k_per_sample = (top_p * rlens.float()).long().clamp(min=1)   # (B,)
+    # Upstream chooses k from the full visible sequence length (prompt + response),
+    # while this capture stores response-to-response attention only. Numpy slicing
+    # implicitly clips an oversized k to the response row width, so do that explicitly.
+    # For response_len=0, keep a safe gather width of one; its row is zeroed below.
+    requested_k = (top_p * (plens + rlens).float()).long().clamp(min=1)
+    k_per_sample = torch.minimum(requested_k, rlens.clamp(min=1))  # (B,)
     k_max = int(k_per_sample.max().item())
 
     # Top-k key positions per (B, L, query_position) — unified gather at k_max.
     # topk_indices: (B, L, r_max, k_max)
-    _, topk_indices = torch.topk(attn_masked, k=k_max, dim=-1, sorted=False)
+    # Keep results sorted so slicing ``:k`` below yields the true top-k subset
+    # for samples whose requested k is smaller than the batch-wide k_max.
+    _, topk_indices = torch.topk(attn_masked, k=k_max, dim=-1, sorted=True)
 
     a_topk = attn_masked.gather(-1, topk_indices)  # (B, L, r_max, k_max)
 

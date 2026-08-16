@@ -1,7 +1,8 @@
 {
-  "name": "contrastive_logprob_recon",
+  "name": "contrastive_logprob_recon_prefix_mixed",
   "routine": "contrastive_logprob_recon",
   "model_class": "logprob_recon_progressive_compressor",
+  "_comment": "Issue #149 \u2014 mixed layer x prefix contrastive views. Identical to contrastive_logprob_recon except prefix_view_mode=mixed, so any delta is attributable to the view geometry alone. k is sampled per batch (never pinned to the 0/16/32/48/64 eval grid) and post-prefix tokens are zero-padded with an explicit mask threaded to both attention and pooling.",
   "model_params": {
     "final_dim": 512,
     "input_dropout": 0.3,
@@ -21,7 +22,10 @@
     "use_infinite_index_stream": true,
     "balanced_sampling": false,
     "grad_clip_norm": 1.0,
-    "min_total_steps": 3000
+    "min_total_steps": 3000,
+    "prefix_view_mode": "mixed",
+    "prefix_min_tokens": 8,
+    "prefix_min_gap": 8
   },
   "data": {
     "relevant_layers": "14-29",

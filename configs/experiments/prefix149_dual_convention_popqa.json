@@ -1,0 +1,13 @@
+{
+  "_comment": "Issue #149 dual-convention scope-expansion experiment.",
+  "experiment_name": "prefix149_dual_convention_popqa",
+  "dataset": "popqa_memmap",
+  "methods": ["dual_convention_contrastive_classifier_prefix_mixed_lowk"],
+  "split_seed": 42,
+  "split_seeds": [42, 1, 2, 3, 4],
+  "training_seeds": [0, 1, 2, 3, 4],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs"
+}

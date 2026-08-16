@@ -169,7 +169,7 @@ class _ICRMode:
 class _MemmapMode:
     """Reads from InferenceCaptureWriter layout (Issue #72)."""
 
-    def __init__(self, capture_dir: Path):
+    def __init__(self, capture_dir: Path, scores_path: Path | None = None):
         config_path = capture_dir / "config.json"
         if not config_path.exists():
             raise FileNotFoundError(f"config.json not found: {config_path}")
@@ -202,7 +202,7 @@ class _MemmapMode:
         # Loaded before filtering meta_rows so we can clip to the actual
         # scores array size (guards against partial captures and
         # restart-appended duplicate rows in meta.jsonl).
-        scores_path = capture_dir / "icr_scores.npy"
+        scores_path = scores_path or (capture_dir / "icr_scores.npy")
         if not scores_path.exists():
             raise FileNotFoundError(f"icr_scores.npy not found: {scores_path}")
         self._icr_scores = np.load(scores_path)  # (n_samples, num_layers) fp32
@@ -369,6 +369,10 @@ class ICRDataset(Dataset):
         Ignored when split="all".
     random_seed : int
         RNG seed for the stratified split.  Ignored when split="all".
+    scores_path : str or Path or None
+        Optional alternate score array for ``mode="memmap"``. Prefix-specific
+        ICR evaluation uses this to read ``icr_scores_k{K}.npy`` while retaining
+        labels and sample-index alignment from the original capture directory.
     """
 
     def __init__(
@@ -378,16 +382,22 @@ class ICRDataset(Dataset):
         split: Literal["train", "val", "test", "all"] = "train",
         val_fraction: float | None = None,
         random_seed: int = 42,
+        scores_path: str | Path | None = None,
     ) -> None:
         capture_dir = Path(capture_dir)
         if not capture_dir.exists():
             raise FileNotFoundError(f"capture_dir not found: {capture_dir}")
+        if scores_path is not None and mode != "memmap":
+            raise ValueError("scores_path is only supported with mode='memmap'")
 
         if mode == "icr":
             self._backend = _ICRMode(capture_dir)
             self._get_item = self._backend.get
         elif mode == "memmap":
-            self._backend = _MemmapMode(capture_dir)
+            self._backend = _MemmapMode(
+                capture_dir,
+                Path(scores_path) if scores_path is not None else None,
+            )
             self._get_item = self._backend.get_icr
         elif mode == "memmap-raw":
             self._backend = _MemmapMode(capture_dir)

@@ -410,6 +410,7 @@ class SingleLayerDataset(Dataset):
         layer_pos: int,
         layer_id: int,
         _row_indices: Optional[np.ndarray] = None,
+        response_lens: Optional[np.ndarray] = None,
     ):
         self.cache = cache                    # (N, L, T, H)
         self.labels = labels
@@ -417,6 +418,11 @@ class SingleLayerDataset(Dataset):
         self.layer_pos = layer_pos            # positional index into dim-1
         self.layer_id = layer_id              # model layer number (for metadata)
         self._row_indices = _row_indices
+        self.response_lens = response_lens
+        if response_lens is not None and len(response_lens) != len(labels):
+            raise ValueError(
+                "response_lens and labels must contain the same number of rows"
+            )
 
     def __len__(self) -> int:
         return len(self.labels)
@@ -424,12 +430,15 @@ class SingleLayerDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         cache_idx = int(self._row_indices[idx]) if self._row_indices is not None else idx
         act = torch.from_numpy(np.array(self.cache[cache_idx, self.layer_pos]))  # (T, H)
-        return {
+        out = {
             'hashkey': self.prompt_hashes[idx],
             'halu': torch.tensor(float(self.labels[idx]), dtype=torch.float32),
             'views_activations': act.unsqueeze(0),  # (1, T, H)
             'view_indices': torch.tensor([self.layer_id], dtype=torch.long),
         }
+        if self.response_lens is not None:
+            out['response_len'] = int(self.response_lens[idx])
+        return out
 
 
 class MultiLayerDeterministicDataset(Dataset):
@@ -1767,5 +1776,4 @@ class ActivationParser:
     def close(self):
         """Close the underlying activation logger connection."""
         self.logger.close() 
-
 

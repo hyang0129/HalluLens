@@ -1,0 +1,31 @@
+{
+  "name": "act_vit_prefix_multik",
+  "routine": "act_vit",
+  "_comment": "Issue #149 main fair ACT-ViT arm: one fixed-geometry model trained across response prefixes, matching the multi-k deployment setting. k=1/4 remain extrapolation below the training minimum.",
+  "model_params": {
+    "L_p": 8,
+    "N_p": 100,
+    "patch_h": 2,
+    "patch_w": 10,
+    "d_adapter": 256,
+    "d_model": 256,
+    "num_heads": 8,
+    "depth": 4,
+    "dropout": 0.1
+  },
+  "training": {
+    "max_epochs": 50,
+    "batch_size": 64,
+    "lr": 0.0001,
+    "weight_decay": 0.01,
+    "prefix_training": true,
+    "prefix_min_tokens": 8,
+    "prefix_min_gap": 8,
+    "prefix_validation_lengths": [8, 16, 32, 64]
+  },
+  "evaluation": {
+    "metrics": ["auroc"],
+    "eval_prefix_curve": true,
+    "eval_prefix_lengths": [1, 4, 8, 16, 32, 48, 64]
+  }
+}

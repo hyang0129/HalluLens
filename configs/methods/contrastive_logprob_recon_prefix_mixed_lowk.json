@@ -1,7 +1,8 @@
 {
-  "name": "contrastive_logprob_recon",
+  "name": "contrastive_logprob_recon_prefix_mixed_lowk",
   "routine": "contrastive_logprob_recon",
   "model_class": "logprob_recon_progressive_compressor",
+  "_comment": "Issue #149 headline HalluLens arm. Retrains mixed layer x prefix views on the exact seven-point low-k support used by the matched ACT-ViT arm and evaluation grid.",
   "model_params": {
     "final_dim": 512,
     "input_dropout": 0.3,
@@ -21,14 +22,15 @@
     "use_infinite_index_stream": true,
     "balanced_sampling": false,
     "grad_clip_norm": 1.0,
-    "min_total_steps": 3000
+    "min_total_steps": 3000,
+    "prefix_view_mode": "mixed",
+    "prefix_min_tokens": 1,
+    "prefix_min_gap": 1,
+    "prefix_sampling_lengths": [1, 4, 8, 16, 32, 48, 64]
   },
   "data": {
     "relevant_layers": "14-29",
-    "target_layers": [
-      22,
-      26
-    ],
+    "target_layers": [22, 26],
     "num_views": 2,
     "pad_length": 63,
     "preload": true,
@@ -36,36 +38,18 @@
     "response_logprobs_top_k": 20
   },
   "evaluation": {
-    "metrics": [
-      "cosine",
-      "mds",
-      "knn"
-    ],
+    "metrics": ["cosine", "mds", "knn"],
     "knn_params": {
       "k": 50,
       "metric": "euclidean",
       "calibrate_k": true,
-      "k_candidates": [
-        50,
-        100,
-        200,
-        500,
-        1000
-      ],
+      "k_candidates": [50, 100, 200, 500, 1000],
       "max_train_size": 200000
     },
     "eval_batch_size": 256,
     "sub_batch_size": 64,
     "dump_embeddings": true,
     "eval_prefix_curve": true,
-    "eval_prefix_lengths": [
-      1,
-      4,
-      8,
-      16,
-      32,
-      48,
-      64
-    ]
+    "eval_prefix_lengths": [1, 4, 8, 16, 32, 48, 64]
   }
 }

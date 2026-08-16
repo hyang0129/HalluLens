@@ -1,0 +1,19 @@
+{
+  "name": "logprob_baseline_prefix_eval",
+  "routine": "logprob_baseline",
+  "model_class": null,
+  "training": null,
+  "_comment": "Issue #149 response-length-aware prefix recomputation of sequence logprob aggregates.",
+  "data": {
+    "relevant_layers": "14-29",
+    "num_views": 2,
+    "preload": true,
+    "include_response_logprobs": true,
+    "response_logprobs_top_k": 20
+  },
+  "evaluation": {
+    "metrics": ["mean_logprob", "seq_logprob", "perplexity"],
+    "eval_prefix_curve": true,
+    "eval_prefix_lengths": [1, 4, 8, 16, 32, 48, 64]
+  }
+}

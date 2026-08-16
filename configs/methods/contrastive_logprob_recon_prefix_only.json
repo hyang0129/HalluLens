@@ -1,7 +1,8 @@
 {
-  "name": "contrastive_logprob_recon",
+  "name": "contrastive_logprob_recon_prefix_only",
   "routine": "contrastive_logprob_recon",
   "model_class": "logprob_recon_progressive_compressor",
+  "_comment": "Issue #149 ablation \u2014 prefix (time) axis only: positive pairs differ in prefix length at a FIXED layer. Isolates how much of the signal the time axis carries on its own, versus layer_only (depth only) and prefix_mixed (both). Note this arm is closest to vanilla CPC.",
   "model_params": {
     "final_dim": 512,
     "input_dropout": 0.3,
@@ -21,7 +22,10 @@
     "use_infinite_index_stream": true,
     "balanced_sampling": false,
     "grad_clip_norm": 1.0,
-    "min_total_steps": 3000
+    "min_total_steps": 3000,
+    "prefix_view_mode": "prefix_only",
+    "prefix_min_tokens": 8,
+    "prefix_min_gap": 8
   },
   "data": {
     "relevant_layers": "14-29",

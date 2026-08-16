@@ -837,6 +837,11 @@ class LinearProbeTrainerConfig(TrainerConfig):
     use_infinite_index_stream: bool = False
     infinite_stream_shuffle: bool = True
     infinite_stream_seed: int = 0
+    prefix_training: bool = False
+    prefix_min_tokens: int = 8
+    prefix_min_gap: int = 8
+    prefix_max_tokens: int = 64
+    prefix_seed: Optional[int] = None
 
 
 class LinearProbeTrainer(Trainer):
@@ -855,6 +860,18 @@ class LinearProbeTrainer(Trainer):
         super().__init__(model, config=config)
         self.loss_fn = torch.nn.BCELoss()
         self.best_auroc: float = 0.0
+        self.prefix_sampler = None
+        if bool(config.prefix_training):
+            from activation_research.prefix_views import PrefixPairSampler
+
+            self.prefix_sampler = PrefixPairSampler(
+                mode="prefix_only",
+                num_views=2,
+                min_prefix=int(config.prefix_min_tokens),
+                min_gap=int(config.prefix_min_gap),
+                max_prefix=int(config.prefix_max_tokens),
+                seed=config.prefix_seed,
+            )
 
     def training_step(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, Dict[str, float]]:
         # views_activations: (B, 1, seq_len, D) → squeeze view dim
@@ -863,10 +880,36 @@ class LinearProbeTrainer(Trainer):
             x = x.squeeze(1)  # (B, seq_len, D)
         labels = batch["halu"].to(self.device, non_blocking=True).float().view(-1, 1)
 
-        preds = self.model(x)  # (B, 1)
-        loss = self.loss_fn(preds, labels)
+        if self.prefix_sampler is None:
+            preds = self.model(x)  # (B, 1)
+            loss = self.loss_fn(preds, labels)
+            acc = float(((preds > 0.5).float() == labels).float().mean().item())
+            return loss, {"acc": acc}
 
-        acc = float(((preds > 0.5).float() == labels).float().mean().item())
+        if "response_len" not in batch:
+            raise KeyError(
+                "prefix_training requires response_len in the single-layer dataset"
+            )
+        from activation_research.prefix_views import build_prefix_mask
+
+        response_lens = batch["response_len"].to(self.device, non_blocking=True)
+        spec = self.prefix_sampler.sample()
+        losses = []
+        accuracies = []
+        for prefix_len in spec.prefix_lens:
+            mask = build_prefix_mask(
+                response_lens,
+                seq_len=x.shape[1],
+                prefix_len=int(prefix_len),
+                device=self.device,
+            )
+            preds = self.model(x, token_mask=mask)
+            losses.append(self.loss_fn(preds, labels))
+            accuracies.append(
+                ((preds > 0.5).float() == labels).float().mean()
+            )
+        loss = torch.stack(losses).mean()
+        acc = float(torch.stack(accuracies).mean().item())
         return loss, {"acc": acc}
 
     def train_epoch(self, *, epoch: int, train_dataset) -> Dict[str, float]:
@@ -932,7 +975,22 @@ class LinearProbeTrainer(Trainer):
                     x = x.squeeze(1)
                 labels = batch["halu"].to(self.device, non_blocking=True).float().view(-1, 1)
 
-                preds = self.model(x)
+                if bool(self.probe_config.prefix_training):
+                    if "response_len" not in batch:
+                        raise KeyError(
+                            "prefix_training requires response_len in validation batches"
+                        )
+                    from activation_research.prefix_views import build_prefix_mask
+
+                    mask = build_prefix_mask(
+                        batch["response_len"].to(self.device, non_blocking=True),
+                        seq_len=x.shape[1],
+                        prefix_len=x.shape[1],
+                        device=self.device,
+                    )
+                    preds = self.model(x, token_mask=mask)
+                else:
+                    preds = self.model(x)
                 loss = self.loss_fn(preds, labels)
                 total_loss += float(loss.item())
                 n_batches += 1
@@ -1335,10 +1393,50 @@ class LinearProbeTrainer(Trainer):
             x = x.squeeze(1)  # (B, seq_len, D)
         labels = batch["halu"].to(self.device, non_blocking=True).float().view(-1, 1)
 
-        preds = self.model(x)  # (B, 1)
-        loss = self.loss_fn(preds, labels)
+        if not hasattr(self, "prefix_sampler"):
+            self.prefix_sampler = None
+            if bool(self.probe_config.prefix_training):
+                from activation_research.prefix_views import PrefixPairSampler
 
-        acc = float(((preds > 0.5).float() == labels).float().mean().item())
+                self.prefix_sampler = PrefixPairSampler(
+                    mode="prefix_only",
+                    num_views=2,
+                    min_prefix=int(self.probe_config.prefix_min_tokens),
+                    min_gap=int(self.probe_config.prefix_min_gap),
+                    max_prefix=int(self.probe_config.prefix_max_tokens),
+                    seed=self.probe_config.prefix_seed,
+                )
+
+        if self.prefix_sampler is None:
+            preds = self.model(x)  # (B, 1)
+            loss = self.loss_fn(preds, labels)
+            acc = float(((preds > 0.5).float() == labels).float().mean().item())
+            return loss, {"acc": acc}
+
+        if "response_len" not in batch:
+            raise KeyError(
+                "prefix_training requires response_len in the single-layer dataset"
+            )
+        from activation_research.prefix_views import build_prefix_mask
+
+        response_lens = batch["response_len"].to(self.device, non_blocking=True)
+        spec = self.prefix_sampler.sample()
+        losses = []
+        accuracies = []
+        for prefix_len in spec.prefix_lens:
+            mask = build_prefix_mask(
+                response_lens,
+                seq_len=x.shape[1],
+                prefix_len=int(prefix_len),
+                device=self.device,
+            )
+            preds = self.model(x, token_mask=mask)
+            losses.append(self.loss_fn(preds, labels))
+            accuracies.append(
+                ((preds > 0.5).float() == labels).float().mean()
+            )
+        loss = torch.stack(losses).mean()
+        acc = float(torch.stack(accuracies).mean().item())
         return loss, {"acc": acc}
 
     def train_epoch(self, *, epoch: int, train_dataset) -> Dict[str, float]:
@@ -1404,7 +1502,22 @@ class LinearProbeTrainer(Trainer):
                     x = x.squeeze(1)
                 labels = batch["halu"].to(self.device, non_blocking=True).float().view(-1, 1)
 
-                preds = self.model(x)
+                if bool(self.probe_config.prefix_training):
+                    if "response_len" not in batch:
+                        raise KeyError(
+                            "prefix_training requires response_len in validation batches"
+                        )
+                    from activation_research.prefix_views import build_prefix_mask
+
+                    mask = build_prefix_mask(
+                        batch["response_len"].to(self.device, non_blocking=True),
+                        seq_len=x.shape[1],
+                        prefix_len=x.shape[1],
+                        device=self.device,
+                    )
+                    preds = self.model(x, token_mask=mask)
+                else:
+                    preds = self.model(x)
                 loss = self.loss_fn(preds, labels)
                 total_loss += float(loss.item())
                 n_batches += 1

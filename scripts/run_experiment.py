@@ -101,6 +101,155 @@ def _safe_git(*args: str) -> str:
         return ""
 
 
+def _resolve_run_split_seed(experiment_cfg: dict, training_seed: int | None) -> int:
+    """Return the fold seed paired with this training seed.
+
+    Experiment files may specify ``split_seeds`` in parallel with
+    ``training_seeds``. Routines that reconstruct their own memmap splits
+    (notably ACT-ViT and ICR) must use the paired value rather than the global
+    fallback, or every reported seed silently trains on the same fold.
+    """
+    fallback = int(experiment_cfg.get("split_seed", 42))
+    split_seeds = experiment_cfg.get("split_seeds")
+    training_seeds = experiment_cfg.get("training_seeds")
+    if training_seed is None or split_seeds is None or training_seeds is None:
+        return fallback
+    try:
+        index = list(training_seeds).index(training_seed)
+    except ValueError:
+        return fallback
+    return int(split_seeds[index]) if index < len(split_seeds) else fallback
+
+
+def _score_single_layer_classifier(
+    model,
+    dataset,
+    *,
+    batch_size: int,
+    eval_device: torch.device,
+    prefix_len: int | None = None,
+    length_aware: bool = False,
+) -> tuple["np.ndarray", "np.ndarray"]:
+    """Score a LinearProbe/SAPLMA-style sequence classifier.
+
+    ``prefix_len`` selects the first k response tokens.  When either a prefix
+    is requested or ``length_aware`` is true, the model receives an explicit
+    mask capped by each sample's recorded response length.
+    """
+    import numpy as np
+    from torch.utils.data import DataLoader
+
+    from activation_research.prefix_views import build_prefix_mask
+
+    loader = DataLoader(dataset, batch_size=int(batch_size), shuffle=False)
+    all_preds, all_labels = [], []
+    model.eval()
+    with torch.no_grad():
+        for batch in loader:
+            x = batch["views_activations"].to(eval_device)
+            if x.dim() == 4:
+                x = x.squeeze(1)
+            if prefix_len is not None or length_aware:
+                if "response_len" not in batch:
+                    raise KeyError(
+                        "prefix evaluation requires response_len in the "
+                        "single-layer dataset"
+                    )
+                k = x.shape[1] if prefix_len is None else int(prefix_len)
+                mask = build_prefix_mask(
+                    batch["response_len"].to(eval_device),
+                    seq_len=x.shape[1],
+                    prefix_len=k,
+                    device=eval_device,
+                )
+                preds = model(x, token_mask=mask)
+            else:
+                preds = model(x)
+            all_preds.append(preds.detach().cpu())
+            all_labels.append(batch["halu"].cpu())
+
+    return (
+        torch.cat(all_preds).reshape(-1).numpy().astype(np.float32),
+        torch.cat(all_labels).reshape(-1).numpy().astype(np.int32),
+    )
+
+
+def _single_layer_prefix_curve(
+    model,
+    dataset,
+    *,
+    batch_size: int,
+    eval_device: torch.device,
+    eval_cfg: dict,
+) -> tuple[dict, dict[int, "np.ndarray"]]:
+    """Return namespaced AUROCs and per-sample scores for every requested k."""
+    from sklearn.metrics import roc_auc_score
+
+    from activation_research.prefix_views import resolve_eval_prefixes
+
+    if not eval_cfg.get("eval_prefix_curve", False):
+        return {}, {}
+    max_prefix = int(getattr(dataset, "max_response_len", 64))
+    if hasattr(dataset, "cache") and getattr(dataset.cache, "ndim", 0) >= 3:
+        max_prefix = int(dataset.cache.shape[-2])
+    ks = resolve_eval_prefixes(eval_cfg.get("eval_prefix_lengths"), max_prefix)
+    curve: dict = {}
+    scores_by_k: dict[int, "np.ndarray"] = {}
+    for k in ks:
+        scores, labels = _score_single_layer_classifier(
+            model,
+            dataset,
+            batch_size=batch_size,
+            eval_device=eval_device,
+            prefix_len=k,
+        )
+        auroc = (
+            float(roc_auc_score(labels, scores))
+            if len(set(labels.tolist())) >= 2
+            else float("nan")
+        )
+        curve[f"k{k}_auroc"] = auroc
+        scores_by_k[int(k)] = scores
+        logger.info(f"[single-layer prefix] k={k}: auroc={auroc}")
+    return curve, scores_by_k
+
+
+def _act_vit_logits_at_prefix(
+    model,
+    activations: torch.Tensor,
+    response_lens: torch.Tensor,
+    prefix_len: int,
+) -> torch.Tensor:
+    """Run ACT-ViT without padding beyond each sample's effective prefix.
+
+    ACT-ViT accepts variable token width through adaptive pooling, but a batch
+    tensor has one shared width.  Grouping by ``min(response_len, k)`` keeps
+    early-EOS rows information-correct while preserving gradients.
+    """
+    if activations.dim() != 4:
+        raise ValueError(
+            "ACT-ViT activations must have shape (B, L, N, D), got "
+            f"{tuple(activations.shape)}"
+        )
+    if int(prefix_len) < 1:
+        raise ValueError(f"prefix_len must be >= 1, got {prefix_len}")
+    lens = torch.as_tensor(
+        response_lens, dtype=torch.long, device=activations.device
+    ).clamp(min=1, max=min(int(prefix_len), int(activations.shape[2])))
+    logits_chunks = []
+    index_chunks = []
+    for effective_len in lens.unique(sorted=True):
+        idx = torch.nonzero(lens == effective_len, as_tuple=False).reshape(-1)
+        width = int(effective_len.item())
+        logits_chunks.append(
+            model(activations.index_select(0, idx)[:, :, :width, :]).reshape(-1)
+        )
+        index_chunks.append(idx)
+    joined_logits = torch.cat(logits_chunks, dim=0)
+    joined_indices = torch.cat(index_chunks, dim=0)
+    return joined_logits[torch.argsort(joined_indices)]
+
+
 # ---------------------------------------------------------------------------
 # Method runners
 # ---------------------------------------------------------------------------
@@ -257,7 +406,7 @@ def run_contrastive(
         "dataset": dataset_cfg["name"],
         "seed": training_seed,
         "flip_auroc": flip_auroc,
-        "split_seed": experiment_cfg.get("split_seed", 42),
+        "split_seed": _resolve_run_split_seed(experiment_cfg, training_seed),
         "n_train": len(train_ds),
         "n_test": len(test_ds),
     }
@@ -481,6 +630,13 @@ def run_contrastive_logprob_recon(
             balanced_sampling=train_cfg.get("balanced_sampling", False),
             grad_clip_norm=train_cfg.get("grad_clip_norm"),
             augment_fn=augment_fn,
+            # Issue #149 prefix views. Default "layer_only" keeps every existing
+            # config byte-identical to its pre-#149 behaviour.
+            prefix_view_mode=train_cfg.get("prefix_view_mode", "layer_only"),
+            prefix_min_tokens=train_cfg.get("prefix_min_tokens", 8),
+            prefix_min_gap=train_cfg.get("prefix_min_gap", 8),
+            prefix_sampling_lengths=train_cfg.get("prefix_sampling_lengths"),
+            prefix_seed=training_seed,
         )
 
         torch.save(
@@ -537,16 +693,68 @@ def run_contrastive_logprob_recon(
     knn_scores_arr = ood_stats.pop("knn_scores", None)
     knn_labels_arr = ood_stats.pop("knn_labels", None)
 
+    # ---- Issue #149: AUROC as a function of the response prefix ------------
+    # The headline question is whether a hallucination is detectable at token 16,
+    # before the generation finishes. The full-length numbers above are the k=64
+    # point of that curve; the loop below fills in the rest.
+    #
+    # Both the train (KNN reference) and test loaders are re-encoded at each k.
+    # Scoring a k-truncated test set against a full-length KNN base would
+    # measure distribution shift between the two, not early detectability.
+    prefix_curve: dict = {}
+    eval_prefixes_cfg = eval_cfg.get("eval_prefix_lengths", None)
+    if eval_cfg.get("eval_prefix_curve", False):
+        from activation_research.prefix_views import (
+            PrefixEvalWrapper,
+            resolve_eval_prefixes,
+        )
+
+        _capture_r_max = getattr(test_ds, "_max_resp", None) or 64
+        _ks = resolve_eval_prefixes(eval_prefixes_cfg, int(_capture_r_max))
+        logger.info(f"prefix curve: evaluating at k={_ks} (capture width {_capture_r_max})")
+
+        for _k in _ks:
+            _wrapped = PrefixEvalWrapper(model, _k).to(train_device)
+            _wrapped.eval()
+            _evaluator_k = MultiMetricHallucinationEvaluator(
+                activation_parser_df=eval_ap.df,
+                train_data_loader=DataLoader(
+                    train_ds_target, batch_size=64, shuffle=False
+                ),
+                metrics=metrics_list,
+                batch_size=eval_cfg.get("eval_batch_size", 256),
+                sub_batch_size=eval_cfg.get("sub_batch_size", 64),
+                device=train_device,
+                num_workers=experiment_cfg.get("num_workers", 4),
+                persistent_workers=False,
+                outlier_class=effective_outlier_class,
+            )
+            _stats_k = _evaluator_k.compute(
+                DataLoader(test_ds_target, batch_size=64, shuffle=False), _wrapped
+            )
+            _stats_k.pop("knn_scores", None)
+            _stats_k.pop("knn_labels", None)
+            for _metric_name, _v in _stats_k.items():
+                prefix_curve[f"k{_k}_{_metric_name}"] = _v
+            logger.info(
+                f"  k={_k}: knn_auroc={_stats_k.get('knn_auroc')} "
+                f"cosine_auroc={_stats_k.get('cosine_auroc')} "
+                f"mahalanobis_auroc={_stats_k.get('mahalanobis_auroc')}"
+            )
+
     eval_metrics: dict = {
         "method": method_cfg["name"],
         "dataset": dataset_cfg["name"],
         "seed": training_seed,
         "flip_auroc": flip_auroc,
-        "split_seed": experiment_cfg.get("split_seed", 42),
+        "split_seed": _resolve_run_split_seed(experiment_cfg, training_seed),
         "n_train": len(train_ds),
         "n_test": len(test_ds),
     }
     eval_metrics.update(ood_stats)
+    # Prefix-curve cells are namespaced k{K}_* so they never collide with the
+    # full-length metrics above.
+    eval_metrics.update(prefix_curve)
 
     predictions: list[dict] = []
     if knn_scores_arr is not None and knn_labels_arr is not None:
@@ -797,7 +1005,7 @@ def run_contrastive_logprob_recon_shared_trunk(
         "dataset": dataset_cfg["name"],
         "seed": training_seed,
         "flip_auroc": flip_auroc,
-        "split_seed": experiment_cfg.get("split_seed", 42),
+        "split_seed": _resolve_run_split_seed(experiment_cfg, training_seed),
         "n_train": len(train_ds),
         "n_test": len(test_ds),
         "variant": variant,
@@ -806,6 +1014,27 @@ def run_contrastive_logprob_recon_shared_trunk(
 
     predictions: list[dict] = []
     return eval_metrics, predictions
+
+
+def _build_classifier_predictions(classifier_scores, classifier_labels) -> list[dict]:
+    """Convert aligned classifier arrays to the canonical prediction rows."""
+    if len(classifier_scores) != len(classifier_labels):
+        raise ValueError(
+            "classifier score/label length mismatch: "
+            f"{len(classifier_scores)} != {len(classifier_labels)}"
+        )
+    return [
+        {"example_id": i, "score_halu": float(s), "label_halu": int(l)}
+        for i, (s, l) in enumerate(zip(classifier_scores, classifier_labels))
+    ]
+
+
+def _clear_stale_run_error(run_error_path: str) -> bool:
+    """Remove a superseded failure marker after all result writes succeed."""
+    if not os.path.exists(run_error_path):
+        return False
+    os.remove(run_error_path)
+    return True
 
 
 def run_contrastive_logprob_recon_dualhead_fusion(
@@ -818,10 +1047,9 @@ def run_contrastive_logprob_recon_dualhead_fusion(
     training_seed: int,
     test_ap=None,
 ) -> tuple[dict, list[dict]]:
-    """SS-1 (issue #129): train a ``SharedSpineDualHeadCompressor`` and evaluate
-    the two convention-heads SEPARATELY, then fuse their per-sample KNN scores.
+    """Train/evaluate models with standard and mirrored contrastive heads.
 
-    The fix over the D2 shared-trunk routine (#102/#128): the spine is protected
+    The SS-1 fix over the D2 shared-trunk routine (#102/#128): the spine is protected
     (``spine_supcon_grad_scale`` on the model) and **eval scores each head's own
     embedding** (head A under ignore=1 → std convention; head B under ignore=0 →
     flip convention), fusing at the SCORE level via an a-priori equal-weight
@@ -832,7 +1060,11 @@ def run_contrastive_logprob_recon_dualhead_fusion(
     from sklearn.metrics import roc_auc_score
     from torch.utils.data import DataLoader
     from activation_research.metric_evaluator import MultiMetricHallucinationEvaluator
-    from activation_research.model import SharedSpineDualHeadCompressor, SharedStemDualBranchCompressor
+    from activation_research.model import (
+        DualConventionContrastiveClassifier,
+        SharedSpineDualHeadCompressor,
+        SharedStemDualBranchCompressor,
+    )
     from activation_research.training import train_contrastive_logprob_recon_dualloss
 
     data_cfg = method_cfg["data"]
@@ -860,7 +1092,32 @@ def run_contrastive_logprob_recon_dualhead_fusion(
     train_device = device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
 
     model_class = method_cfg.get("model_class", "shared_spine_dual_head")
-    if model_class == "shared_stem_dual_branch":
+    if model_class == "dual_convention_contrastive_classifier":
+        # Issue-149 scope expansion: two complete headline-size encoders under
+        # one model, trained jointly with opposite label conventions and a
+        # supervised classifier over their concatenated representations.
+        model = DualConventionContrastiveClassifier(
+            input_dim=dataset_cfg["input_dim"],
+            final_dim=model_params.get("final_dim", 512),
+            classifier_hidden_dim=model_params.get(
+                "classifier_hidden_dim", 128
+            ),
+            classifier_dropout=model_params.get("classifier_dropout", 0.1),
+            classifier_normalize_branches=model_params.get(
+                "classifier_normalize_branches", True
+            ),
+            input_dropout=model_params.get("input_dropout", 0.3),
+            normalize_input=model_params.get("normalize_input", False),
+            recon_seq_len=model_params.get("recon_seq_len", 64),
+            recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            logprob_var_threshold=model_params.get(
+                "logprob_var_threshold", 1e-4
+            ),
+            block_dims=model_params.get("block_dims"),
+            pre_norm=model_params.get("pre_norm", False),
+        )
+    elif model_class == "shared_stem_dual_branch":
         # SS-1b: early split — shared input stem, two independent branch sub-encoders.
         model = SharedStemDualBranchCompressor(
             input_dim=dataset_cfg["input_dim"],
@@ -897,6 +1154,16 @@ def run_contrastive_logprob_recon_dualhead_fusion(
         model.load_state_dict(torch.load(final_weights, map_location=train_device)["model_state_dict"])
     else:
         os.makedirs(artifacts_dir, exist_ok=True)
+        _classifier_pos_weight = train_cfg.get("classifier_pos_weight")
+        if _classifier_pos_weight == "auto":
+            _train_labels = ap.df.loc[ap.df["split"] == "train", "halu"]
+            _n_pos = int((_train_labels == 1).sum())
+            _n_neg = int((_train_labels == 0).sum())
+            _classifier_pos_weight = _n_neg / max(_n_pos, 1)
+            logger.info(
+                f"dual-convention classifier pos_weight="
+                f"{_classifier_pos_weight:.4f} ({_n_neg} truth/{_n_pos} halu)"
+            )
         train_contrastive_logprob_recon_dualloss(
             model=model,
             train_dataset=train_ds,
@@ -918,10 +1185,18 @@ def run_contrastive_logprob_recon_dualhead_fusion(
             infinite_stream_shuffle=True,
             infinite_stream_seed=training_seed,
             steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+            min_total_steps=train_cfg.get("min_total_steps"),
             balanced_sampling=train_cfg.get("balanced_sampling", False),
             grad_clip_norm=train_cfg.get("grad_clip_norm"),
             augment_fn=None,
             ignore_labels=tuple(train_cfg.get("ignore_labels", (1, 0))),
+            classifier_lambda=train_cfg.get("classifier_lambda", 0.0),
+            classifier_pos_weight=_classifier_pos_weight,
+            prefix_view_mode=train_cfg.get("prefix_view_mode", "layer_only"),
+            prefix_min_tokens=train_cfg.get("prefix_min_tokens", 8),
+            prefix_min_gap=train_cfg.get("prefix_min_gap", 8),
+            prefix_sampling_lengths=train_cfg.get("prefix_sampling_lengths"),
+            prefix_seed=training_seed,
         )
         torch.save({"model_state_dict": model.state_dict()}, final_weights)
 
@@ -936,17 +1211,22 @@ def run_contrastive_logprob_recon_dualhead_fusion(
             self.base = base
             self.which = which
 
-        def forward(self, x):
+        def forward(self, x, **kwargs):
             # Works for both SS-1 (head on trunk) and SS-1b (branch on stem seq).
-            return self.base.embed_head(x, self.which)
+            return self.base.embed_head(x, self.which, **kwargs)
 
     train_loader = DataLoader(train_ds.slice_layers(target_layers), batch_size=64, shuffle=False)
     eval_loader = DataLoader(test_ds.slice_layers(target_layers), batch_size=64, shuffle=False)
 
-    def _head_scores(which, outlier_class, flip):
+    def _head_scores(which, outlier_class, flip, prefix_len=None):
         knn_params = dict(eval_cfg.get("knn_params", {}))
         knn_params["sample_seed"] = training_seed
         knn_params["include_per_sample"] = True
+        head_model = _HeadView(model, which)
+        if prefix_len is not None:
+            from activation_research.prefix_views import PrefixEvalWrapper
+
+            head_model = PrefixEvalWrapper(head_model, int(prefix_len))
         evaluator = MultiMetricHallucinationEvaluator(
             activation_parser_df=eval_ap.df,
             train_data_loader=train_loader,
@@ -958,7 +1238,7 @@ def run_contrastive_logprob_recon_dualhead_fusion(
             persistent_workers=False,
             outlier_class=outlier_class,
         )
-        stats = evaluator.compute(eval_loader, _HeadView(model, which))
+        stats = evaluator.compute(eval_loader, head_model)
         s = np.asarray(stats.pop("knn_scores"), dtype=np.float64)
         l = np.asarray(stats.pop("knn_labels"), dtype=np.int64)
         # Orient to "higher = more halu" (mirror the headline routine's flip rule).
@@ -966,8 +1246,20 @@ def run_contrastive_logprob_recon_dualhead_fusion(
             return -s, 1 - l, float(stats["knn_auroc"])
         return s, l, float(stats["knn_auroc"])
 
-    s_std, lab, auroc_std = _head_scores("A", outlier_class=1, flip=False)
-    s_flip, lab_b, auroc_flip = _head_scores("B", outlier_class=0, flip=True)
+    # Prefix-trained models must mask zero-padded response rows even for their
+    # full-response score. k=r_max retains every real token while excluding
+    # padding, matching the training-time token-mask contract.
+    _full_prefix = (
+        int(getattr(test_ds, "_max_resp", None) or 64)
+        if model_class == "dual_convention_contrastive_classifier"
+        else None
+    )
+    s_std, lab, auroc_std = _head_scores(
+        "A", outlier_class=1, flip=False, prefix_len=_full_prefix
+    )
+    s_flip, lab_b, auroc_flip = _head_scores(
+        "B", outlier_class=0, flip=True, prefix_len=_full_prefix
+    )
 
     # Both passes iterate the same shuffle=False eval_loader → index-aligned.
     assert np.array_equal(lab, lab_b), "head A/B eval ordering diverged — cannot fuse"
@@ -993,13 +1285,15 @@ def run_contrastive_logprob_recon_dualhead_fusion(
         "method": method_cfg["name"],
         "dataset": dataset_cfg["name"],
         "seed": training_seed,
-        "split_seed": experiment_cfg.get("split_seed", 42),
+        "split_seed": _resolve_run_split_seed(experiment_cfg, training_seed),
         "n_train": len(train_ds),
         "n_test": len(test_ds),
         "model_class": model_class,
         "spine_supcon_grad_scale": float(model_params.get("spine_supcon_grad_scale", 0.0)),
         "knn_auroc_head_std": auroc_std,
         "knn_auroc_head_flip": auroc_flip,
+        "knn_auroc_standard": auroc_std,
+        "knn_auroc_mirrored": auroc_flip,
         # Headline = the fused score (the SS-1 method output).
         "knn_auroc": auroc_fused,
         "knn_auroc_fused": auroc_fused,
@@ -1010,12 +1304,128 @@ def run_contrastive_logprob_recon_dualhead_fusion(
         "fusion_oracle_weight_std": fusion_oracle_weight_std,
         "fusion_oracle_delta_vs_best": auroc_fused_oracle - max(auroc_std, auroc_flip),
     }
-    predictions = [
-        {"example_id": i, "score_halu": float(f), "label_halu": int(l)}
-        for i, (f, l) in enumerate(zip(fused, lab))
-    ]
+
+    classifier_scores = None
+    classifier_labels = None
+    if model_class == "dual_convention_contrastive_classifier":
+        from sklearn.metrics import average_precision_score
+
+        def _classifier_scores(prefix_len=None):
+            scores, labels = [], []
+            with torch.no_grad():
+                for batch in eval_loader:
+                    views = batch["views_activations"].to(
+                        train_device, non_blocking=True
+                    )
+                    bsz, num_views, seq_len, hidden_dim = views.shape
+                    # Always exclude padded rows. prefix_len=None means every
+                    # real response token, not every fixed-width storage row.
+                    raw_valid = views.detach().ne(0).any(dim=-1)
+                    response_lens = raw_valid.long().sum(dim=-1).clamp(
+                        min=1, max=seq_len
+                    )
+                    if prefix_len is None:
+                        effective = response_lens
+                    else:
+                        effective = torch.minimum(
+                            response_lens,
+                            torch.full_like(response_lens, int(prefix_len)),
+                        )
+                    positions = torch.arange(
+                        seq_len, device=views.device
+                    ).view(1, 1, -1)
+                    token_mask = positions < effective.unsqueeze(-1)
+                    views = views * token_mask.unsqueeze(-1).to(views.dtype)
+                    x_flat = views.reshape(
+                        bsz * num_views, seq_len, hidden_dim
+                    )
+                    mask_flat = (
+                        token_mask.reshape(bsz * num_views, seq_len)
+                        if token_mask is not None
+                        else None
+                    )
+                    _, z_std, z_mirror, _ = model.forward_with_heads(
+                        x_flat, token_mask=mask_flat
+                    )
+                    logits = model.classifier_logits_from_views(
+                        z_std.reshape(bsz, num_views, -1),
+                        z_mirror.reshape(bsz, num_views, -1),
+                    )
+                    scores.append(torch.sigmoid(logits).cpu())
+                    labels.append(batch["halu"].reshape(-1).cpu())
+            return (
+                torch.cat(scores).numpy(),
+                torch.cat(labels).numpy().astype(np.int64),
+            )
+
+        classifier_scores, classifier_labels = _classifier_scores()
+        classifier_auroc = float(
+            roc_auc_score(classifier_labels, classifier_scores)
+        )
+        classifier_auprc = float(
+            average_precision_score(classifier_labels, classifier_scores)
+        )
+        eval_metrics.update(
+            {
+                "auroc": classifier_auroc,
+                "auprc": classifier_auprc,
+                "classifier_auroc": classifier_auroc,
+                "classifier_auprc": classifier_auprc,
+                "primary_scorer": "binary_classifier",
+                "knn_fusion_role": "diagnostic",
+                "classifier_input_dim": 2 * int(model.final_dim),
+                "classifier_hidden_dim": int(
+                    model.classifier_hidden_dim
+                ),
+                "model_parameter_count": int(
+                    sum(p.numel() for p in model.parameters())
+                ),
+                "standard_encoder_parameter_count": int(
+                    sum(p.numel() for p in model.standard_encoder.parameters())
+                ),
+                "mirrored_encoder_parameter_count": int(
+                    sum(p.numel() for p in model.mirrored_encoder.parameters())
+                ),
+                "classifier_parameter_count": int(
+                    sum(p.numel() for p in model.classifier.parameters())
+                ),
+            }
+        )
+
+        if eval_cfg.get("eval_prefix_curve", False):
+            from activation_research.prefix_views import resolve_eval_prefixes
+
+            _r_max = getattr(test_ds, "_max_resp", None) or 64
+            for _k in resolve_eval_prefixes(
+                eval_cfg.get("eval_prefix_lengths"), int(_r_max)
+            ):
+                _scores_k, _labels_k = _classifier_scores(prefix_len=_k)
+                _, _, _std_k = _head_scores(
+                    "A", outlier_class=1, flip=False, prefix_len=_k
+                )
+                _, _, _mirror_k = _head_scores(
+                    "B", outlier_class=0, flip=True, prefix_len=_k
+                )
+                eval_metrics[f"k{_k}_classifier_auroc"] = float(
+                    roc_auc_score(_labels_k, _scores_k)
+                )
+                eval_metrics[f"k{_k}_classifier_auprc"] = float(
+                    average_precision_score(_labels_k, _scores_k)
+                )
+                eval_metrics[f"k{_k}_knn_auroc_head_std"] = _std_k
+                eval_metrics[f"k{_k}_knn_auroc_head_flip"] = _mirror_k
+
+    if classifier_scores is not None and classifier_labels is not None:
+        predictions = _build_classifier_predictions(
+            classifier_scores, classifier_labels
+        )
+    else:
+        predictions = [
+            {"example_id": i, "score_halu": float(f), "label_halu": int(l)}
+            for i, (f, l) in enumerate(zip(fused, lab))
+        ]
     logger.info(
-        f"SS-1 dual-head: std={auroc_std:.4f} flip={auroc_flip:.4f} "
+        f"{model_class} dual-head: std={auroc_std:.4f} flip={auroc_flip:.4f} "
         f"fused={auroc_fused:.4f} (Δvs_best={auroc_fused-max(auroc_std,auroc_flip):+.4f}) "
         f"head_corr={head_score_corr:.3f} oracle={auroc_fused_oracle:.4f}@w_std={fusion_oracle_weight_std:.2f}"
     )
@@ -1035,6 +1445,7 @@ def run_linear_probe(
     """Train and evaluate a linear probe on a single layer."""
     data_cfg = method_cfg["data"]
     train_cfg = method_cfg["training"]
+    eval_cfg = method_cfg.get("evaluation", {})
 
     relevant_layers = (
         parse_layer_range(data_cfg["relevant_layers"])
@@ -1088,6 +1499,11 @@ def run_linear_probe(
         use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", False),
         infinite_stream_seed=training_seed,
         pooling=method_cfg["model_params"].get("pooling", "mean"),
+        prefix_training=train_cfg.get("prefix_training", False),
+        prefix_min_tokens=train_cfg.get("prefix_min_tokens", 8),
+        prefix_min_gap=train_cfg.get("prefix_min_gap", 8),
+        prefix_max_tokens=int(probe_train.cache.shape[-2]),
+        prefix_seed=training_seed,
         device=device,
         num_workers=experiment_cfg.get("num_workers", 4),
         persistent_workers=experiment_cfg.get("persistent_workers", True),
@@ -1096,57 +1512,78 @@ def run_linear_probe(
     )
 
     trainer = LinearProbeTrainer(model, config=config)
-    trainer.fit(train_dataset=probe_train, val_dataset=probe_val)
-
-    # Save final weights
-    torch.save(
-        {"model_state_dict": model.state_dict()},
-        os.path.join(output_dir, "artifacts", "final_weights.pt"),
+    final_weights_path = os.path.join(
+        output_dir, "artifacts", "final_weights.pt"
     )
+    if os.path.exists(final_weights_path):
+        logger.info(
+            "[linear_probe] final_weights.pt found — loading checkpoint and "
+            "skipping training"
+        )
+        checkpoint = torch.load(
+            final_weights_path, map_location=trainer.device, weights_only=True
+        )
+        model.load_state_dict(checkpoint["model_state_dict"])
+    else:
+        trainer.fit(train_dataset=probe_train, val_dataset=probe_val)
+        torch.save(
+            {"model_state_dict": model.state_dict()}, final_weights_path
+        )
 
     # Evaluate
     from sklearn.metrics import roc_auc_score
-    from torch.utils.data import DataLoader
-
     model.eval()
     eval_device = torch.device(
         device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
     )
     model.to(eval_device)
 
-    probe_eval_loader = DataLoader(
-        probe_test, batch_size=train_cfg["batch_size"], shuffle=False
+    all_preds_np, all_labels_np = _score_single_layer_classifier(
+        model,
+        probe_test,
+        batch_size=train_cfg["batch_size"],
+        eval_device=eval_device,
+        length_aware=bool(train_cfg.get("prefix_training", False)),
     )
-    all_preds, all_labels = [], []
-    with torch.no_grad():
-        for batch in probe_eval_loader:
-            x = batch["views_activations"].to(eval_device)
-            if x.dim() == 4:
-                x = x.squeeze(1)
-            preds = model(x)
-            all_preds.append(preds.cpu())
-            all_labels.append(batch["halu"].cpu())
-
-    all_preds_np = torch.cat(all_preds).squeeze().numpy()
-    all_labels_np = torch.cat(all_labels).numpy()
     if len(set(all_labels_np)) < 2:
         auroc = float("nan")
     else:
         auroc = roc_auc_score(all_labels_np, all_preds_np)
 
+
+    prefix_curve, prefix_scores = _single_layer_prefix_curve(
+        model,
+        probe_test,
+        batch_size=train_cfg["batch_size"],
+        eval_device=eval_device,
+        eval_cfg=eval_cfg,
+    )
+
     eval_metrics = {
         "method": method_cfg["name"],
         "dataset": dataset_cfg["name"],
         "seed": training_seed,
-        "split_seed": experiment_cfg.get("split_seed", 42),
+        "split_seed": _resolve_run_split_seed(experiment_cfg, training_seed),
         "n_train": len(probe_train),
         "n_test": len(probe_test),
         "auroc": float(auroc),
         "probe_layer": probe_layer,
+        "training_regime": (
+            "multi_k" if train_cfg.get("prefix_training", False) else "full_length"
+        ),
     }
+    eval_metrics.update(prefix_curve)
 
     predictions = [
-        {"example_id": i, "score_halu": float(s), "label_halu": int(l)}
+        {
+            "example_id": i,
+            "score_halu": float(s),
+            "label_halu": int(l),
+            **{
+                f"k{k}_score_halu": float(scores[i])
+                for k, scores in prefix_scores.items()
+            },
+        }
         for i, (s, l) in enumerate(zip(all_preds_np, all_labels_np))
     ]
 
@@ -1166,6 +1603,7 @@ def run_saplma(
     """Train and evaluate SAPLMA (SimpleHaluClassifier) on a single layer."""
     data_cfg = method_cfg["data"]
     train_cfg = method_cfg["training"]
+    eval_cfg = method_cfg.get("evaluation", {})
 
     relevant_layers = (
         parse_layer_range(data_cfg["relevant_layers"])
@@ -1217,6 +1655,11 @@ def run_saplma(
         use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", False),
         infinite_stream_seed=training_seed,
         pooling="mean",
+        prefix_training=train_cfg.get("prefix_training", False),
+        prefix_min_tokens=train_cfg.get("prefix_min_tokens", 8),
+        prefix_min_gap=train_cfg.get("prefix_min_gap", 8),
+        prefix_max_tokens=int(probe_train.cache.shape[-2]),
+        prefix_seed=training_seed,
         device=device,
         num_workers=experiment_cfg.get("num_workers", 4),
         persistent_workers=experiment_cfg.get("persistent_workers", True),
@@ -1225,55 +1668,76 @@ def run_saplma(
     )
 
     trainer = LinearProbeTrainer(model, config=config)
-    trainer.fit(train_dataset=probe_train, val_dataset=probe_val)
-
-    torch.save(
-        {"model_state_dict": model.state_dict()},
-        os.path.join(output_dir, "artifacts", "final_weights.pt"),
+    final_weights_path = os.path.join(
+        output_dir, "artifacts", "final_weights.pt"
     )
+    if os.path.exists(final_weights_path):
+        logger.info(
+            "[saplma] final_weights.pt found — loading checkpoint and "
+            "skipping training"
+        )
+        checkpoint = torch.load(
+            final_weights_path, map_location=trainer.device, weights_only=True
+        )
+        model.load_state_dict(checkpoint["model_state_dict"])
+    else:
+        trainer.fit(train_dataset=probe_train, val_dataset=probe_val)
+        torch.save(
+            {"model_state_dict": model.state_dict()}, final_weights_path
+        )
 
     from sklearn.metrics import roc_auc_score
-    from torch.utils.data import DataLoader
-
     model.eval()
     eval_device = torch.device(
         device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
     )
     model.to(eval_device)
 
-    probe_eval_loader = DataLoader(
-        probe_test, batch_size=train_cfg["batch_size"], shuffle=False
+    all_preds_np, all_labels_np = _score_single_layer_classifier(
+        model,
+        probe_test,
+        batch_size=train_cfg["batch_size"],
+        eval_device=eval_device,
+        length_aware=bool(train_cfg.get("prefix_training", False)),
     )
-    all_preds, all_labels = [], []
-    with torch.no_grad():
-        for batch in probe_eval_loader:
-            x = batch["views_activations"].to(eval_device)
-            if x.dim() == 4:
-                x = x.squeeze(1)
-            preds = model(x)
-            all_preds.append(preds.cpu())
-            all_labels.append(batch["halu"].cpu())
-
-    all_preds_np = torch.cat(all_preds).squeeze().numpy()
-    all_labels_np = torch.cat(all_labels).numpy()
     if len(set(all_labels_np)) < 2:
         auroc = float("nan")
     else:
         auroc = roc_auc_score(all_labels_np, all_preds_np)
 
+    prefix_curve, prefix_scores = _single_layer_prefix_curve(
+        model,
+        probe_test,
+        batch_size=train_cfg["batch_size"],
+        eval_device=eval_device,
+        eval_cfg=eval_cfg,
+    )
+
     eval_metrics = {
         "method": method_cfg["name"],
         "dataset": dataset_cfg["name"],
         "seed": training_seed,
-        "split_seed": experiment_cfg.get("split_seed", 42),
+        "split_seed": _resolve_run_split_seed(experiment_cfg, training_seed),
         "n_train": len(probe_train),
         "n_test": len(probe_test),
         "auroc": float(auroc),
         "probe_layer": probe_layer,
+        "training_regime": (
+            "multi_k" if train_cfg.get("prefix_training", False) else "full_length"
+        ),
     }
+    eval_metrics.update(prefix_curve)
 
     predictions = [
-        {"example_id": i, "score_halu": float(s), "label_halu": int(l)}
+        {
+            "example_id": i,
+            "score_halu": float(s),
+            "label_halu": int(l),
+            **{
+                f"k{k}_score_halu": float(scores[i])
+                for k, scores in prefix_scores.items()
+            },
+        }
         for i, (s, l) in enumerate(zip(all_preds_np, all_labels_np))
     ]
 
@@ -1406,7 +1870,7 @@ def run_saplma_logprob_recon(
         "method": method_cfg["name"],
         "dataset": dataset_cfg["name"],
         "seed": training_seed,
-        "split_seed": experiment_cfg.get("split_seed", 42),
+        "split_seed": _resolve_run_split_seed(experiment_cfg, training_seed),
         "n_train": len(train_ds),
         "n_test": len(test_ds),
         "auroc": float(auroc),
@@ -2127,6 +2591,7 @@ def run_token_entropy(
 ) -> tuple[dict, list[dict]]:
     """Run token-entropy baseline (no training)."""
     data_cfg = method_cfg["data"]
+    eval_cfg = method_cfg.get("evaluation", {})
     relevant_layers = parse_layer_range(data_cfg["relevant_layers"])
 
     eval_ap = test_ap if test_ap is not None else ap
@@ -2160,6 +2625,22 @@ def run_token_entropy(
     }
     eval_metrics.update(stats)
 
+    if eval_cfg.get("eval_prefix_curve", False):
+        from activation_research.prefix_views import resolve_eval_prefixes
+
+        max_prefix = int(getattr(test_ds, "_max_resp", 64))
+        for k in resolve_eval_prefixes(
+            eval_cfg.get("eval_prefix_lengths"), max_prefix
+        ):
+            stats_k = detector.score(
+                test_ds,
+                batch_size=256,
+                num_workers=experiment_cfg.get("num_workers", 4),
+                prefix_len=k,
+            )
+            for metric_name, value in stats_k.items():
+                eval_metrics[f"k{k}_{metric_name}"] = value
+
     return eval_metrics, []
 
 
@@ -2174,6 +2655,7 @@ def run_logprob_baseline(
 ) -> tuple[dict, list[dict]]:
     """Run logprob baseline (no training)."""
     data_cfg = method_cfg["data"]
+    eval_cfg = method_cfg.get("evaluation", {})
     relevant_layers = parse_layer_range(data_cfg["relevant_layers"])
 
     eval_ap = test_ap if test_ap is not None else ap
@@ -2218,6 +2700,24 @@ def run_logprob_baseline(
     }
     eval_metrics.update(stats)
 
+    if eval_cfg.get("eval_prefix_curve", False):
+        from activation_research.prefix_views import resolve_eval_prefixes
+
+        max_prefix = int(getattr(test_ds, "_max_resp", 64))
+        for k in resolve_eval_prefixes(
+            eval_cfg.get("eval_prefix_lengths"), max_prefix
+        ):
+            records_k = []
+            for record in records:
+                mask = record["response_logprob_mask"].clone().bool()
+                mask[int(k):] = False
+                records_k.append({**record, "response_logprob_mask": mask})
+            stats_k = logprob_baseline_auroc(
+                records_k, outlier_class=dataset_cfg.get("outlier_class", 1)
+            )
+            for metric_name, value in stats_k.items():
+                eval_metrics[f"k{k}_{metric_name}"] = value
+
     return eval_metrics, []
 
 
@@ -2242,6 +2742,7 @@ def run_llmsknow_probe(
 
     data_cfg = method_cfg["data"]
     sweep_cfg = method_cfg.get("sweep", {})
+    eval_cfg = method_cfg.get("evaluation", {})
 
     relevant_layers = parse_layer_range(data_cfg["relevant_layers"])
     pad_length = data_cfg.get("pad_length", 63)
@@ -2314,21 +2815,100 @@ def run_llmsknow_probe(
         best_layer_idx, best_token_pos, outlier_class=outlier_class,
     )
 
+    prefix_metrics: dict = {}
+    prefix_scores: dict[int, "np.ndarray"] = {}
+    prefix_locations: dict[str, dict] = {}
+    if eval_cfg.get("eval_prefix_curve", False):
+        from activation_research.prefix_views import resolve_eval_prefixes
+
+        ks = resolve_eval_prefixes(
+            eval_cfg.get("eval_prefix_lengths"), int(sweep_matrix.shape[1])
+        )
+        fitted_by_location = {
+            (int(best_layer_idx), int(best_token_pos)): (
+                probe, float(auroc), scores
+            )
+        }
+        for k in ks:
+            constrained = sweep_matrix[:, : min(int(k), sweep_matrix.shape[1])]
+            if np.all(np.isnan(constrained)):
+                layer_idx_k, token_pos_k = 0, 0
+            else:
+                best_flat_k = int(np.nanargmax(constrained))
+                layer_idx_k = best_flat_k // constrained.shape[1]
+                token_pos_k = best_flat_k % constrained.shape[1]
+            location = (int(layer_idx_k), int(token_pos_k))
+            if location not in fitted_by_location:
+                probe_k = train_final_probe(
+                    train_full,
+                    train_rows,
+                    train_labels,
+                    layer_idx_k,
+                    token_pos_k,
+                    seed=training_seed,
+                    C=C,
+                    max_iter=max_iter,
+                )
+                auroc_k, scores_k = eval_probe(
+                    probe_k,
+                    test_full,
+                    test_rows,
+                    test_labels,
+                    layer_idx_k,
+                    token_pos_k,
+                    outlier_class=outlier_class,
+                )
+                fitted_by_location[location] = (
+                    probe_k, float(auroc_k), scores_k
+                )
+            _, auroc_k, scores_k = fitted_by_location[location]
+            prefix_metrics[f"k{k}_auroc"] = float(auroc_k)
+            prefix_metrics[f"k{k}_selected_layer_idx"] = int(layer_idx_k)
+            prefix_metrics[f"k{k}_selected_token_pos"] = int(token_pos_k)
+            prefix_scores[int(k)] = scores_k
+            prefix_locations[f"k{k}"] = {
+                "selected_layer_idx": int(layer_idx_k),
+                "selected_layer": (
+                    int(relevant_layers[layer_idx_k])
+                    if layer_idx_k < len(relevant_layers)
+                    else None
+                ),
+                "selected_token_pos": int(token_pos_k),
+                "dev_auroc": float(constrained[layer_idx_k, token_pos_k]),
+                "test_auroc": float(auroc_k),
+            }
+        with open(
+            os.path.join(artifacts_dir, "prefix_sweep_summary.json"), "w"
+        ) as f:
+            json.dump(prefix_locations, f, indent=2)
+
     eval_metrics = {
         "method": method_cfg["name"],
         "dataset": dataset_cfg["name"],
         "seed": training_seed,
-        "split_seed": experiment_cfg.get("split_seed", 42),
+        "split_seed": _resolve_run_split_seed(experiment_cfg, training_seed),
         "n_train": len(train_ds),
         "n_test": len(test_ds),
         "auroc": float(auroc),
         "selected_layer": best_layer_id,
         "selected_token_pos": int(best_token_pos),
         "sweep_best_dev_auroc": float(sweep_summary["best_dev_auroc"]),
+        "training_regime": (
+            "per_k" if eval_cfg.get("eval_prefix_curve", False) else "full_length"
+        ),
     }
+    eval_metrics.update(prefix_metrics)
 
     predictions = [
-        {"example_id": i, "score_halu": float(s), "label_halu": int(l)}
+        {
+            "example_id": i,
+            "score_halu": float(s),
+            "label_halu": int(l),
+            **{
+                f"k{k}_score_halu": float(scores_k[i])
+                for k, scores_k in prefix_scores.items()
+            },
+        }
         for i, (s, l) in enumerate(zip(scores, test_labels))
     ]
 
@@ -2365,96 +2945,183 @@ def run_icr_probe(
     icr_cfg = dataset_cfg["icr_capture"]
     train_cfg = method_cfg["training"]
     data_cfg = method_cfg.get("data", {})
+    eval_cfg = method_cfg.get("evaluation", {})
 
-    split_seed = experiment_cfg.get("split_seed", 42)
+    split_seed = _resolve_run_split_seed(experiment_cfg, training_seed)
     val_fraction = data_cfg.get("val_fraction", 0.1)
-
-    train_ds = ICRDataset(
-        icr_cfg["train_dir"],
-        mode="memmap",
-        split="train",
-        val_fraction=val_fraction,
-        random_seed=split_seed,
-    )
-    val_ds = ICRDataset(
-        icr_cfg["train_dir"],
-        mode="memmap",
-        split="val",
-        val_fraction=val_fraction,
-        random_seed=split_seed,
-    )
-    test_ds = ICRDataset(
-        icr_cfg["test_dir"],
-        mode="memmap",
-        split="all",
-        random_seed=split_seed,
-    )
-
-    num_layers = int(train_ds[0]["icr_score"].shape[0])
-
-    model = ICRProbe(input_dim=num_layers)
-    config = ICRProbeTrainerConfig(
-        max_epochs=train_cfg["max_epochs"],
-        batch_size=train_cfg["batch_size"],
-        # learning_rate and lr both used; set both for clarity.
-        learning_rate=train_cfg.get("lr", 1e-3),
-        lr=train_cfg.get("lr", 1e-3),
-        weight_decay=train_cfg.get("weight_decay", 0.0),
-        plateau_patience=train_cfg.get("plateau_patience", 5),
-        plateau_factor=train_cfg.get("plateau_factor", 0.5),
-        early_stop_patience=train_cfg.get("early_stop_patience", 10),
-        device=device,
-        num_workers=experiment_cfg.get("num_workers", 4),
-        persistent_workers=experiment_cfg.get("persistent_workers", True),
-        checkpoint_dir=os.path.join(output_dir, "artifacts"),
-        save_every=1,
-    )
-    trainer = ICRProbeTrainer(model, config=config)
-    trainer.fit(train_dataset=train_ds, val_dataset=val_ds)
-
-    # Test evaluation
-    model.eval()
+    train_capture = Path(_resolve_shared(icr_cfg["train_dir"]))
+    test_capture = Path(_resolve_shared(icr_cfg["test_dir"]))
     eval_device = torch.device(
         device
         if device != "auto"
         else ("cuda" if torch.cuda.is_available() else "cpu")
     )
-    model.to(eval_device)
 
-    loader = DataLoader(
-        test_ds, batch_size=train_cfg["batch_size"], shuffle=False
-    )
-    all_logits, all_labels, all_hashes = [], [], []
-    with torch.no_grad():
-        for batch in loader:
-            x = batch["icr_score"].to(eval_device)
-            all_logits.append(torch.sigmoid(model(x)).cpu())
-            all_labels.append(batch["halu"].cpu())
-            all_hashes.extend(batch["hashkey"])
+    prefix_eval = bool(eval_cfg.get("eval_prefix_curve", False))
+    if prefix_eval:
+        from activation_research.prefix_views import resolve_eval_prefixes
 
-    scores = torch.cat(all_logits).numpy()
-    labels = torch.cat(all_labels).numpy()
-    auroc = (
-        float(roc_auc_score(labels, scores))
-        if len(set(labels.tolist())) >= 2
+        cache_root_cfg = eval_cfg.get("prefix_icr_cache_root")
+        if not cache_root_cfg:
+            raise ValueError(
+                "ICR prefix evaluation requires evaluation.prefix_icr_cache_root"
+            )
+        cache_root = Path(_resolve_shared(str(cache_root_cfg)))
+        capture_cfg = json.loads((test_capture / "config.json").read_text())
+        prefixes: list[int | None] = resolve_eval_prefixes(
+            eval_cfg.get("eval_prefix_lengths"), int(capture_cfg["r_max"])
+        )
+    else:
+        cache_root = None
+        prefixes = [None]
+
+    def _score_path(capture: Path, prefix: int | None) -> Path | None:
+        if prefix is None:
+            return None
+        assert cache_root is not None
+        return cache_root / capture.name / f"icr_scores_k{prefix}.npy"
+
+    def _datasets(prefix: int | None):
+        train_scores = _score_path(train_capture, prefix)
+        test_scores = _score_path(test_capture, prefix)
+        for score_path in (train_scores, test_scores):
+            if score_path is not None and not score_path.exists():
+                raise FileNotFoundError(
+                    f"prefix ICR cache missing: {score_path}; run "
+                    "scripts/build_prefix_icr_cache.py first"
+                )
+        train_ds = ICRDataset(
+            train_capture,
+            mode="memmap",
+            split="train",
+            val_fraction=val_fraction,
+            random_seed=split_seed,
+            scores_path=train_scores,
+        )
+        val_ds = ICRDataset(
+            train_capture,
+            mode="memmap",
+            split="val",
+            val_fraction=val_fraction,
+            random_seed=split_seed,
+            scores_path=train_scores,
+        )
+        test_ds = ICRDataset(
+            test_capture,
+            mode="memmap",
+            split="all",
+            random_seed=split_seed,
+            scores_path=test_scores,
+        )
+        return train_ds, val_ds, test_ds
+
+    prefix_scores: dict[int, object] = {}
+    prefix_metrics: dict[str, float] = {}
+    main_scores = main_labels = main_hashes = None
+    main_train_n = main_val_n = main_test_n = num_layers = 0
+
+    # Each k receives its own probe. This is deliberately more favorable to
+    # ICR than a shared multi-k probe and serves as the matched-k oracle arm;
+    # the expensive ICR representation itself is recomputed at that prefix.
+    for prefix in prefixes:
+        train_ds, val_ds, test_ds = _datasets(prefix)
+        num_layers = int(train_ds[0]["icr_score"].shape[0])
+        torch.manual_seed(training_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(training_seed)
+        model = ICRProbe(input_dim=num_layers)
+
+        artifact_dir = os.path.join(
+            output_dir,
+            "artifacts" if prefix is None else f"artifacts/k{prefix}",
+        )
+        checkpoint_path = os.path.join(artifact_dir, "linear_probe_last.pt")
+        config = ICRProbeTrainerConfig(
+            max_epochs=train_cfg["max_epochs"],
+            batch_size=train_cfg["batch_size"],
+            learning_rate=train_cfg.get("lr", 1e-3),
+            lr=train_cfg.get("lr", 1e-3),
+            weight_decay=train_cfg.get("weight_decay", 0.0),
+            plateau_patience=train_cfg.get("plateau_patience", 5),
+            plateau_factor=train_cfg.get("plateau_factor", 0.5),
+            early_stop_patience=train_cfg.get("early_stop_patience", 10),
+            device=device,
+            num_workers=experiment_cfg.get("num_workers", 4),
+            persistent_workers=experiment_cfg.get("persistent_workers", True),
+            checkpoint_dir=artifact_dir,
+            resume_from=checkpoint_path if os.path.exists(checkpoint_path) else None,
+            save_every=1,
+        )
+        trainer = ICRProbeTrainer(model, config=config)
+        trainer.fit(train_dataset=train_ds, val_dataset=val_ds)
+
+        model.eval()
+        model.to(eval_device)
+        loader = DataLoader(
+            test_ds, batch_size=train_cfg["batch_size"], shuffle=False
+        )
+        all_logits, all_labels, all_hashes = [], [], []
+        with torch.no_grad():
+            for batch in loader:
+                x = batch["icr_score"].to(eval_device)
+                all_logits.append(torch.sigmoid(model(x)).cpu())
+                all_labels.append(batch["halu"].cpu())
+                all_hashes.extend(batch["hashkey"])
+
+        scores = torch.cat(all_logits).numpy()
+        labels = torch.cat(all_labels).numpy()
+        auroc = (
+            float(roc_auc_score(labels, scores))
+            if len(set(labels.tolist())) >= 2
+            else float("nan")
+        )
+        if prefix is not None:
+            prefix_scores[int(prefix)] = scores
+            prefix_metrics[f"k{prefix}_auroc"] = auroc
+            logger.info(f"[icr prefix oracle] k={prefix}: auroc={auroc}")
+
+        # Standard score/auroc is the largest visible prefix (or legacy full run).
+        if prefix == prefixes[-1]:
+            main_scores, main_labels, main_hashes = scores, labels, all_hashes
+            main_train_n, main_val_n, main_test_n = (
+                len(train_ds),
+                len(val_ds),
+                len(test_ds),
+            )
+
+    assert main_scores is not None and main_labels is not None and main_hashes is not None
+    main_auroc = (
+        float(roc_auc_score(main_labels, main_scores))
+        if len(set(main_labels.tolist())) >= 2
         else float("nan")
     )
-
     eval_metrics = {
         "method": method_cfg["name"],
         "dataset": dataset_cfg["name"],
         "seed": training_seed,
         "split_seed": split_seed,
-        "n_train": len(train_ds),
-        "n_val": len(val_ds),
-        "n_test": len(test_ds),
-        "auroc": auroc,
-        "selected_layer": None,  # ICR consumes all layers simultaneously
+        "n_train": main_train_n,
+        "n_val": main_val_n,
+        "n_test": main_test_n,
+        "auroc": main_auroc,
+        "selected_layer": None,
         "num_layers": num_layers,
+        "training_regime": "per_k_oracle" if prefix_eval else "full_length",
+        **prefix_metrics,
     }
     predictions = [
-        {"example_id": h, "score_halu": float(s), "label_halu": int(l)}
-        for h, s, l in zip(all_hashes, scores, labels)
+        {
+            "example_id": h,
+            "score_halu": float(s),
+            "label_halu": int(l),
+            **{
+                f"k{k}_score_halu": float(scores_k[i])
+                for k, scores_k in prefix_scores.items()
+            },
+        }
+        for i, (h, s, l) in enumerate(
+            zip(main_hashes, main_scores, main_labels)
+        )
     ]
     return eval_metrics, predictions
 
@@ -2498,7 +3165,7 @@ def run_contrastive_actvit(
     eval_cfg = method_cfg["evaluation"]
     model_params = method_cfg.get("model_params", {})
     icr_cfg = dataset_cfg["icr_capture"]
-    split_seed = experiment_cfg.get("split_seed", 42)
+    split_seed = _resolve_run_split_seed(experiment_cfg, training_seed)
     train_device = torch.device(
         device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
     )
@@ -2673,9 +3340,11 @@ def run_act_vit(
 
     train_cfg = method_cfg["training"]
     model_params = method_cfg.get("model_params", {})
+    eval_cfg = method_cfg.get("evaluation", {})
+    prefix_training = bool(train_cfg.get("prefix_training", False))
 
     icr_cfg = dataset_cfg["icr_capture"]
-    split_seed = experiment_cfg.get("split_seed", 42)
+    split_seed = _resolve_run_split_seed(experiment_cfg, training_seed)
     label_source = dataset_cfg.get("label_source", "substring")  # substring | llm_judge (#145)
 
     # Build split indices from MemmapActivationParser (same pattern as other runners).
@@ -2717,6 +3386,28 @@ def run_act_vit(
     train_ds = ACTViTDataset(icr_cfg["train_dir"], train_idx, label_source=label_source)
     val_ds = ACTViTDataset(icr_cfg["train_dir"], val_idx, label_source=label_source)
     test_ds = ACTViTDataset(icr_cfg["test_dir"], test_idx, label_source=label_source)
+
+    prefix_sampler = None
+    if prefix_training:
+        from activation_research.prefix_views import PrefixPairSampler
+
+        prefix_sampler = PrefixPairSampler(
+            mode="prefix_only",
+            num_views=2,
+            max_prefix=int(train_ds.max_response_len),
+            min_prefix=int(train_cfg.get("prefix_min_tokens", 8)),
+            min_gap=int(train_cfg.get("prefix_min_gap", 8)),
+            sampling_prefixes=train_cfg.get("prefix_sampling_lengths"),
+            seed=training_seed,
+        )
+        logger.info(
+            "[act_vit] multi-k training enabled: "
+            f"min={train_cfg.get('prefix_min_tokens', 8)} "
+            f"gap={train_cfg.get('prefix_min_gap', 8)} "
+            f"max={train_ds.max_response_len} "
+            f"support={train_cfg.get('prefix_sampling_lengths', 'continuous')} "
+            f"seed={training_seed}"
+        )
 
     num_workers = experiment_cfg.get("num_workers", 4)
     persistent_workers = experiment_cfg.get("persistent_workers", True) and num_workers > 0
@@ -2825,8 +3516,21 @@ def run_act_vit(
         for step_idx, batch in enumerate(train_loader):
             x = batch["activations"].to(eval_device, non_blocking=True)       # (B, L, N, D)
             labels_b = batch["label"].float().to(eval_device, non_blocking=True)  # (B,)
-            logits = model(x).squeeze(1)                   # (B,)
-            loss = loss_fn(logits, labels_b)
+            if prefix_sampler is None:
+                logits = model(x).squeeze(1)               # (B,)
+                loss = loss_fn(logits, labels_b)
+            else:
+                response_lens_b = batch["response_len"].to(
+                    eval_device, non_blocking=True
+                )
+                spec = prefix_sampler.sample()
+                prefix_losses = []
+                for prefix_len in spec.prefix_lens:
+                    logits_k = _act_vit_logits_at_prefix(
+                        model, x, response_lens_b, int(prefix_len)
+                    )
+                    prefix_losses.append(loss_fn(logits_k, labels_b))
+                loss = torch.stack(prefix_losses).mean()
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -2844,32 +3548,69 @@ def run_act_vit(
 
         # Validation AUROC
         model.eval()
-        val_preds, val_labels = [], []
-        with torch.no_grad():
-            for batch in val_loader:
-                x = batch["activations"].to(eval_device, non_blocking=True)
-                logits = model(x).squeeze(1)
-                val_preds.append(torch.sigmoid(logits).cpu())
-                val_labels.append(batch["label"].cpu())
+        if prefix_training:
+            from activation_research.prefix_views import resolve_eval_prefixes
 
-        val_scores = torch.cat(val_preds).numpy()
-        val_lbls = torch.cat(val_labels).numpy()
-        if len(set(val_lbls.tolist())) >= 2:
-            val_auroc = float(roc_auc_score(val_lbls, val_scores))
+            val_ks = resolve_eval_prefixes(
+                train_cfg.get("prefix_validation_lengths", [8, 16, 32, 64]),
+                int(val_ds.max_response_len),
+            )
         else:
-            val_auroc = float("nan")
+            val_ks = [int(val_ds.max_response_len)]
+        val_aurocs: dict[int, float] = {}
+        for val_k in val_ks:
+            val_preds, val_labels = [], []
+            with torch.no_grad():
+                for batch in val_loader:
+                    x = batch["activations"].to(eval_device, non_blocking=True)
+                    if prefix_training:
+                        logits = _act_vit_logits_at_prefix(
+                            model,
+                            x,
+                            batch["response_len"].to(
+                                eval_device, non_blocking=True
+                            ),
+                            val_k,
+                        )
+                    else:
+                        logits = model(x).squeeze(1)
+                    val_preds.append(torch.sigmoid(logits).cpu())
+                    val_labels.append(batch["label"].cpu())
+
+            val_scores = torch.cat(val_preds).numpy()
+            val_lbls = torch.cat(val_labels).numpy()
+            val_aurocs[val_k] = (
+                float(roc_auc_score(val_lbls, val_scores))
+                if len(set(val_lbls.tolist())) >= 2
+                else float("nan")
+            )
+        finite_val_aurocs = [
+            v for v in val_aurocs.values() if not math.isnan(v)
+        ]
+        val_auroc = (
+            float(sum(finite_val_aurocs) / len(finite_val_aurocs))
+            if finite_val_aurocs
+            else float("nan")
+        )
 
         if not math.isnan(val_auroc) and val_auroc > best_val_auroc:
             best_val_auroc = val_auroc
             best_epoch = epoch
             torch.save(
-                {"epoch": epoch, "model_state_dict": model.state_dict()},
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "selection_auroc": val_auroc,
+                    "per_k_val_auroc": val_aurocs,
+                },
                 os.path.join(artifact_dir, "best_checkpoint.pt"),
             )
 
         epoch_wall_s = time.time() - epoch_t0
         logger.info(
-            f"[act_vit] epoch={epoch+1}/{max_epochs}  val_auroc={val_auroc:.4f}  wall={epoch_wall_s:.0f}s"
+            f"[act_vit] epoch={epoch+1}/{max_epochs}  "
+            f"selection_val_auroc={val_auroc:.4f} per_k={val_aurocs} "
+            f"wall={epoch_wall_s:.0f}s"
         )
 
     # Load best checkpoint (if any was saved)
@@ -2896,7 +3637,15 @@ def run_act_vit(
     with torch.no_grad():
         for batch in test_loader:
             x = batch["activations"].to(eval_device)
-            logits = model(x).squeeze(1)
+            if prefix_training:
+                logits = _act_vit_logits_at_prefix(
+                    model,
+                    x,
+                    batch["response_len"].to(eval_device),
+                    int(test_ds.max_response_len),
+                )
+            else:
+                logits = model(x).squeeze(1)
             all_preds.append(torch.sigmoid(logits).cpu())
             all_labels.append(batch["label"].cpu())
 
@@ -2907,7 +3656,50 @@ def run_act_vit(
     else:
         auroc = float("nan")
 
+    # ---- Issue #149: AUROC vs response prefix -----------------------------
+    # Truncation here is a SLICE of the token axis of (B, L, N, D), not a mask:
+    # act_vit adaptive-max-pools the (L, N) plane to a fixed (L_p, N_p) grid, so
+    # a narrower N is absorbed by the pooling. With prefix_training=true this
+    # is the main fair arm (one fixed-geometry ACT-ViT trained across sampled
+    # widths); otherwise it remains the legacy full-length-to-prefix
+    # deployability arm that can reuse an existing checkpoint.
+    act_vit_prefix_curve: dict = {}
+    act_vit_prefix_scores: dict[int, object] = {}
+    if eval_cfg.get("eval_prefix_curve", False):
+        from activation_research.prefix_views import resolve_eval_prefixes
+
+        _n_tokens = int(getattr(test_ds, "max_response_len", 64))
+        _ks = resolve_eval_prefixes(eval_cfg.get("eval_prefix_lengths"), _n_tokens)
+        logger.info(
+            f"[act_vit] prefix curve ({'multi-k' if prefix_training else 'eval-only'}): "
+            f"k={_ks} over N={_n_tokens} tokens"
+        )
+        for _k in _ks:
+            _p, _l = [], []
+            with torch.no_grad():
+                for batch in test_loader:
+                    x = batch["activations"].to(eval_device)   # (B, L, N, D)
+                    logits = _act_vit_logits_at_prefix(
+                        model,
+                        x,
+                        batch["response_len"].to(eval_device),
+                        _k,
+                    )
+                    _p.append(torch.sigmoid(logits).cpu())
+                    _l.append(batch["label"].cpu())
+            _sn = torch.cat(_p).numpy()
+            _ln = torch.cat(_l).numpy()
+            _a = (
+                float(roc_auc_score(_ln, _sn))
+                if len(set(_ln.tolist())) >= 2
+                else float("nan")
+            )
+            act_vit_prefix_curve[f"k{_k}_auroc"] = _a
+            act_vit_prefix_scores[int(_k)] = _sn
+            logger.info(f"  [act_vit] k={_k}: auroc={_a}")
+
     eval_metrics = {
+        **act_vit_prefix_curve,
         "method": method_cfg["name"],
         "dataset": dataset_cfg["name"],
         "seed": training_seed,
@@ -2918,9 +3710,19 @@ def run_act_vit(
         "auroc": auroc,
         "best_val_auroc": best_val_auroc,
         "best_epoch": best_epoch,
+        "training_regime": "multi_k" if prefix_training else "full_length",
     }
     predictions = [
-        {"example_id": i, "score_halu": float(s), "label_halu": int(l), "split": "test"}
+        {
+            "example_id": i,
+            "score_halu": float(s),
+            "label_halu": int(l),
+            "split": "test",
+            **{
+                f"k{k}_score_halu": float(prefix_scores[i])
+                for k, prefix_scores in act_vit_prefix_scores.items()
+            },
+        }
         for i, (s, l) in enumerate(zip(scores_np, labels_np))
     ]
 
@@ -2977,6 +3779,14 @@ def parse_args() -> argparse.Namespace:
         "--force",
         action="store_true",
         help="Force re-run even if eval_metrics.json already exists",
+    )
+    parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help=(
+            "Require an existing artifacts/final_weights.pt checkpoint and run "
+            "evaluation without permitting training."
+        ),
     )
     parser.add_argument(
         "--max-epochs",
@@ -3914,6 +4724,7 @@ def main() -> None:
                 needs_predictions = routine_for_skip in {
                     "contrastive_logprob_recon",
                     "contrastive_logprob_recon_twin",
+                    "contrastive_logprob_recon_dualhead_fusion",
                 }
                 have_predictions = (not needs_predictions) or os.path.exists(pred_path)
                 if os.path.exists(eval_metrics_path) and have_predictions and not args.force:
@@ -3942,6 +4753,18 @@ def main() -> None:
                 logger.info(f"Running {method_name} seed={effective_seed} -> {run_dir}")
 
                 try:
+                    if args.eval_only:
+                        required_checkpoint = os.path.join(
+                            run_dir, "artifacts", "final_weights.pt"
+                        )
+                        if not os.path.isfile(required_checkpoint) or os.path.getsize(
+                            required_checkpoint
+                        ) == 0:
+                            raise FileNotFoundError(
+                                "--eval-only requires a nonempty checkpoint at "
+                                f"{required_checkpoint}"
+                            )
+
                     if effective_seed is not None:
                         from utils.seeding import seed_everything
 
@@ -4070,6 +4893,14 @@ def main() -> None:
                             writer = csv.DictWriter(f, fieldnames=predictions[0].keys())
                             writer.writeheader()
                             writer.writerows(predictions)
+
+                    # A successful recovery supersedes a previous per-seed error.
+                    # Leaving this marker behind makes status tooling classify valid
+                    # eval outputs as failed and causes subsequent runs to repeat.
+                    if _clear_stale_run_error(run_error_path):
+                        logger.info(
+                            f"Removed stale run_error.json after successful {method_name} recovery"
+                        )
 
                     logger.info(f"Completed {method_name} seed={effective_seed}: {eval_metrics}")
 

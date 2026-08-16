@@ -18,6 +18,34 @@ class PositionalEncoding(nn.Module):
     def forward(self, x):
         return x + self.pe[:, :x.size(1)]
 
+def masked_mean(x: torch.Tensor, token_mask: torch.Tensor | None) -> torch.Tensor:
+    """Mean over the sequence axis, ignoring padded positions.
+
+    Parameters
+    ----------
+    x : Tensor (B, L, D)
+    token_mask : Tensor (B, L) bool | None
+        ``True`` marks a *real* token. ``None`` means "no padding" and falls
+        through to a plain ``x.mean(dim=1)`` so existing callers are unchanged.
+
+    Notes
+    -----
+    Padded positions cannot be detected by value: ``input_proj`` has a bias and
+    ``PositionalEncoding`` adds to every slot, so a zero-filled pad row is
+    non-zero by the time it reaches the pool. The mask must be carried
+    explicitly from the input.
+
+    Rows with no valid tokens would divide by zero; the denominator is clamped
+    so they yield a finite (zero) vector rather than NaN. Callers should avoid
+    fully-masked rows — see ``prefix_views`` which floors prefixes at 1 token.
+    """
+    if token_mask is None:
+        return x.mean(dim=1)
+    m = token_mask.unsqueeze(-1).to(x.dtype)
+    denom = m.sum(dim=1).clamp(min=1.0)
+    return (x * m).sum(dim=1) / denom
+
+
 class TransformerBlock(nn.Module):
     def __init__(self, d_model_in, d_model_out, nhead=8, ff_multiplier=4, dropout=0.1, pre_norm: bool = False):
         super().__init__()
@@ -32,9 +60,18 @@ class TransformerBlock(nn.Module):
         )
         self.norm = nn.LayerNorm(d_model_out)
 
-    def forward(self, x):
+    def forward(self, x, token_mask: torch.Tensor | None = None):
+        """token_mask : (B, L) bool, ``True`` = real token, or ``None``.
+
+        Padding must be excluded from self-attention, not merely from the
+        final pool — otherwise pad slots act as keys/values and contaminate
+        the representations of the real tokens.
+        """
         x = self.input_proj(x)
-        x = self.encoder(x)
+        # nn.TransformerEncoderLayer's convention is the inverse of ours:
+        # True marks positions to IGNORE.
+        src_key_padding_mask = None if token_mask is None else ~token_mask
+        x = self.encoder(x, src_key_padding_mask=src_key_padding_mask)
         return self.norm(x)
 
 class ProgressiveCompressor(nn.Module):
@@ -90,9 +127,12 @@ class ProgressiveCompressor(nn.Module):
 
         self.dropout = nn.Dropout(p=input_dropout)
 
-    def forward(self, x):
+    def forward(self, x, token_mask: torch.Tensor | None = None):
         """
         x: (B, L, 4096)
+        token_mask: (B, L) bool, ``True`` = real token. ``None`` (default)
+            means every position is real, reproducing the pre-masking
+            behaviour bit-for-bit.
         returns: (B, 512)
         """
         x = x.float()
@@ -101,13 +141,13 @@ class ProgressiveCompressor(nn.Module):
             x = self.input_norm(x)
 
         x = self.dropout(x)
-    
+
         x = self.pos_encodings(x)
         for block in self.blocks:
-            x = block(x)
+            x = block(x, token_mask=token_mask)
 
-        # Mean pooling over sequence dimension (L)
-        x_pooled = x.mean(dim=1)  # (B, dim)
+        # Mean pooling over sequence dimension (L), ignoring padded positions.
+        x_pooled = masked_mean(x, token_mask)  # (B, dim)
         return self.final_proj(x_pooled)  # (B, 512)
 
 class LogprobReconProgressiveCompressor(nn.Module):
@@ -187,18 +227,20 @@ class LogprobReconProgressiveCompressor(nn.Module):
             nn.Linear(int(recon_hidden_dim), self.recon_seq_len),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, token_mask: torch.Tensor | None = None) -> torch.Tensor:
         """Standard forward — identical to ProgressiveCompressor.
 
         The auxiliary decoder is **not** called.  Use this path for
         inference and for evaluation utilities that expect a single tensor.
 
         x : (B, L, input_dim)
+        token_mask : (B, L) bool | None
+            ``True`` = real token; ``None`` treats every position as real.
         returns : (B, final_dim)
         """
-        return self.encoder(x)
+        return self.encoder(x, token_mask=token_mask)
 
-    def forward_with_recon(self, x: torch.Tensor):
+    def forward_with_recon(self, x: torch.Tensor, token_mask: torch.Tensor | None = None):
         """Forward pass with auxiliary reconstruction.
 
         Returns
@@ -206,7 +248,7 @@ class LogprobReconProgressiveCompressor(nn.Module):
         z : (B, final_dim)
         logprob_pred : (B, recon_seq_len)
         """
-        z = self.encoder(x)
+        z = self.encoder(x, token_mask=token_mask)
         logprob_pred = self.decoder(z)
         return z, logprob_pred
 
@@ -587,6 +629,151 @@ class TwinConcatModel(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.cat([self.head_a(x), self.head_b(x)], dim=-1)
+
+
+class DualConventionContrastiveClassifier(nn.Module):
+    """Two full-size contrastive encoders plus a joint binary classifier.
+
+    The standard branch is trained with ``ignore_label=1`` (truthful examples
+    form the supervised class), while the mirrored branch is trained with
+    ``ignore_label=0`` (hallucinated examples form the supervised class).  The
+    branches share no parameters.  Their per-view embeddings are mean-pooled,
+    concatenated, and scored by a small MLP in the same end-to-end objective.
+
+    ``forward()`` returns the concatenated representation for evaluator
+    compatibility.  ``forward_with_heads()`` exposes both branch embeddings and
+    both reconstruction predictions to the existing dual-loss trainer.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 4096,
+        final_dim: int = 512,
+        classifier_hidden_dim: int = 128,
+        classifier_dropout: float = 0.1,
+        classifier_normalize_branches: bool = True,
+        dropout: float = 0.1,
+        input_dropout: float = 0.3,
+        normalize_input: bool = False,
+        recon_seq_len: int = 64,
+        recon_hidden_dim: int = 256,
+        recon_lambda: float = 1.0,
+        logprob_var_threshold: float = 1e-4,
+        block_dims: list | None = None,
+        pre_norm: bool = False,
+    ):
+        super().__init__()
+        self.final_dim = int(final_dim)
+        self.classifier_hidden_dim = int(classifier_hidden_dim)
+        self.recon_lambda = float(recon_lambda)
+        self.classifier_normalize_branches = bool(
+            classifier_normalize_branches
+        )
+
+        branch_kwargs = dict(
+            input_dim=int(input_dim),
+            final_dim=self.final_dim,
+            dropout=float(dropout),
+            input_dropout=float(input_dropout),
+            normalize_input=bool(normalize_input),
+            recon_seq_len=int(recon_seq_len),
+            recon_hidden_dim=int(recon_hidden_dim),
+            recon_lambda=float(recon_lambda),
+            logprob_var_threshold=float(logprob_var_threshold),
+            block_dims=block_dims,
+            pre_norm=bool(pre_norm),
+        )
+        self.standard_encoder = LogprobReconProgressiveCompressor(**branch_kwargs)
+        self.mirrored_encoder = LogprobReconProgressiveCompressor(**branch_kwargs)
+        self.classifier = nn.Sequential(
+            nn.Linear(2 * self.final_dim, self.classifier_hidden_dim),
+            nn.GELU(),
+            nn.Dropout(float(classifier_dropout)),
+            nn.Linear(self.classifier_hidden_dim, 1),
+        )
+
+    def _classifier_input(
+        self, z_standard: torch.Tensor, z_mirrored: torch.Tensor
+    ) -> torch.Tensor:
+        if self.classifier_normalize_branches:
+            z_standard = F.normalize(z_standard, dim=-1)
+            z_mirrored = F.normalize(z_mirrored, dim=-1)
+        return torch.cat([z_standard, z_mirrored], dim=-1)
+
+    def classifier_logits_from_views(
+        self, z_standard_views: torch.Tensor, z_mirrored_views: torch.Tensor
+    ) -> torch.Tensor:
+        """Score ``(B, K, D)`` branch embeddings with one logit per sample."""
+        if z_standard_views.ndim != 3 or z_mirrored_views.ndim != 3:
+            raise ValueError("classifier inputs must have shape (B, K, D)")
+        if z_standard_views.shape != z_mirrored_views.shape:
+            raise ValueError(
+                "standard and mirrored classifier inputs must have equal shapes"
+            )
+        if int(z_standard_views.shape[-1]) != self.final_dim:
+            raise ValueError(
+                f"classifier expected branch dim {self.final_dim}, got "
+                f"{z_standard_views.shape[-1]}"
+            )
+        z_standard = z_standard_views.mean(dim=1)
+        z_mirrored = z_mirrored_views.mean(dim=1)
+        return self.classifier(
+            self._classifier_input(z_standard, z_mirrored)
+        ).squeeze(-1)
+
+    def forward(
+        self, x: torch.Tensor, token_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        z_standard = self.standard_encoder(x, token_mask=token_mask)
+        z_mirrored = self.mirrored_encoder(x, token_mask=token_mask)
+        return torch.cat([z_standard, z_mirrored], dim=-1)
+
+    def forward_with_heads(
+        self, x: torch.Tensor, token_mask: torch.Tensor | None = None
+    ):
+        z_standard, recon_standard = self.standard_encoder.forward_with_recon(
+            x, token_mask=token_mask
+        )
+        z_mirrored, recon_mirrored = self.mirrored_encoder.forward_with_recon(
+            x, token_mask=token_mask
+        )
+        z_concat = torch.cat([z_standard, z_mirrored], dim=-1)
+        return (
+            z_concat,
+            z_standard,
+            z_mirrored,
+            (recon_standard, recon_mirrored),
+        )
+
+    def recon_loss(self, predictions, target: torch.Tensor):
+        """Sum both branch reconstruction losses without sharing decoders."""
+        pred_standard, pred_mirrored = predictions
+        loss_standard, diag_standard = self.standard_encoder.recon_loss(
+            pred_standard, target
+        )
+        loss_mirrored, diag_mirrored = self.mirrored_encoder.recon_loss(
+            pred_mirrored, target
+        )
+        return loss_standard + loss_mirrored, {
+            "suppressed": bool(
+                diag_standard.get("suppressed", False)
+                and diag_mirrored.get("suppressed", False)
+            ),
+            "standard": diag_standard,
+            "mirrored": diag_mirrored,
+        }
+
+    def embed_head(
+        self,
+        x: torch.Tensor,
+        which: str,
+        token_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if str(which).upper() == "A":
+            return self.standard_encoder(x, token_mask=token_mask)
+        if str(which).upper() == "B":
+            return self.mirrored_encoder(x, token_mask=token_mask)
+        raise ValueError("which must be 'A' (standard) or 'B' (mirrored)")
 
 
 class SharedTrunkSplitOutputCompressor(nn.Module):
@@ -1594,13 +1781,25 @@ class SimpleHaluClassifier(nn.Module):
         
         self.classifier = nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x, token_mask: torch.Tensor | None = None):
         """
         x: (B, L, D)
         returns: (B, 1) sigmoid probability
         """
         x = x.float()
-        last_token = x[:, -1, :]  # (B, D)
+        if token_mask is None:
+            last_token = x[:, -1, :]  # (B, D)
+        else:
+            mask = token_mask.to(device=x.device, dtype=torch.bool)
+            if mask.shape != x.shape[:2]:
+                raise ValueError(
+                    f"token_mask shape {tuple(mask.shape)} does not match "
+                    f"sequence shape {tuple(x.shape[:2])}"
+                )
+            last_idx = mask.long().sum(dim=1).clamp(min=1) - 1
+            last_token = x[
+                torch.arange(x.shape[0], device=x.device), last_idx
+            ]
         logits = self.classifier(last_token)
         return torch.sigmoid(logits)
 
@@ -1775,16 +1974,28 @@ class LinearProbe(nn.Module):
         self.pooling = pooling
         self.linear = nn.Linear(input_dim, 1)
 
-    def forward(self, x):
+    def forward(self, x, token_mask: torch.Tensor | None = None):
         """
         x: (B, L, D)
         returns: (B, 1) sigmoid probability
         """
         x = x.float()
         if self.pooling == "mean":
-            pooled = x.mean(dim=1)      # (B, D)
+            pooled = masked_mean(x, token_mask)
         else:
-            pooled = x[:, -1, :]         # (B, D)
+            if token_mask is None:
+                pooled = x[:, -1, :]     # (B, D)
+            else:
+                mask = token_mask.to(device=x.device, dtype=torch.bool)
+                if mask.shape != x.shape[:2]:
+                    raise ValueError(
+                        f"token_mask shape {tuple(mask.shape)} does not match "
+                        f"sequence shape {tuple(x.shape[:2])}"
+                    )
+                last_idx = mask.long().sum(dim=1).clamp(min=1) - 1
+                pooled = x[
+                    torch.arange(x.shape[0], device=x.device), last_idx
+                ]
         return torch.sigmoid(self.linear(pooled))
 
 

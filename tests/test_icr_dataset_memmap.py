@@ -167,6 +167,32 @@ def test_memmap_mode_returns_icr_dict_shape(tmp_path):
     assert sample["icr_score"].dtype == torch.float32
 
 
+def test_memmap_mode_can_read_alternate_prefix_score_array(tmp_path):
+    capture_dir = _make_capture_dir(tmp_path, n_samples=20)
+    alternate = tmp_path / "icr_scores_k4.npy"
+    expected = np.full((20, 4), 4.25, dtype=np.float32)
+    np.save(alternate, expected)
+
+    ds = ICRDataset(
+        capture_dir=capture_dir,
+        mode="memmap",
+        split="all",
+        scores_path=alternate,
+    )
+    assert torch.equal(ds[7]["icr_score"], torch.full((4,), 4.25))
+
+
+def test_alternate_score_array_is_rejected_for_raw_mode(tmp_path):
+    capture_dir = _make_capture_dir(tmp_path, n_samples=20)
+    with pytest.raises(ValueError, match="mode='memmap'"):
+        ICRDataset(
+            capture_dir=capture_dir,
+            mode="memmap-raw",
+            split="all",
+            scores_path=capture_dir / "icr_scores.npy",
+        )
+
+
 # ---------------------------------------------------------------------------
 # 3. Split consistency
 # ---------------------------------------------------------------------------

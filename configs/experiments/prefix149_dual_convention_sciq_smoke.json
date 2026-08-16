@@ -1,0 +1,13 @@
+{
+  "_comment": "Single-seed wiring smoke test for the issue #149 dual-convention scope expansion; not a paper result.",
+  "experiment_name": "prefix149_dual_convention_sciq_smoke",
+  "dataset": "sciq_memmap",
+  "methods": ["dual_convention_contrastive_classifier_prefix_mixed_lowk"],
+  "split_seed": 42,
+  "split_seeds": [42],
+  "training_seeds": [0],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs"
+}
