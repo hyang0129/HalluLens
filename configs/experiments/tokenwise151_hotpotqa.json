@@ -1,10 +1,9 @@
 {
-  "_comment": "Issue #151 token-wise contrastive pilot: token 0 anchored against a later token versus uniformly random distinct token pairs. Primary evaluation uses token 0 only; later positions are matched-bank diagnostics.",
+  "_comment": "Issue #151 token-wise contrastive pilot: token 0 is anchored against a later token during training, matching token-0-only inference. Later positions are matched-bank diagnostics.",
   "experiment_name": "tokenwise151_hotpotqa",
   "dataset": "hotpotqa_memmap",
   "methods": [
-    "tokenwise_contrastive_first_anchored",
-    "tokenwise_contrastive_random_distinct"
+    "tokenwise_contrastive_first_anchored"
   ],
   "split_seed": 42,
   "training_seeds": [0, 1, 2, 3, 4],

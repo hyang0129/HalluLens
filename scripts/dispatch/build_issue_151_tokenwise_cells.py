@@ -1,8 +1,8 @@
-"""Build the isolated 50-cell issue #151 token-wise contrastive matrix.
+"""Build the isolated 25-cell issue #151 token-wise contrastive matrix.
 
 Grid:
 
-    5 datasets x 2 token-pair rules x 5 training seeds = 50 cells
+    5 datasets x 1 first-anchored token-pair rule x 5 training seeds = 25 cells
 
 Each cell owns one dataset/method/seed output directory and uses
 ``predictions.csv`` as its completion sentinel.  High-priority cells receive a
@@ -31,10 +31,7 @@ _TARGETS = (
     ("tokenwise151_sciq", "sciq_memmap"),
     ("tokenwise151_searchqa", "searchqa_memmap"),
 )
-_METHODS = (
-    "tokenwise_contrastive_first_anchored",
-    "tokenwise_contrastive_random_distinct",
-)
+_METHODS = ("tokenwise_contrastive_first_anchored",)
 _SEEDS = (0, 1, 2, 3, 4)
 
 

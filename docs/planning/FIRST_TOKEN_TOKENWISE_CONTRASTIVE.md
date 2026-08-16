@@ -1,9 +1,9 @@
 # First-token token-wise contrastive learning
 
-Status: issue #151 implementation draft. The 50-cell queue builder is included;
-workers are intentionally not started by this change. Architecture revision v2
-reuses one ordinary contrastive activation cache per split and applies only a
-token-wise indexing adapter.
+Status: issue #151 implementation draft. The canonical 25-cell queue covers
+five datasets and five seeds using first-anchored training only. Architecture
+revision v2 reuses one ordinary contrastive activation cache per split and
+applies only a token-wise indexing adapter.
 
 ## Motivation
 
@@ -308,8 +308,9 @@ n ~ Uniform({1, ..., min(R_i, R_max) - 1})
 This exposes the first decoding state on every update and explicitly transfers
 response-level signal from later states into the deployment representation.
 The pure token-invariance variant samples both `k` and `n` uniformly without
-replacement. A mixed schedule can use first-anchored pairs half the time and
-fully random distinct pairs half the time.
+replacement, but it is not part of the canonical issue #151 matrix because it
+does not guarantee exposure to the token-zero representation used at
+inference. It remains an optional future control.
 
 Responses with fewer than two captured steps cannot satisfy `k != n`. Keep
 them in the token-zero evaluation/reference surfaces, but exclude them from
@@ -433,9 +434,7 @@ Compare, with identical datasets and five seeds:
 1. current layer-wise encoder evaluated at response prefix `k=1`;
 2. token-wise encoder trained with first-anchored `(0,n)` pairs and evaluated
    at decoding step zero;
-3. token-wise encoder trained with fully random distinct `(k,n)` pairs and
-   evaluated at decoding step zero;
-4. full-response current contrastive encoder as the information-rich reference.
+3. full-response current contrastive encoder as the information-rich reference.
 
 Report AUROC and AUPRC on HotpotQA, NQ, PopQA, SciQ, and SearchQA. For the
 token-wise methods, report KNN as primary and a frozen linear probe only as a
@@ -443,7 +442,6 @@ diagnostic.
 
 ### Necessary ablations
 
-- first-anchored versus random-distinct token pairs;
 - full logprob reconstruction versus `lambda_recon=0`;
 - all 32 post-block layers versus the current selected-layer subset;
 - standard supervised contrastive labels versus label-free SimCLR;
@@ -469,7 +467,6 @@ at later token positions would support token invariance.
 The approach is weakened or falsified if:
 
 - later states substantially outperform `t=0`;
-- first-anchored pairing does not improve `t=0` over random pairing;
 - token-wise alignment causes representation collapse or erases useful
   time-specific information;
 - gains disappear without full-response logprob reconstruction, indicating

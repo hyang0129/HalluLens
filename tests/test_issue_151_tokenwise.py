@@ -9,10 +9,7 @@ from scripts.dispatch.validate_issue_151_tokenwise import validate_cells
 
 
 _ROOT = Path(__file__).resolve().parent.parent
-_METHODS = (
-    "tokenwise_contrastive_first_anchored",
-    "tokenwise_contrastive_random_distinct",
-)
+_METHODS = ("tokenwise_contrastive_first_anchored",)
 
 
 def _load_json(relative: str) -> dict:
@@ -37,13 +34,13 @@ def test_tokenwise_methods_match_standard_compressor_size_contract():
         assert "knn" in method["evaluation"]["metrics"]
 
 
-def test_issue_151_builder_creates_50_idempotent_non_mmlu_cells(tmp_path):
+def test_issue_151_builder_creates_25_idempotent_non_mmlu_cells(tmp_path):
     dispatch_root = tmp_path / "dispatch"
-    assert build(dispatch_root) == 50
+    assert build(dispatch_root) == 25
     assert build(dispatch_root) == 0
 
     cells = sorted((dispatch_root / "pending").glob("*.json"))
-    assert len(cells) == 50
+    assert len(cells) == 25
     payloads = [json.loads(path.read_text(encoding="utf-8")) for path in cells]
     assert {p["seed"] for p in payloads} == {"0", "1", "2", "3", "4"}
     assert {p["method"] for p in payloads} == set(_METHODS)
@@ -62,7 +59,7 @@ def test_issue_151_builder_creates_50_idempotent_non_mmlu_cells(tmp_path):
     assert all("mmlu" not in json.dumps(p).lower() for p in payloads)
     assert all(p["output_check"].endswith("predictions.csv") for p in payloads)
     assert validate_cells(dispatch_root) == {
-        "pending": 50,
+        "pending": 25,
         "claimed": 0,
         "done": 0,
         "failed": 0,
@@ -71,7 +68,7 @@ def test_issue_151_builder_creates_50_idempotent_non_mmlu_cells(tmp_path):
 
 def test_issue_151_builder_refreshes_stale_pending_cell(tmp_path):
     dispatch_root = tmp_path / "dispatch"
-    assert build(dispatch_root) == 50
+    assert build(dispatch_root) == 25
     pending = next((dispatch_root / "pending").glob("*.json"))
     stale = json.loads(pending.read_text(encoding="utf-8"))
     stale.pop("architecture")

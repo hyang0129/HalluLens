@@ -1,6 +1,6 @@
 """Validate that issue #151 cells are safe to submit without claiming them.
 
-Checks the 50-cell manifest and, by default, opens one real Empire capture to
+Checks the 25-cell manifest and, by default, opens one real Empire capture to
 prove that pair-training and token-zero evaluation adapters share the ordinary
 contrastive cache.  This script performs no training and starts no workers.
 """
@@ -24,18 +24,21 @@ from activation_research.tokenwise_contrastive_dataset import (  # noqa: E402
 from scripts.dispatch.claim import count_status  # noqa: E402
 
 _ARCHITECTURE = "tokenwise_shared_contrastive_cache_v2"
+_METHOD = "tokenwise_contrastive_first_anchored"
 
 
 def validate_cells(dispatch_root: Path) -> dict:
     status = count_status(dispatch_root)
     cell_paths = sorted((dispatch_root / "pending").glob("*.json"))
     payloads = [json.loads(path.read_text(encoding="utf-8")) for path in cell_paths]
-    if len(payloads) != 50:
-        raise RuntimeError(f"expected 50 pending cells, found {len(payloads)}")
+    if len(payloads) != 25:
+        raise RuntimeError(f"expected 25 pending cells, found {len(payloads)}")
     if status["claimed"] or status["failed"]:
         raise RuntimeError(f"queue is not submission-clean: {status}")
     if any(payload.get("architecture") != _ARCHITECTURE for payload in payloads):
         raise RuntimeError("one or more cells use a stale architecture revision")
+    if any(payload.get("method") != _METHOD for payload in payloads):
+        raise RuntimeError("one or more cells are not first-token anchored")
     if any("mmlu" in json.dumps(payload).lower() for payload in payloads):
         raise RuntimeError("MMLU unexpectedly appears in the issue #151 queue")
     for payload in payloads:

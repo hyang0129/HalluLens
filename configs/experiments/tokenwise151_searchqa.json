@@ -3,8 +3,7 @@
   "experiment_name": "tokenwise151_searchqa",
   "dataset": "searchqa_memmap",
   "methods": [
-    "tokenwise_contrastive_first_anchored",
-    "tokenwise_contrastive_random_distinct"
+    "tokenwise_contrastive_first_anchored"
   ],
   "split_seed": 42,
   "training_seeds": [0, 1, 2, 3, 4],
