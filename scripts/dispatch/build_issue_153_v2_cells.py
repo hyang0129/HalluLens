@@ -1,10 +1,9 @@
-"""Append the three-cell Issue #153 token-wise v2 seed-0 screen.
+"""Append the five-cell Issue #153 token-wise v2 seed-0 screen.
 
 The corrected Issue #151 v1 runs already provide the matched seed-0 controls
-for HotpotQA, NQ, and PopQA. This builder therefore queues one v2 cell per
-dataset. IDs sort after the Issue #155 causal controls in the shared generic
-experiment queue. MMLU is excluded. Seeds 1--2 are deferred until the seed-0
-macro screen is positive.
+for all five benchmark datasets. This builder therefore queues one v2 cell per
+dataset at the effective high-priority ``0_high`` tier. MMLU is excluded.
+Seeds 1--2 are deferred until the seed-0 macro screen is positive.
 """
 from __future__ import annotations
 
@@ -23,6 +22,8 @@ _TARGETS = (
     ("00", "hotpotqa_memmap", "issue153_v2_hotpotqa"),
     ("20", "nq_memmap", "issue153_v2_nq"),
     ("30", "popqa_memmap", "issue153_v2_popqa"),
+    ("40", "sciq_memmap", "issue153_v2_sciq"),
+    ("50", "searchqa_memmap", "issue153_v2_searchqa"),
 )
 _METHOD = "tokenwise_contrastive_v2_depthnorm_projection"
 _SEEDS = (0,)
@@ -54,7 +55,7 @@ def build(dispatch_root: Path, *, project_root: Path = _PROJECT_ROOT) -> int:
 
         for seed in _SEEDS:
             cell_id = (
-                f"2_high_{priority}_{seed}_issue153_v2__{dataset_name}__"
+                f"0_high_{priority}_{seed}_issue153_v2__{dataset_name}__"
                 f"{_METHOD}__seed_{seed}"
             )
             if _dispatch_has_cell(dispatch_root, cell_id):

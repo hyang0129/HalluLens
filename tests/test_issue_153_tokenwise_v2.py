@@ -22,7 +22,14 @@ from scripts.dispatch.build_issue_153_v2_cells import build
 
 _ROOT = Path(__file__).resolve().parent.parent
 _METHOD = "tokenwise_contrastive_v2_depthnorm_projection"
-_DATASETS = {"hotpotqa_memmap", "nq_memmap", "popqa_memmap"}
+_DATASETS = {
+    "hotpotqa_memmap",
+    "nq_memmap",
+    "popqa_memmap",
+    "sciq_memmap",
+    "searchqa_memmap",
+}
+_DATASET_SUFFIXES = ("hotpotqa", "nq", "popqa", "sciq", "searchqa")
 
 
 def _make_model(**overrides) -> LogprobReconProjectedProgressiveCompressor:
@@ -234,27 +241,27 @@ def test_v2_method_is_matched_to_corrected_v1_outside_the_model():
     assert v2["evaluation"] == v1["evaluation"]
 
 
-def test_issue153_builder_appends_exact_three_seed_zero_cells(tmp_path):
+def test_issue153_builder_appends_exact_five_seed_zero_cells(tmp_path):
     dispatch_root = tmp_path / "dispatch"
-    assert build(dispatch_root, project_root=_ROOT) == 3
+    assert build(dispatch_root, project_root=_ROOT) == 5
     assert build(dispatch_root, project_root=_ROOT) == 0
 
     paths = sorted((dispatch_root / "pending").glob("*.json"))
     payloads = [json.loads(path.read_text()) for path in paths]
-    assert len(payloads) == 3
+    assert len(payloads) == 5
     assert {cell["dataset"] for cell in payloads} == _DATASETS
     assert {cell["seed"] for cell in payloads} == {0}
     assert {cell["method"] for cell in payloads} == {_METHOD}
     assert all(cell["issue"] == 153 for cell in payloads)
     assert all(cell["kind"] == "experiment" for cell in payloads)
-    assert all(path.name.startswith("2_high_") for path in paths)
+    assert all(path.name.startswith("0_high_") for path in paths)
     assert all("mmlu" not in json.dumps(cell).lower() for cell in payloads)
     assert all(cell["baseline_run"].endswith("eval_metrics.json") for cell in payloads)
 
 
 def test_issue153_analysis_plan_is_predeclared_and_identical():
     plans = []
-    for suffix in ("hotpotqa", "nq", "popqa"):
+    for suffix in _DATASET_SUFFIXES:
         payload = json.loads(
             (
                 _ROOT
@@ -264,14 +271,14 @@ def test_issue153_analysis_plan_is_predeclared_and_identical():
             ).read_text()
         )
         plans.append(payload["analysis_plan"])
-    assert plans[0] == plans[1] == plans[2]
+    assert all(plan == plans[0] for plan in plans)
     assert plans[0] == {
         "primary_metric": "knn_auroc",
         "aggregate": "unweighted_macro_of_dataset_seed_means",
         "baseline_experiment_prefix": "issue151_knnval",
         "expansion_threshold": "v2_macro_delta_gt_0_then_run_seeds_1_2",
     }
-    for suffix in ("hotpotqa", "nq", "popqa"):
+    for suffix in _DATASET_SUFFIXES:
         payload = json.loads(
             (
                 _ROOT
