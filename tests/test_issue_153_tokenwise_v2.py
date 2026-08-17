@@ -234,16 +234,16 @@ def test_v2_method_is_matched_to_corrected_v1_outside_the_model():
     assert v2["evaluation"] == v1["evaluation"]
 
 
-def test_issue153_builder_appends_exact_nine_cells(tmp_path):
+def test_issue153_builder_appends_exact_three_seed_zero_cells(tmp_path):
     dispatch_root = tmp_path / "dispatch"
-    assert build(dispatch_root, project_root=_ROOT) == 9
+    assert build(dispatch_root, project_root=_ROOT) == 3
     assert build(dispatch_root, project_root=_ROOT) == 0
 
     paths = sorted((dispatch_root / "pending").glob("*.json"))
     payloads = [json.loads(path.read_text()) for path in paths]
-    assert len(payloads) == 9
+    assert len(payloads) == 3
     assert {cell["dataset"] for cell in payloads} == _DATASETS
-    assert {cell["seed"] for cell in payloads} == {0, 1, 2}
+    assert {cell["seed"] for cell in payloads} == {0}
     assert {cell["method"] for cell in payloads} == {_METHOD}
     assert all(cell["issue"] == 153 for cell in payloads)
     assert all(cell["kind"] == "experiment" for cell in payloads)
@@ -269,5 +269,16 @@ def test_issue153_analysis_plan_is_predeclared_and_identical():
         "primary_metric": "knn_auroc",
         "aggregate": "unweighted_macro_of_dataset_seed_means",
         "baseline_experiment_prefix": "issue151_knnval",
-        "expansion_threshold": "v2_macro_delta_gt_0",
+        "expansion_threshold": "v2_macro_delta_gt_0_then_run_seeds_1_2",
     }
+    for suffix in ("hotpotqa", "nq", "popqa"):
+        payload = json.loads(
+            (
+                _ROOT
+                / "configs"
+                / "experiments"
+                / f"issue153_v2_{suffix}.json"
+            ).read_text()
+        )
+        assert payload["training_seeds"] == [0]
+        assert payload["split_seeds"] == [42]

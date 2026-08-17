@@ -1,16 +1,16 @@
 {
-  "_comment": "Issue #153 v2 pilot; corrected v1 seeds 0-2 are reused as the matched control.",
+  "_comment": "Issue #153 seed-0 screen; corrected v1 seed 0 is reused as the matched control.",
   "experiment_name": "issue153_v2_hotpotqa",
   "dataset": "hotpotqa_memmap",
   "methods": ["tokenwise_contrastive_v2_depthnorm_projection"],
   "split_seed": 42,
-  "split_seeds": [42, 1, 2],
-  "training_seeds": [0, 1, 2],
+  "split_seeds": [42],
+  "training_seeds": [0],
   "analysis_plan": {
     "primary_metric": "knn_auroc",
     "aggregate": "unweighted_macro_of_dataset_seed_means",
     "baseline_experiment_prefix": "issue151_knnval",
-    "expansion_threshold": "v2_macro_delta_gt_0"
+    "expansion_threshold": "v2_macro_delta_gt_0_then_run_seeds_1_2"
   },
   "device": "auto",
   "num_workers": 4,

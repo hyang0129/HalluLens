@@ -1,9 +1,10 @@
-"""Append the nine-cell Issue #153 token-wise v2 pilot.
+"""Append the three-cell Issue #153 token-wise v2 seed-0 screen.
 
-The corrected Issue #151 v1 runs already provide the matched seeds 0--2 for
-HotpotQA, NQ, and PopQA. This builder therefore queues only the corresponding
-v2 cells. IDs sort after the Issue #155 causal controls in the shared generic
-experiment queue. MMLU is excluded.
+The corrected Issue #151 v1 runs already provide the matched seed-0 controls
+for HotpotQA, NQ, and PopQA. This builder therefore queues one v2 cell per
+dataset. IDs sort after the Issue #155 causal controls in the shared generic
+experiment queue. MMLU is excluded. Seeds 1--2 are deferred until the seed-0
+macro screen is positive.
 """
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ _TARGETS = (
     ("30", "popqa_memmap", "issue153_v2_popqa"),
 )
 _METHOD = "tokenwise_contrastive_v2_depthnorm_projection"
-_SEEDS = (0, 1, 2)
+_SEEDS = (0,)
 
 
 def _dispatch_has_cell(dispatch_root: Path, cell_id: str) -> bool:
