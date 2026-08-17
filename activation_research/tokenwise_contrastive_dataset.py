@@ -89,6 +89,7 @@ class TokenwiseContrastiveDataset(Dataset):
         self.num_views = int(num_views)
         if self.num_views < 1:
             raise ValueError("num_views must be at least one")
+        self.fixed_token = int(fixed_token) if fixed_token is not None else None
         if token_pair_mode not in (
             "first_anchored",
             "first_same",
@@ -99,10 +100,13 @@ class TokenwiseContrastiveDataset(Dataset):
                 "token_pair_mode must be one of {'first_anchored', "
                 "'first_same', 'shuffled_later', 'random_distinct'}"
             )
-        if token_pair_mode in ("first_same", "shuffled_later") and self.num_views != 2:
+        if (
+            self.fixed_token is None
+            and token_pair_mode in ("first_same", "shuffled_later")
+            and self.num_views != 2
+        ):
             raise ValueError(f"{token_pair_mode} requires exactly two views")
         self.token_pair_mode = str(token_pair_mode)
-        self.fixed_token = int(fixed_token) if fixed_token is not None else None
         if self.fixed_token is not None and not (
             0 <= self.fixed_token < self.cache.shape[2]
         ):

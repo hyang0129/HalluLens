@@ -469,6 +469,36 @@ def test_tokenwise_first_same_is_a_t0_dropout_control(tmp_path):
     )
 
 
+def test_issue155_control_modes_allow_single_view_fixed_token_eval(tmp_path):
+    from activation_research.tokenwise_contrastive_dataset import (
+        TokenwiseContrastiveDataset,
+    )
+
+    capture = _make_full_capture_dir(tmp_path, n_samples=8)
+    base = MemmapContrastiveDataset(
+        capture,
+        split="all",
+        num_views=2,
+        relevant_layers=[1, 2, 3, 4],
+        include_response_logprobs=True,
+        pad_length=12,
+    )
+
+    for mode in ("first_same", "shuffled_later"):
+        eval_ds = TokenwiseContrastiveDataset(
+            base,
+            layer_positions=[1, 2, 3, 4],
+            num_views=1,
+            token_pair_mode=mode,
+            fixed_token=0,
+            min_response_tokens=1,
+        )
+        item = eval_ds[0]
+        assert item["views_activations"].shape[0] == 1
+        assert item["view_token_indices"].tolist() == [0]
+        assert item["view_source_indices"].tolist() == [0]
+
+
 def test_tokenwise_shuffled_later_is_label_and_length_bucket_matched(tmp_path):
     from activation_research.tokenwise_contrastive_dataset import (
         TokenwiseContrastiveDataset,
