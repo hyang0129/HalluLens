@@ -911,9 +911,14 @@ def train_contrastive_logprob_recon(
 ):
     """Train a ``LogprobReconProgressiveCompressor`` with auxiliary logprob reconstruction.
 
-    Loss per step:
+    Loss per step for the standard shared-surface model:
 
         L = L_SupCon(z) + λ · L_recon(g(z), ℓ)
+
+    Models implementing ``forward_with_contrastive_recon`` may instead return
+    ``(z_trunk, q, g(z_trunk))``. In that case SupCon consumes only ``q`` while
+    reconstruction, validation KNN, and downstream evaluation retain the
+    deployment trunk ``z_trunk``.
 
     ``λ`` defaults to ``model.recon_lambda`` but can be overridden via
     ``recon_lambda``.  When the batch contains no ``"logprob"`` field (e.g.
@@ -961,7 +966,7 @@ def train_contrastive_logprob_recon(
         sub_batch_size = batch_size
 
     def _call_model(m, x, layer_idx=None, token_mask=None):
-        """Encode a flattened view batch, optionally with a prefix token mask.
+        """Return ``(trunk, contrastive, reconstruction)`` for flat views.
 
         The ``token_mask`` path must never fail silently. Existing code here
         falls back to a mask-free call on ``TypeError``, which for issue #149
@@ -972,18 +977,37 @@ def train_contrastive_logprob_recon(
         """
         mask_kw = {} if token_mask is None else {"token_mask": token_mask}
 
-        if layer_idx is None:
+        def _without_layer_index():
+            projected_forward = getattr(
+                m, "forward_with_contrastive_recon", None
+            )
+            if projected_forward is not None:
+                if token_mask is None:
+                    return projected_forward(x)
+                try:
+                    return projected_forward(x, **mask_kw)
+                except TypeError as e:
+                    raise TypeError(
+                        f"{type(m).__name__}.forward_with_contrastive_recon "
+                        "does not accept token_mask, but prefix views require it."
+                    ) from e
+
             if token_mask is None:
-                return m.forward_with_recon(x)
-            try:
-                return m.forward_with_recon(x, **mask_kw)
-            except TypeError as e:
-                raise TypeError(
-                    f"{type(m).__name__}.forward_with_recon does not accept "
-                    "token_mask, but prefix views (issue #149) require it. "
-                    "Silently dropping the mask would unmask padding and leak "
-                    "prefix length into the embedding."
-                ) from e
+                trunk, logprob_pred = m.forward_with_recon(x)
+            else:
+                try:
+                    trunk, logprob_pred = m.forward_with_recon(x, **mask_kw)
+                except TypeError as e:
+                    raise TypeError(
+                        f"{type(m).__name__}.forward_with_recon does not accept "
+                        "token_mask, but prefix views (issue #149) require it. "
+                        "Silently dropping the mask would unmask padding and leak "
+                        "prefix length into the embedding."
+                    ) from e
+            return trunk, trunk, logprob_pred
+
+        if layer_idx is None:
+            return _without_layer_index()
 
         try:
             # LayerAware wrapper: inject layer_idx into encoder, then call decoder
@@ -993,19 +1017,13 @@ def train_contrastive_logprob_recon(
                 else m.encoder(x, **mask_kw)
             )
             logprob_pred = m.decoder(z)
-            return z, logprob_pred
+            return z, z, logprob_pred
         except TypeError:
             if token_mask is not None:
                 # Retry without layer_idx but KEEP the mask; only raise if the
                 # model cannot take the mask either.
-                try:
-                    return m.forward_with_recon(x, **mask_kw)
-                except TypeError as e:
-                    raise TypeError(
-                        f"{type(m).__name__} does not accept token_mask, but "
-                        "prefix views (issue #149) require it."
-                    ) from e
-            return m.forward_with_recon(x)
+                return _without_layer_index()
+            return _without_layer_index()
 
     assert batch_size % sub_batch_size == 0, "batch_size must be divisible by sub_batch_size"
 
@@ -1288,17 +1306,17 @@ def train_contrastive_logprob_recon(
                 )
                 view_idx_flat = view_idx_full.reshape(bsz * num_views) if view_idx_full is not None else None
 
-                z_flat, logprob_pred_flat = _call_model(
+                _trunk_flat, contrastive_flat, logprob_pred_flat = _call_model(
                     model, x_flat, layer_idx=view_idx_flat, token_mask=token_mask_flat
                 )
-                z_views = z_flat.reshape(bsz, num_views, -1)
+                contrastive_views = contrastive_flat.reshape(bsz, num_views, -1)
 
                 # Contrastive loss. Issue #155 explicitly separates a class
                 # term on t0 from an instance-pair term so only view
                 # construction differs between causal-control arms.
                 if isinstance(loss_fn, TokenwiseCausalContrastiveLoss):
                     temporal_contrastive, class_contrastive = loss_fn.components(
-                        z_views,
+                        contrastive_views,
                         labels=labels_full,
                         sample_ids=sample_ids_full,
                     )
@@ -1309,13 +1327,13 @@ def train_contrastive_logprob_recon(
                 elif use_labels:
                     temporal_contrastive = class_contrastive = None
                     supcon = loss_fn(
-                        z_views,
+                        contrastive_views,
                         labels=labels_full,
                         sample_ids=sample_ids_full,
                     )
                 else:
                     temporal_contrastive = class_contrastive = None
-                    supcon = loss_fn(z_views)
+                    supcon = loss_fn(contrastive_views)
 
                 # Auxiliary reconstruction loss
                 recon = torch.zeros(1, device=device).squeeze()
@@ -1363,8 +1381,8 @@ def train_contrastive_logprob_recon(
                     total_temporal += float(temporal_contrastive.detach())
                     total_class += float(class_contrastive.detach())
                 total_recon += float(recon.detach())
-                total_intra_cos += intra_sample_cosine_mean(z_views)
-                total_intra_inter += intra_inter_margin(z_views)
+                total_intra_cos += intra_sample_cosine_mean(contrastive_views)
+                total_intra_inter += intra_inter_margin(contrastive_views)
                 n_batches += 1
 
                 avg_loss = total_loss / n_batches

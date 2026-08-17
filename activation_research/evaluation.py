@@ -28,6 +28,22 @@ def _call_model(model, x, **kwargs):
         raise
 
 
+def _call_contrastive_model(model, x, **kwargs):
+    """Use a disposable training projection when the model exposes one."""
+    forward_contrastive = getattr(model, "forward_contrastive", None)
+    if forward_contrastive is None:
+        return _call_model(model, x, **kwargs)
+    if not kwargs:
+        return forward_contrastive(x)
+    try:
+        return forward_contrastive(x, **kwargs)
+    except TypeError as e:
+        msg = str(e)
+        if "unexpected keyword argument" in msg or "got an unexpected keyword" in msg:
+            return forward_contrastive(x)
+        raise
+
+
 def _normalize_labels(labels: torch.Tensor) -> torch.Tensor:
     if labels.dim() == 0:
         return labels.unsqueeze(0)
@@ -119,7 +135,9 @@ def evaluate(
             if view_indices_full is not None:
                 layer_idx_flat = view_indices_full.reshape(bsz * num_views)
 
-            z_flat = _call_model(model, x_flat, layer_idx=layer_idx_flat)
+            z_flat = _call_contrastive_model(
+                model, x_flat, layer_idx=layer_idx_flat
+            )
             z_views = z_flat.reshape(bsz, num_views, -1)
 
             if evaluator_manager is not None:

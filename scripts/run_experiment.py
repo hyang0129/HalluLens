@@ -726,7 +726,36 @@ def run_contrastive_logprob_recon(
 
     model_params = method_cfg.get("model_params", {})
     model_class = str(method_cfg.get("model_class", "logprob_recon_progressive_compressor")).strip().lower()
-    if model_class == "logprob_recon_adapter_vit_compressor":
+    if model_class == "logprob_recon_projected_progressive_compressor":
+        from activation_research.model import (
+            LogprobReconProjectedProgressiveCompressor,
+        )
+
+        model = LogprobReconProjectedProgressiveCompressor(
+            input_dim=dataset_cfg["input_dim"],
+            final_dim=model_params.get("final_dim", 512),
+            projection_hidden_dim=model_params.get(
+                "projection_hidden_dim", 512
+            ),
+            projection_dim=model_params.get("projection_dim", 128),
+            projection_l2_normalize=model_params.get(
+                "projection_l2_normalize", True
+            ),
+            depth_pooling=model_params.get("depth_pooling", "attention"),
+            pool_num_queries=model_params.get("pool_num_queries", 1),
+            dropout=model_params.get("dropout", 0.1),
+            input_dropout=model_params.get("input_dropout", 0.3),
+            normalize_input=model_params.get("normalize_input", False),
+            block_dims=model_params.get("block_dims"),
+            pre_norm=model_params.get("pre_norm", False),
+            recon_seq_len=model_params.get("recon_seq_len", 64),
+            recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            logprob_var_threshold=model_params.get(
+                "logprob_var_threshold", 1e-4
+            ),
+        )
+    elif model_class == "logprob_recon_adapter_vit_compressor":
         from activation_research.model import LogprobReconAdapterViTCompressor
 
         model = LogprobReconAdapterViTCompressor(
@@ -750,7 +779,9 @@ def run_contrastive_logprob_recon(
         model = LogprobReconAttentionPoolProgressiveCompressor(
             input_dim=dataset_cfg["input_dim"],
             final_dim=model_params.get("final_dim", 512),
+            dropout=model_params.get("dropout", 0.1),
             input_dropout=model_params.get("input_dropout", 0.3),
+            normalize_input=model_params.get("normalize_input", False),
             recon_seq_len=model_params.get("recon_seq_len", 64),
             recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
             recon_lambda=model_params.get("recon_lambda", 1.0),
@@ -781,7 +812,9 @@ def run_contrastive_logprob_recon(
         model = LogprobReconProgressiveCompressor(
             input_dim=dataset_cfg["input_dim"],
             final_dim=model_params.get("final_dim", 512),
+            dropout=model_params.get("dropout", 0.1),
             input_dropout=model_params.get("input_dropout", 0.3),
+            normalize_input=model_params.get("normalize_input", False),
             recon_seq_len=model_params.get("recon_seq_len", 64),
             recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
             recon_lambda=model_params.get("recon_lambda", 1.0),
@@ -789,6 +822,30 @@ def run_contrastive_logprob_recon(
             block_dims=model_params.get("block_dims"),
             pre_norm=model_params.get("pre_norm", False),
         )
+
+    model_total_params = sum(p.numel() for p in model.parameters())
+    expected_total_params = model_params.get("expected_total_params")
+    if (
+        expected_total_params is not None
+        and model_total_params != int(expected_total_params)
+    ):
+        raise RuntimeError(
+            f"model parameter guard failed: expected {expected_total_params}, "
+            f"constructed {model_total_params}"
+        )
+    reference_total_params = model_params.get("reference_total_params")
+    model_parameter_delta_pct = None
+    if reference_total_params is not None:
+        model_parameter_delta_pct = 100.0 * (
+            model_total_params - int(reference_total_params)
+        ) / int(reference_total_params)
+    logger.info(
+        "model_class={} total_params={} reference_params={} delta_pct={}",
+        model_class,
+        model_total_params,
+        reference_total_params,
+        model_parameter_delta_pct,
+    )
 
     train_device = device if device != "auto" else (
         "cuda" if torch.cuda.is_available() else "cpu"
@@ -1200,12 +1257,18 @@ def run_contrastive_logprob_recon(
                 "n_train_base": len(train_base_ds),
                 "n_train_pair_eligible": len(train_ds),
                 "n_train_t0": len(train_ds_target),
-                "model_total_params": sum(p.numel() for p in model.parameters()),
+                "model_class": model_class,
+                "model_total_params": model_total_params,
                 "model_encoder_params": sum(
                     p.numel() for p in model.encoder.parameters()
                 ),
+                "model_reference_total_params": reference_total_params,
+                "model_parameter_delta_pct": model_parameter_delta_pct,
             }
         )
+        architecture_metadata = getattr(model, "architecture_metadata", None)
+        if architecture_metadata is not None:
+            eval_metrics.update(architecture_metadata())
     eval_metrics.update(ood_stats)
     # Prefix-curve cells are namespaced k{K}_* so they never collide with the
     # full-length metrics above.
