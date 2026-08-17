@@ -41,6 +41,8 @@
     "relevant_layers": "1-32",
     "num_views": 2,
     "token_pair_mode": "first_same",
+    "later_token_sampling": "uniform",
+    "min_response_tokens": 2,
     "shuffle_length_bucket_size": 8,
     "emit_view_logprob_targets": true,
     "pad_length": 64,

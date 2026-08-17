@@ -623,6 +623,12 @@ def run_contrastive_logprob_recon(
         shuffle_length_bucket_size = int(
             data_cfg.get("shuffle_length_bucket_size", 8)
         )
+        later_token_sampling = str(
+            data_cfg.get("later_token_sampling", "uniform")
+        )
+        pair_min_response_tokens = int(
+            data_cfg.get("min_response_tokens", 2)
+        )
         emit_view_logprob_targets = bool(
             data_cfg.get("emit_view_logprob_targets", False)
         )
@@ -632,8 +638,9 @@ def run_contrastive_logprob_recon(
             layer_positions=layer_positions,
             num_views=data_cfg.get("num_views", 2),
             token_pair_mode=pair_mode,
-            min_response_tokens=2,
+            min_response_tokens=pair_min_response_tokens,
             shuffle_length_bucket_size=shuffle_length_bucket_size,
+            later_token_sampling=later_token_sampling,
             emit_view_logprob_targets=emit_view_logprob_targets,
         )
         val_base_ds = (
@@ -646,8 +653,9 @@ def run_contrastive_logprob_recon(
             layer_positions=layer_positions,
             num_views=data_cfg.get("num_views", 2),
             token_pair_mode=pair_mode,
-            min_response_tokens=2,
+            min_response_tokens=pair_min_response_tokens,
             shuffle_length_bucket_size=shuffle_length_bucket_size,
+            later_token_sampling=later_token_sampling,
             emit_view_logprob_targets=emit_view_logprob_targets,
         )
         test_base_ds = eval_ap.get_dataset("test", **ds_kwargs)
@@ -659,6 +667,7 @@ def run_contrastive_logprob_recon(
             fixed_token=0,
             min_response_tokens=1,
             shuffle_length_bucket_size=shuffle_length_bucket_size,
+            later_token_sampling=later_token_sampling,
             emit_view_logprob_targets=False,
         )
         val_eval_ds = TokenwiseContrastiveDataset(
@@ -669,6 +678,7 @@ def run_contrastive_logprob_recon(
             fixed_token=0,
             min_response_tokens=1,
             shuffle_length_bucket_size=shuffle_length_bucket_size,
+            later_token_sampling=later_token_sampling,
             emit_view_logprob_targets=False,
         )
         test_ds = TokenwiseContrastiveDataset(
@@ -679,15 +689,19 @@ def run_contrastive_logprob_recon(
             fixed_token=0,
             min_response_tokens=1,
             shuffle_length_bucket_size=shuffle_length_bucket_size,
+            later_token_sampling=later_token_sampling,
             emit_view_logprob_targets=False,
         )
         logger.info(
-            "token-wise cache adapter={} pair_mode={} causal_objective={} "
+            "token-wise cache adapter={} pair_mode={} later_sampling={} "
+            "pair_min_tokens={} causal_objective={} "
             "source_aligned_recon={} base_cache_id={} "
             "train_base={} train_pairs={} train_t0={} test_t0={} "
             "depth_sequence={}",
             view_adapter,
             pair_mode,
+            later_token_sampling,
+            pair_min_response_tokens,
             train_cfg.get("contrastive_objective", "legacy_supcon"),
             emit_view_logprob_targets,
             id(train_base_ds.cache),
@@ -711,8 +725,8 @@ def run_contrastive_logprob_recon(
             raise ValueError(
                 "tokenwise_causal_control is valid only for the token-wise routine"
             )
-        if int(data_cfg.get("num_views", 2)) != 2:
-            raise ValueError("tokenwise causal controls require exactly two views")
+        if int(data_cfg.get("num_views", 2)) < 2:
+            raise ValueError("tokenwise causal controls require at least two views")
         if not bool(data_cfg.get("emit_view_logprob_targets", False)):
             raise ValueError(
                 "tokenwise causal controls require source-aligned per-view "
@@ -1255,6 +1269,12 @@ def run_contrastive_logprob_recon(
                 ),
                 "shuffle_length_bucket_size": int(
                     data_cfg.get("shuffle_length_bucket_size", 8)
+                ),
+                "later_token_sampling": str(
+                    data_cfg.get("later_token_sampling", "uniform")
+                ),
+                "pair_min_response_tokens": int(
+                    data_cfg.get("min_response_tokens", 2)
                 ),
                 "primary_eval_token": 0,
                 "activation_cache_reused": bool(

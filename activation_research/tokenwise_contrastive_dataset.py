@@ -41,6 +41,10 @@ class TokenwiseContrastiveDataset(Dataset):
     min_response_tokens:
         Filter logical split rows by real captured response length.  Pair
         datasets use two; token-zero evaluation uses one.
+    later_token_sampling:
+        ``uniform`` samples later positions directly. ``stratified`` first
+        divides the available later positions into early/middle/late bins,
+        samples bins uniformly, and then samples within each selected bin.
     source_indices:
         Optional logical base-dataset indices to inherit.  Used by
         :meth:`fixed_token_view` so later-token diagnostics stay within the
@@ -60,6 +64,7 @@ class TokenwiseContrastiveDataset(Dataset):
         min_response_tokens: int = 0,
         view_sampling_with_replacement: bool = False,
         shuffle_length_bucket_size: int = 8,
+        later_token_sampling: Literal["uniform", "stratified"] = "uniform",
         emit_view_logprob_targets: bool = False,
         source_indices: Optional[Sequence[int]] = None,
     ) -> None:
@@ -121,6 +126,11 @@ class TokenwiseContrastiveDataset(Dataset):
         self.shuffle_length_bucket_size = int(shuffle_length_bucket_size)
         if self.shuffle_length_bucket_size < 1:
             raise ValueError("shuffle_length_bucket_size must be positive")
+        self.later_token_sampling = str(later_token_sampling).strip().lower()
+        if self.later_token_sampling not in {"uniform", "stratified"}:
+            raise ValueError(
+                "later_token_sampling must be one of {'uniform', 'stratified'}"
+            )
         self.emit_view_logprob_targets = bool(emit_view_logprob_targets)
 
         base_labels = np.asarray(base_dataset.labels)
@@ -262,12 +272,52 @@ class TokenwiseContrastiveDataset(Dataset):
             min_response_tokens=token_index + 1,
             view_sampling_with_replacement=False,
             shuffle_length_bucket_size=self.shuffle_length_bucket_size,
+            later_token_sampling=self.later_token_sampling,
             emit_view_logprob_targets=self.emit_view_logprob_targets,
             source_indices=self._valid_indices,
         )
 
     def _length_bucket(self, response_len: int) -> int:
         return max(0, (int(response_len) - 2) // self.shuffle_length_bucket_size)
+
+    def _sample_later_positions(
+        self, later: list[int], needed: int
+    ) -> list[int]:
+        if self.view_sampling_with_replacement:
+            if not later:
+                raise ValueError(
+                    "first_anchored views require response_len >= 2"
+                )
+        elif len(later) < needed:
+            raise ValueError(
+                f"first_anchored {self.num_views}-view sampling requires "
+                f"response_len >= {self.num_views}; got {len(later) + 1}"
+            )
+
+        if self.later_token_sampling == "uniform":
+            return (
+                random.choices(later, k=needed)
+                if self.view_sampling_with_replacement
+                else random.sample(later, needed)
+            )
+
+        # Equal-probability position regimes prevent long responses from
+        # making late positions dominate. np.array_split keeps adjacent token
+        # positions together and handles short responses without empty middle
+        # regimes after filtering below.
+        bins = [
+            [int(position) for position in bucket]
+            for bucket in np.array_split(later, 3)
+            if len(bucket)
+        ]
+        if needed <= len(bins):
+            selected_bins = random.sample(bins, needed)
+            return [random.choice(bucket) for bucket in selected_bins]
+        if self.view_sampling_with_replacement:
+            return [random.choice(random.choice(bins)) for _ in range(needed)]
+        # More keys than non-empty regimes: retain distinct positions while
+        # degrading gracefully to uniform sampling for the excess keys.
+        return random.sample(later, needed)
 
     def _select_view_sources(
         self, logical_idx: int
@@ -311,19 +361,7 @@ class TokenwiseContrastiveDataset(Dataset):
                 return [logical_idx], [0]
             later = list(range(1, response_len))
             needed = self.num_views - 1
-            if self.view_sampling_with_replacement:
-                if not later:
-                    raise ValueError(
-                        "first_anchored views require response_len >= 2"
-                    )
-                sampled = random.choices(later, k=needed)
-            else:
-                if len(later) < needed:
-                    raise ValueError(
-                        f"first_anchored {self.num_views}-view sampling requires "
-                        f"response_len >= {self.num_views}; got {response_len}"
-                    )
-                sampled = random.sample(later, needed)
+            sampled = self._sample_later_positions(later, needed)
             return [logical_idx] * self.num_views, [0, *sampled]
 
         positions = list(range(response_len))
