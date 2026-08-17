@@ -1380,6 +1380,52 @@ def run_tokenwise_contrastive_logprob_recon(
     )
 
 
+def run_tokenwise_projection_rescore(
+    ap,
+    dataset_cfg: dict,
+    method_cfg: dict,
+    experiment_cfg: dict,
+    output_dir: str,
+    device: str,
+    training_seed: int,
+    test_ap=None,
+) -> tuple[dict, list[dict]]:
+    """Score a trained token-wise projection head without encoder retraining.
+
+    The source run is the sibling method directory named by ``source_method``.
+    Its dumped 512-d token-zero trunk embeddings are passed through the saved
+    projection MLP, then evaluated with the same KNN/probe implementations used
+    by the ordinary token-wise evaluation path.
+    """
+    del ap, test_ap
+    from pathlib import Path
+
+    from activation_research.projection_scoring import score_saved_projection
+
+    source_method = str(method_cfg["source_method"])
+    source_run_dir = (
+        Path(output_dir).parent.parent / source_method / f"seed_{training_seed}"
+    )
+    metrics, predictions = score_saved_projection(
+        source_run_dir,
+        evaluation_cfg=method_cfg["evaluation"],
+        outlier_class=int(dataset_cfg.get("outlier_class", 1)),
+        sample_seed=int(training_seed),
+        device=device,
+    )
+    metrics.update(
+        {
+            "method": method_cfg["name"],
+            "dataset": dataset_cfg["name"],
+            "seed": int(training_seed),
+            "split_seed": _resolve_run_split_seed(experiment_cfg, training_seed),
+            "source_method": source_method,
+            "training_performed": False,
+        }
+    )
+    return metrics, predictions
+
+
 def run_contrastive_logprob_recon_shared_trunk(
     ap,
     dataset_cfg: dict,
@@ -5281,6 +5327,7 @@ def main() -> None:
                     "contrastive_logprob_recon",
                     "contrastive_logprob_recon_twin",
                     "contrastive_logprob_recon_dualhead_fusion",
+                    "tokenwise_projection_rescore",
                 }
                 have_predictions = (not needs_predictions) or os.path.exists(pred_path)
                 if os.path.exists(eval_metrics_path) and have_predictions and not args.force:
@@ -5354,6 +5401,11 @@ def main() -> None:
                         )
                     elif routine == "tokenwise_contrastive_logprob_recon":
                         eval_metrics, predictions = run_tokenwise_contrastive_logprob_recon(
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
+                            test_ap=test_ap,
+                        )
+                    elif routine == "tokenwise_projection_rescore":
+                        eval_metrics, predictions = run_tokenwise_projection_rescore(
                             ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
                         )
