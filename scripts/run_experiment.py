@@ -620,6 +620,12 @@ def run_contrastive_logprob_recon(
             else list(range(len(relevant_layers)))
         )
         pair_mode = data_cfg.get("token_pair_mode", "first_anchored")
+        shuffle_length_bucket_size = int(
+            data_cfg.get("shuffle_length_bucket_size", 8)
+        )
+        emit_view_logprob_targets = bool(
+            data_cfg.get("emit_view_logprob_targets", False)
+        )
 
         train_ds = TokenwiseContrastiveDataset(
             train_base_ds,
@@ -627,6 +633,8 @@ def run_contrastive_logprob_recon(
             num_views=data_cfg.get("num_views", 2),
             token_pair_mode=pair_mode,
             min_response_tokens=2,
+            shuffle_length_bucket_size=shuffle_length_bucket_size,
+            emit_view_logprob_targets=emit_view_logprob_targets,
         )
         val_base_ds = (
             ap.get_dataset("val", **ds_kwargs)
@@ -639,6 +647,8 @@ def run_contrastive_logprob_recon(
             num_views=data_cfg.get("num_views", 2),
             token_pair_mode=pair_mode,
             min_response_tokens=2,
+            shuffle_length_bucket_size=shuffle_length_bucket_size,
+            emit_view_logprob_targets=emit_view_logprob_targets,
         )
         test_base_ds = eval_ap.get_dataset("test", **ds_kwargs)
         train_eval_ds = TokenwiseContrastiveDataset(
@@ -648,6 +658,8 @@ def run_contrastive_logprob_recon(
             token_pair_mode=pair_mode,
             fixed_token=0,
             min_response_tokens=1,
+            shuffle_length_bucket_size=shuffle_length_bucket_size,
+            emit_view_logprob_targets=False,
         )
         val_eval_ds = TokenwiseContrastiveDataset(
             val_base_ds,
@@ -656,6 +668,8 @@ def run_contrastive_logprob_recon(
             token_pair_mode=pair_mode,
             fixed_token=0,
             min_response_tokens=1,
+            shuffle_length_bucket_size=shuffle_length_bucket_size,
+            emit_view_logprob_targets=False,
         )
         test_ds = TokenwiseContrastiveDataset(
             test_base_ds,
@@ -664,13 +678,18 @@ def run_contrastive_logprob_recon(
             token_pair_mode=pair_mode,
             fixed_token=0,
             min_response_tokens=1,
+            shuffle_length_bucket_size=shuffle_length_bucket_size,
+            emit_view_logprob_targets=False,
         )
         logger.info(
-            "token-wise cache adapter={} pair_mode={} base_cache_id={} "
+            "token-wise cache adapter={} pair_mode={} causal_objective={} "
+            "source_aligned_recon={} base_cache_id={} "
             "train_base={} train_pairs={} train_t0={} test_t0={} "
             "depth_sequence={}",
             view_adapter,
             pair_mode,
+            train_cfg.get("contrastive_objective", "legacy_supcon"),
+            emit_view_logprob_targets,
             id(train_base_ds.cache),
             len(train_base_ds),
             len(train_ds),
@@ -683,6 +702,27 @@ def run_contrastive_logprob_recon(
         val_ds = ap.get_dataset("val", **ds_kwargs) if has_val else test_ds
         train_eval_ds = None
         val_eval_ds = None
+
+    contrastive_objective = str(
+        train_cfg.get("contrastive_objective", "legacy_supcon")
+    ).strip().lower()
+    if contrastive_objective == "tokenwise_causal_control":
+        if not _tokenwise:
+            raise ValueError(
+                "tokenwise_causal_control is valid only for the token-wise routine"
+            )
+        if int(data_cfg.get("num_views", 2)) != 2:
+            raise ValueError("tokenwise causal controls require exactly two views")
+        if not bool(data_cfg.get("emit_view_logprob_targets", False)):
+            raise ValueError(
+                "tokenwise causal controls require source-aligned per-view "
+                "logprob targets"
+            )
+        if pair_mode not in {"first_anchored", "first_same", "shuffled_later"}:
+            raise ValueError(
+                "tokenwise causal control pair mode must be one of "
+                "{'first_anchored', 'first_same', 'shuffled_later'}"
+            )
 
     model_params = method_cfg.get("model_params", {})
     model_class = str(method_cfg.get("model_class", "logprob_recon_progressive_compressor")).strip().lower()
@@ -849,6 +889,9 @@ def run_contrastive_logprob_recon(
             snapshot_keep_last=3,
             use_labels=train_cfg.get("use_labels", False),
             ignore_label=train_cfg.get("ignore_label", -1),
+            contrastive_objective=contrastive_objective,
+            temporal_loss_weight=train_cfg.get("temporal_loss_weight", 1.0),
+            class_loss_weight=train_cfg.get("class_loss_weight", 1.0),
             persistent_workers=experiment_cfg.get("persistent_workers", True),
             recon_lambda=model_params.get("recon_lambda", 1.0),
             use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", True),
@@ -1136,6 +1179,19 @@ def run_contrastive_logprob_recon(
                 ),
                 "token_pair_mode": data_cfg.get(
                     "token_pair_mode", "first_anchored"
+                ),
+                "contrastive_objective": contrastive_objective,
+                "temporal_loss_weight": float(
+                    train_cfg.get("temporal_loss_weight", 1.0)
+                ),
+                "class_loss_weight": float(
+                    train_cfg.get("class_loss_weight", 1.0)
+                ),
+                "source_aligned_view_reconstruction": bool(
+                    data_cfg.get("emit_view_logprob_targets", False)
+                ),
+                "shuffle_length_bucket_size": int(
+                    data_cfg.get("shuffle_length_bucket_size", 8)
                 ),
                 "primary_eval_token": 0,
                 "activation_cache_reused": bool(

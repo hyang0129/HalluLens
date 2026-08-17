@@ -31,6 +31,9 @@ class TokenwiseContrastiveDataset(Dataset):
         to the encoder.  For Issue #151 these are post-block rows ``1..32``.
     token_pair_mode:
         ``first_anchored`` emits token zero followed by sampled later tokens;
+        ``first_same`` emits token zero twice so model stochasticity supplies
+        the augmentation control; ``shuffled_later`` pairs token zero with a
+        later token from a different, label/length-matched response;
         ``random_distinct`` samples all positions without replacement.
     fixed_token:
         When set, emit only this token position.  The primary KNN surface uses
@@ -51,11 +54,13 @@ class TokenwiseContrastiveDataset(Dataset):
         layer_positions: Sequence[int],
         num_views: int = 2,
         token_pair_mode: Literal[
-            "first_anchored", "random_distinct"
+            "first_anchored", "first_same", "shuffled_later", "random_distinct"
         ] = "first_anchored",
         fixed_token: Optional[int] = None,
         min_response_tokens: int = 0,
         view_sampling_with_replacement: bool = False,
+        shuffle_length_bucket_size: int = 8,
+        emit_view_logprob_targets: bool = False,
         source_indices: Optional[Sequence[int]] = None,
     ) -> None:
         required = ("cache", "labels", "_row_indices")
@@ -84,10 +89,18 @@ class TokenwiseContrastiveDataset(Dataset):
         self.num_views = int(num_views)
         if self.num_views < 1:
             raise ValueError("num_views must be at least one")
-        if token_pair_mode not in ("first_anchored", "random_distinct"):
+        if token_pair_mode not in (
+            "first_anchored",
+            "first_same",
+            "shuffled_later",
+            "random_distinct",
+        ):
             raise ValueError(
-                "token_pair_mode must be 'first_anchored' or 'random_distinct'"
+                "token_pair_mode must be one of {'first_anchored', "
+                "'first_same', 'shuffled_later', 'random_distinct'}"
             )
+        if token_pair_mode in ("first_same", "shuffled_later") and self.num_views != 2:
+            raise ValueError(f"{token_pair_mode} requires exactly two views")
         self.token_pair_mode = str(token_pair_mode)
         self.fixed_token = int(fixed_token) if fixed_token is not None else None
         if self.fixed_token is not None and not (
@@ -101,6 +114,10 @@ class TokenwiseContrastiveDataset(Dataset):
         if self.min_response_tokens < 0:
             raise ValueError("min_response_tokens must be non-negative")
         self.view_sampling_with_replacement = bool(view_sampling_with_replacement)
+        self.shuffle_length_bucket_size = int(shuffle_length_bucket_size)
+        if self.shuffle_length_bucket_size < 1:
+            raise ValueError("shuffle_length_bucket_size must be positive")
+        self.emit_view_logprob_targets = bool(emit_view_logprob_targets)
 
         base_labels = np.asarray(base_dataset.labels)
         self._base_labels = base_labels
@@ -159,6 +176,55 @@ class TokenwiseContrastiveDataset(Dataset):
             )
         self._valid_indices = candidates
 
+        # The shuffled control keeps the anchor cohort identical to the other
+        # two arms. Every anchor must have a different same-label partner; we
+        # fail instead of silently filtering rows. Prefer the exact response-
+        # length bucket and fall back to the nearest same-label response length
+        # only when a bucket contains the anchor alone.
+        self._shuffle_partner_candidates: dict[int, tuple[int, ...]] = {}
+        if self.token_pair_mode == "shuffled_later":
+            valid = [int(value) for value in self._valid_indices]
+            groups: dict[tuple[int, int], list[int]] = {}
+            for logical_idx in valid:
+                label = int(self._base_labels[logical_idx])
+                bucket = self._length_bucket(self._response_lengths[logical_idx])
+                groups.setdefault((label, bucket), []).append(logical_idx)
+
+            for logical_idx in valid:
+                label = int(self._base_labels[logical_idx])
+                bucket = self._length_bucket(self._response_lengths[logical_idx])
+                exact = [
+                    partner
+                    for partner in groups[(label, bucket)]
+                    if partner != logical_idx
+                ]
+                if exact:
+                    partners = exact
+                else:
+                    same_label = [
+                        partner
+                        for partner in valid
+                        if partner != logical_idx
+                        and int(self._base_labels[partner]) == label
+                    ]
+                    if not same_label:
+                        raise ValueError(
+                            "shuffled_later requires at least two eligible rows "
+                            f"for label {label}"
+                        )
+                    anchor_len = int(self._response_lengths[logical_idx])
+                    best_gap = min(
+                        abs(int(self._response_lengths[partner]) - anchor_len)
+                        for partner in same_label
+                    )
+                    partners = [
+                        partner
+                        for partner in same_label
+                        if abs(int(self._response_lengths[partner]) - anchor_len)
+                        == best_gap
+                    ]
+                self._shuffle_partner_candidates[logical_idx] = tuple(partners)
+
         # Compatibility attributes consumed by the existing trainer.
         self._num_views = self.num_views
         self._max_resp = int(self.cache.shape[2])
@@ -191,10 +257,17 @@ class TokenwiseContrastiveDataset(Dataset):
             fixed_token=token_index,
             min_response_tokens=token_index + 1,
             view_sampling_with_replacement=False,
+            shuffle_length_bucket_size=self.shuffle_length_bucket_size,
+            emit_view_logprob_targets=self.emit_view_logprob_targets,
             source_indices=self._valid_indices,
         )
 
-    def _select_token_positions(self, logical_idx: int) -> list[int]:
+    def _length_bucket(self, response_len: int) -> int:
+        return max(0, (int(response_len) - 2) // self.shuffle_length_bucket_size)
+
+    def _select_view_sources(
+        self, logical_idx: int
+    ) -> tuple[list[int], list[int]]:
         response_len = max(
             0,
             min(
@@ -208,11 +281,30 @@ class TokenwiseContrastiveDataset(Dataset):
                     f"fixed_token={self.fixed_token} unavailable for "
                     f"response_len={response_len}"
                 )
-            return [self.fixed_token] * self.num_views
+            return (
+                [logical_idx] * self.num_views,
+                [self.fixed_token] * self.num_views,
+            )
+
+        if self.token_pair_mode == "first_same":
+            return [logical_idx, logical_idx], [0, 0]
+
+        if self.token_pair_mode == "shuffled_later":
+            partner = random.choice(self._shuffle_partner_candidates[logical_idx])
+            partner_len = max(
+                0,
+                min(
+                    int(self._response_lengths[partner]),
+                    int(self.cache.shape[2]),
+                ),
+            )
+            if partner_len < 2:
+                raise RuntimeError("shuffled_later selected an ineligible partner")
+            return [logical_idx, partner], [0, random.randrange(1, partner_len)]
 
         if self.token_pair_mode == "first_anchored":
             if self.num_views == 1:
-                return [0]
+                return [logical_idx], [0]
             later = list(range(1, response_len))
             needed = self.num_views - 1
             if self.view_sampling_with_replacement:
@@ -228,17 +320,23 @@ class TokenwiseContrastiveDataset(Dataset):
                         f"response_len >= {self.num_views}; got {response_len}"
                     )
                 sampled = random.sample(later, needed)
-            return [0, *sampled]
+            return [logical_idx] * self.num_views, [0, *sampled]
 
         positions = list(range(response_len))
         if self.view_sampling_with_replacement:
-            return random.choices(positions, k=self.num_views)
+            return (
+                [logical_idx] * self.num_views,
+                random.choices(positions, k=self.num_views),
+            )
         if len(positions) < self.num_views:
             raise ValueError(
                 f"random_distinct {self.num_views}-view sampling requires "
                 f"response_len >= {self.num_views}; got {response_len}"
             )
-        return random.sample(positions, self.num_views)
+        return (
+            [logical_idx] * self.num_views,
+            random.sample(positions, self.num_views),
+        )
 
     def _auxiliary_fields(self, logical_idx: int) -> Dict[str, Any]:
         getter = getattr(self.base_dataset, "get_auxiliary_fields", None)
@@ -253,18 +351,25 @@ class TokenwiseContrastiveDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         logical_idx = int(self._valid_indices[idx])
-        cache_idx = int(self._base_rows[logical_idx])
-        token_positions = self._select_token_positions(logical_idx)
+        source_indices, token_positions = self._select_view_sources(logical_idx)
+        source_cache_indices = [
+            int(self._base_rows[source_idx]) for source_idx in source_indices
+        ]
 
         trajectories = np.stack(
             [
                 np.array(
                     self.cache[
-                        cache_idx, self.layer_positions, token_position, :
+                        source_cache_idx,
+                        self.layer_positions,
+                        token_position,
+                        :,
                     ],
                     dtype=np.float32,
                 )
-                for token_position in token_positions
+                for source_cache_idx, token_position in zip(
+                    source_cache_indices, token_positions
+                )
             ],
             axis=0,
         )
@@ -274,11 +379,36 @@ class TokenwiseContrastiveDataset(Dataset):
             "view_token_indices": torch.tensor(
                 token_positions, dtype=torch.long
             ),
+            "view_source_indices": torch.tensor(
+                source_indices, dtype=torch.long
+            ),
+            "view_source_response_lens": torch.tensor(
+                [int(self._response_lengths[source_idx]) for source_idx in source_indices],
+                dtype=torch.long,
+            ),
+            "temporal_same_response": torch.tensor(
+                source_indices[0] == source_indices[1]
+                if len(source_indices) > 1
+                else True,
+                dtype=torch.bool,
+            ),
             "halu": torch.tensor(
                 float(self._base_labels[logical_idx]), dtype=torch.float32
             ),
             "hashkey": self._prompt_hashes[logical_idx],
             "response_len": int(self._response_lengths[logical_idx]),
         }
-        sample.update(self._auxiliary_fields(logical_idx))
+        auxiliary_by_source: dict[int, Dict[str, Any]] = {}
+        for source_idx in set(source_indices):
+            auxiliary_by_source[source_idx] = self._auxiliary_fields(source_idx)
+        sample.update(auxiliary_by_source[logical_idx])
+        if self.emit_view_logprob_targets:
+            targets = [
+                auxiliary_by_source[source_idx].get("response_token_logprobs")
+                for source_idx in source_indices
+            ]
+            if all(target is not None for target in targets):
+                sample["view_response_token_logprobs"] = torch.stack(
+                    [target.float() for target in targets], dim=0
+                )
         return sample

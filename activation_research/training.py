@@ -383,6 +383,91 @@ class SupConLoss(nn.Module):
         return loss
 
 
+class TokenwiseCausalContrastiveLoss(nn.Module):
+    """Matched loss for the Issue #155 three-arm temporal control.
+
+    The class-level term consumes token zero only and is therefore identical
+    across view-construction arms. The instance-level term treats the two
+    supplied views as the designated temporal/augmentation pair for every
+    example. This separation avoids the legacy ``ignore_label`` mask making a
+    shuffled same-label view indistinguishable from a same-response view for
+    the compacted class.
+    """
+
+    def __init__(
+        self,
+        *,
+        temperature: float = 0.07,
+        base_temperature: float = 0.07,
+        ignore_label: int = 1,
+        temporal_weight: float = 1.0,
+        class_weight: float = 1.0,
+    ) -> None:
+        super().__init__()
+        self.temporal_weight = float(temporal_weight)
+        self.class_weight = float(class_weight)
+        if self.temporal_weight < 0 or self.class_weight < 0:
+            raise ValueError("causal contrastive loss weights must be non-negative")
+        if self.temporal_weight == 0 and self.class_weight == 0:
+            raise ValueError(
+                "at least one causal contrastive loss weight must be positive"
+            )
+
+        self.temporal_loss = SupConLoss(
+            temperature=temperature,
+            base_temperature=base_temperature,
+            ignore_label=-1,
+            contrast_mode="all",
+        )
+        self.class_loss = SupConLoss(
+            temperature=temperature,
+            base_temperature=base_temperature,
+            ignore_label=ignore_label,
+            contrast_mode="one",
+        )
+
+    def components(
+        self,
+        features: torch.Tensor,
+        *,
+        labels: torch.Tensor,
+        sample_ids: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if features.ndim != 3 or features.shape[1] != 2:
+            raise ValueError(
+                "tokenwise causal control requires features shaped (B, 2, D)"
+            )
+        if labels is None:
+            raise ValueError("tokenwise causal class loss requires labels")
+
+        temporal = self.temporal_loss(features)
+        # Keep the class geometry independent of the constructed second view.
+        class_level = self.class_loss(
+            features[:, :1, :],
+            labels=labels,
+            sample_ids=sample_ids,
+        )
+        return temporal, class_level
+
+    def forward(
+        self,
+        features: torch.Tensor,
+        labels: torch.Tensor | None = None,
+        mask=None,
+        sample_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if mask is not None:
+            raise ValueError(
+                "tokenwise causal loss does not accept an external mask"
+            )
+        temporal, class_level = self.components(
+            features,
+            labels=labels,
+            sample_ids=sample_ids,
+        )
+        return self.temporal_weight * temporal + self.class_weight * class_level
+
+
 def _build_balanced_sampler(dataset):
     """
     Build a WeightedRandomSampler for balanced class sampling.
@@ -754,6 +839,26 @@ def _contrastive_collate_with_logprob(batch):
             padded.append(lp)
         out["logprob"] = torch.stack(padded, dim=0)  # (B, max_len)
 
+    # Issue #155 shuffled controls need each view to reconstruct the response
+    # that produced that view. Same-response and t0+t0 arms emit the same
+    # source-aligned shape so all three arms follow this exact code path.
+    view_key = "view_response_token_logprobs"
+    if all(view_key in b for b in batch):
+        raw_views = [b[view_key].float() for b in batch]
+        num_views = {int(value.shape[0]) for value in raw_views}
+        if len(num_views) != 1:
+            raise ValueError("view logprob targets must have a fixed view count")
+        max_len = max(int(value.shape[-1]) for value in raw_views)
+        padded_views = [
+            torch.nn.functional.pad(
+                value,
+                (0, max_len - int(value.shape[-1])),
+                value=float("nan"),
+            )
+            for value in raw_views
+        ]
+        out["view_logprob"] = torch.stack(padded_views, dim=0)
+
     return out
 
 
@@ -784,6 +889,9 @@ def train_contrastive_logprob_recon(
     ignore_label=-1,
     same_sample_weight=1.0,
     same_class_weight=1.0,
+    contrastive_objective: str = "legacy_supcon",
+    temporal_loss_weight: float = 1.0,
+    class_loss_weight: float = 1.0,
     balanced_sampling=False,
     recon_lambda: float = None,
     use_infinite_index_stream: bool = False,
@@ -913,13 +1021,30 @@ def train_contrastive_logprob_recon(
         if str(lr_schedule).lower() == "cosine"
         else None
     )
-    loss_fn = SupConLoss(
-        temperature=temperature,
-        base_temperature=base_temperature,
-        ignore_label=ignore_label,
-        same_sample_weight=same_sample_weight,
-        same_class_weight=same_class_weight,
-    )
+    contrastive_objective = str(contrastive_objective).strip().lower()
+    if contrastive_objective == "tokenwise_causal_control":
+        if not use_labels:
+            raise ValueError("tokenwise causal control requires use_labels=True")
+        loss_fn = TokenwiseCausalContrastiveLoss(
+            temperature=temperature,
+            base_temperature=base_temperature,
+            ignore_label=ignore_label,
+            temporal_weight=temporal_loss_weight,
+            class_weight=class_loss_weight,
+        )
+    elif contrastive_objective == "legacy_supcon":
+        loss_fn = SupConLoss(
+            temperature=temperature,
+            base_temperature=base_temperature,
+            ignore_label=ignore_label,
+            same_sample_weight=same_sample_weight,
+            same_class_weight=same_class_weight,
+        )
+    else:
+        raise ValueError(
+            "contrastive_objective must be one of "
+            "{'legacy_supcon', 'tokenwise_causal_control'}"
+        )
 
     start_epoch = 0
     best_loss = float("inf")
@@ -1040,6 +1165,7 @@ def train_contrastive_logprob_recon(
         model.train()
 
         total_loss = total_supcon = total_recon = 0.0
+        total_temporal = total_class = 0.0
         total_intra_cos = total_intra_inter = 0.0
         n_batches = 0
 
@@ -1056,6 +1182,7 @@ def train_contrastive_logprob_recon(
         buffer_views = []
         buffer_view_indices = []
         buffer_logprobs = []
+        buffer_view_logprobs = []
         buffer_token_masks = []
         buffer_labels = [] if use_labels else None
         buffer_sample_ids = [] if use_labels else None
@@ -1081,6 +1208,10 @@ def train_contrastive_logprob_recon(
 
             if "logprob" in batch:
                 buffer_logprobs.append(batch["logprob"].to(device, non_blocking=True))
+            if "view_logprob" in batch:
+                buffer_view_logprobs.append(
+                    batch["view_logprob"].to(device, non_blocking=True)
+                )
 
             if use_labels:
                 labels = batch["halu"].to(device, non_blocking=True)
@@ -1108,10 +1239,16 @@ def train_contrastive_logprob_recon(
                 )
                 view_idx_full = torch.cat(buffer_view_indices, dim=0) if buffer_view_indices else None
                 logprob_full = torch.cat(buffer_logprobs, dim=0) if buffer_logprobs else None
+                view_logprob_full = (
+                    torch.cat(buffer_view_logprobs, dim=0)
+                    if buffer_view_logprobs
+                    else None
+                )
                 buffer_views = []
                 buffer_token_masks = []
                 buffer_view_indices = []
                 buffer_logprobs = []
+                buffer_view_logprobs = []
 
                 # Assemble labels before augmentation (mixup needs them)
                 labels_full = None
@@ -1156,19 +1293,52 @@ def train_contrastive_logprob_recon(
                 )
                 z_views = z_flat.reshape(bsz, num_views, -1)
 
-                # SupCon loss
-                if use_labels:
-                    supcon = loss_fn(z_views, labels=labels_full, sample_ids=sample_ids_full)
+                # Contrastive loss. Issue #155 explicitly separates a class
+                # term on t0 from an instance-pair term so only view
+                # construction differs between causal-control arms.
+                if isinstance(loss_fn, TokenwiseCausalContrastiveLoss):
+                    temporal_contrastive, class_contrastive = loss_fn.components(
+                        z_views,
+                        labels=labels_full,
+                        sample_ids=sample_ids_full,
+                    )
+                    supcon = (
+                        loss_fn.temporal_weight * temporal_contrastive
+                        + loss_fn.class_weight * class_contrastive
+                    )
+                elif use_labels:
+                    temporal_contrastive = class_contrastive = None
+                    supcon = loss_fn(
+                        z_views,
+                        labels=labels_full,
+                        sample_ids=sample_ids_full,
+                    )
                 else:
+                    temporal_contrastive = class_contrastive = None
                     supcon = loss_fn(z_views)
 
                 # Auxiliary reconstruction loss
                 recon = torch.zeros(1, device=device).squeeze()
                 recon_diag = {}
-                if logprob_full is not None and _lambda > 0.0:
-                    # Expand logprob from (B, L) to (B*num_views, L) to match z_flat
-                    logprob_expanded = logprob_full.unsqueeze(1).expand(-1, num_views, -1)
-                    logprob_expanded = logprob_expanded.reshape(bsz * num_views, -1)
+                if (
+                    view_logprob_full is not None or logprob_full is not None
+                ) and _lambda > 0.0:
+                    if view_logprob_full is not None:
+                        if tuple(view_logprob_full.shape[:2]) != (bsz, num_views):
+                            raise ValueError(
+                                "view logprob targets do not align with activation views"
+                            )
+                        logprob_expanded = view_logprob_full.reshape(
+                            bsz * num_views, -1
+                        )
+                    else:
+                        # Legacy same-response target: expand (B, L) over views.
+                        logprob_expanded = logprob_full.unsqueeze(1).expand(
+                            -1, num_views, -1
+                        )
+                        logprob_expanded = logprob_expanded.reshape(
+                            bsz * num_views, -1
+                        )
                     # Mask out padding NaNs with the sequence mean
                     nan_mask = logprob_expanded.isnan()
                     if nan_mask.any():
@@ -1189,6 +1359,9 @@ def train_contrastive_logprob_recon(
 
                 total_loss += loss.item()
                 total_supcon += supcon.item()
+                if temporal_contrastive is not None:
+                    total_temporal += float(temporal_contrastive.detach())
+                    total_class += float(class_contrastive.detach())
                 total_recon += float(recon.detach())
                 total_intra_cos += intra_sample_cosine_mean(z_views)
                 total_intra_inter += intra_inter_margin(z_views)
@@ -1200,11 +1373,23 @@ def train_contrastive_logprob_recon(
                     supcon=total_supcon / n_batches,
                     recon=total_recon / n_batches,
                     suppressed=recon_diag.get("suppressed", "N/A"),
+                    temporal=(
+                        total_temporal / n_batches
+                        if temporal_contrastive is not None
+                        else "N/A"
+                    ),
+                    class_term=(
+                        total_class / n_batches
+                        if class_contrastive is not None
+                        else "N/A"
+                    ),
                 )
 
         avg_loss = total_loss / max(1, n_batches)
         avg_supcon = total_supcon / max(1, n_batches)
         avg_recon = total_recon / max(1, n_batches)
+        avg_temporal = total_temporal / max(1, n_batches)
+        avg_class = total_class / max(1, n_batches)
         avg_intra_cos = total_intra_cos / max(1, n_batches)
         avg_intra_inter = total_intra_inter / max(1, n_batches)
         print(
@@ -1212,6 +1397,11 @@ def train_contrastive_logprob_recon(
             f"(SupCon={avg_supcon:.4f}, Recon={avg_recon:.4f}) "
             f"- IntraCos: {avg_intra_cos:.4f} - IntraInterMargin: {avg_intra_inter:.4f}"
         )
+        if contrastive_objective == "tokenwise_causal_control":
+            print(
+                f"Epoch {epoch + 1}/{epochs} - Causal components: "
+                f"Temporal={avg_temporal:.4f}, ClassT0={avg_class:.4f}"
+            )
 
         test_loss = float("inf")
         test_intra_cos = test_intra_inter = 0.0
@@ -1268,6 +1458,11 @@ def train_contrastive_logprob_recon(
                 "train_loss": avg_loss,
                 "train_supcon": avg_supcon,
                 "train_recon": avg_recon,
+                "train_temporal_contrastive": avg_temporal,
+                "train_class_t0_contrastive": avg_class,
+                "contrastive_objective": contrastive_objective,
+                "temporal_loss_weight": float(temporal_loss_weight),
+                "class_loss_weight": float(class_loss_weight),
                 "train_intra_cos": avg_intra_cos,
                 "train_intra_inter_margin": avg_intra_inter,
                 "test_loss": test_loss,
@@ -1330,7 +1525,7 @@ def train_contrastive_logprob_recon(
                 best_val_epoch,
             )
 
-    return {
+    summary = {
         "checkpoint_selection": (
             f"maximum_{validation_score_name}"
             if select_on_val and validation_score_fn is not None
@@ -1354,6 +1549,15 @@ def train_contrastive_logprob_recon(
         ),
         "best_validation_epoch": best_val_epoch,
     }
+    if contrastive_objective == "tokenwise_causal_control":
+        summary.update(
+            {
+                "contrastive_objective": contrastive_objective,
+                "temporal_loss_weight": float(temporal_loss_weight),
+                "class_loss_weight": float(class_loss_weight),
+            }
+        )
+    return summary
 
 
 def _contrastive_collate_with_logprob_attn(batch):

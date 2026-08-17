@@ -6,4 +6,4 @@ PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 export PROJECT_ROOT
 export DISPATCH_ROOT="${DISPATCH_ROOT:-$PROJECT_ROOT/shared/issue_151_knnval_rerun_dispatch}"
 
-exec "$SCRIPT_DIR/worker_149.sh"
+exec "$SCRIPT_DIR/worker_experiment.sh"

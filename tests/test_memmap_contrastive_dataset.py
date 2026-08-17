@@ -432,6 +432,140 @@ def test_tokenwise_adapter_reuses_one_contrastive_cache_for_train_and_eval(tmp_p
     assert token0_item["response_token_logprobs"].shape == (12,)
 
 
+def test_tokenwise_first_same_is_a_t0_dropout_control(tmp_path):
+    from activation_research.tokenwise_contrastive_dataset import (
+        TokenwiseContrastiveDataset,
+    )
+
+    capture = _make_full_capture_dir(tmp_path, n_samples=8)
+    base = MemmapContrastiveDataset(
+        capture,
+        split="all",
+        num_views=2,
+        relevant_layers=[1, 2, 3, 4],
+        include_response_logprobs=True,
+        pad_length=12,
+    )
+    ds = TokenwiseContrastiveDataset(
+        base,
+        layer_positions=[1, 2, 3, 4],
+        num_views=2,
+        token_pair_mode="first_same",
+        min_response_tokens=2,
+        emit_view_logprob_targets=True,
+    )
+
+    item = ds[0]
+    assert item["view_token_indices"].tolist() == [0, 0]
+    assert item["view_source_indices"].tolist() == [0, 0]
+    assert item["temporal_same_response"].item() is True
+    torch.testing.assert_close(
+        item["views_activations"][0], item["views_activations"][1]
+    )
+    torch.testing.assert_close(
+        item["view_response_token_logprobs"][0],
+        item["view_response_token_logprobs"][1],
+        equal_nan=True,
+    )
+
+
+def test_tokenwise_shuffled_later_is_label_and_length_bucket_matched(tmp_path):
+    from activation_research.tokenwise_contrastive_dataset import (
+        TokenwiseContrastiveDataset,
+    )
+
+    labels = np.array([0, 0, 1, 1, 0, 0, 1, 1], dtype=bool)
+    lengths = np.array([3, 4, 3, 4, 10, 11, 10, 11], dtype=np.int32)
+    capture = _make_full_capture_dir(
+        tmp_path,
+        n_samples=8,
+        halu_pattern=labels,
+        response_lengths=lengths,
+    )
+    base = MemmapContrastiveDataset(
+        capture,
+        split="all",
+        num_views=2,
+        relevant_layers=[1, 2, 3, 4],
+        include_response_logprobs=True,
+        pad_length=12,
+    )
+    ds = TokenwiseContrastiveDataset(
+        base,
+        layer_positions=[1, 2, 3, 4],
+        num_views=2,
+        token_pair_mode="shuffled_later",
+        min_response_tokens=2,
+        shuffle_length_bucket_size=8,
+        emit_view_logprob_targets=True,
+    )
+
+    for item_index in range(len(ds)):
+        item = ds[item_index]
+        anchor, partner = item["view_source_indices"].tolist()
+        _, later_token = item["view_token_indices"].tolist()
+        assert anchor != partner
+        assert int(base.labels[anchor]) == int(base.labels[partner])
+        anchor_bucket = (int(lengths[anchor]) - 2) // 8
+        partner_bucket = (int(lengths[partner]) - 2) // 8
+        assert anchor_bucket == partner_bucket
+        assert 1 <= later_token < int(lengths[partner])
+        np.testing.assert_array_equal(
+            item["views_activations"][1].numpy(),
+            np.array(
+                base.cache[
+                    int(base._row_indices[partner]),
+                    [1, 2, 3, 4],
+                    later_token,
+                    :,
+                ],
+                dtype=np.float32,
+            ),
+        )
+        partner_target = base.get_auxiliary_fields(partner)[
+            "response_token_logprobs"
+        ]
+        torch.testing.assert_close(
+            item["view_response_token_logprobs"][1],
+            partner_target,
+            equal_nan=True,
+        )
+
+
+def test_issue155_three_arms_keep_identical_anchor_cohorts(tmp_path):
+    from activation_research.tokenwise_contrastive_dataset import (
+        TokenwiseContrastiveDataset,
+    )
+
+    capture = _make_full_capture_dir(
+        tmp_path,
+        n_samples=8,
+        response_lengths=np.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=np.int32),
+    )
+    base = MemmapContrastiveDataset(
+        capture,
+        split="all",
+        num_views=2,
+        relevant_layers=[1, 2, 3, 4],
+        include_response_logprobs=True,
+        pad_length=12,
+    )
+    datasets = [
+        TokenwiseContrastiveDataset(
+            base,
+            layer_positions=[1, 2, 3, 4],
+            num_views=2,
+            token_pair_mode=mode,
+            min_response_tokens=2,
+        )
+        for mode in ("first_anchored", "first_same", "shuffled_later")
+    ]
+
+    assert [dataset._valid_indices.tolist() for dataset in datasets] == [
+        [1, 2, 3, 4, 5, 6, 7]
+    ] * 3
+
+
 def test_tokenwise_dataset_trains_through_standard_joint_objective(tmp_path):
     from activation_research.model import LogprobReconProgressiveCompressor
     from activation_research.tokenwise_contrastive_dataset import (
@@ -487,6 +621,68 @@ def test_tokenwise_dataset_trains_through_standard_joint_objective(tmp_path):
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     assert checkpoint["min_total_steps"] == 3
     assert checkpoint["steps_per_epoch"] == 3
+
+
+def test_shuffled_tokenwise_dataset_trains_with_causal_objective(tmp_path):
+    from activation_research.model import LogprobReconProgressiveCompressor
+    from activation_research.tokenwise_contrastive_dataset import (
+        TokenwiseContrastiveDataset,
+    )
+    from activation_research.training import train_contrastive_logprob_recon
+
+    capture = _make_full_capture_dir(tmp_path, n_samples=8)
+    base = MemmapContrastiveDataset(
+        capture,
+        split="all",
+        num_views=2,
+        relevant_layers=[1, 2, 3, 4],
+        include_response_logprobs=True,
+        pad_length=12,
+    )
+    ds = TokenwiseContrastiveDataset(
+        base,
+        layer_positions=[1, 2, 3, 4],
+        num_views=2,
+        token_pair_mode="shuffled_later",
+        min_response_tokens=2,
+        emit_view_logprob_targets=True,
+    )
+    model = LogprobReconProgressiveCompressor(
+        input_dim=_SMALL_CFG["hidden_dim"],
+        final_dim=64,
+        block_dims=[128, 64],
+        input_dropout=0.0,
+        recon_seq_len=12,
+        recon_hidden_dim=32,
+    )
+
+    train_contrastive_logprob_recon(
+        model,
+        train_dataset=ds,
+        test_dataset=None,
+        epochs=1,
+        batch_size=4,
+        sub_batch_size=4,
+        lr=1e-4,
+        device="cpu",
+        num_workers=0,
+        checkpoint_dir=tmp_path / "causal_checkpoints",
+        persistent_workers=False,
+        use_labels=True,
+        ignore_label=1,
+        contrastive_objective="tokenwise_causal_control",
+        use_infinite_index_stream=True,
+        min_total_steps=2,
+    )
+
+    checkpoint = torch.load(
+        tmp_path / "causal_checkpoints" / "contrastive_last.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    assert checkpoint["contrastive_objective"] == "tokenwise_causal_control"
+    assert np.isfinite(checkpoint["train_temporal_contrastive"])
+    assert np.isfinite(checkpoint["train_class_t0_contrastive"])
 
 
 def test_dataset_emits_logprob_fields(tmp_path):
