@@ -384,7 +384,7 @@ class SupConLoss(nn.Module):
 
 
 class TokenwiseCausalContrastiveLoss(nn.Module):
-    """Matched loss for the Issue #155 three-arm temporal control.
+    """Matched temporal/class loss for the Issue #155/#154 controls.
 
     The class-level term consumes token zero only and is therefore identical
     across view-construction arms. The instance-level term treats the two
@@ -392,6 +392,11 @@ class TokenwiseCausalContrastiveLoss(nn.Module):
     example. This separation avoids the legacy ``ignore_label`` mask making a
     shuffled same-label view indistinguishable from a same-response view for
     the compacted class.
+
+    ``temporal_mode='symmetric'`` makes both views anchors. The two directional
+    modes make token zero the only query; ``t0_to_later_stopgrad`` additionally
+    detaches the later-token key from this temporal term. Other loss terms,
+    including reconstruction, retain their normal gradients.
     """
 
     def __init__(
@@ -402,6 +407,7 @@ class TokenwiseCausalContrastiveLoss(nn.Module):
         ignore_label: int = 1,
         temporal_weight: float = 1.0,
         class_weight: float = 1.0,
+        temporal_mode: str = "symmetric",
     ) -> None:
         super().__init__()
         self.temporal_weight = float(temporal_weight)
@@ -413,11 +419,25 @@ class TokenwiseCausalContrastiveLoss(nn.Module):
                 "at least one causal contrastive loss weight must be positive"
             )
 
+        self.temporal_mode = str(temporal_mode).strip().lower()
+        valid_temporal_modes = {
+            "symmetric",
+            "t0_to_later",
+            "t0_to_later_stopgrad",
+        }
+        if self.temporal_mode not in valid_temporal_modes:
+            raise ValueError(
+                "temporal_mode must be one of "
+                f"{sorted(valid_temporal_modes)}; got {temporal_mode!r}"
+            )
+
         self.temporal_loss = SupConLoss(
             temperature=temperature,
             base_temperature=base_temperature,
             ignore_label=-1,
-            contrast_mode="all",
+            contrast_mode=(
+                "all" if self.temporal_mode == "symmetric" else "one"
+            ),
         )
         self.class_loss = SupConLoss(
             temperature=temperature,
@@ -440,7 +460,16 @@ class TokenwiseCausalContrastiveLoss(nn.Module):
         if labels is None:
             raise ValueError("tokenwise causal class loss requires labels")
 
-        temporal = self.temporal_loss(features)
+        temporal_features = features
+        if self.temporal_mode == "t0_to_later_stopgrad":
+            # The later token remains a key for the t0 query but receives no
+            # gradient from the temporal term. Reconstruction is computed
+            # separately from the original features and therefore remains
+            # matched to the other Stage-A arms.
+            temporal_features = torch.stack(
+                (features[:, 0, :], features[:, 1, :].detach()), dim=1
+            )
+        temporal = self.temporal_loss(temporal_features)
         # Keep the class geometry independent of the constructed second view.
         class_level = self.class_loss(
             features[:, :1, :],
@@ -892,6 +921,7 @@ def train_contrastive_logprob_recon(
     contrastive_objective: str = "legacy_supcon",
     temporal_loss_weight: float = 1.0,
     class_loss_weight: float = 1.0,
+    causal_temporal_mode: str = "symmetric",
     balanced_sampling=False,
     recon_lambda: float = None,
     use_infinite_index_stream: bool = False,
@@ -938,6 +968,10 @@ def train_contrastive_logprob_recon(
         Same semantics as ``train_contrastive``.
     recon_lambda : float or None
         Override ``model.recon_lambda``.  Pass ``None`` to use the model default.
+    causal_temporal_mode : str
+        For ``tokenwise_causal_control``, choose symmetric anchors,
+        token-zero-only anchors, or token-zero anchors with a detached
+        later-token key. The detach applies only to the temporal term.
     steps_per_epoch_override : int or None
         When set, use this fixed step count per epoch instead of
         ``ceil(dataset_len / batch_size)``.  Requires
@@ -1049,6 +1083,7 @@ def train_contrastive_logprob_recon(
             ignore_label=ignore_label,
             temporal_weight=temporal_loss_weight,
             class_weight=class_loss_weight,
+            temporal_mode=causal_temporal_mode,
         )
     elif contrastive_objective == "legacy_supcon":
         loss_fn = SupConLoss(
@@ -1481,6 +1516,11 @@ def train_contrastive_logprob_recon(
                 "contrastive_objective": contrastive_objective,
                 "temporal_loss_weight": float(temporal_loss_weight),
                 "class_loss_weight": float(class_loss_weight),
+                "causal_temporal_mode": (
+                    loss_fn.temporal_mode
+                    if isinstance(loss_fn, TokenwiseCausalContrastiveLoss)
+                    else None
+                ),
                 "train_intra_cos": avg_intra_cos,
                 "train_intra_inter_margin": avg_intra_inter,
                 "test_loss": test_loss,
@@ -1573,6 +1613,7 @@ def train_contrastive_logprob_recon(
                 "contrastive_objective": contrastive_objective,
                 "temporal_loss_weight": float(temporal_loss_weight),
                 "class_loss_weight": float(class_loss_weight),
+                "causal_temporal_mode": loss_fn.temporal_mode,
             }
         )
     return summary

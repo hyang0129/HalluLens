@@ -1,5 +1,5 @@
 {
-  "name": "tokenwise_causal_shuffled_later",
+  "name": "tokenwise_causal_t0_to_later",
   "routine": "tokenwise_contrastive_logprob_recon",
   "model_class": "logprob_recon_progressive_compressor",
   "model_params": {
@@ -19,7 +19,7 @@
     "use_labels": true,
     "ignore_label": 1,
     "contrastive_objective": "tokenwise_causal_control",
-    "causal_temporal_mode": "symmetric",
+    "causal_temporal_mode": "t0_to_later",
     "temporal_loss_weight": 1.0,
     "class_loss_weight": 1.0,
     "use_infinite_index_stream": true,
@@ -40,7 +40,7 @@
     "view_adapter": "tokenwise_shared_contrastive_cache",
     "relevant_layers": "1-32",
     "num_views": 2,
-    "token_pair_mode": "shuffled_later",
+    "token_pair_mode": "first_anchored",
     "shuffle_length_bucket_size": 8,
     "emit_view_logprob_targets": true,
     "pad_length": 64,

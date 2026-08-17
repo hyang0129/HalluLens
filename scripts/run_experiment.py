@@ -949,6 +949,9 @@ def run_contrastive_logprob_recon(
             contrastive_objective=contrastive_objective,
             temporal_loss_weight=train_cfg.get("temporal_loss_weight", 1.0),
             class_loss_weight=train_cfg.get("class_loss_weight", 1.0),
+            causal_temporal_mode=train_cfg.get(
+                "causal_temporal_mode", "symmetric"
+            ),
             persistent_workers=experiment_cfg.get("persistent_workers", True),
             recon_lambda=model_params.get("recon_lambda", 1.0),
             use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", True),
@@ -1243,6 +1246,9 @@ def run_contrastive_logprob_recon(
                 ),
                 "class_loss_weight": float(
                     train_cfg.get("class_loss_weight", 1.0)
+                ),
+                "causal_temporal_mode": str(
+                    train_cfg.get("causal_temporal_mode", "symmetric")
                 ),
                 "source_aligned_view_reconstruction": bool(
                     data_cfg.get("emit_view_logprob_targets", False)

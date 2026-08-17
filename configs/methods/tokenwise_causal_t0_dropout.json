@@ -19,6 +19,7 @@
     "use_labels": true,
     "ignore_label": 1,
     "contrastive_objective": "tokenwise_causal_control",
+    "causal_temporal_mode": "symmetric",
     "temporal_loss_weight": 1.0,
     "class_loss_weight": 1.0,
     "use_infinite_index_stream": true,
