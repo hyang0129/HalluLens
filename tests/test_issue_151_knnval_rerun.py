@@ -4,7 +4,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from scripts.dispatch.build_issue_151_knnval_rerun_cells import build
+from scripts.dispatch.build_issue_151_knnval_rerun_cells import (
+    build,
+    build_tokenwise_full_sweep,
+)
 
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -43,14 +46,35 @@ def test_knnval_rerun_builder_creates_exact_fresh_matrix(tmp_path):
     assert all("mmlu" not in json.dumps(cell).lower() for cell in payloads)
 
 
-def test_knnval_experiments_are_seed_zero_and_non_mmlu():
+def test_tokenwise_full_sweep_reuses_seed_zero_cells(tmp_path):
+    dispatch_root = tmp_path / "dispatch"
+    assert build(dispatch_root, project_root=_ROOT) == 15
+    assert build_tokenwise_full_sweep(dispatch_root, project_root=_ROOT) == 20
+    assert build_tokenwise_full_sweep(dispatch_root, project_root=_ROOT) == 0
+
+    paths = sorted((dispatch_root / "pending").glob("*.json"))
+    payloads = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+    tokenwise = [
+        cell
+        for cell in payloads
+        if cell["method"] == "tokenwise_contrastive_first_anchored"
+    ]
+    assert len(tokenwise) == 25
+    assert {cell["dataset"] for cell in tokenwise} == _DATASETS
+    assert {cell["seed"] for cell in tokenwise} == {0, 1, 2, 3, 4}
+    assert len({(cell["dataset"], cell["seed"]) for cell in tokenwise}) == 25
+    assert all(cell["priority"] == "high" for cell in tokenwise)
+    assert all("mmlu" not in json.dumps(cell).lower() for cell in tokenwise)
+
+
+def test_knnval_experiments_cover_full_seed_sweep_and_non_mmlu():
     configs = sorted(
         (_ROOT / "configs/experiments").glob("issue151_knnval_*.json")
     )
     assert len(configs) == 5
     payloads = [json.loads(path.read_text(encoding="utf-8")) for path in configs]
     assert {payload["dataset"] for payload in payloads} == _DATASETS
-    assert all(payload["training_seeds"] == [0] for payload in payloads)
-    assert all(payload["split_seeds"] == [42] for payload in payloads)
+    assert all(payload["training_seeds"] == [0, 1, 2, 3, 4] for payload in payloads)
+    assert all(payload["split_seeds"] == [42, 1, 2, 3, 4] for payload in payloads)
     assert all(set(payload["methods"]) == _METHODS for payload in payloads)
     assert all("mmlu" not in json.dumps(payload).lower() for payload in payloads)

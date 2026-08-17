@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Drain the isolated issue #151 one-seed KNN-validation rerun queue.
+# Drain the issue #151 KNN-validation rerun/sweep queue.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
