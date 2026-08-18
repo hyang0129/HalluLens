@@ -19,6 +19,58 @@ import torch.nn.functional as F
 from .metrics import frozen_linear_probe_stats, knn_ood_stats
 
 
+def merge_projection_surface_results(
+    trunk_metrics: dict[str, Any],
+    trunk_predictions: list[dict[str, Any]],
+    projection_metrics: dict[str, Any],
+    projection_predictions: list[dict[str, Any]],
+) -> None:
+    """Namespace projection scores beside an existing trunk evaluation.
+
+    The function mutates the two trunk outputs in place. It deliberately keeps
+    ``knn_auroc`` as the canonical 512-d deployment-trunk score and writes the
+    alternate surface as ``projection_knn_auroc`` (and analogous metrics).
+    """
+    projection_key_names = {
+        "embedding_surface": "projection_embedding_surface",
+        "projection_dim": "projection_embedding_dim",
+        "projection_l2_normalized": "projection_l2_normalized",
+        "n_train": "projection_n_train",
+        "n_test": "projection_n_test",
+    }
+    for metric_name, value in projection_metrics.items():
+        if metric_name.startswith("source_"):
+            continue
+        output_name = projection_key_names.get(
+            metric_name, f"projection_{metric_name}"
+        )
+        trunk_metrics[output_name] = value
+    trunk_metrics["projection_source_trunk_knn_auroc"] = trunk_metrics.get(
+        "knn_auroc"
+    )
+    trunk_metrics["projection_source_trunk_cosine_knn_auroc"] = (
+        trunk_metrics.get("cosine_knn_auroc")
+    )
+    trunk_metrics["projection_source_trunk_linear_probe_auroc"] = (
+        trunk_metrics.get("linear_probe_auroc")
+    )
+
+    if len(projection_predictions) != len(trunk_predictions):
+        raise RuntimeError(
+            "projection and trunk predictions are not row-aligned: "
+            f"{len(projection_predictions)} != {len(trunk_predictions)}"
+        )
+    for trunk_prediction, projection_prediction in zip(
+        trunk_predictions, projection_predictions
+    ):
+        for score_name in (
+            "score_halu_projection_knn",
+            "score_halu_projection_cosine_knn",
+            "score_halu_projection_linear_probe",
+        ):
+            trunk_prediction[score_name] = projection_prediction[score_name]
+
+
 def _load_projection_tensors(checkpoint_path: Path) -> tuple[torch.Tensor, ...]:
     try:
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)

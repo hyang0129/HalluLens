@@ -1,0 +1,12 @@
+{
+  "name": "tokenwise_arch_v1_input_norm_only",
+  "extends": "tokenwise_contrastive_first_anchored",
+  "study_issue": 156,
+  "architecture_arm": "input_layernorm_only",
+  "training_recipe": "v1_first_anchored",
+  "model_params": {
+    "normalize_input": true,
+    "expected_total_params": 77546304,
+    "reference_total_params": 77538112
+  }
+}

@@ -7,7 +7,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from activation_research.projection_scoring import score_saved_projection
+from activation_research.projection_scoring import (
+    merge_projection_surface_results,
+    score_saved_projection,
+)
 from scripts.dispatch.build_issue_153_projection_eval_cells import build
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -93,6 +96,53 @@ def test_projection_rescore_uses_saved_head_and_emits_predictions(tmp_path):
     assert "score_halu_projection_knn" in predictions[0]
     assert "score_halu_projection_cosine_knn" in predictions[0]
     assert "score_halu_projection_linear_probe" in predictions[0]
+
+
+def test_projection_surface_results_are_namespaced_beside_trunk_scores():
+    trunk_metrics = {
+        "knn_auroc": 0.7,
+        "cosine_knn_auroc": 0.71,
+        "linear_probe_auroc": 0.72,
+    }
+    trunk_predictions = [{"score_halu": 0.1}, {"score_halu": 0.2}]
+    projection_metrics = {
+        "embedding_surface": "normalized_contrastive_projection",
+        "projection_dim": 128,
+        "projection_l2_normalized": True,
+        "n_train": 20,
+        "n_test": 2,
+        "knn_auroc": 0.8,
+        "cosine_knn_auroc": 0.81,
+        "linear_probe_auroc": 0.82,
+        "source_trunk_knn_auroc": 0.1,
+    }
+    projection_predictions = [
+        {
+            "score_halu_projection_knn": 0.3,
+            "score_halu_projection_cosine_knn": 0.4,
+            "score_halu_projection_linear_probe": 0.5,
+        },
+        {
+            "score_halu_projection_knn": 0.6,
+            "score_halu_projection_cosine_knn": 0.7,
+            "score_halu_projection_linear_probe": 0.8,
+        },
+    ]
+
+    merge_projection_surface_results(
+        trunk_metrics,
+        trunk_predictions,
+        projection_metrics,
+        projection_predictions,
+    )
+
+    assert trunk_metrics["knn_auroc"] == 0.7
+    assert trunk_metrics["projection_knn_auroc"] == 0.8
+    assert trunk_metrics["projection_cosine_knn_auroc"] == 0.81
+    assert trunk_metrics["projection_linear_probe_auroc"] == 0.82
+    assert trunk_metrics["projection_embedding_dim"] == 128
+    assert trunk_metrics["projection_source_trunk_knn_auroc"] == 0.7
+    assert trunk_predictions[0]["score_halu_projection_knn"] == 0.3
 
 
 def test_projection_builder_defers_unready_sources_and_queues_highest_priority(tmp_path):

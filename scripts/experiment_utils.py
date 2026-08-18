@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import json
 import os
+from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 
 class RunStatus(Enum):
@@ -42,6 +43,64 @@ def is_seeded_method(method_cfg: dict) -> bool:
     if method_cfg.get("training") is not None:
         return True
     return bool(method_cfg.get("seeded", False))
+
+
+def _deep_merge_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge a compact method override onto a base config.
+
+    Dictionaries are merged recursively while lists and scalar values are
+    replaced.  The returned object never aliases either input, which matters
+    because the runner applies command-line overrides to loaded configs.
+    """
+    merged = deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_config(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
+def load_method_config(
+    method: str | os.PathLike[str],
+    *,
+    project_root: Optional[str] = None,
+    _chain: tuple[str, ...] = (),
+) -> dict:
+    """Load a method config, resolving an optional ``extends`` chain.
+
+    ``method`` may be a method name or a JSON path.  An overlay such as
+    ``{"extends": "tokenwise_causal_mixed_half", ...}`` inherits the full
+    training/data/evaluation recipe and changes only its declared fields.
+    This keeps one-factor architecture ablations auditable without copying a
+    hundred lines of training configuration into every arm.
+    """
+    if project_root is None:
+        project_root = str(Path(__file__).parent.parent)
+    root = Path(project_root)
+    supplied = Path(method)
+    if supplied.suffix == ".json" or supplied.is_absolute() or supplied.parent != Path("."):
+        path = supplied if supplied.is_absolute() else root / supplied
+    else:
+        path = root / "configs" / "methods" / f"{method}.json"
+    path = path.resolve()
+    key = str(path)
+    if key in _chain:
+        cycle = " -> ".join((*_chain, key))
+        raise ValueError(f"method config inheritance cycle: {cycle}")
+    if not path.is_file():
+        raise FileNotFoundError(path)
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    base_method = payload.get("extends")
+    if not base_method:
+        return payload
+    base = load_method_config(
+        str(base_method),
+        project_root=str(root),
+        _chain=(*_chain, key),
+    )
+    return _deep_merge_config(base, payload)
 
 
 def load_experiment_config(
@@ -88,8 +147,9 @@ def load_experiment_config(
             project_root, "configs", "methods", f"{method_name}.json"
         )
         if os.path.exists(method_cfg_path):
-            with open(method_cfg_path) as f:
-                method_configs[method_name] = json.load(f)
+            method_configs[method_name] = load_method_config(
+                method_name, project_root=project_root
+            )
         else:
             # If method config doesn't exist, assume non-learned
             method_configs[method_name] = {"name": method_name, "training": None}

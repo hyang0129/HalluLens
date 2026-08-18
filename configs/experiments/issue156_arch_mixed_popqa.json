@@ -1,0 +1,25 @@
+{
+  "_comment": "Issue #156 seed-0 architecture pilot using the mixed-half recipe. Do not queue until the nine-cell Issue #154 mixed sweep is complete.",
+  "experiment_name": "issue156_arch_mixed_popqa",
+  "dataset": "popqa_memmap",
+  "methods": [
+    "tokenwise_arch_mixed_input_norm_only",
+    "tokenwise_arch_mixed_prenorm_only",
+    "tokenwise_arch_mixed_attention_pool_only",
+    "tokenwise_arch_mixed_projection128_only"
+  ],
+  "split_seed": 42,
+  "split_seeds": [42],
+  "training_seeds": [0],
+  "selection_gate": "issue154_mixed_3x3_complete",
+  "analysis_plan": {
+    "primary_metric": "knn_auroc",
+    "aggregate": "unweighted_macro_across_hotpotqa_nq_popqa",
+    "comparison": "one_factor_delta_from_selected_post_issue154_baseline",
+    "promotion_threshold": "positive_three_dataset_macro_knn_delta"
+  },
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs"
+}

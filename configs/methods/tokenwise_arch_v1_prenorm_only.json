@@ -1,0 +1,12 @@
+{
+  "name": "tokenwise_arch_v1_prenorm_only",
+  "extends": "tokenwise_contrastive_first_anchored",
+  "study_issue": 156,
+  "architecture_arm": "transformer_prenorm_only",
+  "training_recipe": "v1_first_anchored",
+  "model_params": {
+    "pre_norm": true,
+    "expected_total_params": 77538112,
+    "reference_total_params": 77538112
+  }
+}

@@ -53,6 +53,8 @@ def _resolve_shared(rel_path: str) -> str:
 import torch
 from loguru import logger
 
+from scripts.experiment_utils import load_method_config
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -851,6 +853,20 @@ def run_contrastive_logprob_recon(
             pre_norm=model_params.get("pre_norm", False),
         )
 
+    score_projection_surface = bool(
+        eval_cfg.get("score_projection_surface", False)
+    )
+    if score_projection_surface:
+        if not hasattr(model, "project"):
+            raise ValueError(
+                "evaluation.score_projection_surface=true requires a model "
+                "with a projection head"
+            )
+        if not bool(eval_cfg.get("dump_embeddings", False)):
+            raise ValueError(
+                "projection-surface scoring requires evaluation.dump_embeddings=true"
+            )
+
     model_total_params = sum(p.numel() for p in model.parameters())
     expected_total_params = model_params.get("expected_total_params")
     if (
@@ -1309,6 +1325,10 @@ def run_contrastive_logprob_recon(
                 ),
                 "model_reference_total_params": reference_total_params,
                 "model_parameter_delta_pct": model_parameter_delta_pct,
+                "study_issue": method_cfg.get("study_issue"),
+                "architecture_arm": method_cfg.get("architecture_arm"),
+                "training_recipe": method_cfg.get("training_recipe"),
+                "base_method_config": method_cfg.get("extends"),
             }
         )
         architecture_metadata = getattr(model, "architecture_metadata", None)
@@ -1396,7 +1416,33 @@ def run_contrastive_logprob_recon(
             else:
                 logger.warning("dump_embeddings=true but evaluator has no _labeled_test_embeddings; skipping test dump")
         except Exception:
+            if score_projection_surface:
+                raise
             logger.exception("dump_embeddings failed; continuing without embeddings dump")
+
+    # Issue #156: the projection-only arm reports both deployment surfaces in
+    # one cell. The encoder has already produced and dumped its token-zero
+    # trunk, so applying the small saved projection MLP avoids a second encoder
+    # pass and prevents a scoring dependency from racing the training cell.
+    if score_projection_surface:
+        from activation_research.projection_scoring import (
+            merge_projection_surface_results,
+            score_saved_projection,
+        )
+
+        projection_metrics, projection_predictions = score_saved_projection(
+            output_dir,
+            evaluation_cfg=eval_cfg,
+            outlier_class=int(effective_outlier_class),
+            sample_seed=int(training_seed),
+            device=train_device,
+        )
+        merge_projection_surface_results(
+            eval_metrics,
+            predictions,
+            projection_metrics,
+            projection_predictions,
+        )
 
     return eval_metrics, predictions
 
@@ -4914,8 +4960,9 @@ def main() -> None:
     elif args.dataset and args.method:
         with open(args.dataset) as f:
             single_dataset_cfg = json.load(f)
-        with open(args.method) as f:
-            single_method_cfg = json.load(f)
+        single_method_cfg = load_method_config(
+            args.method, project_root=str(project_root)
+        )
 
         datasets = [single_dataset_cfg["name"]]
         methods = [single_method_cfg["name"]]
@@ -4991,8 +5038,9 @@ def main() -> None:
                         str(project_root), "configs", "methods", f"{m}.json"
                     )
                     if os.path.exists(mcfg_path):
-                        with open(mcfg_path) as f:
-                            method_configs[m] = json.load(f)
+                        method_configs[m] = load_method_config(
+                            m, project_root=str(project_root)
+                        )
             exp_cfg_loaded["method_configs"] = method_configs
 
         run_specs = enumerate_runs(
@@ -5048,8 +5096,7 @@ def main() -> None:
                 )
                 if not os.path.exists(mcfg_path):
                     continue
-                with open(mcfg_path) as f:
-                    mcfg = json.load(f)
+                mcfg = load_method_config(m, project_root=str(project_root))
             if mcfg.get("training") is None:
                 continue  # non-learned method — doesn't preload
             data = mcfg.get("data", {})
@@ -5327,11 +5374,9 @@ def main() -> None:
                 if method_name in _preloaded_method_cfgs:
                     method_cfg = _preloaded_method_cfgs[method_name]
                 else:
-                    method_cfg_path = os.path.join(
-                        str(project_root), "configs", "methods", f"{method_name}.json"
+                    method_cfg = load_method_config(
+                        method_name, project_root=str(project_root)
                     )
-                    with open(method_cfg_path) as f:
-                        method_cfg = json.load(f)
 
                 # Apply max_epochs / steps_per_epoch overrides
                 if (max_epochs_override is not None or steps_per_epoch_override is not None) and method_cfg.get("training"):
