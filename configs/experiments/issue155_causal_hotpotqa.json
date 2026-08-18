@@ -1,5 +1,5 @@
 {
-  "_comment": "Issue #155 matched three-arm causal pilot for same-response temporal transfer.",
+  "_comment": "Issue #154 claim-3 matched three-arm test for same-response temporal transfer; legacy Issue #155 name retained for result continuity.",
   "experiment_name": "issue155_causal_hotpotqa",
   "dataset": "hotpotqa_memmap",
   "methods": [
@@ -8,8 +8,8 @@
     "tokenwise_causal_shuffled_later"
   ],
   "split_seed": 42,
-  "split_seeds": [42, 1, 2],
-  "training_seeds": [0, 1, 2],
+  "split_seeds": [42, 1, 2, 3, 4],
+  "training_seeds": [0, 1, 2, 3, 4],
   "device": "auto",
   "num_workers": 4,
   "persistent_workers": true,

@@ -1,4 +1,4 @@
-"""Contracts for the Issue #155 three-arm causal-control pilot."""
+"""Contracts for the Issue #154 claim-3 three-arm causal test."""
 from __future__ import annotations
 
 import json
@@ -10,7 +10,13 @@ from activation_research.training import TokenwiseCausalContrastiveLoss
 from scripts.dispatch.build_issue_155_causal_cells import build
 
 _ROOT = Path(__file__).resolve().parent.parent
-_DATASETS = {"hotpotqa_memmap", "nq_memmap", "popqa_memmap"}
+_DATASETS = {
+    "hotpotqa_memmap",
+    "nq_memmap",
+    "popqa_memmap",
+    "sciq_memmap",
+    "searchqa_memmap",
+}
 _METHODS = {
     "tokenwise_causal_temporal_positive",
     "tokenwise_causal_t0_dropout",
@@ -86,34 +92,44 @@ def test_issue155_method_configs_are_matched_except_view_construction():
     assert normalized[0] == normalized[1] == normalized[2]
 
 
-def test_issue155_experiments_cover_three_datasets_and_matched_seeds():
+def test_issue155_experiments_cover_five_datasets_and_matched_seeds():
     paths = sorted(
         (_ROOT / "configs" / "experiments").glob("issue155_causal_*.json")
     )
     payloads = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
-    assert len(payloads) == 3
+    assert len(payloads) == 5
     assert {payload["dataset"] for payload in payloads} == _DATASETS
     assert all(set(payload["methods"]) == _METHODS for payload in payloads)
-    assert all(payload["training_seeds"] == [0, 1, 2] for payload in payloads)
-    assert all(payload["split_seeds"] == [42, 1, 2] for payload in payloads)
+    assert all(
+        payload["training_seeds"] == [0, 1, 2, 3, 4]
+        for payload in payloads
+    )
+    assert all(
+        payload["split_seeds"] == [42, 1, 2, 3, 4]
+        for payload in payloads
+    )
     assert all("mmlu" not in json.dumps(payload).lower() for payload in payloads)
 
 
-def test_issue155_builder_appends_exact_27_cell_matrix(tmp_path):
+def test_issue155_builder_appends_exact_75_cell_matrix(tmp_path):
     dispatch_root = tmp_path / "dispatch"
-    assert build(dispatch_root, project_root=_ROOT) == 27
+    assert build(dispatch_root, project_root=_ROOT) == 75
     assert build(dispatch_root, project_root=_ROOT) == 0
 
     paths = sorted((dispatch_root / "pending").glob("*.json"))
     payloads = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
-    assert len(payloads) == 27
+    assert len(payloads) == 75
     assert {cell["dataset"] for cell in payloads} == _DATASETS
     assert {cell["method"] for cell in payloads} == _METHODS
-    assert {cell["seed"] for cell in payloads} == {0, 1, 2}
+    assert {cell["seed"] for cell in payloads} == {0, 1, 2, 3, 4}
     assert len(
         {(cell["dataset"], cell["method"], cell["seed"]) for cell in payloads}
-    ) == 27
-    assert all(cell["issue"] == 155 for cell in payloads)
+    ) == 75
+    assert all(cell["issue"] == 154 for cell in payloads)
+    assert all(
+        cell["experiment"] == "claim3_same_response_temporal_transfer"
+        for cell in payloads
+    )
     assert all(cell["kind"] == "experiment" for cell in payloads)
     assert all(
         cell["worker_script"] == "scripts/dispatch/worker_experiment.sh"

@@ -1,7 +1,7 @@
 {
   "_comment": "Issue #154 claim-3 matched three-arm test for same-response temporal transfer; legacy Issue #155 name retained for result continuity.",
-  "experiment_name": "issue155_causal_popqa",
-  "dataset": "popqa_memmap",
+  "experiment_name": "issue155_causal_sciq",
+  "dataset": "sciq_memmap",
   "methods": [
     "tokenwise_causal_temporal_positive",
     "tokenwise_causal_t0_dropout",

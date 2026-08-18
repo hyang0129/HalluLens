@@ -1,9 +1,11 @@
-"""Build the 27-cell Issue #155 causal-control pilot.
+"""Build the complete 75-cell causal-control matrix for Issue #154 claim 3.
 
-Grid: HotpotQA, NQ, and PopQA x three matched view-construction arms x
-training/split seeds 0--2. Cells are appended to the active Issue #151 queue
-with an ID prefix that sorts after the already queued 25-run tokenwise sweep.
-MMLU is excluded.
+Grid: five HalluLens datasets x three matched view-construction arms x
+training/split seeds 0--4. The legacy Issue #155 filenames and cell-ID prefix
+are retained so the completed 27-cell pilot is reused. On that live queue this
+builder appends only the 48 missing cells. New cells are owned by Issue #154,
+which now tracks the ICLR claim that same-response later states provide useful
+privileged supervision. MMLU is excluded.
 
 This script creates queue cells only; it never starts workers.
 """
@@ -24,13 +26,15 @@ _TARGETS = (
     ("00", "hotpotqa_memmap", "issue155_causal_hotpotqa"),
     ("20", "nq_memmap", "issue155_causal_nq"),
     ("30", "popqa_memmap", "issue155_causal_popqa"),
+    ("40", "sciq_memmap", "issue155_causal_sciq"),
+    ("50", "searchqa_memmap", "issue155_causal_searchqa"),
 )
 _METHODS = (
     "tokenwise_causal_temporal_positive",
     "tokenwise_causal_t0_dropout",
     "tokenwise_causal_shuffled_later",
 )
-_SEEDS = (0, 1, 2)
+_SEEDS = (0, 1, 2, 3, 4)
 
 
 def _dispatch_has_cell(dispatch_root: Path, cell_id: str) -> bool:
@@ -78,8 +82,8 @@ def build(dispatch_root: Path, *, project_root: Path = _PROJECT_ROOT) -> int:
                     "cell_id": cell_id,
                     "kind": "experiment",
                     "priority": "high",
-                    "issue": 155,
-                    "experiment": "same_response_temporal_transfer_control",
+                    "issue": 154,
+                    "experiment": "claim3_same_response_temporal_transfer",
                     "worker_script": "scripts/dispatch/worker_experiment.sh",
                     "experiment_config": experiment_rel,
                     "dataset": dataset_name,
