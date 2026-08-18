@@ -1,6 +1,6 @@
 import json
 import os
-from typing import List
+from typing import Any, List, Mapping
 
 import torch
 import torch.nn.functional as F
@@ -401,6 +401,7 @@ def dump_embeddings_to_memmap(
     split_name: str,
     *,
     dtype: str = "float16",
+    split_metadata: Mapping[str, Any] | None = None,
 ) -> dict:
     """Write a list of (`z_views`, `halu`, `hashkey`) records to .npy files.
 
@@ -408,6 +409,7 @@ def dump_embeddings_to_memmap(
       - {split_name}_z.npy        (N, K, D) `dtype`, np.save format → mmap on read
       - {split_name}_labels.npy   (N,) int8
       - {split_name}_hashkeys.json  list of N hashkeys (traceability)
+      - {split_name}_stable_ids.json  deterministic unique row identifiers
       - {split_name}_meta.json    shape, dtype, split_name, n
 
     Callers load via `np.load(path, mmap_mode='r')` to get a memmap view —
@@ -450,30 +452,91 @@ def dump_embeddings_to_memmap(
     z_stack = np.stack([_to_np(r["z_views"]) for r in records]).astype(np.dtype(dtype), copy=False)
     labels = np.array([int(r["halu"]) for r in records], dtype=np.int8)
     hashkeys = [str(r.get("hashkey", "")) for r in records]
+    # Prompt hashes are stable example identifiers but need not be unique when
+    # a capture contains repeated prompts.  A deterministic occurrence suffix
+    # makes every dumped row addressable without discarding the raw join key.
+    occurrences: dict[str, int] = {}
+    stable_ids = []
+    for hashkey in hashkeys:
+        occurrence = occurrences.get(hashkey, 0)
+        occurrences[hashkey] = occurrence + 1
+        stable_ids.append(
+            f"{split_name}::{hashkey}::occurrence_{occurrence}"
+        )
 
     z_path = os.path.join(out_dir, f"{split_name}_z.npy")
     labels_path = os.path.join(out_dir, f"{split_name}_labels.npy")
     hash_path = os.path.join(out_dir, f"{split_name}_hashkeys.json")
+    stable_ids_path = os.path.join(out_dir, f"{split_name}_stable_ids.json")
     meta_path = os.path.join(out_dir, f"{split_name}_meta.json")
 
     np.save(z_path, z_stack)
     np.save(labels_path, labels)
     with open(hash_path, "w") as f:
         json.dump(hashkeys, f)
+    with open(stable_ids_path, "w") as f:
+        json.dump(stable_ids, f)
 
     meta = {
+        "schema_version": 2,
         "split_name": split_name,
         "n": int(z_stack.shape[0]),
         "z_shape": list(z_stack.shape),
         "z_dtype": str(z_stack.dtype),
         "label_dtype": str(labels.dtype),
+        "stable_id_scheme": "split_plus_prompt_hash_plus_occurrence_v1",
+        "split_metadata": dict(split_metadata or {}),
         "files": {
             "z": os.path.basename(z_path),
             "labels": os.path.basename(labels_path),
             "hashkeys": os.path.basename(hash_path),
+            "stable_ids": os.path.basename(stable_ids_path),
         },
     }
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
 
     return meta
+
+
+def write_embedding_dump_manifest(
+    out_dir: str,
+    split_metas: Mapping[str, Mapping[str, Any]],
+    *,
+    run_metadata: Mapping[str, Any],
+) -> dict:
+    """Write run-level provenance for independently dumped data splits."""
+    expected = {"train", "val", "test"}
+    if set(split_metas) != expected:
+        raise ValueError(
+            "token-wise embedding manifest requires exactly train/val/test; "
+            f"got {sorted(split_metas)}"
+        )
+    for split_name, meta in split_metas.items():
+        if meta.get("split_name") != split_name:
+            raise ValueError(
+                f"embedding split metadata mismatch for {split_name!r}: "
+                f"{meta.get('split_name')!r}"
+            )
+
+    os.makedirs(out_dir, exist_ok=True)
+    manifest = {
+        "schema_version": 1,
+        "splits": {
+            split_name: {
+                "n": int(meta["n"]),
+                "meta": f"{split_name}_meta.json",
+            }
+            for split_name, meta in split_metas.items()
+        },
+        "run_metadata": dict(run_metadata),
+        "label_isolation": {
+            "train": "training_capture_train_rows",
+            "val": "training_capture_validation_rows",
+            "test": "test_capture_rows",
+        },
+    }
+    manifest_path = os.path.join(out_dir, "manifest.json")
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2)
+    return manifest

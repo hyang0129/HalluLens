@@ -311,6 +311,44 @@ class HallucinationEvaluator(MetricEvaluator):
 
         logger.info(f"Computed {len(test_embeddings)} test embeddings")
         return test_embeddings
+
+    def compute_labeled_split_embeddings(
+        self,
+        data_loader,
+        model,
+        *,
+        split_name: str,
+        lookup_df: Any,
+    ) -> List[Dict[str, Any]]:
+        """Encode and label one explicitly isolated split.
+
+        Unlike :meth:`compute`, this helper performs no scoring and never
+        falls back to ``activation_parser_df``.  The caller must supply the
+        label frame for the requested split, which keeps validation artifact
+        generation independent of the final test labels.
+        """
+        split_name = str(split_name)
+        if "split" in lookup_df.columns:
+            observed = set(lookup_df["split"].dropna().astype(str).unique())
+            if observed != {split_name}:
+                raise ValueError(
+                    f"label lookup for split={split_name!r} contains split "
+                    f"values {sorted(observed)!r}"
+                )
+        embeddings = inference_embeddings(
+            model,
+            data_loader.dataset,
+            batch_size=self.batch_size,
+            sub_batch_size=self.sub_batch_size,
+            device=self.device,
+            num_workers=self.num_workers,
+            layers=self.layers,
+            persistent_workers=self.persistent_workers,
+        )
+        return self._assign_hallucination_labels(
+            embeddings,
+            lookup_df=lookup_df,
+        )
     
     def _assign_hallucination_labels(
         self,

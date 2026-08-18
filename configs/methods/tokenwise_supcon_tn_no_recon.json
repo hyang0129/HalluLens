@@ -1,0 +1,19 @@
+{
+  "name": "tokenwise_supcon_tn_no_recon",
+  "extends": "tokenwise_contrastive_first_anchored",
+  "study": "standard_supcon_view_reconstruction_factorial",
+  "factor_views": "t0_plus_random_same_response_tn",
+  "factor_reconstruction": "none",
+  "model_params": {
+    "recon_lambda": 0.0,
+    "expected_total_params": 77538112,
+    "reference_total_params": 77538112
+  },
+  "training": {
+    "contrastive_objective": "legacy_supcon"
+  },
+  "data": {
+    "token_pair_mode": "first_anchored",
+    "min_response_tokens": 2
+  }
+}

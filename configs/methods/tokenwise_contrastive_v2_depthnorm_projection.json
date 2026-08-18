@@ -46,6 +46,7 @@
     "relevant_layers": "1-32",
     "num_views": 2,
     "token_pair_mode": "first_anchored",
+    "min_response_tokens": 2,
     "pad_length": 64,
     "preload": true,
     "include_response_logprobs": true,

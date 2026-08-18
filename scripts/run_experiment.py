@@ -1108,9 +1108,19 @@ def run_contrastive_logprob_recon(
     flip_auroc: bool = bool(eval_cfg.get("flip_auroc", False))
     effective_outlier_class = 0 if flip_auroc else dataset_cfg.get("outlier_class", 1)
 
+    train_label_lookup_df = ap.df
+    if _tokenwise and "split" in ap.df.columns:
+        train_label_lookup_df = ap.df.loc[
+            ap.df["split"].astype(str) == "train"
+        ].copy()
+        if train_label_lookup_df.empty:
+            raise RuntimeError(
+                "token-wise evaluation has no isolated training label rows"
+            )
+
     evaluator = MultiMetricHallucinationEvaluator(
         activation_parser_df=eval_ap.df,
-        train_activation_parser_df=ap.df,
+        train_activation_parser_df=train_label_lookup_df,
         train_data_loader=train_loader,
         metrics=metrics_list,
         batch_size=eval_cfg.get("eval_batch_size", 256),
@@ -1318,6 +1328,7 @@ def run_contrastive_logprob_recon(
                 "n_train_base": len(train_base_ds),
                 "n_train_pair_eligible": len(train_ds),
                 "n_train_t0": len(train_ds_target),
+                "n_val_t0": len(val_eval_ds) if has_val else None,
                 "model_class": model_class,
                 "model_total_params": model_total_params,
                 "model_encoder_params": sum(
@@ -1384,18 +1395,35 @@ def run_contrastive_logprob_recon(
             if linear_halu_scores is not None:
                 prediction["score_halu_linear_probe"] = linear_halu_scores[i]
 
-    # Optional: dump predicted train+test embeddings as memmap-friendly .npy files
-    # for downstream reuse (e.g. KNN-k sweeps, cosine-collapse analysis). Opt-in via
+    # Optional: dump predicted embeddings as memmap-friendly .npy files for
+    # downstream reuse (e.g. KNN-k sweeps, cosine-collapse analysis). Opt-in via
     # eval_cfg["dump_embeddings"] — runs only at the final test eval, and downstream
     # callers must explicitly load via np.load(..., mmap_mode='r'); no path in this
-    # codebase reads these files automatically.
+    # codebase reads these files automatically. Token-wise runs additionally
+    # encode the held-out validation set after checkpoint restoration, using
+    # only validation-row labels from the training capture.
     if eval_cfg.get("dump_embeddings", False):
-        # Dump failures must not invalidate the eval — the metrics + predictions
-        # are already in hand. Log the traceback and move on.
+        # Legacy dump failures do not invalidate evaluation. Token-wise runs
+        # are stricter because downstream scorer selection requires a complete,
+        # split-isolated train/val/test artifact set.
         try:
-            from activation_research.evaluation import dump_embeddings_to_memmap
+            from activation_research.evaluation import (
+                dump_embeddings_to_memmap,
+                write_embedding_dump_manifest,
+            )
 
             emb_dir = os.path.join(output_dir, "embeddings")
+            split_seed = _resolve_run_split_seed(
+                experiment_cfg, training_seed
+            )
+            common_dump_metadata = {
+                "dataset": dataset_cfg["name"],
+                "experiment": experiment_cfg.get("experiment_name"),
+                "method": method_cfg["name"],
+                "training_seed": int(training_seed),
+                "split_seed": int(split_seed),
+                "embedding_surface": "token_zero" if _tokenwise else "target_layers",
+            }
 
             # Test records: the evaluator's labeling used eval_ap.df which is the
             # test parser's df, so test hashkeys resolve and labels are correct.
@@ -1405,18 +1433,80 @@ def run_contrastive_logprob_recon(
             # independently of the test parser used above.
             train_records = getattr(evaluator, "_labeled_baseline_embeddings", None)
 
+            split_metas = {}
             if train_records:
-                train_meta = dump_embeddings_to_memmap(train_records, emb_dir, "train")
+                train_meta = dump_embeddings_to_memmap(
+                    train_records,
+                    emb_dir,
+                    "train",
+                    split_metadata={
+                        **common_dump_metadata,
+                        "role": "scorer_reference_bank",
+                        "label_lookup": "training_capture_train_rows",
+                    },
+                )
+                split_metas["train"] = train_meta
                 logger.info(f"dumped train embeddings: {train_meta['n']} × {train_meta['z_shape'][1:]} -> {emb_dir}")
             else:
                 logger.warning("dump_embeddings=true but no labeled train records (check ap.df); skipping train dump")
             if test_records:
-                test_meta = dump_embeddings_to_memmap(test_records, emb_dir, "test")
+                test_meta = dump_embeddings_to_memmap(
+                    test_records,
+                    emb_dir,
+                    "test",
+                    split_metadata={
+                        **common_dump_metadata,
+                        "role": "final_evaluation",
+                        "label_lookup": "test_capture_rows",
+                    },
+                )
+                split_metas["test"] = test_meta
                 logger.info(f"dumped test embeddings: {test_meta['n']} × {test_meta['z_shape'][1:]} -> {emb_dir}")
             else:
                 logger.warning("dump_embeddings=true but evaluator has no _labeled_test_embeddings; skipping test dump")
+
+            if _tokenwise and has_val:
+                val_label_df = ap.df.loc[
+                    ap.df["split"].astype(str) == "val"
+                ].copy()
+                if val_label_df.empty:
+                    raise RuntimeError(
+                        "token-wise validation embedding dump has no isolated "
+                        "validation label rows"
+                    )
+                val_records = evaluator.compute_labeled_split_embeddings(
+                    DataLoader(val_eval_ds, batch_size=64, shuffle=False),
+                    model,
+                    split_name="val",
+                    lookup_df=val_label_df,
+                )
+                val_meta = dump_embeddings_to_memmap(
+                    val_records,
+                    emb_dir,
+                    "val",
+                    split_metadata={
+                        **common_dump_metadata,
+                        "role": "scorer_selection",
+                        "label_lookup": "training_capture_validation_rows",
+                    },
+                )
+                split_metas["val"] = val_meta
+                logger.info(
+                    f"dumped val embeddings: {val_meta['n']} × "
+                    f"{val_meta['z_shape'][1:]} -> {emb_dir}"
+                )
+                if set(split_metas) != {"train", "val", "test"}:
+                    raise RuntimeError(
+                        "token-wise scoring dump requires complete independent "
+                        f"train/val/test artifacts; got {sorted(split_metas)}"
+                    )
+                write_embedding_dump_manifest(
+                    emb_dir,
+                    split_metas,
+                    run_metadata=common_dump_metadata,
+                )
         except Exception:
-            if score_projection_surface:
+            if score_projection_surface or _tokenwise:
                 raise
             logger.exception("dump_embeddings failed; continuing without embeddings dump")
 
