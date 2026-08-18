@@ -86,7 +86,7 @@ def build(dispatch_root: Path, *, project_root: Path = _PROJECT_ROOT) -> int:
         experiment_name, experiment_rel = experiments[dataset_name]
         for training_seed, split_seed in zip(_TRAINING_SEEDS, _SPLIT_SEEDS):
             cell_id = (
-                f"0_high_60_{dataset_order}_{training_seed}_issue151_token_zero_mlp__"
+                f"9_low_60_{dataset_order}_{training_seed}_issue151_token_zero_mlp__"
                 f"{dataset_name}__{_METHOD}__seed_{training_seed}"
             )
             if _dispatch_has_cell(dispatch_root, cell_id):
@@ -102,7 +102,7 @@ def build(dispatch_root: Path, *, project_root: Path = _PROJECT_ROOT) -> int:
             cell = {
                 "cell_id": cell_id,
                 "kind": "experiment",
-                "priority": "high",
+                "priority": "low",
                 "issue": 151,
                 "experiment": "token_zero_supervised_mlp_baseline",
                 "worker_script": "scripts/dispatch/worker_experiment.sh",

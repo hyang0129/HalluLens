@@ -112,7 +112,7 @@ def test_method_and_experiments_are_token_zero_only_and_paired():
     assert all("mmlu" not in json.dumps(payload).lower() for payload in payloads)
 
 
-def test_builder_adds_exactly_25_idempotent_high_priority_cells(tmp_path):
+def test_builder_adds_exactly_25_idempotent_low_priority_cells(tmp_path):
     dispatch_root = tmp_path / "dispatch"
     assert build(dispatch_root, project_root=_ROOT) == 25
     assert build(dispatch_root, project_root=_ROOT) == 0
@@ -130,7 +130,8 @@ def test_builder_adds_exactly_25_idempotent_high_priority_cells(tmp_path):
         (3, 3),
         (4, 4),
     }
-    assert all(cell["priority"] == "high" for cell in cells)
+    assert all(cell["priority"] == "low" for cell in cells)
+    assert all(cell["cell_id"].startswith("9_low_") for cell in cells)
     assert all(cell["model_total_params"] == 10_531_842 for cell in cells)
     assert all(cell["primary_eval_token"] == 0 for cell in cells)
     assert all("mmlu" not in json.dumps(cell).lower() for cell in cells)
