@@ -4514,6 +4514,7 @@ def run_act_vit(
     # after a mid-epoch crash.
     best_ckpt_path = os.path.join(artifact_dir, "best_checkpoint.pt")
     final_weights_path = os.path.join(artifact_dir, "final_weights.pt")
+    training_skipped_from_complete_checkpoint = False
     if os.path.exists(final_weights_path) and os.path.exists(best_ckpt_path):
         logger.info(
             "[act_vit] final_weights.pt found — training already complete, "
@@ -4524,6 +4525,7 @@ def run_act_vit(
         best_epoch = int(ckpt.get("epoch", -1))
         best_val_auroc = float(ckpt.get("selection_auroc", -1.0))
         max_epochs = 0
+        training_skipped_from_complete_checkpoint = True
 
     log_every = 50
     for epoch in range(max_epochs):
@@ -4646,10 +4648,11 @@ def run_act_vit(
         ckpt = torch.load(best_ckpt, map_location=eval_device, weights_only=True)
         model.load_state_dict(ckpt["model_state_dict"])
 
-    torch.save(
-        {"model_state_dict": model.state_dict()},
-        os.path.join(artifact_dir, "final_weights.pt"),
-    )
+    if not training_skipped_from_complete_checkpoint:
+        torch.save(
+            {"model_state_dict": model.state_dict()},
+            os.path.join(artifact_dir, "final_weights.pt"),
+        )
 
     # Test evaluation
     test_loader = DataLoader(
