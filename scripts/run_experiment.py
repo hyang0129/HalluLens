@@ -4336,6 +4336,16 @@ def run_act_vit(
     model_params = method_cfg.get("model_params", {})
     eval_cfg = method_cfg.get("evaluation", {})
     prefix_training = bool(train_cfg.get("prefix_training", False))
+    fixed_prefix_length_cfg = train_cfg.get("fixed_prefix_length")
+    fixed_prefix_length = (
+        None
+        if fixed_prefix_length_cfg is None
+        else int(fixed_prefix_length_cfg)
+    )
+    if prefix_training and fixed_prefix_length is not None:
+        raise ValueError(
+            "ACT-ViT cannot combine prefix_training with fixed_prefix_length"
+        )
 
     icr_cfg = dataset_cfg["icr_capture"]
     split_seed = _resolve_run_split_seed(experiment_cfg, training_seed)
@@ -4380,6 +4390,13 @@ def run_act_vit(
     train_ds = ACTViTDataset(icr_cfg["train_dir"], train_idx, label_source=label_source)
     val_ds = ACTViTDataset(icr_cfg["train_dir"], val_idx, label_source=label_source)
     test_ds = ACTViTDataset(icr_cfg["test_dir"], test_idx, label_source=label_source)
+    if fixed_prefix_length is not None and not (
+        1 <= fixed_prefix_length <= int(train_ds.max_response_len)
+    ):
+        raise ValueError(
+            "ACT-ViT fixed_prefix_length must be between 1 and "
+            f"{train_ds.max_response_len}; got {fixed_prefix_length}"
+        )
 
     prefix_sampler = None
     if prefix_training:
@@ -4401,6 +4418,11 @@ def run_act_vit(
             f"max={train_ds.max_response_len} "
             f"support={train_cfg.get('prefix_sampling_lengths', 'continuous')} "
             f"seed={training_seed}"
+        )
+    elif fixed_prefix_length is not None:
+        logger.info(
+            "[act_vit] fixed-prefix training enabled: "
+            f"k={fixed_prefix_length} seed={training_seed}"
         )
 
     num_workers = experiment_cfg.get("num_workers", 4)
@@ -4500,6 +4522,7 @@ def run_act_vit(
         ckpt = torch.load(best_ckpt_path, map_location=eval_device, weights_only=True)
         model.load_state_dict(ckpt["model_state_dict"])
         best_epoch = int(ckpt.get("epoch", -1))
+        best_val_auroc = float(ckpt.get("selection_auroc", -1.0))
         max_epochs = 0
 
     log_every = 50
@@ -4510,7 +4533,15 @@ def run_act_vit(
         for step_idx, batch in enumerate(train_loader):
             x = batch["activations"].to(eval_device, non_blocking=True)       # (B, L, N, D)
             labels_b = batch["label"].float().to(eval_device, non_blocking=True)  # (B,)
-            if prefix_sampler is None:
+            if fixed_prefix_length is not None:
+                logits = _act_vit_logits_at_prefix(
+                    model,
+                    x,
+                    batch["response_len"].to(eval_device, non_blocking=True),
+                    fixed_prefix_length,
+                )
+                loss = loss_fn(logits, labels_b)
+            elif prefix_sampler is None:
                 logits = model(x).squeeze(1)               # (B,)
                 loss = loss_fn(logits, labels_b)
             else:
@@ -4542,7 +4573,9 @@ def run_act_vit(
 
         # Validation AUROC
         model.eval()
-        if prefix_training:
+        if fixed_prefix_length is not None:
+            val_ks = [fixed_prefix_length]
+        elif prefix_training:
             from activation_research.prefix_views import resolve_eval_prefixes
 
             val_ks = resolve_eval_prefixes(
@@ -4557,7 +4590,7 @@ def run_act_vit(
             with torch.no_grad():
                 for batch in val_loader:
                     x = batch["activations"].to(eval_device, non_blocking=True)
-                    if prefix_training:
+                    if prefix_training or fixed_prefix_length is not None:
                         logits = _act_vit_logits_at_prefix(
                             model,
                             x,
@@ -4631,12 +4664,16 @@ def run_act_vit(
     with torch.no_grad():
         for batch in test_loader:
             x = batch["activations"].to(eval_device)
-            if prefix_training:
+            if prefix_training or fixed_prefix_length is not None:
                 logits = _act_vit_logits_at_prefix(
                     model,
                     x,
                     batch["response_len"].to(eval_device),
-                    int(test_ds.max_response_len),
+                    (
+                        fixed_prefix_length
+                        if fixed_prefix_length is not None
+                        else int(test_ds.max_response_len)
+                    ),
                 )
             else:
                 logits = model(x).squeeze(1)
@@ -4692,6 +4729,12 @@ def run_act_vit(
             act_vit_prefix_scores[int(_k)] = _sn
             logger.info(f"  [act_vit] k={_k}: auroc={_a}")
 
+    if fixed_prefix_length is not None:
+        act_vit_prefix_curve.setdefault(
+            f"k{fixed_prefix_length}_auroc", auroc
+        )
+        act_vit_prefix_scores.setdefault(fixed_prefix_length, scores_np)
+
     eval_metrics = {
         **act_vit_prefix_curve,
         "method": method_cfg["name"],
@@ -4704,7 +4747,12 @@ def run_act_vit(
         "auroc": auroc,
         "best_val_auroc": best_val_auroc,
         "best_epoch": best_epoch,
-        "training_regime": "multi_k" if prefix_training else "full_length",
+        "training_regime": (
+            f"fixed_k{fixed_prefix_length}"
+            if fixed_prefix_length is not None
+            else ("multi_k" if prefix_training else "full_length")
+        ),
+        "training_prefix_length": fixed_prefix_length,
     }
     predictions = [
         {

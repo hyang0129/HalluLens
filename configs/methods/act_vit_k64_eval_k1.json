@@ -1,0 +1,10 @@
+{
+  "name": "act_vit_k64_eval_k1",
+  "extends": "act_vit",
+  "_comment": "Deployability control: reuse a validation-selected ACT-ViT trained on the full 64-token capture width and evaluate it after slicing the response-token axis to k=1. No retraining.",
+  "evaluation": {
+    "metrics": ["auroc"],
+    "eval_prefix_curve": true,
+    "eval_prefix_lengths": [1]
+  }
+}
