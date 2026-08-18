@@ -32,7 +32,9 @@ class TokenwiseContrastiveDataset(Dataset):
     token_pair_mode:
         ``first_anchored`` emits token zero followed by sampled later tokens;
         ``first_same`` emits token zero twice so model stochasticity supplies
-        the augmentation control; ``shuffled_later`` pairs token zero with a
+        the augmentation control; ``first_mixed`` emits token zero plus either
+        token zero or a same-response later token according to
+        ``later_view_probability``; ``shuffled_later`` pairs token zero with a
         later token from a different, label/length-matched response;
         ``random_distinct`` samples all positions without replacement.
     fixed_token:
@@ -45,6 +47,9 @@ class TokenwiseContrastiveDataset(Dataset):
         ``uniform`` samples later positions directly. ``stratified`` first
         divides the available later positions into early/middle/late bins,
         samples bins uniformly, and then samples within each selected bin.
+    later_view_probability:
+        For ``first_mixed`` only, probability that the second view is a
+        same-response later token rather than a second token-zero view.
     source_indices:
         Optional logical base-dataset indices to inherit.  Used by
         :meth:`fixed_token_view` so later-token diagnostics stay within the
@@ -58,13 +63,18 @@ class TokenwiseContrastiveDataset(Dataset):
         layer_positions: Sequence[int],
         num_views: int = 2,
         token_pair_mode: Literal[
-            "first_anchored", "first_same", "shuffled_later", "random_distinct"
+            "first_anchored",
+            "first_same",
+            "first_mixed",
+            "shuffled_later",
+            "random_distinct",
         ] = "first_anchored",
         fixed_token: Optional[int] = None,
         min_response_tokens: int = 0,
         view_sampling_with_replacement: bool = False,
         shuffle_length_bucket_size: int = 8,
         later_token_sampling: Literal["uniform", "stratified"] = "uniform",
+        later_view_probability: float = 0.5,
         emit_view_logprob_targets: bool = False,
         source_indices: Optional[Sequence[int]] = None,
     ) -> None:
@@ -98,16 +108,22 @@ class TokenwiseContrastiveDataset(Dataset):
         if token_pair_mode not in (
             "first_anchored",
             "first_same",
+            "first_mixed",
             "shuffled_later",
             "random_distinct",
         ):
             raise ValueError(
                 "token_pair_mode must be one of {'first_anchored', "
-                "'first_same', 'shuffled_later', 'random_distinct'}"
+                "'first_same', 'first_mixed', 'shuffled_later', "
+                "'random_distinct'}"
             )
         if (
             self.fixed_token is None
-            and token_pair_mode in ("first_same", "shuffled_later")
+            and token_pair_mode in (
+                "first_same",
+                "first_mixed",
+                "shuffled_later",
+            )
             and self.num_views != 2
         ):
             raise ValueError(f"{token_pair_mode} requires exactly two views")
@@ -131,6 +147,9 @@ class TokenwiseContrastiveDataset(Dataset):
             raise ValueError(
                 "later_token_sampling must be one of {'uniform', 'stratified'}"
             )
+        self.later_view_probability = float(later_view_probability)
+        if not 0.0 <= self.later_view_probability <= 1.0:
+            raise ValueError("later_view_probability must be between 0 and 1")
         self.emit_view_logprob_targets = bool(emit_view_logprob_targets)
 
         base_labels = np.asarray(base_dataset.labels)
@@ -273,6 +292,7 @@ class TokenwiseContrastiveDataset(Dataset):
             view_sampling_with_replacement=False,
             shuffle_length_bucket_size=self.shuffle_length_bucket_size,
             later_token_sampling=self.later_token_sampling,
+            later_view_probability=self.later_view_probability,
             emit_view_logprob_targets=self.emit_view_logprob_targets,
             source_indices=self._valid_indices,
         )
@@ -342,6 +362,13 @@ class TokenwiseContrastiveDataset(Dataset):
 
         if self.token_pair_mode == "first_same":
             return [logical_idx, logical_idx], [0, 0]
+
+        if self.token_pair_mode == "first_mixed":
+            if random.random() >= self.later_view_probability:
+                return [logical_idx, logical_idx], [0, 0]
+            later = list(range(1, response_len))
+            sampled = self._sample_later_positions(later, 1)
+            return [logical_idx, logical_idx], [0, sampled[0]]
 
         if self.token_pair_mode == "shuffled_later":
             partner = random.choice(self._shuffle_partner_candidates[logical_idx])

@@ -626,6 +626,9 @@ def run_contrastive_logprob_recon(
         later_token_sampling = str(
             data_cfg.get("later_token_sampling", "uniform")
         )
+        later_view_probability = float(
+            data_cfg.get("later_view_probability", 0.5)
+        )
         pair_min_response_tokens = int(
             data_cfg.get("min_response_tokens", 2)
         )
@@ -641,6 +644,7 @@ def run_contrastive_logprob_recon(
             min_response_tokens=pair_min_response_tokens,
             shuffle_length_bucket_size=shuffle_length_bucket_size,
             later_token_sampling=later_token_sampling,
+            later_view_probability=later_view_probability,
             emit_view_logprob_targets=emit_view_logprob_targets,
         )
         val_base_ds = (
@@ -656,6 +660,7 @@ def run_contrastive_logprob_recon(
             min_response_tokens=pair_min_response_tokens,
             shuffle_length_bucket_size=shuffle_length_bucket_size,
             later_token_sampling=later_token_sampling,
+            later_view_probability=later_view_probability,
             emit_view_logprob_targets=emit_view_logprob_targets,
         )
         test_base_ds = eval_ap.get_dataset("test", **ds_kwargs)
@@ -668,6 +673,7 @@ def run_contrastive_logprob_recon(
             min_response_tokens=1,
             shuffle_length_bucket_size=shuffle_length_bucket_size,
             later_token_sampling=later_token_sampling,
+            later_view_probability=later_view_probability,
             emit_view_logprob_targets=False,
         )
         val_eval_ds = TokenwiseContrastiveDataset(
@@ -679,6 +685,7 @@ def run_contrastive_logprob_recon(
             min_response_tokens=1,
             shuffle_length_bucket_size=shuffle_length_bucket_size,
             later_token_sampling=later_token_sampling,
+            later_view_probability=later_view_probability,
             emit_view_logprob_targets=False,
         )
         test_ds = TokenwiseContrastiveDataset(
@@ -690,6 +697,7 @@ def run_contrastive_logprob_recon(
             min_response_tokens=1,
             shuffle_length_bucket_size=shuffle_length_bucket_size,
             later_token_sampling=later_token_sampling,
+            later_view_probability=later_view_probability,
             emit_view_logprob_targets=False,
         )
         logger.info(
@@ -732,10 +740,16 @@ def run_contrastive_logprob_recon(
                 "tokenwise causal controls require source-aligned per-view "
                 "logprob targets"
             )
-        if pair_mode not in {"first_anchored", "first_same", "shuffled_later"}:
+        if pair_mode not in {
+            "first_anchored",
+            "first_same",
+            "first_mixed",
+            "shuffled_later",
+        }:
             raise ValueError(
                 "tokenwise causal control pair mode must be one of "
-                "{'first_anchored', 'first_same', 'shuffled_later'}"
+                "{'first_anchored', 'first_same', 'first_mixed', "
+                "'shuffled_later'}"
             )
 
     model_params = method_cfg.get("model_params", {})
@@ -1272,6 +1286,11 @@ def run_contrastive_logprob_recon(
                 ),
                 "later_token_sampling": str(
                     data_cfg.get("later_token_sampling", "uniform")
+                ),
+                "later_view_probability": (
+                    float(data_cfg.get("later_view_probability", 0.5))
+                    if pair_mode == "first_mixed"
+                    else None
                 ),
                 "pair_min_response_tokens": int(
                     data_cfg.get("min_response_tokens", 2)
