@@ -1,10 +1,10 @@
-"""Append the ten missing v1 input-normalization confirmation cells.
+"""Append the twenty missing v1 input-normalization confirmation cells.
 
 The matched no-normalization v1 baseline already has five datasets x five
 seeds, and Issue #156 Stage 1 supplies input-normalized seed 0. This builder
-adds input-normalized seeds 1 and 2 over the five HalluLens datasets, paired
-with split seeds 1 and 2. It is idempotent across every queue state and does
-not launch workers. MMLU is deliberately excluded.
+adds input-normalized seeds 1 through 4 over the five HalluLens datasets,
+paired with the same-numbered split seeds. It is idempotent across every queue
+state and does not launch workers. MMLU is deliberately excluded.
 """
 from __future__ import annotations
 
@@ -29,9 +29,9 @@ _TARGETS = (
     ("40", "sciq", "sciq_memmap"),
     ("50", "searchqa", "searchqa_memmap"),
 )
-_SEED_PAIRS = ((1, 1), (2, 2))
-_EXPECTED_TRAINING_SEEDS = [1, 2]
-_EXPECTED_SPLIT_SEEDS = [1, 2]
+_SEED_PAIRS = ((1, 1), (2, 2), (3, 3), (4, 4))
+_EXPECTED_TRAINING_SEEDS = [1, 2, 3, 4]
+_EXPECTED_SPLIT_SEEDS = [1, 2, 3, 4]
 
 
 def _dispatch_has_cell(dispatch_root: Path, cell_id: str) -> bool:
@@ -130,7 +130,7 @@ def build(
                 "kind": "experiment",
                 "priority": "highest",
                 "issue": 156,
-                "experiment": "v1_input_norm_three_seed_confirmation",
+                "experiment": "v1_input_norm_five_seed_confirmation",
                 "stage": 2,
                 "worker_script": "scripts/dispatch/worker_experiment.sh",
                 "experiment_config": experiment_rel,

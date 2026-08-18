@@ -93,11 +93,11 @@ excluded.
 
 The seed-0 architecture sweep provisionally favored input LayerNorm under the
 v1 t0-plus-later-token recipe. Before adding more normalization mechanisms,
-confirm that effect with a paired three-seed comparison over all five
-datasets. The no-normalization v1 baseline already exists for training seeds
-0, 1, and 2 with split seeds 42, 1, and 2. Stage 1 supplies the normalized
-seed-0 results, so the confirmation builder adds only the ten missing
-normalized cells for seeds 1 and 2.
+confirm that effect with a paired five-seed comparison over all five datasets.
+The no-normalization v1 baseline already exists for training seeds 0 through 4
+with split seeds 42, 1, 2, 3, and 4. Stage 1 supplies the normalized seed-0
+results, so the confirmation builder adds the twenty missing normalized cells
+for seeds 1 through 4.
 
 ```bash
 python scripts/dispatch/build_issue_156_input_norm_confirmation_cells.py \
