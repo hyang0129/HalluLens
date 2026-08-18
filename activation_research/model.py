@@ -2127,6 +2127,75 @@ class LinearProbe(nn.Module):
         return torch.sigmoid(self.linear(pooled))
 
 
+class TokenZeroMLPProbe(nn.Module):
+    """Shallow supervised probe over token zero from every selected layer.
+
+    A shared MLP transforms each layer state independently, learned
+    content-dependent attention pools the depth trajectory, and a binary head
+    predicts hallucination probability.  The probe consumes exactly one
+    response-token position; it has no access to later response tokens,
+    contrastive pairs, or response-logprob reconstruction targets.
+
+    The Issue #151 baseline uses ``4096 -> 2048 -> 1024`` and 32 layers for
+    10,531,842 trainable parameters.  This deliberately clears a 10M-parameter
+    capacity floor while remaining much smaller than the ~77.5M token-wise
+    contrastive encoder.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 4096,
+        num_layers: int = 32,
+        hidden_dim: int = 2048,
+        output_dim: int = 1024,
+        dropout: float = 0.1,
+        normalize_input: bool = True,
+    ) -> None:
+        super().__init__()
+        self.input_dim = int(input_dim)
+        self.num_layers = int(num_layers)
+        self.hidden_dim = int(hidden_dim)
+        self.output_dim = int(output_dim)
+        if min(self.input_dim, self.num_layers, self.hidden_dim, self.output_dim) <= 0:
+            raise ValueError("all dimensions and num_layers must be positive")
+        if not 0.0 <= float(dropout) < 1.0:
+            raise ValueError("dropout must be in [0, 1)")
+
+        self.input_norm = (
+            nn.LayerNorm(self.input_dim) if bool(normalize_input) else nn.Identity()
+        )
+        self.layer_mlp = nn.Sequential(
+            nn.Linear(self.input_dim, self.hidden_dim),
+            nn.GELU(),
+            nn.Dropout(float(dropout)),
+            nn.Linear(self.hidden_dim, self.output_dim),
+            nn.GELU(),
+        )
+        self.layer_embeddings = nn.Parameter(
+            torch.empty(self.num_layers, self.output_dim)
+        )
+        self.layer_attention = nn.Linear(self.output_dim, 1)
+        self.classifier = nn.Linear(self.output_dim, 1)
+        nn.init.normal_(self.layer_embeddings, mean=0.0, std=0.02)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3:
+            raise ValueError(
+                "TokenZeroMLPProbe expects (B, num_layers, input_dim); "
+                f"got {tuple(x.shape)}"
+            )
+        if x.shape[1:] != (self.num_layers, self.input_dim):
+            raise ValueError(
+                "TokenZeroMLPProbe input geometry mismatch: expected "
+                f"(*, {self.num_layers}, {self.input_dim}), got {tuple(x.shape)}"
+            )
+        depth_states = self.layer_mlp(self.input_norm(x.float()))
+        attention_input = depth_states + self.layer_embeddings.unsqueeze(0)
+        attention = torch.softmax(self.layer_attention(attention_input), dim=1)
+        pooled = torch.sum(attention * depth_states, dim=1)
+        return torch.sigmoid(self.classifier(pooled))
+
+
 class MultiLayerLinearProbe(nn.Module):
     """Multi-layer linear probe for hallucination detection.
 

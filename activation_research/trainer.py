@@ -842,6 +842,7 @@ class LinearProbeTrainerConfig(TrainerConfig):
     prefix_min_gap: int = 8
     prefix_max_tokens: int = 64
     prefix_seed: Optional[int] = None
+    select_on_val: bool = False
 
 
 class LinearProbeTrainer(Trainer):
@@ -1075,7 +1076,6 @@ class LinearProbeTrainer(Trainer):
 
         last_path = os.path.join(self.config.checkpoint_dir, "linear_probe_last.pt")
         _atomic_torch_save(checkpoint, last_path)
-
         _save_and_prune_snapshots(
             checkpoint_dir=self.resolve_snapshot_dir(),
             snapshot_prefix="linear_probe",
@@ -1386,6 +1386,31 @@ class LinearProbeTrainer(Trainer):
         self.loss_fn = torch.nn.BCELoss()
         self.best_auroc: float = 0.0
 
+    def fit(self, train_dataset, val_dataset=None) -> None:
+        if bool(self.probe_config.select_on_val) and val_dataset is None:
+            raise ValueError("select_on_val=True requires a validation dataset")
+        super().fit(train_dataset=train_dataset, val_dataset=val_dataset)
+        if bool(self.probe_config.select_on_val):
+            best_path = os.path.join(
+                self.config.checkpoint_dir, "linear_probe_best.pt"
+            )
+            if not os.path.isfile(best_path):
+                raise RuntimeError(
+                    "validation-selected linear probe never observed a finite AUROC"
+                )
+            checkpoint = torch.load(
+                best_path, map_location=self.device, weights_only=True
+            )
+            self.model.load_state_dict(checkpoint["model_state_dict"])
+            self.selected_epoch = int(checkpoint["epoch"])
+            self.selected_val_auroc = float(checkpoint["val_auroc"])
+            logger.info(
+                "Restored linear-probe weights from validation-best epoch {} "
+                "(AUROC={:.6f})",
+                int(checkpoint["epoch"]) + 1,
+                float(checkpoint["val_auroc"]),
+            )
+
     def training_step(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, Dict[str, float]]:
         # views_activations: (B, 1, seq_len, D) → squeeze view dim
         x = batch["views_activations"].to(self.device, non_blocking=True)
@@ -1602,6 +1627,18 @@ class LinearProbeTrainer(Trainer):
 
         last_path = os.path.join(self.config.checkpoint_dir, "linear_probe_last.pt")
         _atomic_torch_save(checkpoint, last_path)
+        current_val_auroc = float(val_metrics.get("val_auroc", float("nan")))
+        if (
+            bool(self.probe_config.select_on_val)
+            and math.isfinite(current_val_auroc)
+            and current_val_auroc >= float(self.best_auroc)
+        ):
+            _atomic_torch_save(
+                checkpoint,
+                os.path.join(
+                    self.config.checkpoint_dir, "linear_probe_best.pt"
+                ),
+            )
 
         _save_and_prune_snapshots(
             checkpoint_dir=self.resolve_snapshot_dir(),
@@ -1616,7 +1653,7 @@ class LinearProbeTrainer(Trainer):
         if bool(self.config.cleanup_legacy_checkpoints):
             _cleanup_legacy_checkpoints(
                 self.config.checkpoint_dir,
-                keep_filenames={"linear_probe_last.pt"},
+                keep_filenames={"linear_probe_last.pt", "linear_probe_best.pt"},
             )
 
         elapsed = float(time.perf_counter() - checkpoint_start)

@@ -2799,6 +2799,215 @@ def run_multi_layer_linear_probe(
     return eval_metrics, predictions
 
 
+def run_token_zero_mlp_probe(
+    ap,
+    dataset_cfg: dict,
+    method_cfg: dict,
+    experiment_cfg: dict,
+    output_dir: str,
+    device: str,
+    training_seed: int,
+    test_ap=None,
+) -> tuple[dict, list[dict]]:
+    """Train a supervised >=10M-parameter MLP on the token-zero depth trace.
+
+    This is the direct supervised-capacity baseline for Issue #151.  It sees
+    all configured post-block layers but exactly one response token (t=0), and
+    is selected only by AUROC on the held-out validation split.
+    """
+    from sklearn.metrics import average_precision_score, roc_auc_score
+    from torch.utils.data import DataLoader
+
+    from activation_research.model import TokenZeroMLPProbe
+    from activation_research.tokenwise_contrastive_dataset import (
+        TokenwiseContrastiveDataset,
+    )
+    from activation_research.trainer import (
+        LinearProbeTrainer,
+        LinearProbeTrainerConfig,
+    )
+
+    data_cfg = method_cfg["data"]
+    model_cfg = method_cfg["model_params"]
+    train_cfg = method_cfg["training"]
+    relevant_layers = parse_layer_range(data_cfg["relevant_layers"])
+    if int(data_cfg.get("fixed_token", 0)) != 0:
+        raise ValueError("token-zero MLP probe requires data.fixed_token=0")
+    if ap.split_strategy != "three_way":
+        raise ValueError(
+            "token-zero MLP validation selection requires a held-out validation "
+            "split; refusing to select a checkpoint on test data"
+        )
+
+    ds_kwargs = dict(
+        relevant_layers=relevant_layers,
+        num_views=1,
+        pad_length=data_cfg.get("pad_length", 64),
+        preload=data_cfg.get("preload", True),
+        include_response_logprobs=False,
+        check_ram=False,
+    )
+    train_base = ap.get_dataset("train", **ds_kwargs)
+    val_base = ap.get_dataset("val", **ds_kwargs)
+    eval_ap = test_ap if test_ap is not None else ap
+    test_base = eval_ap.get_dataset("test", **ds_kwargs)
+    layer_positions = (
+        list(relevant_layers)
+        if hasattr(train_base, "_relevant_layers")
+        else list(range(len(relevant_layers)))
+    )
+
+    def _token_zero_view(base_dataset):
+        return TokenwiseContrastiveDataset(
+            base_dataset,
+            layer_positions=layer_positions,
+            num_views=1,
+            token_pair_mode="first_anchored",
+            fixed_token=0,
+            min_response_tokens=1,
+            emit_view_logprob_targets=False,
+        )
+
+    train_ds = _token_zero_view(train_base)
+    val_ds = _token_zero_view(val_base)
+    test_ds = _token_zero_view(test_base)
+
+    model = TokenZeroMLPProbe(
+        input_dim=int(dataset_cfg["input_dim"]),
+        num_layers=len(relevant_layers),
+        hidden_dim=int(model_cfg.get("hidden_dim", 2048)),
+        output_dim=int(model_cfg.get("output_dim", 1024)),
+        dropout=float(model_cfg.get("dropout", 0.1)),
+        normalize_input=bool(model_cfg.get("normalize_input", True)),
+    )
+    total_params = sum(parameter.numel() for parameter in model.parameters())
+    parameter_floor = int(model_cfg.get("parameter_floor", 10_000_000))
+    expected_total_params = model_cfg.get("expected_total_params")
+    if total_params < parameter_floor:
+        raise RuntimeError(
+            f"token-zero MLP parameter floor failed: {total_params} < "
+            f"{parameter_floor}"
+        )
+    if expected_total_params is not None and total_params != int(expected_total_params):
+        raise RuntimeError(
+            "token-zero MLP parameter guard failed: expected "
+            f"{expected_total_params}, constructed {total_params}"
+        )
+
+    checkpoint_dir = os.path.join(output_dir, "artifacts")
+    trainer_config = LinearProbeTrainerConfig(
+        max_epochs=int(train_cfg["max_epochs"]),
+        batch_size=int(train_cfg["batch_size"]),
+        lr=float(train_cfg["lr"]),
+        steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+        min_total_steps=train_cfg.get("min_total_steps"),
+        grad_clip_norm=train_cfg.get("grad_clip_norm"),
+        balanced_sampling=bool(train_cfg.get("balanced_sampling", True)),
+        use_infinite_index_stream=bool(
+            train_cfg.get("use_infinite_index_stream", False)
+        ),
+        infinite_stream_seed=int(training_seed),
+        select_on_val=True,
+        device=device,
+        num_workers=int(experiment_cfg.get("num_workers", 4)),
+        persistent_workers=bool(experiment_cfg.get("persistent_workers", True)),
+        checkpoint_dir=checkpoint_dir,
+        save_every=1,
+    )
+    trainer = LinearProbeTrainer(model, config=trainer_config)
+    final_weights_path = os.path.join(checkpoint_dir, "final_weights.pt")
+    training_summary: dict = {}
+    if os.path.exists(final_weights_path):
+        logger.info(
+            "[token_zero_mlp_probe] final_weights.pt found; loading the "
+            "validation-selected checkpoint and skipping training"
+        )
+        checkpoint = torch.load(
+            final_weights_path, map_location=trainer.device, weights_only=True
+        )
+        model.load_state_dict(checkpoint["model_state_dict"])
+        training_summary = dict(checkpoint.get("training_summary", {}))
+    else:
+        trainer.fit(train_dataset=train_ds, val_dataset=val_ds)
+        training_summary = {
+            "checkpoint_selection_metric": "validation_auroc",
+            "selected_epoch": int(trainer.selected_epoch) + 1,
+            "selected_validation_auroc": float(trainer.selected_val_auroc),
+        }
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "training_summary": training_summary,
+            },
+            final_weights_path,
+        )
+
+    eval_device = trainer.device
+    model.eval()
+    model.to(eval_device)
+    eval_loader = DataLoader(
+        test_ds,
+        batch_size=int(train_cfg.get("eval_batch_size", train_cfg["batch_size"])),
+        shuffle=False,
+        num_workers=int(experiment_cfg.get("num_workers", 4)),
+        pin_memory=True,
+        persistent_workers=bool(
+            experiment_cfg.get("persistent_workers", True)
+            and int(experiment_cfg.get("num_workers", 4)) > 0
+        ),
+    )
+    scores: list[float] = []
+    labels: list[int] = []
+    example_ids: list[str] = []
+    with torch.no_grad():
+        for batch in eval_loader:
+            activations = batch["views_activations"].to(
+                eval_device, non_blocking=True
+            )
+            if activations.dim() == 4:
+                activations = activations.squeeze(1)
+            probabilities = model(activations).view(-1).cpu().tolist()
+            scores.extend(float(value) for value in probabilities)
+            labels.extend(int(value) for value in batch["halu"].view(-1).tolist())
+            example_ids.extend(str(value) for value in batch["hashkey"])
+
+    auroc = float(roc_auc_score(labels, scores))
+    auprc = float(average_precision_score(labels, scores))
+    eval_metrics = {
+        "method": method_cfg["name"],
+        "dataset": dataset_cfg["name"],
+        "seed": training_seed,
+        "split_seed": _resolve_run_split_seed(experiment_cfg, training_seed),
+        "n_train": len(train_ds),
+        "n_val": len(val_ds),
+        "n_test": len(test_ds),
+        "auroc": auroc,
+        "auprc": auprc,
+        "primary_eval_token": 0,
+        "relevant_layers": relevant_layers,
+        "model_class": "TokenZeroMLPProbe",
+        "model_total_params": int(total_params),
+        "parameter_floor": parameter_floor,
+        "checkpoint_selection_metric": "validation_auroc",
+        "selected_epoch": training_summary.get("selected_epoch"),
+        "selected_validation_auroc": training_summary.get(
+            "selected_validation_auroc"
+        ),
+        "future_response_tokens_used": False,
+        "contrastive_training": False,
+        "response_logprob_reconstruction": False,
+    }
+    predictions = [
+        {
+            "example_id": example_id,
+            "score_halu": score,
+            "label_halu": label,
+        }
+        for example_id, score, label in zip(example_ids, scores, labels)
+    ]
+    return eval_metrics, predictions
+
+
 
 def run_simclr_linear(
     ap,
@@ -5512,6 +5721,7 @@ def main() -> None:
                     "contrastive_logprob_recon_twin",
                     "contrastive_logprob_recon_dualhead_fusion",
                     "tokenwise_projection_rescore",
+                    "token_zero_mlp_probe",
                 }
                 have_predictions = (not needs_predictions) or os.path.exists(pred_path)
                 embedding_manifest_path = os.path.join(
@@ -5644,6 +5854,11 @@ def main() -> None:
                         )
                     elif routine == "multi_layer_linear_probe":
                         eval_metrics, predictions = run_multi_layer_linear_probe(
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
+                            test_ap=test_ap,
+                        )
+                    elif routine == "token_zero_mlp_probe":
+                        eval_metrics, predictions = run_token_zero_mlp_probe(
                             ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
                         )
