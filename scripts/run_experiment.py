@@ -1420,6 +1420,10 @@ def run_contrastive_logprob_recon(
                 "dataset": dataset_cfg["name"],
                 "experiment": experiment_cfg.get("experiment_name"),
                 "method": method_cfg["name"],
+                "training_recipe": method_cfg.get(
+                    "training_recipe", method_cfg["name"]
+                ),
+                "architecture_arm": method_cfg.get("architecture_arm"),
                 "training_seed": int(training_seed),
                 "split_seed": int(split_seed),
                 "embedding_surface": "token_zero" if _tokenwise else "target_layers",
@@ -5510,7 +5514,24 @@ def main() -> None:
                     "tokenwise_projection_rescore",
                 }
                 have_predictions = (not needs_predictions) or os.path.exists(pred_path)
-                if os.path.exists(eval_metrics_path) and have_predictions and not args.force:
+                embedding_manifest_path = os.path.join(
+                    run_dir, "embeddings", "manifest.json"
+                )
+                needs_eval_only_embedding_backfill = bool(
+                    args.eval_only
+                    and routine_for_skip
+                    == "tokenwise_contrastive_logprob_recon"
+                    and method_cfg.get("evaluation", {}).get(
+                        "dump_embeddings", False
+                    )
+                    and not os.path.exists(embedding_manifest_path)
+                )
+                if (
+                    os.path.exists(eval_metrics_path)
+                    and have_predictions
+                    and not args.force
+                    and not needs_eval_only_embedding_backfill
+                ):
                     if prior_error:
                         logger.warning(
                             f"Found both eval_metrics.json and run_error.json for "
@@ -5561,11 +5582,23 @@ def main() -> None:
                         "training_seed": effective_seed,
                         "split_seed": actual_split_seed,
                     }
-                    with open(os.path.join(run_dir, "config.json"), "w") as f:
-                        json.dump(merged_config, f, indent=2)
+                    config_output_path = os.path.join(run_dir, "config.json")
+                    if not (
+                        args.eval_only
+                        and os.path.exists(config_output_path)
+                        and not args.force
+                    ):
+                        with open(config_output_path, "w") as f:
+                            json.dump(merged_config, f, indent=2)
 
                     # Write manifest
-                    write_run_manifest(run_dir)
+                    run_manifest_path = os.path.join(run_dir, "run_manifest.json")
+                    if not (
+                        args.eval_only
+                        and os.path.exists(run_manifest_path)
+                        and not args.force
+                    ):
+                        write_run_manifest(run_dir)
 
                     # Dispatch to method runner
                     routine = method_cfg.get("routine", method_cfg["name"])
@@ -5680,7 +5713,9 @@ def main() -> None:
                             json.dump(eval_metrics, f, indent=2)
 
                     # Write predictions.csv
-                    if predictions:
+                    if predictions and not (
+                        args.eval_only and os.path.exists(pred_path) and not args.force
+                    ):
                         pred_path = os.path.join(run_dir, "predictions.csv")
                         with open(pred_path, "w", newline="") as f:
                             writer = csv.DictWriter(f, fieldnames=predictions[0].keys())
