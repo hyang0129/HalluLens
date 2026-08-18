@@ -92,6 +92,162 @@ the first decoding state. Its role is to discard nuisance variation while
 retaining the portion predictive of `C`, which is the information-bottleneck
 interpretation of the proposed contrastive objective.
 
+### Why information theory does not guarantee full-response sufficiency
+
+The autoregressive factorization says that the prompt and fixed model define a
+distribution over complete continuations before generation begins. It does not
+say that this distribution is encoded in the final hidden vector used to
+produce the first response token.
+
+Let `H_0 = h_0^L` denote the final-layer hidden vector at the last prompt
+position and let `K_0` denote the complete prefill KV cache across all prompt
+positions and layers. The first-token distribution is a direct function of
+`H_0`:
+
+\[
+P_\theta(Y_0\mid X)
+=
+\operatorname{softmax}(W H_0+b).
+\]
+
+Consequently, `H_0` is sufficient for the first-token distribution by
+construction. Later decoding does not, however, form a feedforward recurrence
+through `H_0` alone. A feedforward state model would have the form
+
+\[
+H_{t+1}=F(H_t,Y_t),
+\]
+
+in which case every influence of the prompt on the future would have to pass
+through `H_0`. A transformer instead updates its state using the cached keys
+and values:
+
+\[
+(H_{t+1},K_{t+1})=F_\theta(Y_t,K_t).
+\]
+
+For example, after the same first token `Y_0` has been sampled, an attention
+head computes a quantity of the form
+
+\[
+\operatorname{Attn}(q_{Y_0},K_0)
+=
+\sum_i
+\operatorname{softmax}(q_{Y_0}^{\mathsf T}k_i)v_i.
+\]
+
+The keys and values retain position- and layer-specific prompt information
+that need not be recoverable from `H_0`. The relevant causal structure is
+therefore two parallel prompt-dependent paths:
+
+```text
+X -> H_0 -> first-token logits
+X -> K_0 -> later-token states and logits
+```
+
+For the same tokenized prompt, model parameters, masks, and deterministic
+inference settings, repeated prefill produces both the same `H_0` and the same
+`K_0`. The concern is instead that the architecture imposes no implication
+
+\[
+H_0(X)=H_0(X')
+\quad\Longrightarrow\quad
+K_0(X)=K_0(X')
+\]
+
+for two different prompts. If their final vectors were equal but their caches
+differed, they would have identical first-token distributions but could have
+different continuation distributions after sampling the same `Y_0`. This is a
+counterexample to an architectural guarantee, not a claim that exact hidden
+state collisions are common.
+
+In fact, exact collisions between the complete high-dimensional floating-point
+vectors of two distinct model inputs should be extremely rare in practice.
+The map from the discrete prompt support into `H_0` could even be injective. In
+that case an unrestricted mathematical decoder could identify the prompt from
+`H_0`, making `H_0` formally sufficient through an arbitrary inverse lookup.
+That notion of sufficiency would be technically valid but scientifically weak:
+it would not establish that the continuation distribution or hallucination
+risk is encoded in a stable form accessible to a realistic detector.
+
+The useful hypothesis is therefore **approximate, robust, and accessible risk
+sufficiency**, not exact recoverability of the entire response distribution.
+For the hallucination outcome `C`, the exact statistical condition would be
+
+\[
+C\perp X\mid S_0,
+\qquad\text{equivalently}\qquad
+I(C;X\mid S_0)=0.
+\]
+
+A robust version first prevents the representation from acting merely as a
+unique prompt identifier, for example by quantizing or perturbing it:
+
+\[
+\widetilde S_0=Q(S_0+\eta),
+\qquad
+I(C;X\mid\widetilde S_0)\le\epsilon.
+\]
+
+An operational version asks whether a deliberately simple scorer can recover
+the risk from the first state and generalize to held-out prompts:
+
+\[
+P(C=1\mid X)\approx g_\psi(S_0(X)),
+\]
+
+where `g_psi` is restricted to a predeclared family such as KNN or a frozen
+linear classifier. These statements allow `S_0` to omit details required to
+reconstruct the exact continuation while retaining most of the information
+needed for the much coarser hallucination decision.
+
+There are several reasons this weaker condition is plausible. The first state
+already aggregates prompt-conditioned knowledge and uncertainty to predict the
+first response token; the benchmark prompts request short direct answers; and
+the eventual correctness label is often governed by whether the model can
+access the relevant fact before it begins answering. None of these facts is a
+proof. They motivate measuring how much predictive performance is available at
+token zero and how much additional performance appears after the response has
+unfolded.
+
+### What token-wise improvement means
+
+Token-wise training uses later states as privileged training information:
+
+\[
+Z_0=f_\phi(S_0),
+\qquad
+Z_t=f_\phi(S_t),
+\qquad
+\mathcal L_{\mathrm{temporal}}(Z_0,Z_t).
+\]
+
+At inference, the detector still receives only `S_0`. Later states therefore
+cannot contribute sample-specific future information at test time. Instead,
+they teach the encoder which patterns already present in `S_0` tend to predict
+how a response will develop. By the data-processing inequality, the learned
+encoder cannot increase the true information about `C`; it can make that
+information easier for a restricted scorer to use.
+
+Accordingly, a token-wise model outperforming a linear classifier on the raw
+first state is evidence that useful nonlinear or geometrically inaccessible
+signal exists at token zero and can be exposed through training. It is
+suggestive, but does not by itself prove that later-token supervision caused
+the improvement: the nonlinear encoder, supervised contrastive labels, and
+reconstruction objective are alternative explanations. The causal comparison
+holds model, scorer, labels, updates, and auxiliary losses fixed while varying
+only the second view:
+
+1. token zero plus a later state from the same response;
+2. token zero plus a second token-zero augmentation;
+3. token zero plus a later state from a different, shuffled response.
+
+If the same-response temporal arm wins both controls, the supported conclusion
+is that subsequent token states provide useful privileged supervision for
+extracting hallucination risk already latent in the first state. It would
+still not imply that `H_0` contains a lossless encoding of the complete future
+distribution.
+
 ### Substring-match theorem for the 64-token benchmark
 
 The default benchmark generation is explicitly capped at 64 new tokens and
