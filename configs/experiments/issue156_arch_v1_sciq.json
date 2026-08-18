@@ -1,7 +1,7 @@
 {
   "_comment": "Issue #156 seed-0 architecture sweep using the v1 t0-plus-tn recipe. Queue only after the nine-cell Issue #154 mixed sweep is complete.",
-  "experiment_name": "issue156_arch_v1_popqa",
-  "dataset": "popqa_memmap",
+  "experiment_name": "issue156_arch_v1_sciq",
+  "dataset": "sciq_memmap",
   "methods": [
     "tokenwise_arch_v1_input_norm_only",
     "tokenwise_arch_v1_prenorm_only",

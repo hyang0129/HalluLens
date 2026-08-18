@@ -1,0 +1,13 @@
+{
+  "name": "tokenwise_arch_t0_attention_pool_only",
+  "extends": "tokenwise_causal_t0_dropout",
+  "study_issue": 156,
+  "architecture_arm": "single_query_attention_pool_only",
+  "training_recipe": "t0_same_dropout",
+  "model_class": "logprob_recon_attn_pool_progressive_compressor",
+  "model_params": {
+    "pool_num_queries": 1,
+    "expected_total_params": 77538624,
+    "reference_total_params": 77538112
+  }
+}

@@ -20,7 +20,10 @@ _DATASETS = {
     "hotpotqa_memmap": "hotpotqa",
     "nq_memmap": "nq",
     "popqa_memmap": "popqa",
+    "sciq_memmap": "sciq",
+    "searchqa_memmap": "searchqa",
 }
+_MIXED_DATASETS = dict(list(_DATASETS.items())[:3])
 _ARMS = {
     "input_layernorm_only",
     "transformer_prenorm_only",
@@ -30,12 +33,11 @@ _ARMS = {
 
 
 def _method_names(recipe: str) -> list[str]:
-    prefix = "v1" if recipe == "v1" else "mixed"
     return [
-        f"tokenwise_arch_{prefix}_input_norm_only",
-        f"tokenwise_arch_{prefix}_prenorm_only",
-        f"tokenwise_arch_{prefix}_attention_pool_only",
-        f"tokenwise_arch_{prefix}_projection128_only",
+        f"tokenwise_arch_{recipe}_input_norm_only",
+        f"tokenwise_arch_{recipe}_prenorm_only",
+        f"tokenwise_arch_{recipe}_attention_pool_only",
+        f"tokenwise_arch_{recipe}_projection128_only",
     ]
 
 
@@ -50,10 +52,16 @@ def _write_baselines(runs_root: Path, recipe: str) -> None:
     if recipe == "v1":
         experiment_prefix = "issue151_knnval"
         method = "tokenwise_contrastive_first_anchored"
+        datasets = _DATASETS
+    elif recipe == "t0":
+        experiment_prefix = "issue155_causal"
+        method = "tokenwise_causal_t0_dropout"
+        datasets = _DATASETS
     else:
         experiment_prefix = "issue154_mixed"
         method = "tokenwise_causal_mixed_half"
-    for dataset, slug in _DATASETS.items():
+        datasets = _MIXED_DATASETS
+    for dataset, slug in datasets.items():
         path = (
             runs_root
             / f"{experiment_prefix}_{slug}"
@@ -100,6 +108,7 @@ def _model_from_config(config: dict):
     ("recipe", "base_method", "training_recipe"),
     [
         ("v1", "tokenwise_contrastive_first_anchored", "v1_first_anchored"),
+        ("t0", "tokenwise_causal_t0_dropout", "t0_same_dropout"),
         ("mixed", "tokenwise_causal_mixed_half", "mixed_half"),
     ],
 )
@@ -130,7 +139,7 @@ def test_architecture_overlays_change_one_model_factor_only(
     assert projection["model_params"]["pre_norm"] is False
 
 
-@pytest.mark.parametrize("recipe", ["v1", "mixed"])
+@pytest.mark.parametrize("recipe", ["v1", "t0", "mixed"])
 def test_architecture_parameter_guards_match_constructed_models(recipe):
     with torch.device("meta"):
         configs = [
@@ -176,7 +185,7 @@ def test_builder_refuses_before_all_nine_mixed_cells_finish(tmp_path):
     assert not dispatch_root.exists()
 
 
-@pytest.mark.parametrize("recipe", ["v1", "mixed"])
+@pytest.mark.parametrize("recipe", ["v1", "t0", "mixed"])
 def test_builder_queues_exact_seed_zero_matrix_after_gate(tmp_path, recipe):
     mixed_root = tmp_path / "mixed"
     dispatch_root = tmp_path / "dispatch"
@@ -184,6 +193,8 @@ def test_builder_queues_exact_seed_zero_matrix_after_gate(tmp_path, recipe):
     _complete_mixed_gate(mixed_root)
     _write_baselines(runs_root, recipe)
 
+    expected = 12 if recipe == "mixed" else 20
+    expected_datasets = _MIXED_DATASETS if recipe == "mixed" else _DATASETS
     assert (
         build(
             dispatch_root,
@@ -192,7 +203,7 @@ def test_builder_queues_exact_seed_zero_matrix_after_gate(tmp_path, recipe):
             project_root=_ROOT,
             runs_root=runs_root,
         )
-        == 12
+        == expected
     )
     assert (
         build(
@@ -209,8 +220,8 @@ def test_builder_queues_exact_seed_zero_matrix_after_gate(tmp_path, recipe):
         json.loads(path.read_text())
         for path in sorted((dispatch_root / "pending").glob("*.json"))
     ]
-    assert len(cells) == 12
-    assert {cell["dataset"] for cell in cells} == set(_DATASETS)
+    assert len(cells) == expected
+    assert {cell["dataset"] for cell in cells} == set(expected_datasets)
     assert {cell["method"] for cell in cells} == set(_method_names(recipe))
     assert {cell["seed"] for cell in cells} == {0}
     assert all(cell["mixed_sweep_gate"] == "complete" for cell in cells)
@@ -222,7 +233,8 @@ def test_builder_queues_exact_seed_zero_matrix_after_gate(tmp_path, recipe):
     selection = json.loads(
         (dispatch_root / "issue156_recipe_selection.json").read_text()
     )
-    assert selection["recipe"] == recipe
+    assert set(selection["recipes"]) == {recipe}
+    assert selection["recipes"][recipe]["datasets"] == list(expected_datasets)
     assert len(selection["completed_mixed_cells"]) == 9
 
 
@@ -251,9 +263,84 @@ def test_recorded_recipe_cannot_be_changed_in_same_queue(tmp_path):
         )
 
 
+def test_v1_and_t0_recipes_can_share_the_matched_comparison_queue(tmp_path):
+    mixed_root = tmp_path / "mixed"
+    dispatch_root = tmp_path / "dispatch"
+    runs_root = tmp_path / "runs"
+    _complete_mixed_gate(mixed_root)
+    _write_baselines(runs_root, "v1")
+    _write_baselines(runs_root, "t0")
+
+    assert build(
+        dispatch_root,
+        recipe="v1",
+        mixed_sweep_root=mixed_root,
+        project_root=_ROOT,
+        runs_root=runs_root,
+    ) == 20
+    assert build(
+        dispatch_root,
+        recipe="t0",
+        mixed_sweep_root=mixed_root,
+        project_root=_ROOT,
+        runs_root=runs_root,
+    ) == 20
+
+    selection = json.loads(
+        (dispatch_root / "issue156_recipe_selection.json").read_text()
+    )
+    assert set(selection["recipes"]) == {"v1", "t0"}
+    assert len(list((dispatch_root / "pending").glob("*.json"))) == 40
+
+
+def test_builder_migrates_original_scalar_v1_selection_record(tmp_path):
+    mixed_root = tmp_path / "mixed"
+    dispatch_root = tmp_path / "dispatch"
+    runs_root = tmp_path / "runs"
+    _complete_mixed_gate(mixed_root)
+    _write_baselines(runs_root, "v1")
+    _write_baselines(runs_root, "t0")
+    dispatch_root.mkdir()
+    completed = sorted(
+        path.stem for path in (mixed_root / "done").glob("*issue154_mixed*.json")
+    )
+    (dispatch_root / "issue156_recipe_selection.json").write_text(
+        json.dumps(
+            {
+                "issue": 156,
+                "recipe": "v1",
+                "training_recipe": "v1_first_anchored",
+                "mixed_sweep_gate": "complete",
+                "completed_mixed_cells": completed,
+                "methods": _method_names("v1"),
+            }
+        )
+    )
+
+    assert build(
+        dispatch_root,
+        recipe="v1",
+        mixed_sweep_root=mixed_root,
+        project_root=_ROOT,
+        runs_root=runs_root,
+    ) == 20
+    assert build(
+        dispatch_root,
+        recipe="t0",
+        mixed_sweep_root=mixed_root,
+        project_root=_ROOT,
+        runs_root=runs_root,
+    ) == 20
+    selection = json.loads(
+        (dispatch_root / "issue156_recipe_selection.json").read_text()
+    )
+    assert "recipe" not in selection
+    assert set(selection["recipes"]) == {"v1", "t0"}
+
+
 def test_experiment_configs_are_gated_matched_seed_zero_pilots():
     paths = sorted((_ROOT / "configs/experiments").glob("issue156_arch_*.json"))
-    assert len(paths) == 6
+    assert len(paths) == 13
     payloads = [json.loads(path.read_text()) for path in paths]
     assert {payload["dataset"] for payload in payloads} == set(_DATASETS)
     assert all(payload["selection_gate"] == "issue154_mixed_3x3_complete" for payload in payloads)
@@ -261,3 +348,6 @@ def test_experiment_configs_are_gated_matched_seed_zero_pilots():
     assert all(payload["split_seeds"] == [42] for payload in payloads)
     assert all(len(payload["methods"]) == 4 for payload in payloads)
     assert all("mmlu" not in json.dumps(payload).lower() for payload in payloads)
+    assert sum("arch_v1" in payload["experiment_name"] for payload in payloads) == 5
+    assert sum("arch_t0" in payload["experiment_name"] for payload in payloads) == 5
+    assert sum("arch_mixed" in payload["experiment_name"] for payload in payloads) == 3

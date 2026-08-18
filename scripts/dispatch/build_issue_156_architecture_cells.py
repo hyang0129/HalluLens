@@ -1,14 +1,15 @@
-"""Build the gated Issue #156 one-factor architecture pilot.
+"""Build the gated Issue #156 one-factor architecture sweep.
 
 The code/config matrix can land before Issue #154 finishes, but this builder
 refuses to select a recipe or create cells until all nine mixed-half cells are
-in the completed state.  The caller then explicitly chooses ``v1`` or
-``mixed``; that choice is persisted beside the queue so a later invocation
-cannot accidentally mix training recipes.
+in the completed state. The caller explicitly chooses a recipe. The selected
+``v1`` (t0 + tn) and ``t0`` (t0 + t0 dropout) recipes may coexist for the
+matched comparison requested in Issue #156; the legacy ``mixed`` recipe may
+not be combined with either one.
 
-Grid after the gate: HotpotQA, NQ, PopQA x seed 0 x four trained arms.  The
-projection arm reports both its 512-d trunk and 128-d projection scores in the
-same cell. MMLU is excluded.
+The v1 and t0 grids cover HotpotQA, NQ, PopQA, SciQ, and SearchQA x seed 0 x
+four trained arms. The projection arm reports both its 512-d trunk and 128-d
+projection scores in the same cell. MMLU is excluded.
 """
 from __future__ import annotations
 
@@ -24,17 +25,21 @@ if str(_PROJECT_ROOT) not in sys.path:
 from scripts.dispatch.claim import init_dispatch_dirs  # noqa: E402
 from scripts.experiment_utils import load_method_config  # noqa: E402
 
-_TARGETS = (
+_FIVE_DATASET_TARGETS = (
     ("00", "hotpotqa", "hotpotqa_memmap"),
     ("20", "nq", "nq_memmap"),
     ("30", "popqa", "popqa_memmap"),
+    ("40", "sciq", "sciq_memmap"),
+    ("50", "searchqa", "searchqa_memmap"),
 )
+_THREE_DATASET_TARGETS = _FIVE_DATASET_TARGETS[:3]
 _RECIPES = {
     "v1": {
         "training_recipe": "v1_first_anchored",
         "baseline_method": "tokenwise_contrastive_first_anchored",
         "baseline_experiment_prefix": "issue151_knnval",
         "experiment_prefix": "issue156_arch_v1",
+        "targets": _FIVE_DATASET_TARGETS,
         "methods": (
             "tokenwise_arch_v1_input_norm_only",
             "tokenwise_arch_v1_prenorm_only",
@@ -42,11 +47,25 @@ _RECIPES = {
             "tokenwise_arch_v1_projection128_only",
         ),
     },
+    "t0": {
+        "training_recipe": "t0_same_dropout",
+        "baseline_method": "tokenwise_causal_t0_dropout",
+        "baseline_experiment_prefix": "issue155_causal",
+        "experiment_prefix": "issue156_arch_t0",
+        "targets": _FIVE_DATASET_TARGETS,
+        "methods": (
+            "tokenwise_arch_t0_input_norm_only",
+            "tokenwise_arch_t0_prenorm_only",
+            "tokenwise_arch_t0_attention_pool_only",
+            "tokenwise_arch_t0_projection128_only",
+        ),
+    },
     "mixed": {
         "training_recipe": "mixed_half",
         "baseline_method": "tokenwise_causal_mixed_half",
         "baseline_experiment_prefix": "issue154_mixed",
         "experiment_prefix": "issue156_arch_mixed",
+        "targets": _THREE_DATASET_TARGETS,
         "methods": (
             "tokenwise_arch_mixed_input_norm_only",
             "tokenwise_arch_mixed_prenorm_only",
@@ -114,22 +133,62 @@ def _record_recipe_selection(
     completed_mixed_cells: tuple[str, ...],
 ) -> None:
     selection_path = dispatch_root / _SELECTION_FILE
-    payload = {
-        "issue": 156,
-        "recipe": recipe,
+    recipe_entry = {
         "training_recipe": _RECIPES[recipe]["training_recipe"],
+        "methods": list(_RECIPES[recipe]["methods"]),
+        "datasets": [target[2] for target in _RECIPES[recipe]["targets"]],
+    }
+    common = {
+        "issue": 156,
         "mixed_sweep_gate": "complete",
         "completed_mixed_cells": list(completed_mixed_cells),
-        "methods": list(_RECIPES[recipe]["methods"]),
     }
     if selection_path.exists():
         existing = json.loads(selection_path.read_text(encoding="utf-8"))
-        if existing != payload:
+        if "recipes" in existing:
+            existing_recipes = dict(existing["recipes"])
+        else:
+            # Migrate the original scalar selection record written by the
+            # three-dataset v1/mixed builder without invalidating queued cells.
+            existing_recipe = existing.get("recipe")
+            existing_recipes = {
+                existing_recipe: {
+                    "training_recipe": existing.get("training_recipe"),
+                    "methods": existing.get("methods"),
+                    "datasets": [
+                        target[2]
+                        for target in _RECIPES.get(existing_recipe, {}).get(
+                            "targets", ()
+                        )
+                    ],
+                }
+            }
+        if {
+            key: existing.get(key) for key in common
+        } != common:
             raise RuntimeError(
-                f"Issue #156 recipe already recorded as {existing.get('recipe')!r}; "
-                f"refusing to mix it with {recipe!r}"
+                "Issue #156 selection gate metadata does not match the "
+                "completed mixed sweep"
             )
-        return
+        selected = set(existing_recipes)
+        proposed = selected | {recipe}
+        if "mixed" in proposed and len(proposed) > 1:
+            raise RuntimeError(
+                f"Issue #156 recipes already recorded as {sorted(selected)!r}; "
+                f"refusing to mix them with {recipe!r}"
+            )
+        if recipe in existing_recipes and existing_recipes[recipe] != recipe_entry:
+            raise RuntimeError(
+                f"Issue #156 recipe {recipe!r} metadata changed after selection"
+            )
+        existing_recipes[recipe] = recipe_entry
+    else:
+        existing_recipes = {recipe: recipe_entry}
+    payload = {
+        **common,
+        "comparison": "t0_same_dropout_vs_v1_first_anchored",
+        "recipes": existing_recipes,
+    }
     selection_path.write_text(
         json.dumps(payload, indent=2) + "\n", encoding="utf-8"
     )
@@ -158,7 +217,7 @@ def build(
 
     baseline_paths: dict[str, Path] = {}
     experiment_paths: dict[str, Path] = {}
-    for _, slug, dataset_name in _TARGETS:
+    for _, slug, dataset_name in recipe_cfg["targets"]:
         baseline_paths[dataset_name] = (
             runs_root
             / f"{recipe_cfg['baseline_experiment_prefix']}_{slug}"
@@ -184,7 +243,7 @@ def build(
     )
 
     written = 0
-    for dataset_order, slug, dataset_name in _TARGETS:
+    for dataset_order, slug, dataset_name in recipe_cfg["targets"]:
         experiment_name = f"{recipe_cfg['experiment_prefix']}_{slug}"
         experiment_rel = f"configs/experiments/{experiment_name}.json"
         for arm_order, method in enumerate(recipe_cfg["methods"]):

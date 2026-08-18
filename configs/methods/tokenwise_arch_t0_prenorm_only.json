@@ -1,0 +1,12 @@
+{
+  "name": "tokenwise_arch_t0_prenorm_only",
+  "extends": "tokenwise_causal_t0_dropout",
+  "study_issue": 156,
+  "architecture_arm": "transformer_prenorm_only",
+  "training_recipe": "t0_same_dropout",
+  "model_params": {
+    "pre_norm": true,
+    "expected_total_params": 77538112,
+    "reference_total_params": 77538112
+  }
+}

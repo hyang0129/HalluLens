@@ -1,0 +1,23 @@
+{
+  "name": "tokenwise_arch_t0_projection128_only",
+  "extends": "tokenwise_causal_t0_dropout",
+  "study_issue": 156,
+  "architecture_arm": "disposable_projection_128_only",
+  "training_recipe": "t0_same_dropout",
+  "model_class": "logprob_recon_projected_progressive_compressor",
+  "model_params": {
+    "projection_hidden_dim": 512,
+    "projection_dim": 128,
+    "projection_l2_normalize": true,
+    "depth_pooling": "mean",
+    "pool_num_queries": 1,
+    "normalize_input": false,
+    "pre_norm": false,
+    "expected_total_params": 77866432,
+    "reference_total_params": 77538112
+  },
+  "evaluation": {
+    "score_projection_surface": true,
+    "projection_batch_size": 4096
+  }
+}

@@ -4,20 +4,27 @@
 
 Implementation and validation belong in PR #152, but the Stage 1 training
 cells must not be created until all nine cells in the Issue #154 mixed 50/50
-sweep are complete.  After those results are analyzed, exactly one training
-recipe is selected:
+sweep are complete. Those results rejected the mixed recipe as the primary
+KNN baseline. The completed five-dataset controls then motivated a matched
+comparison of two retained recipes:
 
-- `mixed`: use `tokenwise_causal_mixed_half` if it improves the predeclared
-  three-dataset pilot aggregate.
-- `v1`: otherwise retain `tokenwise_contrastive_first_anchored` as the
-  fallback.
+- `v1` / tn: `tokenwise_contrastive_first_anchored`, pairing t0 with a random
+  same-response later token under the original objective.
+- `t0`: `tokenwise_causal_t0_dropout`, pairing two independently dropped-out
+  t0 views under the causal-control objective.
+
+The five-dataset KNN macro is 0.7790 for v1 and 0.7751 for t0, while the
+linear-probe macro reverses the order (0.7590 for v1 and 0.7719 for t0). The
+architecture sweep therefore retains both instead of choosing one from a
+single scoring surface.
 
 `scripts/dispatch/build_issue_156_architecture_cells.py` enforces this gate.
-It requires an explicit recipe, verifies that the nine mixed cells are in the
-`done` state, verifies the selected baseline outputs, and records the choice in
-`issue156_recipe_selection.json`. It refuses to mix recipes in one queue.
+It verifies that the nine mixed cells are in the `done` state, verifies each
+recipe's baseline outputs, and records the comparison in
+`issue156_recipe_selection.json`. The v1 and t0 recipes may share one queue;
+the rejected legacy mixed recipe cannot be combined with them.
 
-No Issue #156 training cells are queued as part of implementation.
+No Issue #156 training cells are queued merely by importing the implementation.
 
 ## Stage 0: existing projection-surface diagnostic
 
@@ -40,8 +47,8 @@ to promote by itself.
 
 ## Stage 1: one factor at a time
 
-Starting from the selected post-#154 recipe, train seed 0 on HotpotQA, NQ, and
-PopQA with exactly one model change per arm:
+Starting separately from each retained recipe, train seed 0 on HotpotQA, NQ,
+PopQA, SciQ, and SearchQA with exactly one model change per arm:
 
 1. Input LayerNorm only (`+8,192` parameters).
 2. Pre-norm transformer blocks only (`+0` parameters).
@@ -53,29 +60,31 @@ The projection arm reports both 512-d trunk and 128-d projection KNN/probe
 metrics in the same cell. This avoids redundant training and avoids an
 evaluation cell racing its source checkpoint.
 
-All arms inherit the selected recipe's data construction, objective,
+All arms inherit their recipe's data construction, objective,
 optimizer, step count, validation-KNN checkpoint selection, splits, and
 scorers. The primary statistic is raw-Euclidean KNN AUROC, aggregated as an
-unweighted macro over the three pilot datasets. Normalized-cosine KNN, frozen
-linear probe, and AUPRC remain secondary diagnostics.
+unweighted macro over all five datasets. Normalized-cosine KNN, frozen linear
+probe, and AUPRC remain secondary diagnostics. Each architecture arm is
+compared with the baseline from the same training recipe before comparing
+cross-recipe outcomes.
 
 ## Queue commands after the gate
 
-Choose one command only after the mixed sweep is complete and its aggregate is
-known:
+Run both commands after the mixed sweep is complete:
 
 ```bash
-# Mixed wins
-python scripts/dispatch/build_issue_156_architecture_cells.py \
-  --recipe mixed \
-  --dispatch-root shared/issue_151_knnval_rerun_dispatch
-
-# Mixed does not win; corrected v1 remains the fixed recipe
+# Original t0 + tn recipe
 python scripts/dispatch/build_issue_156_architecture_cells.py \
   --recipe v1 \
   --dispatch-root shared/issue_151_knnval_rerun_dispatch
+
+# Two independently dropped-out t0 views
+python scripts/dispatch/build_issue_156_architecture_cells.py \
+  --recipe t0 \
+  --dispatch-root shared/issue_151_knnval_rerun_dispatch
 ```
 
-Either command creates twelve independently claimable cells: four model arms
-times three datasets times one seed. Existing generic workers can consume the
-cells without any worker-specific changes. MMLU is excluded.
+Together the commands create forty independently claimable cells: two recipes
+times four model arms times five datasets times one seed. Existing generic
+workers can consume the cells without any worker-specific changes. MMLU is
+excluded.

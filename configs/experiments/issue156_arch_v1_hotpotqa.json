@@ -1,5 +1,5 @@
 {
-  "_comment": "Issue #156 seed-0 architecture pilot using the v1 fallback recipe. Do not queue until the nine-cell Issue #154 mixed sweep is complete.",
+  "_comment": "Issue #156 seed-0 architecture sweep using the v1 t0-plus-tn recipe. Queue only after the nine-cell Issue #154 mixed sweep is complete.",
   "experiment_name": "issue156_arch_v1_hotpotqa",
   "dataset": "hotpotqa_memmap",
   "methods": [
@@ -14,9 +14,9 @@
   "selection_gate": "issue154_mixed_3x3_complete",
   "analysis_plan": {
     "primary_metric": "knn_auroc",
-    "aggregate": "unweighted_macro_across_hotpotqa_nq_popqa",
-    "comparison": "one_factor_delta_from_selected_post_issue154_baseline",
-    "promotion_threshold": "positive_three_dataset_macro_knn_delta"
+    "aggregate": "unweighted_macro_across_five_benchmarks",
+    "comparison": "one_factor_delta_from_recipe_matched_baseline",
+    "promotion_threshold": "positive_five_dataset_macro_knn_delta"
   },
   "device": "auto",
   "num_workers": 4,
