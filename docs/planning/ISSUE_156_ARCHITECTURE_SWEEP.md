@@ -88,3 +88,22 @@ Together the commands create forty independently claimable cells: two recipes
 times four model arms times five datasets times one seed. Existing generic
 workers can consume the cells without any worker-specific changes. MMLU is
 excluded.
+
+## Stage 2: v1 input-normalization confirmation
+
+The seed-0 architecture sweep provisionally favored input LayerNorm under the
+v1 t0-plus-later-token recipe. Before adding more normalization mechanisms,
+confirm that effect with a paired three-seed comparison over all five
+datasets. The no-normalization v1 baseline already exists for training seeds
+0, 1, and 2 with split seeds 42, 1, and 2. Stage 1 supplies the normalized
+seed-0 results, so the confirmation builder adds only the ten missing
+normalized cells for seeds 1 and 2.
+
+```bash
+python scripts/dispatch/build_issue_156_input_norm_confirmation_cells.py \
+  --dispatch-root shared/issue_151_knnval_rerun_dispatch
+```
+
+The primary analysis is the paired five-dataset macro KNN AUROC. Normalized
+cosine KNN, frozen linear probe, and Mahalanobis remain secondary checks. A
+normalization-mechanism sweep should proceed only if the paired gain survives.
