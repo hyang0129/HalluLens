@@ -10,6 +10,17 @@ Usage:
         [--splits test,train] \
         [--n-samples N]
 
+Chat-template re-capture: point --dispatch-root and --out-base-dir at a
+separate tree so this never collides with legacy (non-templated) captures,
+and pass --chat-template so every emitted cell carries "chat_template": true
+through to capture_inference.py:
+
+    python scripts/dispatch/generate_manifest.py \
+        --dispatch-root shared/icr_capture_chat/_dispatch \
+        --out-base-dir shared/icr_capture_chat \
+        --chat-template \
+        [--tasks ...] [--models ...] [--splits ...]
+
 Re-runnable: cells whose output already exists (eval_results.json + full meta.jsonl)
 are skipped. Cells already in pending/claimed/done/failed are not touched.
 """
@@ -145,6 +156,7 @@ def generate_manifest(
     batch_size: int = 1,
     cap: int | None = None,
     shuffle_seed: int = 0,
+    chat_template: bool = False,
 ) -> int:
     init_dispatch_dirs(dispatch_root)
     written = 0
@@ -198,6 +210,7 @@ def generate_manifest(
                         "index_start":     idx_start,
                         "index_end":       idx_end,
                         "shuffle_seed":    shuffle_seed,
+                        "chat_template":   chat_template,
                     }
                     cell_path.write_text(
                         json.dumps(cell, indent=2), encoding="utf-8"
@@ -249,6 +262,12 @@ def main() -> int:
                         help="Seed for the deterministic shuffle when --cap is set. "
                              "Must stay constant across appendix runs of the same "
                              "dataset for the slices to remain non-overlapping.")
+    parser.add_argument("--chat-template", action="store_true", default=False,
+                        help="Set 'chat_template': true on every emitted cell, so worker.sh "
+                             "passes --chat-template through to capture_inference.py. Point "
+                             "--dispatch-root / --out-base-dir at a separate tree (e.g. "
+                             "shared/icr_capture_chat) when using this — do not mix with "
+                             "legacy non-templated captures.")
     args = parser.parse_args()
 
     dispatch_root = Path(args.dispatch_root)
@@ -266,6 +285,7 @@ def main() -> int:
         batch_size=args.batch_size,
         cap=args.cap,
         shuffle_seed=args.shuffle_seed,
+        chat_template=args.chat_template,
     )
     print(f"Done — {total} cells queued in {dispatch_root / 'pending'}")
     return 0

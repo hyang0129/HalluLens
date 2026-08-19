@@ -112,6 +112,7 @@ while true; do
   IDX_START=$(    "$PYTHON" -c "import json,sys; d=json.load(open('$CELL_PATH')); v=d.get('index_start'); print('' if v is None else str(v))")
   IDX_END=$(      "$PYTHON" -c "import json,sys; d=json.load(open('$CELL_PATH')); v=d.get('index_end'); print('' if v is None else str(v))")
   SHUFFLE_SEED=$( "$PYTHON" -c "import json,sys; d=json.load(open('$CELL_PATH')); print(d.get('shuffle_seed', 0))")
+  CHAT_TEMPLATE=$("$PYTHON" -c "import json,sys; d=json.load(open('$CELL_PATH')); print('1' if d.get('chat_template') else '')")
 
   CAPTURE_ARGS=(
     --task        "$TASK"
@@ -134,6 +135,9 @@ while true; do
     CAPTURE_ARGS+=(--index-end "$IDX_END")
   fi
   CAPTURE_ARGS+=(--shuffle-seed "$SHUFFLE_SEED")
+  if [ -n "$CHAT_TEMPLATE" ]; then
+    CAPTURE_ARGS+=(--chat-template)
+  fi
 
   echo "worker $WORKER_ID: running capture_inference.py task=$TASK split=$SPLIT model=$MODEL"
   set +e
