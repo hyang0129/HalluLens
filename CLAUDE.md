@@ -202,8 +202,8 @@ python scripts/experiment_status.py --experiment configs/experiments/baseline_co
 
 Agents **may** start a Jupyter Lab allocation **without asking**, but **only** through the guarded launcher `scripts/launch_jupyter.py`. It enforces hard caps in code (no agent can bypass them) and has **no cancel path**:
 
-- Refuses if **≥ 8 jupyter jobs are already RUNNING**.
-- Refuses if **≥ 8 jobs total** (any state, including PENDING/queued).
+- Refuses if **≥ 12 jupyter jobs are already RUNNING**.
+- Refuses if **≥ 12 jobs total** (any state, including PENDING/queued).
 - Refuses if the requested port already serves a running jupyter job.
 
 ```bash
