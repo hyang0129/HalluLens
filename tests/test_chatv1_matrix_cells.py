@@ -18,6 +18,9 @@ _LLAMA_METHODS = [
     "token_zero_mlp_probe",
     "tokenwise_causal_t0_dropout",
     "tokenwise_arch_t0_input_norm_only",
+    "tokenwise_v1_inputnorm_probe21m",
+    "tokenwise_v1_inputnorm_probe6m",
+    "tokenwise_v1_inputnorm_probe2m",
     "logprob_baseline",
     "token_entropy",
 ]
@@ -28,6 +31,9 @@ _QWEN_METHODS = [
     "token_zero_mlp_probe_qwen3",
     "tokenwise_causal_t0_dropout_qwen3",
     "tokenwise_arch_t0_input_norm_only_qwen3",
+    "tokenwise_v1_inputnorm_probe21m_qwen3",
+    "tokenwise_v1_inputnorm_probe6m_qwen3",
+    "tokenwise_v1_inputnorm_probe2m_qwen3",
     "logprob_baseline",
     "token_entropy",
 ]
@@ -83,7 +89,7 @@ def test_experiment_configs_cover_five_tasks_two_models_without_mmlu():
 def test_builder_writes_60_cells_and_is_idempotent(tmp_path):
     dispatch_root = tmp_path / "dispatch"
 
-    assert build(dispatch_root, project_root=_ROOT) == 80
+    assert build(dispatch_root, project_root=_ROOT) == 110
     # Re-running must not duplicate cells.
     assert build(dispatch_root, project_root=_ROOT) == 0
 
@@ -91,7 +97,7 @@ def test_builder_writes_60_cells_and_is_idempotent(tmp_path):
         json.loads(p.read_text(encoding="utf-8"))
         for p in sorted((dispatch_root / "pending").glob("*.json"))
     ]
-    assert len(cells) == 80
+    assert len(cells) == 110
 
     # cell_id uniqueness.
     ids = [c["cell_id"] for c in cells]
@@ -126,7 +132,7 @@ def test_builder_writes_60_cells_and_is_idempotent(tmp_path):
     for c in cells:
         by_dataset.setdefault(c["dataset"], []).append(c)
     assert len(by_dataset) == 10
-    assert all(len(v) == 8 for v in by_dataset.values())
+    assert all(len(v) == 11 for v in by_dataset.values())
 
     # Tokenwise cells sort first: every tokenwise cell_id must precede every
     # non-tokenwise cell_id lexicographically for the SAME dataset_order
@@ -140,6 +146,10 @@ def test_builder_writes_60_cells_and_is_idempotent(tmp_path):
               if "causal_t0_dropout" in c["method"] or "arch_t0_input_norm" in c["method"]]
     assert len(t0_ids) == 20
     assert all(cid.startswith("6_t0_") for cid in t0_ids)
+    small_ids = [c["cell_id"] for c in cells if "_probe2" in c["method"] or "_probe6" in c["method"]
+                 or "_probe21m" in c["method"]]
+    assert len(small_ids) == 30
+    assert all(cid.startswith("7_small_") for cid in small_ids)
     assert max(tokenwise_ids) < min(other_ids)
 
     by_method = {}

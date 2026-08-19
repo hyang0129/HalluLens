@@ -9,6 +9,9 @@
     "token_zero_mlp_probe",
     "tokenwise_causal_t0_dropout",
     "tokenwise_arch_t0_input_norm_only",
+    "tokenwise_v1_inputnorm_probe21m",
+    "tokenwise_v1_inputnorm_probe6m",
+    "tokenwise_v1_inputnorm_probe2m",
     "logprob_baseline",
     "token_entropy"
   ],

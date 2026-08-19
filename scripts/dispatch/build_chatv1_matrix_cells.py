@@ -62,6 +62,11 @@ _LLAMA_METHODS = (
     # zero, closing the recipe gap in the v1-vs-token_zero_mlp comparison.
     ("tokenwise_causal_t0_dropout", "6_t0", "normal"),
     ("tokenwise_arch_t0_input_norm_only", "6_t0", "normal"),
+    # Probe-capacity ladder: v1 input-norm recipe at 20.9M / 5.7M / 2.1M params
+    # (vs 77.5M full) — tests whether the token-zero signal needs capacity.
+    ("tokenwise_v1_inputnorm_probe21m", "7_small", "normal"),
+    ("tokenwise_v1_inputnorm_probe6m", "7_small", "normal"),
+    ("tokenwise_v1_inputnorm_probe2m", "7_small", "normal"),
     ("logprob_baseline", "8_low", "low"),
     ("token_entropy", "8_low", "low"),
 )
@@ -72,6 +77,9 @@ _QWEN_METHODS = (
     ("token_zero_mlp_probe_qwen3", "5_mid", "normal"),
     ("tokenwise_causal_t0_dropout_qwen3", "6_t0", "normal"),
     ("tokenwise_arch_t0_input_norm_only_qwen3", "6_t0", "normal"),
+    ("tokenwise_v1_inputnorm_probe21m_qwen3", "7_small", "normal"),
+    ("tokenwise_v1_inputnorm_probe6m_qwen3", "7_small", "normal"),
+    ("tokenwise_v1_inputnorm_probe2m_qwen3", "7_small", "normal"),
     ("logprob_baseline", "8_low", "low"),
     ("token_entropy", "8_low", "low"),
 )

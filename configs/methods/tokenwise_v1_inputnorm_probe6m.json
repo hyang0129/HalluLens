@@ -1,0 +1,11 @@
+{
+  "name": "tokenwise_v1_inputnorm_probe6m",
+  "extends": "tokenwise_arch_v1_input_norm_only",
+  "_comment": "Probe-capacity ablation of the v1 input-norm arm: explicit block_dims [512] shrinks the ProgressiveCompressor from 77.5M to ~5.7M params. Recipe, data view, and eval identical to the parent. expected_total_params measured by direct construction (layer-count independent, so shared with the _qwen3 variant).",
+  "model_params": {
+    "block_dims": [
+      512
+    ],
+    "expected_total_params": 5669696
+  }
+}
