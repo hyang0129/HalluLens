@@ -70,6 +70,10 @@ _QWEN_METHODS = (
     ("token_entropy", "8_low", "low"),
 )
 
+# Methods run_experiment treats as unseeded: no seed_N/ run-dir level, no
+# predictions.csv — completion is signalled by eval_metrics.json.
+_UNSEEDED_METHODS = frozenset({"logprob_baseline", "token_entropy"})
+
 # (model_tag, dataset_suffix, experiment_prefix, methods)
 _MODELS = (
     ("llama", "_chat_memmap", "chatv1", _LLAMA_METHODS),
@@ -152,13 +156,15 @@ def build(dispatch_root: Path, *, project_root: Path = _PROJECT_ROOT) -> int:
                 if _dispatch_has_cell(dispatch_root, cell_id):
                     print(f"  skip (already queued): {cell_id}")
                     continue
-                run_dir = (
-                    Path("runs")
-                    / experiment_name
-                    / dataset_name
-                    / method
-                    / f"seed_{_SEED}"
-                )
+                # Why: logprob/entropy baselines are unseeded in run_experiment —
+                # they write runs/<exp>/<ds>/<method>/eval_metrics.json with no
+                # seed_N/ level and no predictions.csv. Pointing output_check at
+                # the seeded path marks a successful run as failed.
+                unseeded = method in _UNSEEDED_METHODS
+                run_dir = Path("runs") / experiment_name / dataset_name / method
+                if not unseeded:
+                    run_dir = run_dir / f"seed_{_SEED}"
+                output_check = run_dir / ("eval_metrics.json" if unseeded else "predictions.csv")
                 cell = {
                     "cell_id": cell_id,
                     "kind": "experiment",
@@ -171,8 +177,8 @@ def build(dispatch_root: Path, *, project_root: Path = _PROJECT_ROOT) -> int:
                     "method": method,
                     "seed": _SEED,
                     "split_seed": _SPLIT_SEED,
-                    "seeded": True,
-                    "output_check": str(run_dir / "predictions.csv"),
+                    "seeded": not unseeded,
+                    "output_check": str(output_check),
                 }
                 (dispatch_root / "pending" / f"{cell_id}.json").write_text(
                     json.dumps(cell, indent=2) + "\n", encoding="utf-8"

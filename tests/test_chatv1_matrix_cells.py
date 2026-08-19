@@ -101,7 +101,15 @@ def test_builder_writes_60_cells_and_is_idempotent(tmp_path):
         assert isinstance(cell["method"], str)
         assert isinstance(cell["seed"], int)
         assert isinstance(cell["output_check"], str)
-        assert cell["output_check"].endswith("predictions.csv")
+        if cell["method"] in ("logprob_baseline", "token_entropy"):
+            # Why: run_experiment treats these as unseeded — no seed_N/ level,
+            # completion signalled by eval_metrics.json, not predictions.csv.
+            assert cell["seeded"] is False
+            assert cell["output_check"].endswith(f"{cell['method']}/eval_metrics.json")
+            assert "/seed_" not in cell["output_check"]
+        else:
+            assert cell["seeded"] is True
+            assert cell["output_check"].endswith("seed_0/predictions.csv")
         assert cell["worker_script"] == "scripts/dispatch/worker_experiment.sh"
         # experiment_config must resolve to a real file relative to project root.
         assert (_ROOT / cell["experiment_config"]).is_file()
@@ -138,4 +146,4 @@ def test_builder_writes_60_cells_and_is_idempotent(tmp_path):
 
     assert all(c["seed"] == 0 for c in cells)
     assert all(c["split_seed"] == 42 for c in cells)
-    assert all(c["seeded"] is True for c in cells)
+    assert sum(c["seeded"] is False for c in cells) == 20  # 2 unseeded methods x 10 (task, model)
