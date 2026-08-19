@@ -325,3 +325,181 @@ def test_extract_logprobs_batched_vs_unbatched(batched_output, unbatched_outputs
         assert diff < 1e-3, (
             f"sample b={b}: max|batched - unbatched| logprobs = {diff:.4e} >= 1e-3"
         )
+
+
+# ---------------------------------------------------------------------------
+# Capture-convention invariants: what IS response position q=0?
+#
+# The entire first-state / pre-generation line of work (issue #151, #159, #160)
+# rests on one claim: ``response_activations[:, :, 0, :]`` is the hidden state at
+# the FINAL PROMPT TOKEN — the prefill state whose logits produce response token
+# zero — and therefore conditions on no sampled response token.
+#
+# That claim is currently protected only by a comment in generate_capture.py plus
+# a ``tokenizer.padding_side = "left"`` assignment in a DIFFERENT file
+# (scripts/capture_inference.py). stitch_response_hidden_states_batched takes
+# ``layer_cpu[b, -1]`` at q=0 and never consults prompt_lens, so a right-padding
+# regression would silently make every short prompt's q=0 a PAD-position state —
+# producing plausible-looking but meaningless results with no test failure.
+#
+# These tests pin the convention down against an independent forward pass.
+# ---------------------------------------------------------------------------
+
+def _bare_prompt_hidden_states(model, tokenizer, prompt):
+    """Forward pass on the prompt alone: no generation, no padding, no batch.
+
+    Returns a tuple of (num_layers + 1) tensors, each (seq_len, hidden_dim).
+    This is ground truth that provably conditions on no response token.
+    """
+    ids = tokenizer(prompt, return_tensors="pt").input_ids
+    with torch.no_grad():
+        out = model(ids, output_hidden_states=True)
+    return tuple(h[0] for h in out.hidden_states)
+
+
+def test_response_position_zero_is_final_prompt_token(
+    model_and_tokenizer, batched_output
+):
+    """q=0 == the last prompt token's state from an independent prompt-only pass.
+
+    This is the load-bearing assertion. It is independent of the stitching code:
+    it compares against a separate forward pass that contains no response tokens
+    at all, so passing it proves q=0 cannot encode a sampled response token.
+    """
+    from activation_logging.generate_capture import (
+        stitch_response_hidden_states_batched,
+    )
+
+    model, tokenizer = model_and_tokenizer
+    d = batched_output
+    resp = stitch_response_hidden_states_batched(
+        d["out"].hidden_states, d["prompt_lens"], d["response_lens"], R_MAX
+    )
+
+    for b, prompt in enumerate(PROMPTS):
+        ref_layers = _bare_prompt_hidden_states(model, tokenizer, prompt)
+        for layer_idx, ref in enumerate(ref_layers):
+            got = resp[b, layer_idx, 0, :].astype(np.float32)
+            want = ref[-1].detach().cpu().numpy().astype(np.float32)
+            assert np.max(np.abs(got - want)) < 1e-2, (
+                f"prompt {b!r} layer {layer_idx}: response position 0 is not the "
+                f"final prompt token state. If this fails, check that "
+                f"tokenizer.padding_side == 'left' wherever capture runs."
+            )
+
+
+def test_response_position_zero_matches_prompt_activations_tail(batched_output):
+    """Internal consistency: response[:, :, 0] == prompt[:, :, prompt_len - 1].
+
+    Note the index: prompt_activations is zero-padded PAST prompt_len, so its
+    index -1 is a zero pad, not the last real token. Comparing at -1 would fail
+    for reasons unrelated to the convention under test.
+    """
+    from activation_logging.generate_capture import (
+        stitch_prompt_hidden_states_batched,
+        stitch_response_hidden_states_batched,
+    )
+
+    d = batched_output
+    resp = stitch_response_hidden_states_batched(
+        d["out"].hidden_states, d["prompt_lens"], d["response_lens"], R_MAX
+    )
+    prompt = stitch_prompt_hidden_states_batched(
+        d["out"].hidden_states, d["prompt_lens"], d["padded_prompt_len"]
+    )
+
+    for b in range(len(PROMPTS)):
+        tail = int(d["prompt_lens"][b]) - 1
+        got = resp[b, :, 0, :].astype(np.float32)
+        want = prompt[b, :, tail, :].astype(np.float32)
+        assert np.max(np.abs(got - want)) < 1e-2, (
+            f"prompt {b}: response position 0 disagrees with prompt position "
+            f"{tail} (prompt_len={d['prompt_lens'][b]})"
+        )
+
+
+def test_response_position_one_conditions_on_first_generated_token(
+    model_and_tokenizer, batched_output
+):
+    """q=1 DOES condition on response token 0 — confirms the off-by-one.
+
+    Documents the other half of the convention: position q holds the state that
+    PRODUCED token q, so q>=1 has read tokens <q. Without this, a reader could
+    reasonably assume q indexes the state that READ token q.
+    """
+    from activation_logging.generate_capture import (
+        stitch_response_hidden_states_batched,
+    )
+
+    model, tokenizer = model_and_tokenizer
+    d = batched_output
+    resp = stitch_response_hidden_states_batched(
+        d["out"].hidden_states, d["prompt_lens"], d["response_lens"], R_MAX
+    )
+    padded = d["padded_prompt_len"]
+
+    for b, prompt in enumerate(PROMPTS):
+        if d["response_lens"][b] < 2:
+            continue
+        first_gen = d["out"].sequences[b, padded].item()
+        ids = tokenizer(prompt, return_tensors="pt").input_ids
+        ids = torch.cat([ids, torch.tensor([[first_gen]])], dim=1)
+        with torch.no_grad():
+            ref = model(ids, output_hidden_states=True).hidden_states
+
+        for layer_idx, layer_hs in enumerate(ref):
+            got = resp[b, layer_idx, 1, :].astype(np.float32)
+            want = layer_hs[0, -1].detach().cpu().numpy().astype(np.float32)
+            assert np.max(np.abs(got - want)) < 1e-2, (
+                f"prompt {b!r} layer {layer_idx}: response position 1 does not "
+                f"match a forward pass over prompt + first generated token."
+            )
+
+
+def test_right_padding_would_break_position_zero(model_and_tokenizer):
+    """Negative control: the q=0 convention DEPENDS on left padding.
+
+    stitch_response_hidden_states_batched indexes [b, -1] at q=0 without
+    consulting prompt_lens. Under right padding that is a pad-position state for
+    every prompt shorter than the batch max. This test fails loudly if someone
+    changes padding_side, which no other test would catch.
+    """
+    from activation_logging.generate_capture import (
+        stitch_response_hidden_states_batched,
+    )
+
+    model, tokenizer = model_and_tokenizer
+    original_side = tokenizer.padding_side
+    try:
+        tokenizer.padding_side = "right"
+        batch = tokenizer(PROMPTS, padding=True, truncation=True, return_tensors="pt")
+        with torch.no_grad():
+            out = model.generate(
+                batch.input_ids,
+                attention_mask=batch.attention_mask,
+                max_new_tokens=MAX_NEW_TOKENS,
+                do_sample=False,
+                output_hidden_states=True,
+                return_dict_in_generate=True,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+        prompt_lens = batch.attention_mask.sum(dim=1).cpu().numpy()
+        response_lens = np.full(len(PROMPTS), MAX_NEW_TOKENS, dtype=np.int32)
+        resp = stitch_response_hidden_states_batched(
+            out.hidden_states, prompt_lens, response_lens, R_MAX
+        )
+
+        # The shortest prompt carries the most padding; its q=0 must NOT equal
+        # the true final-prompt-token state under right padding.
+        b_short = int(np.argmin(prompt_lens))
+        ref_layers = _bare_prompt_hidden_states(model, tokenizer, PROMPTS[b_short])
+        last_layer = len(ref_layers) - 1
+        got = resp[b_short, last_layer, 0, :].astype(np.float32)
+        want = ref_layers[last_layer][-1].detach().cpu().numpy().astype(np.float32)
+        assert np.max(np.abs(got - want)) > 1e-2, (
+            "Right padding did not break the q=0 invariant. Either the stitcher "
+            "now consults prompt_lens (good — update this test), or the fixture "
+            "no longer has variable-length prompts (bad — the guarantee is void)."
+        )
+    finally:
+        tokenizer.padding_side = original_side

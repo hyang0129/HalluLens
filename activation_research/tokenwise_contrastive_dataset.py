@@ -6,6 +6,30 @@ layer-wise views ``cache[row, layer, :, :]`` become token-wise views
 ``cache[row, selected_layers, token, :]``.  Pair training, token-zero KNN
 evaluation, and later-token diagnostics can therefore share one base dataset
 per split without reopening or reloading activations.
+
+What token 0 actually is
+------------------------
+**Token position 0 is NOT a response token.**  It is the hidden state at the
+FINAL PROMPT TOKEN -- the prefill state whose logits produce response token 0.
+It conditions on no sampled response token.  Positions ``q >= 1`` are decode
+states that have read response tokens ``< q``.
+
+The ``response_activations`` name and the "token-wise" framing both suggest
+otherwise, and that reading is wrong.  See the capture-side comment in
+``activation_logging/generate_capture.py::stitch_response_hidden_states_batched``
+and the invariants pinned in
+``tests/test_generate_capture_batched.py::test_response_position_zero_is_final_prompt_token``,
+which checks position 0 against an independent prompt-only forward pass.
+
+Two consequences worth holding onto:
+
+* The deployed representation (``fixed_token=0``) is a **prompt-state probe**,
+  not a token probe.  This is the same probing surface used by the
+  pre-generation probing literature, which makes those comparisons direct.
+* ``first_anchored`` therefore pairs a *prefill* state with a *decode* state.
+  The two views differ in more than time -- different pass, different sequence
+  position, different conditioning -- so the contrastive objective is aligning
+  across a distribution shift, not merely across decoding steps.
 """
 from __future__ import annotations
 
@@ -30,7 +54,9 @@ class TokenwiseContrastiveDataset(Dataset):
         Positions on the base cache's layer axis, in the fixed order presented
         to the encoder.  For Issue #151 these are post-block rows ``1..32``.
     token_pair_mode:
-        ``first_anchored`` emits token zero followed by sampled later tokens;
+        ``first_anchored`` emits token zero (the final-prompt-token state --
+        see the module docstring; it is not a response token) followed by
+        sampled later tokens;
         ``first_same`` emits token zero twice so model stochasticity supplies
         the augmentation control; ``first_mixed`` emits token zero plus either
         token zero or a same-response later token according to
@@ -39,7 +65,9 @@ class TokenwiseContrastiveDataset(Dataset):
         ``random_distinct`` samples all positions without replacement.
     fixed_token:
         When set, emit only this token position.  The primary KNN surface uses
-        ``fixed_token=0`` and ``num_views=1``.
+        ``fixed_token=0`` and ``num_views=1`` -- i.e. it scores the
+        final-prompt-token (pre-generation) state alone, reading no part of the
+        generated response.
     min_response_tokens:
         Filter logical split rows by real captured response length.  Pair
         datasets use two; token-zero evaluation uses one.

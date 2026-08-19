@@ -49,6 +49,33 @@ Accordingly, “first token” below means **the decoding state that predicts th
 first generated token**, not a representation computed after reading that
 token.
 
+**Verified 2026-08-18.** This is no longer only a documented intent. Four
+invariants in
+[`tests/test_generate_capture_batched.py`](../../tests/test_generate_capture_batched.py)
+pin it: position 0 is checked against an independent prompt-only forward pass
+(which provably contains no response token), position 1 is checked against a
+pass over prompt + first generated token, the two stitched arrays are checked
+against each other at `prompt_len - 1`, and a negative control asserts that
+right padding breaks the convention -- the stitcher indexes `[b, -1]` and never
+consults `prompt_lens`, so it silently depends on
+`tokenizer.padding_side = "left"` being set in a different file. Confirmed on
+the production interpreter (transformers 4.57.6, torch 2.9.1, python 3.11.14)
+and locally on transformers 5.15.0.
+
+Everything below therefore describes the **final-prompt-token state**. The
+theory is unaffected -- `H_0 = h_0^L` is by construction the last prompt
+position's final-layer vector, which is exactly what
+`P_\theta(Y_0 \mid X) = \mathrm{softmax}(W H_0 + b)` requires -- but the
+naming is a persistent hazard. Prefer "pre-generation state" or
+"final-prompt-token state" over "first token" in anything reader-facing.
+
+One asymmetry the notation hides: `S_0` is a *prefill* state while `S_t` for
+`t >= 1` are *decode* states. The sequence `S_0, S_1, ...` is uniform in the
+sense that `S_t` always produces token `t`, but the two kinds of state differ in
+pass, sequence position, and conditioning. First-anchored pairing therefore
+aligns across that gap, which is a candidate explanation for why the temporal
+arm does not beat the `t0 + t0` dropout control (see issue #159).
+
 ## Information-theoretic statement
 
 Let:

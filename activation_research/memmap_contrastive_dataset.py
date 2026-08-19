@@ -141,6 +141,12 @@ class MemmapContrastiveDataset(Dataset):
         Token sampling rule when ``view_axis="token"``.  The first-anchored rule
         emits token 0 plus later response tokens; the comparison rule samples
         distinct response tokens uniformly.
+
+        NOTE: token 0 is the hidden state at the FINAL PROMPT TOKEN (the prefill
+        state that produces response token 0), not a response token.  Positions
+        ``>= 1`` are decode states conditioned on earlier response tokens.  See
+        ``activation_research/tokenwise_contrastive_dataset.py`` and
+        ``tests/test_generate_capture_batched.py``.
     fixed_token : int | None
         Freeze token-wise views to one response step.  Intended for evaluation;
         use ``num_views=1`` to obtain a single representation per example.
