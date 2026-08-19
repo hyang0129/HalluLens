@@ -1,14 +1,16 @@
-"""Build the 75-cell Qwen3-8B first-token comparison matrix.
+"""Build the Qwen3-8B first-token comparison matrix.
 
-Grid: five datasets x five paired seeds x three methods:
+The matrix has two scopes:
 
-* tokenwise contrastive v1 over all 36 Qwen post-block layers;
-* ACT-ViT trained, validation-selected, and evaluated at k=1;
-* canonical full-width ACT-ViT checkpoint evaluated at k=1 without retraining.
+* 50 normal-priority ACT-ViT cells: five datasets x five paired seeds for
+  k1->k1 training and canonical k64->k1 evaluation;
+* 10 high-priority tokenwise pilot cells: five datasets x seed 0 for both
+  normal v1 and input-normalized v1 over all 36 Qwen post-block layers.
 
 The eval-only arm symlinks canonical checkpoint artifacts into additive Issue
 #151 run directories. Cells use the existing cell-agnostic experiment workers,
-are idempotent across queue states, and deliberately exclude MMLU.
+are idempotent across queue states, and deliberately exclude MMLU. The
+tokenwise pilot is a decision gate; it does not pre-queue seeds 1-4.
 """
 from __future__ import annotations
 
@@ -25,13 +27,14 @@ from scripts.dispatch.claim import init_dispatch_dirs  # noqa: E402
 from scripts.experiment_utils import load_method_config  # noqa: E402
 
 _TOKENWISE_METHOD = "tokenwise_contrastive_first_anchored_qwen3"
+_TOKENWISE_INPUTNORM_METHOD = "tokenwise_arch_v1_input_norm_only_qwen3"
 _ACTVIT_K1_METHOD = "act_vit_k1"
 _ACTVIT_K64_EVAL_METHOD = "act_vit_k64_eval_k1"
-_METHODS = (
-    _TOKENWISE_METHOD,
+_CONTROL_METHODS = (
     _ACTVIT_K1_METHOD,
     _ACTVIT_K64_EVAL_METHOD,
 )
+_PILOT_METHODS = (_TOKENWISE_METHOD, _TOKENWISE_INPUTNORM_METHOD)
 _TARGETS = (
     ("10", "hotpotqa", "hotpotqa_qwen3_memmap"),
     ("20", "nq", "nq_qwen3_memmap"),
@@ -75,15 +78,21 @@ def _link_checkpoint(source: Path, target: Path) -> None:
 
 
 def _validate_methods(project_root: Path) -> None:
-    tokenwise = load_method_config(
-        _TOKENWISE_METHOD, project_root=str(project_root)
+    for method in _PILOT_METHODS:
+        tokenwise = load_method_config(method, project_root=str(project_root))
+        if tokenwise.get("routine") != "tokenwise_contrastive_logprob_recon":
+            raise ValueError(f"{method} resolved to the wrong routine")
+        if tokenwise.get("data", {}).get("relevant_layers") != "1-36":
+            raise ValueError(f"{method} must use all 36 Qwen layers")
+        if tokenwise.get("data", {}).get("token_pair_mode") != "first_anchored":
+            raise ValueError(f"{method} must retain the v1 recipe")
+    inputnorm = load_method_config(
+        _TOKENWISE_INPUTNORM_METHOD, project_root=str(project_root)
     )
-    if tokenwise.get("routine") != "tokenwise_contrastive_logprob_recon":
-        raise ValueError(f"{_TOKENWISE_METHOD} resolved to the wrong routine")
-    if tokenwise.get("data", {}).get("relevant_layers") != "1-36":
-        raise ValueError(f"{_TOKENWISE_METHOD} must use all 36 Qwen layers")
-    if tokenwise.get("data", {}).get("token_pair_mode") != "first_anchored":
-        raise ValueError(f"{_TOKENWISE_METHOD} must retain the v1 recipe")
+    if inputnorm.get("model_params", {}).get("normalize_input") is not True:
+        raise ValueError(
+            f"{_TOKENWISE_INPUTNORM_METHOD} must enable input normalization"
+        )
 
     actvit_k1 = load_method_config(
         _ACTVIT_K1_METHOD, project_root=str(project_root)
@@ -128,7 +137,7 @@ def build(
             raise ValueError(f"{relative} has the wrong experiment_name")
         if experiment.get("dataset") != dataset:
             raise ValueError(f"{relative} has the wrong dataset")
-        if experiment.get("methods") != list(_METHODS):
+        if experiment.get("methods") != list(_CONTROL_METHODS):
             raise ValueError(f"{relative} has the wrong method matrix")
         if experiment.get("training_seeds") != list(_SEEDS) or experiment.get(
             "split_seeds"
@@ -159,17 +168,70 @@ def build(
                     source_artifacts / filename, target_artifacts / filename
                 )
 
+    pilot_experiments: dict[str, tuple[str, str, str]] = {}
+    for _, slug, dataset in _TARGETS:
+        relative = f"configs/experiments/issue156_qwen3_inputnorm_pilot_{slug}.json"
+        experiment = _load_json(project_root / relative)
+        expected_name = f"issue156_qwen3_inputnorm_pilot_{slug}"
+        if experiment.get("experiment_name") != expected_name:
+            raise ValueError(f"{relative} has the wrong experiment_name")
+        if experiment.get("dataset") != dataset:
+            raise ValueError(f"{relative} has the wrong dataset")
+        if experiment.get("methods") != list(_PILOT_METHODS):
+            raise ValueError(f"{relative} has the wrong tokenwise pilot matrix")
+        if experiment.get("training_seeds") != [0] or experiment.get(
+            "split_seeds"
+        ) != [42]:
+            raise ValueError(f"{relative} must be the paired seed-0 pilot")
+        pilot_experiments[dataset] = (expected_name, relative, slug)
+
     init_dispatch_dirs(dispatch_root)
     written = 0
     method_specs = (
-        ("4_eval", _ACTVIT_K64_EVAL_METHOD, "actvit_qwen_k64_eval_k1"),
-        ("5_v1", _TOKENWISE_METHOD, "tokenwise_v1_qwen_k1"),
-        ("6_train", _ACTVIT_K1_METHOD, "actvit_qwen_k1_train_eval"),
+        (
+            "4_eval",
+            _ACTVIT_K64_EVAL_METHOD,
+            "actvit_qwen_k64_eval_k1",
+            experiments,
+            tuple(zip(_SEEDS, _SPLIT_SEEDS)),
+            "normal",
+        ),
+        (
+            "6_train",
+            _ACTVIT_K1_METHOD,
+            "actvit_qwen_k1_train_eval",
+            experiments,
+            tuple(zip(_SEEDS, _SPLIT_SEEDS)),
+            "normal",
+        ),
+        (
+            "0_high_60_v1",
+            _TOKENWISE_METHOD,
+            "tokenwise_v1_qwen_seed0_pilot",
+            pilot_experiments,
+            ((0, 42),),
+            "high",
+        ),
+        (
+            "0_high_60_inputnorm",
+            _TOKENWISE_INPUTNORM_METHOD,
+            "tokenwise_v1_inputnorm_qwen_seed0_pilot",
+            pilot_experiments,
+            ((0, 42),),
+            "high",
+        ),
     )
-    for prefix, method, study_arm in method_specs:
+    for (
+        prefix,
+        method,
+        study_arm,
+        experiment_map,
+        seed_pairs,
+        priority,
+    ) in method_specs:
         for dataset_order, _, dataset in _TARGETS:
-            experiment_name, relative, _ = experiments[dataset]
-            for seed, split_seed in zip(_SEEDS, _SPLIT_SEEDS):
+            experiment_name, relative, _ = experiment_map[dataset]
+            for seed, split_seed in seed_pairs:
                 cell_id = (
                     f"{prefix}_{dataset_order}_{seed}_issue151_qwen3__"
                     f"{dataset}__{method}__seed_{seed}"
@@ -198,8 +260,8 @@ def build(
                 cell = {
                     "cell_id": cell_id,
                     "kind": "experiment",
-                    "priority": "normal",
-                    "issue": 151,
+                    "priority": priority,
+                    "issue": 156 if method in _PILOT_METHODS else 151,
                     "experiment": study_arm,
                     "backbone": "Qwen3-8B",
                     "worker_script": "scripts/dispatch/worker_experiment.sh",
@@ -239,6 +301,13 @@ def build(
                             "relevant_layers": "1-36",
                             "checkpoint_selection_metric": (
                                 "validation_knn_auroc_at_token0"
+                            ),
+                            "normalize_input": (
+                                method == _TOKENWISE_INPUTNORM_METHOD
+                            ),
+                            "decision_gate": (
+                                "compare_paired_seed0_over_five_datasets_before_"
+                                "expanding_seeds"
                             ),
                         }
                     )

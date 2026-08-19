@@ -1,9 +1,8 @@
 {
-  "_comment": "Issue #151 Qwen3-8B first-token controls: tokenwise v1, ACT-ViT k1->k1, and canonical ACT-ViT k64->k1.",
+  "_comment": "Issue #151 Qwen3-8B ACT-ViT first-token controls: k1->k1 and canonical k64->k1. Tokenwise arms use the separate paired Issue #156 pilot.",
   "experiment_name": "issue151_qwen3_k1_controls_popqa",
   "dataset": "popqa_qwen3_memmap",
   "methods": [
-    "tokenwise_contrastive_first_anchored_qwen3",
     "act_vit_k1",
     "act_vit_k64_eval_k1"
   ],

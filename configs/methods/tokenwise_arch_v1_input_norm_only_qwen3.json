@@ -1,0 +1,8 @@
+{
+  "name": "tokenwise_arch_v1_input_norm_only_qwen3",
+  "extends": "tokenwise_arch_v1_input_norm_only",
+  "_comment": "Qwen3-8B input-normalized v1 pilot arm. It retains the Llama input-LayerNorm ablation and spans all 36 captured Qwen post-block layers.",
+  "data": {
+    "relevant_layers": "1-36"
+  }
+}
