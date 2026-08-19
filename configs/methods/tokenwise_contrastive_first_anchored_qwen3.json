@@ -1,0 +1,8 @@
+{
+  "name": "tokenwise_contrastive_first_anchored_qwen3",
+  "extends": "tokenwise_contrastive_first_anchored",
+  "_comment": "Qwen3-8B counterpart of tokenwise v1. The training/scoring recipe is unchanged; the depth trajectory spans all 36 captured post-block layers instead of Llama's 32.",
+  "data": {
+    "relevant_layers": "1-36"
+  }
+}
