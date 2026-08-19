@@ -58,6 +58,10 @@ _LLAMA_METHODS = (
     ("tokenwise_arch_v1_input_norm_only", "0_high", "high"),
     ("act_vit", "5_mid", "normal"),
     ("token_zero_mlp_probe", "5_mid", "normal"),
+    # t0-recipe (first_same, "t0+t0") arms: trained AND evaluated at token
+    # zero, closing the recipe gap in the v1-vs-token_zero_mlp comparison.
+    ("tokenwise_causal_t0_dropout", "6_t0", "normal"),
+    ("tokenwise_arch_t0_input_norm_only", "6_t0", "normal"),
     ("logprob_baseline", "8_low", "low"),
     ("token_entropy", "8_low", "low"),
 )
@@ -66,6 +70,8 @@ _QWEN_METHODS = (
     ("tokenwise_arch_v1_input_norm_only_qwen3", "0_high", "high"),
     ("act_vit", "5_mid", "normal"),
     ("token_zero_mlp_probe_qwen3", "5_mid", "normal"),
+    ("tokenwise_causal_t0_dropout_qwen3", "6_t0", "normal"),
+    ("tokenwise_arch_t0_input_norm_only_qwen3", "6_t0", "normal"),
     ("logprob_baseline", "8_low", "low"),
     ("token_entropy", "8_low", "low"),
 )

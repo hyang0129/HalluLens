@@ -16,6 +16,8 @@ _LLAMA_METHODS = [
     "tokenwise_arch_v1_input_norm_only",
     "act_vit",
     "token_zero_mlp_probe",
+    "tokenwise_causal_t0_dropout",
+    "tokenwise_arch_t0_input_norm_only",
     "logprob_baseline",
     "token_entropy",
 ]
@@ -24,6 +26,8 @@ _QWEN_METHODS = [
     "tokenwise_arch_v1_input_norm_only_qwen3",
     "act_vit",
     "token_zero_mlp_probe_qwen3",
+    "tokenwise_causal_t0_dropout_qwen3",
+    "tokenwise_arch_t0_input_norm_only_qwen3",
     "logprob_baseline",
     "token_entropy",
 ]
@@ -79,7 +83,7 @@ def test_experiment_configs_cover_five_tasks_two_models_without_mmlu():
 def test_builder_writes_60_cells_and_is_idempotent(tmp_path):
     dispatch_root = tmp_path / "dispatch"
 
-    assert build(dispatch_root, project_root=_ROOT) == 60
+    assert build(dispatch_root, project_root=_ROOT) == 80
     # Re-running must not duplicate cells.
     assert build(dispatch_root, project_root=_ROOT) == 0
 
@@ -87,7 +91,7 @@ def test_builder_writes_60_cells_and_is_idempotent(tmp_path):
         json.loads(p.read_text(encoding="utf-8"))
         for p in sorted((dispatch_root / "pending").glob("*.json"))
     ]
-    assert len(cells) == 60
+    assert len(cells) == 80
 
     # cell_id uniqueness.
     ids = [c["cell_id"] for c in cells]
@@ -122,7 +126,7 @@ def test_builder_writes_60_cells_and_is_idempotent(tmp_path):
     for c in cells:
         by_dataset.setdefault(c["dataset"], []).append(c)
     assert len(by_dataset) == 10
-    assert all(len(v) == 6 for v in by_dataset.values())
+    assert all(len(v) == 8 for v in by_dataset.values())
 
     # Tokenwise cells sort first: every tokenwise cell_id must precede every
     # non-tokenwise cell_id lexicographically for the SAME dataset_order
@@ -131,6 +135,11 @@ def test_builder_writes_60_cells_and_is_idempotent(tmp_path):
     tokenwise_ids = sorted(c["cell_id"] for c in cells if c["method"] in _TOKENWISE_METHODS)
     other_ids = sorted(c["cell_id"] for c in cells if c["method"] not in _TOKENWISE_METHODS)
     assert all(cid.startswith("0_high_") for cid in tokenwise_ids)
+    # t0-recipe arms queue in the 6_t0 block: after 5_mid, before 8_low.
+    t0_ids = [c["cell_id"] for c in cells
+              if "causal_t0_dropout" in c["method"] or "arch_t0_input_norm" in c["method"]]
+    assert len(t0_ids) == 20
+    assert all(cid.startswith("6_t0_") for cid in t0_ids)
     assert max(tokenwise_ids) < min(other_ids)
 
     by_method = {}
