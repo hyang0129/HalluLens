@@ -215,6 +215,12 @@ def test_validation_backfill_builder_creates_v1_and_t0_matrix(tmp_path):
     ]
     assert len(cells) == 50
     assert all(cell["eval_only"] is True for cell in cells)
+    assert all(cell["embedding_backfill"] is True for cell in cells)
     assert all(cell["retraining_permitted"] is False for cell in cells)
     assert all(cell["output_check"].endswith("embeddings/manifest.json") for cell in cells)
     assert all("mmlu" not in json.dumps(cell).lower() for cell in cells)
+
+    worker = (_ROOT / "scripts/dispatch/worker_experiment.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "--embedding-backfill" in worker

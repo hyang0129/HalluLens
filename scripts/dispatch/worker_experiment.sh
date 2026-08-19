@@ -85,6 +85,8 @@ while true; do
     "import json; print(str(json.load(open('$CELL_PATH')).get('eval_only', False)).lower())")
   CHECKPOINT_CHECK=$("$PYTHON" -c \
     "import json; print(json.load(open('$CELL_PATH')).get('checkpoint_check', ''))")
+  EMBEDDING_BACKFILL=$("$PYTHON" -c \
+    "import json; d=json.load(open('$CELL_PATH')); print(str(d.get('embedding_backfill', d.get('preserve_existing_eval_outputs', False))).lower())")
   ABS_OUTPUT="$PROJECT_ROOT/$OUTPUT_CHECK"
 
   if [ -f "$ABS_OUTPUT" ]; then
@@ -105,6 +107,16 @@ while true; do
       continue
     fi
     EXTRA_ARGS+=(--eval-only)
+  fi
+  if [ "$EMBEDDING_BACKFILL" = "true" ]; then
+    if [ "$EVAL_ONLY" != "true" ]; then
+      printf '%s\n' "embedding_backfill requires eval_only=true" > "$RUN_LOG"
+      "$PYTHON" "$CLI" fail --root "$DISPATCH_ROOT" \
+        --worker-id "$WORKER_ID" --cell "$CELL_PATH" --err-file "$RUN_LOG"
+      N_FAIL=$((N_FAIL + 1))
+      continue
+    fi
+    EXTRA_ARGS+=(--embedding-backfill)
   fi
 
   echo "experiment_worker $WORKER_ID: running experiment=$EXPERIMENT method=$METHOD seed=$SEED eval_only=$EVAL_ONLY"

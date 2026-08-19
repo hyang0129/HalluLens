@@ -155,6 +155,7 @@ def build(
             "seed": seed,
             "seeded": True,
             "eval_only": True,
+            "embedding_backfill": True,
             "retraining_permitted": False,
             "preserve_existing_eval_outputs": True,
             "checkpoint_check": str(relative_checkpoint),

@@ -554,6 +554,7 @@ def run_contrastive_logprob_recon(
     test_ap=None,
     *,
     _tokenwise: bool = False,
+    _preserve_existing_embeddings: bool = False,
 ) -> tuple[dict, list[dict]]:
     """Train and evaluate a LogprobReconProgressiveCompressor model.
 
@@ -1448,6 +1449,7 @@ def run_contrastive_logprob_recon(
                         "role": "scorer_reference_bank",
                         "label_lookup": "training_capture_train_rows",
                     },
+                    preserve_existing=_preserve_existing_embeddings,
                 )
                 split_metas["train"] = train_meta
                 logger.info(f"dumped train embeddings: {train_meta['n']} × {train_meta['z_shape'][1:]} -> {emb_dir}")
@@ -1463,6 +1465,7 @@ def run_contrastive_logprob_recon(
                         "role": "final_evaluation",
                         "label_lookup": "test_capture_rows",
                     },
+                    preserve_existing=_preserve_existing_embeddings,
                 )
                 split_metas["test"] = test_meta
                 logger.info(f"dumped test embeddings: {test_meta['n']} × {test_meta['z_shape'][1:]} -> {emb_dir}")
@@ -1493,6 +1496,7 @@ def run_contrastive_logprob_recon(
                         "role": "scorer_selection",
                         "label_lookup": "training_capture_validation_rows",
                     },
+                    preserve_existing=_preserve_existing_embeddings,
                 )
                 split_metas["val"] = val_meta
                 logger.info(
@@ -1508,6 +1512,7 @@ def run_contrastive_logprob_recon(
                     emb_dir,
                     split_metas,
                     run_metadata=common_dump_metadata,
+                    preserve_existing=_preserve_existing_embeddings,
                 )
         except Exception:
             if score_projection_surface or _tokenwise:
@@ -1550,6 +1555,8 @@ def run_tokenwise_contrastive_logprob_recon(
     device: str,
     training_seed: int,
     test_ap=None,
+    *,
+    preserve_existing_embeddings: bool = False,
 ) -> tuple[dict, list[dict]]:
     """Issue #151 token-pair contrastive training with token-0 KNN scoring."""
     return run_contrastive_logprob_recon(
@@ -1562,6 +1569,7 @@ def run_tokenwise_contrastive_logprob_recon(
         training_seed,
         test_ap=test_ap,
         _tokenwise=True,
+        _preserve_existing_embeddings=preserve_existing_embeddings,
     )
 
 
@@ -4834,6 +4842,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--embedding-backfill",
+        action="store_true",
+        help=(
+            "Add a missing token-wise train/validation/test embedding manifest "
+            "without replacing existing evaluation or embedding artifacts. "
+            "Requires --eval-only and is incompatible with --force."
+        ),
+    )
+    parser.add_argument(
         "--max-epochs",
         type=int,
         default=None,
@@ -4872,7 +4889,12 @@ def parse_args() -> argparse.Namespace:
             "seed-0 cache rather than rebuilding it (which can take many hours)."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.embedding_backfill and not args.eval_only:
+        parser.error("--embedding-backfill requires --eval-only")
+    if args.embedding_backfill and args.force:
+        parser.error("--embedding-backfill refuses --force to protect prior results")
+    return args
 
 
 def run_contrastive_logprob_recon_twin(
@@ -5778,15 +5800,39 @@ def main() -> None:
                 embedding_manifest_path = os.path.join(
                     run_dir, "embeddings", "manifest.json"
                 )
-                needs_eval_only_embedding_backfill = bool(
+                implicit_embedding_backfill = bool(
                     args.eval_only
                     and routine_for_skip
                     == "tokenwise_contrastive_logprob_recon"
                     and method_cfg.get("evaluation", {}).get(
                         "dump_embeddings", False
                     )
-                    and not os.path.exists(embedding_manifest_path)
+                    and not os.path.isfile(embedding_manifest_path)
                 )
+                embedding_backfill_requested = bool(
+                    args.embedding_backfill or implicit_embedding_backfill
+                )
+                if embedding_backfill_requested:
+                    if routine_for_skip != "tokenwise_contrastive_logprob_recon":
+                        raise ValueError(
+                            "--embedding-backfill is valid only for the token-wise "
+                            "contrastive routine"
+                        )
+                    if not method_cfg.get("evaluation", {}).get(
+                        "dump_embeddings", False
+                    ):
+                        raise ValueError(
+                            "--embedding-backfill requires evaluation.dump_embeddings=true"
+                        )
+                needs_eval_only_embedding_backfill = bool(
+                    embedding_backfill_requested
+                    and not os.path.isfile(embedding_manifest_path)
+                )
+                if needs_eval_only_embedding_backfill:
+                    logger.info(
+                        f"{method_name} seed={effective_seed}: missing embedding "
+                        "manifest; running protected additive backfill"
+                    )
                 if (
                     os.path.exists(eval_metrics_path)
                     and have_predictions
@@ -5877,6 +5923,7 @@ def main() -> None:
                         eval_metrics, predictions = run_tokenwise_contrastive_logprob_recon(
                             ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
+                            preserve_existing_embeddings=needs_eval_only_embedding_backfill,
                         )
                     elif routine == "tokenwise_projection_rescore":
                         eval_metrics, predictions = run_tokenwise_projection_rescore(
@@ -5991,7 +6038,10 @@ def main() -> None:
                     # A successful recovery supersedes a previous per-seed error.
                     # Leaving this marker behind makes status tooling classify valid
                     # eval outputs as failed and causes subsequent runs to repeat.
-                    if _clear_stale_run_error(run_error_path):
+                    if (
+                        not needs_eval_only_embedding_backfill
+                        and _clear_stale_run_error(run_error_path)
+                    ):
                         logger.info(
                             f"Removed stale run_error.json after successful {method_name} recovery"
                         )
@@ -6017,14 +6067,24 @@ def main() -> None:
                     logger.error(
                         f"Failed {method_name} seed={effective_seed}: {tb}"
                     )
-                    # Write error record so we know this run failed
-                    error_path = os.path.join(run_dir, "run_error.json")
-                    with open(error_path, "w") as f:
-                        json.dump(
-                            {"method": method_name, "seed": effective_seed, "error": tb},
-                            f,
-                            indent=2,
+                    if needs_eval_only_embedding_backfill:
+                        # The dispatch queue retains the failure log. Keep the
+                        # scientific run directory strictly additive even when
+                        # backfill fails; in particular, never replace a prior
+                        # run_error.json from the original experiment.
+                        logger.error(
+                            "Embedding backfill failed; preserving the existing "
+                            "run directory without writing run_error.json"
                         )
+                    else:
+                        # Write error record so we know this run failed.
+                        error_path = os.path.join(run_dir, "run_error.json")
+                        with open(error_path, "w") as f:
+                            json.dump(
+                                {"method": method_name, "seed": effective_seed, "error": tb},
+                                f,
+                                indent=2,
+                            )
                     had_failures += 1
 
     if args.smoketest_memmap_cache:
