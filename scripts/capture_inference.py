@@ -15,7 +15,8 @@ Usage:
         --max-response-len 64 \\
         --r-max 64 \\
         --top-k 20 \\
-        --n-samples 100  # for smoketest; omit for full split
+        --n-samples 100  # for smoketest; omit for full split \\
+        --chat-template  # opt-in: wrap prompt via tokenizer.apply_chat_template()
 
 End-to-end loop (see spec "Architecture" section):
 
@@ -53,6 +54,20 @@ Label contract (spec "Label contract"):
     from meta.jsonl with array format {"halu_test_res": [...], "abstantion": [...]}.
   - --step eval-only re-runs is_correct() over an existing generation.jsonl
     without touching GPU.
+
+Chat-template mode (--chat-template, default off):
+  - Wraps the raw task prompt as a single user message and renders it through
+    tokenizer.apply_chat_template(add_generation_prompt=True, tokenize=False),
+    matching activation_logging/server.py's _format_chat_prompt_for_model.
+    For model names containing "qwen3" or "smollm3" (case-insensitive), also
+    passes enable_thinking=False.
+  - The templated string becomes the prompt used everywhere downstream
+    (hashing, storage, tokenization) — this is intentional; the stored prompt
+    should be the actual model input.
+  - Both tokenize() call sites pass add_special_tokens=False in this mode,
+    since the template string already contains BOS / header tokens.
+  - Off by default so existing (legacy, completion-style) captures remain
+    byte-reproducible.
 
 Not orchestrated here (downstream consumers):
   - Probe training (Issue #70).
@@ -157,6 +172,40 @@ def pad_to(arr: np.ndarray, target_len: int, fill_value: Any) -> np.ndarray:
     return np.concatenate([arr, np.full(pad_width, fill_value, dtype=arr.dtype)])
 
 
+def response_len_from_ids(resp_ids: np.ndarray, eos_ids: set[int]) -> int:
+    """Length up to and including the first EOS token, else full length.
+
+    Why a set of eos ids rather than a single id: instruct models commonly
+    have multiple valid stop tokens in generation_config.eos_token_id (e.g.
+    Llama-3.1-Instruct: 128001/128008/128009 end-of-turn variants; Qwen3:
+    151643/151645). Scanning for only tokenizer.eos_token_id can miss an
+    earlier stop emitted via one of the other ids and overcount response_len.
+    """
+    resp_ids = np.asarray(resp_ids)
+    hits = np.nonzero(np.isin(resp_ids, list(eos_ids)))[0]
+    if hits.size > 0:
+        return int(hits[0]) + 1
+    return int(resp_ids.shape[0])
+
+
+def normalize_eos_ids(generation_config_eos: Any, tokenizer_eos_id: Any) -> set[int]:
+    """Normalize model.generation_config.eos_token_id (int | list | None) to a set of ints.
+
+    tokenizer.eos_token_id is always folded in as a fallback / addition, since
+    generation_config can be None or omit it in some checkpoints.
+    """
+    eos_ids: set[int] = set()
+    if generation_config_eos is None:
+        pass
+    elif isinstance(generation_config_eos, (list, tuple, set)):
+        eos_ids.update(int(x) for x in generation_config_eos)
+    else:
+        eos_ids.add(int(generation_config_eos))
+    if tokenizer_eos_id is not None:
+        eos_ids.add(int(tokenizer_eos_id))
+    return eos_ids
+
+
 def pad_2d(arr: np.ndarray, target_rows: int, target_cols: int, fill_value: Any) -> np.ndarray:
     """Pad 2-D array to (target_rows, target_cols), truncating dims that are too large."""
     arr = np.asarray(arr)
@@ -234,9 +283,57 @@ def load_model_eager(model_name: str):
     return tokenizer, model
 
 
-def build_prompt(sample: dict, task_module: Any) -> str:
-    """Build the prompt string for a sample using task_module.format_prompt if available."""
-    return _prompt_default(task_module, sample)
+def apply_chat_template_to_prompt(raw_prompt: str, tokenizer: Any, model_name: str) -> str:
+    """Wrap raw_prompt as a single user message and render via the tokenizer's chat template.
+
+    Mirrors activation_logging/server.py::_format_chat_prompt_for_model. For
+    model names containing "qwen3" or "smollm3" (case-insensitive), also
+    passes enable_thinking=False — those models default to a thinking-mode
+    preamble that this pipeline does not want.
+    """
+    messages = [{"role": "user", "content": raw_prompt}]
+    template_kwargs: dict[str, Any] = dict(add_generation_prompt=True, tokenize=False)
+    model_name_lower = model_name.lower()
+    if "qwen3" in model_name_lower or "smollm3" in model_name_lower:
+        template_kwargs["enable_thinking"] = False
+    return tokenizer.apply_chat_template(messages, **template_kwargs)
+
+
+def build_prompt(
+    sample: dict,
+    task_module: Any,
+    tokenizer: Any = None,
+    model_name: str | None = None,
+    chat_template: bool = False,
+) -> str:
+    """Build the prompt string for a sample using task_module.format_prompt if available.
+
+    When chat_template is True, the raw task prompt is additionally wrapped
+    via apply_chat_template_to_prompt (requires tokenizer and model_name).
+    """
+    raw_prompt = _prompt_default(task_module, sample)
+    if not chat_template:
+        return raw_prompt
+    assert tokenizer is not None and model_name is not None, (
+        "tokenizer and model_name are required when chat_template=True"
+    )
+    return apply_chat_template_to_prompt(raw_prompt, tokenizer, model_name)
+
+
+def check_capture_mode_compat(existing_config: dict, chat_template: bool) -> bool:
+    """True iff existing_config's chat_template mode matches the current run's.
+
+    Why: writer_mode is "a" (append/resume) whenever out_dir/config.json
+    already exists, and resume keys off sha256(prompt) — but a templated
+    prompt and its raw equivalent hash differently, so append mode alone
+    can't detect a mismatch; it would just silently write mixed-convention
+    rows into the same memmap. Chat-templated captures must be strictly new
+    datasets, never mixed into a legacy (or oppositely-configured) out_dir.
+    A missing "chat_template" key means the dir predates this flag, i.e. a
+    legacy (non-templated) capture — treated as False.
+    """
+    existing = bool(existing_config.get("chat_template", False))
+    return existing == chat_template
 
 
 def build_writer_config(model: Any, args: argparse.Namespace) -> dict:
@@ -260,6 +357,7 @@ def build_writer_config(model: Any, args: argparse.Namespace) -> dict:
         "response_logprobs_top_k": args.top_k,
         "max_prompt_len": args.max_prompt_len,
         "max_response_len": args.max_response_len,
+        "chat_template": bool(args.chat_template),
     }
 
 
@@ -297,6 +395,7 @@ def _run_batch(
         truncation=True,
         max_length=args.max_prompt_len,
         return_tensors="pt",
+        add_special_tokens=not args.chat_template,
     ).to(model.device)
 
     prompt_lens = batch.attention_mask.sum(dim=1).cpu().numpy()  # (B,)
@@ -316,14 +415,17 @@ def _run_batch(
             pad_token_id=tokenizer.eos_token_id,
         )
 
+    # Why: pad_token_id=tokenizer.eos_token_id is passed to generate() below,
+    # so right-padding after a sequence finishes is itself an eos id —
+    # first-EOS scanning still gives the correct response_len regardless of
+    # which eos id in the (possibly multi-id) set triggered the stop.
+    eos_ids = normalize_eos_ids(
+        getattr(model.generation_config, "eos_token_id", None), tokenizer.eos_token_id
+    )
     response_lens = np.empty(B, dtype=np.int32)
     for b in range(B):
-        resp_b = out.sequences[b, padded_prompt_len:]
-        eos_positions = (resp_b == tokenizer.eos_token_id).nonzero(as_tuple=False)
-        if len(eos_positions) > 0:
-            response_lens[b] = int(eos_positions[0].item()) + 1
-        else:
-            response_lens[b] = int(resp_b.shape[0])
+        resp_b = out.sequences[b, padded_prompt_len:].cpu().numpy()
+        response_lens[b] = response_len_from_ids(resp_b, eos_ids)
 
     resp_attn = stitch_response_to_response_batched(
         out.attentions, prompt_lens, response_lens, args.r_max
@@ -476,14 +578,31 @@ def _run_capture(args: argparse.Namespace) -> int:
         logger.info("Sliced to [%d, %d) of shuffled dataset (seed=%d): %d samples",
                     start, end, args.shuffle_seed, len(dataset))
 
+    # Guard against mixing chat-templated and legacy/raw captures into the
+    # same out_dir. Checked before loading the model (below) so a mismatch
+    # fails fast — no writer opened, no files touched, no wasted GPU time.
+    out_path = Path(args.out_dir)
+    config_path = out_path / "config.json"
+    if config_path.exists():
+        existing_config = json.loads(config_path.read_text())
+        if not check_capture_mode_compat(existing_config, args.chat_template):
+            logger.error(
+                "chat_template mode mismatch for out_dir=%s: existing capture "
+                "has chat_template=%s, this run requested chat_template=%s. "
+                "Chat-templated and legacy captures must not share an out_dir "
+                "— point --out-dir at a new directory.",
+                args.out_dir,
+                bool(existing_config.get("chat_template", False)),
+                args.chat_template,
+            )
+            return 1
+
     # Load model
     tokenizer, model = load_model_eager(args.model)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     # Determine resume mode
-    out_path = Path(args.out_dir)
-    config_path = out_path / "config.json"
     writer_mode = "a" if config_path.exists() else "w"
 
     config_dict = build_writer_config(model, args)
@@ -499,7 +618,10 @@ def _run_capture(args: argparse.Namespace) -> int:
     ) as writer:
         if batch_size <= 1:
             for i, sample in enumerate(dataset):
-                prompt = build_prompt(sample, task_module)
+                prompt = build_prompt(
+                    sample, task_module, tokenizer=tokenizer, model_name=args.model,
+                    chat_template=args.chat_template,
+                )
                 p_hash = sha256(prompt)
 
                 if writer.is_written(p_hash):
@@ -512,7 +634,10 @@ def _run_capture(args: argparse.Namespace) -> int:
                     i + 1, len(dataset), sample_index, args.task,
                 )
 
-                inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+                inputs = tokenizer(
+                    prompt, return_tensors="pt",
+                    add_special_tokens=not args.chat_template,
+                ).to(model.device)
                 prompt_len = inputs.input_ids.shape[1]
 
                 with torch.no_grad():
@@ -609,7 +734,10 @@ def _run_capture(args: argparse.Namespace) -> int:
             # advance the sample_index ourselves by len(pending_samples).
             next_index = writer.next_index()
             for i, sample in enumerate(dataset):
-                prompt = build_prompt(sample, task_module)
+                prompt = build_prompt(
+                    sample, task_module, tokenizer=tokenizer, model_name=args.model,
+                    chat_template=args.chat_template,
+                )
                 p_hash = sha256(prompt)
 
                 if writer.is_written(p_hash):
@@ -792,6 +920,13 @@ def main() -> int:
                              "(no left-padding). B>1 uses batched stitching primitives. "
                              "Llama-3.1-8B at max_prompt=512, max_response=64: B=4 fits "
                              "comfortably on H100 80GB.")
+    parser.add_argument("--chat-template", action="store_true", default=False,
+                        help="Wrap the raw task prompt as a single user message and render "
+                             "it via tokenizer.apply_chat_template(add_generation_prompt=True) "
+                             "before tokenizing (enable_thinking=False for qwen3/smollm3 model "
+                             "names). Default off — legacy completion-style prompts are fed "
+                             "directly to the model, preserving byte-reproducibility of "
+                             "existing captures.")
     args = parser.parse_args()
 
     if args.step == "capture":
