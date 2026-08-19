@@ -44,8 +44,8 @@ are skipped. Cells already in pending/claimed/done/failed are not touched.
   sharding, taking the front of the same deterministic shuffle --cap uses
   (seed=--shuffle-seed). E.g. hotpotqa train (90447) with --max-samples 50000
   --shard-size 5000 emits exactly 10 shards [0-5000) ... [45000-50000);
-  popqa train (11414) with the same flags emits 3 shards [0-5000),
-  [5000-10000), [10000-11414). A dataset already <= shard-size (before any
+  popqa train (11413) with the same flags emits 3 shards [0-5000),
+  [5000-10000), [10000-11413). A dataset already <= shard-size (before any
   capping) still emits the single unsuffixed cell. Only takes effect
   alongside --shard-size — without it, --max-samples has no effect on the
   default (whole-dataset, unsuffixed) or --cap paths.
@@ -88,14 +88,14 @@ _EXPECTED_SIZES: dict[tuple[str, str], int] = {
     ("hotpotqa",        "train"):           90447,
     ("mmlu",            "test"):            14079,
     ("mmlu",            "auxiliary_train"): 99800,
-    ("popqa",           "test"):            2853,
-    ("popqa",           "train"):           11414,
+    ("popqa",           "test"):            2854,
+    ("popqa",           "train"):           11413,
     ("natural_questions", "test"):          4155,
     ("natural_questions", "train"):         16617,
     ("sciq",            "test"):            1000,
     ("sciq",            "train"):           11679,
     ("searchqa",        "validation"):      13893,
-    ("searchqa",        "train"):           99820,
+    ("searchqa",        "train"):           151295,
 }
 
 

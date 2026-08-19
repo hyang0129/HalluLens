@@ -266,8 +266,8 @@ def test_max_samples_caps_effective_size_before_sharding():
 
 
 def test_max_samples_larger_than_expected_size_is_a_noop_when_capped_dataset_over_threshold():
-    """popqa train (11414) with max_samples=50000 (>expected), shard_size=5000
-    -> 3 shards [0-5000), [5000-10000), [10000-11414), per the spec example —
+    """popqa train (11413) with max_samples=50000 (>expected), shard_size=5000
+    -> 3 shards [0-5000), [5000-10000), [10000-11413), per the spec example —
     max_samples doesn't shrink anything since it exceeds the real size."""
     ranges = _shard_ranges_for_dataset(expected_size=11_414, shard_size=5_000, max_samples=50_000)
     assert ranges == [(0, 5_000), (5_000, 10_000), (10_000, 11_414)]
@@ -353,7 +353,7 @@ def test_generate_manifest_max_samples_shard_size_popqa_train_3_shards(tmp_path)
     cell_ids = sorted(p.stem for p in pending)
     assert cell_ids == [
         "popqa_train_Llama-3.1-8B-Instruct_0-5000",
-        "popqa_train_Llama-3.1-8B-Instruct_10000-11414",
+        "popqa_train_Llama-3.1-8B-Instruct_10000-11413",
         "popqa_train_Llama-3.1-8B-Instruct_5000-10000",
     ]
 
