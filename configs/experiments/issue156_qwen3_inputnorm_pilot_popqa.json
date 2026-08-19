@@ -1,5 +1,5 @@
 {
-  "_comment": "Paired seed-0 Qwen3-8B pilot comparing normal tokenwise v1 with input-normalized v1. Expand seeds only after the five-dataset decision gate.",
+  "_comment": "Qwen3-8B seed-0 pilot plus the authorized low-priority input-norm seed expansion. Normal v1 remains seed 0; queue cells select one method/seed at a time.",
   "experiment_name": "issue156_qwen3_inputnorm_pilot_popqa",
   "dataset": "popqa_qwen3_memmap",
   "methods": [
@@ -7,8 +7,8 @@
     "tokenwise_arch_v1_input_norm_only_qwen3"
   ],
   "split_seed": 42,
-  "split_seeds": [42],
-  "training_seeds": [0],
+  "split_seeds": [42, 1, 2, 3, 4],
+  "training_seeds": [0, 1, 2, 3, 4],
   "device": "auto",
   "num_workers": 4,
   "persistent_workers": true,

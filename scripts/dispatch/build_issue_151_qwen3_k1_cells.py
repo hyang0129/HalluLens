@@ -5,12 +5,15 @@ The matrix has two scopes:
 * 50 normal-priority ACT-ViT cells: five datasets x five paired seeds for
   k1->k1 training and canonical k64->k1 evaluation;
 * 10 high-priority tokenwise pilot cells: five datasets x seed 0 for both
-  normal v1 and input-normalized v1 over all 36 Qwen post-block layers.
+  normal v1 and input-normalized v1 over all 36 Qwen post-block layers;
+* 20 lowest-queue-order input-normalized cells: five datasets x seeds 1-4,
+  appended after every existing low-priority cell.
 
 The eval-only arm symlinks canonical checkpoint artifacts into additive Issue
 #151 run directories. Cells use the existing cell-agnostic experiment workers,
 are idempotent across queue states, and deliberately exclude MMLU. The
-tokenwise pilot is a decision gate; it does not pre-queue seeds 1-4.
+The normal-v1 arm remains a seed-0 pilot.  The explicitly authorized input-norm
+expansion uses paired training/split seeds and does not duplicate seed 0.
 """
 from __future__ import annotations
 
@@ -179,10 +182,10 @@ def build(
             raise ValueError(f"{relative} has the wrong dataset")
         if experiment.get("methods") != list(_PILOT_METHODS):
             raise ValueError(f"{relative} has the wrong tokenwise pilot matrix")
-        if experiment.get("training_seeds") != [0] or experiment.get(
+        if experiment.get("training_seeds") != list(_SEEDS) or experiment.get(
             "split_seeds"
-        ) != [42]:
-            raise ValueError(f"{relative} must be the paired seed-0 pilot")
+        ) != list(_SPLIT_SEEDS):
+            raise ValueError(f"{relative} must define all paired seeds")
         pilot_experiments[dataset] = (expected_name, relative, slug)
 
     init_dispatch_dirs(dispatch_root)
@@ -219,6 +222,14 @@ def build(
             pilot_experiments,
             ((0, 42),),
             "high",
+        ),
+        (
+            "9_low_99_inputnorm",
+            _TOKENWISE_INPUTNORM_METHOD,
+            "tokenwise_v1_inputnorm_qwen_seed_expansion",
+            pilot_experiments,
+            tuple(zip(_SEEDS[1:], _SPLIT_SEEDS[1:])),
+            "low",
         ),
     )
     for (
@@ -294,6 +305,10 @@ def build(
                         }
                     )
                 else:
+                    is_inputnorm_expansion = (
+                        study_arm
+                        == "tokenwise_v1_inputnorm_qwen_seed_expansion"
+                    )
                     cell.update(
                         {
                             "training_view": "token0_plus_same_response_later",
@@ -306,11 +321,15 @@ def build(
                                 method == _TOKENWISE_INPUTNORM_METHOD
                             ),
                             "decision_gate": (
-                                "compare_paired_seed0_over_five_datasets_before_"
-                                "expanding_seeds"
+                                "authorized_lowest_priority_seed_expansion"
+                                if is_inputnorm_expansion
+                                else "compare_paired_seed0_over_five_datasets_"
+                                "before_expanding_seeds"
                             ),
                         }
                     )
+                    if is_inputnorm_expansion:
+                        cell["queue_order"] = "after_all_existing_low_priority_cells"
                 (dispatch_root / "pending" / f"{cell_id}.json").write_text(
                     json.dumps(cell, indent=2) + "\n", encoding="utf-8"
                 )

@@ -80,20 +80,20 @@ def test_qwen_experiments_cover_five_paired_datasets_without_mmlu():
         payloads.append(pilot)
         assert pilot["dataset"] == dataset
         assert pilot["methods"] == expected_pilot_methods
-        assert pilot["training_seeds"] == [0]
-        assert pilot["split_seeds"] == [42]
+        assert pilot["training_seeds"] == [0, 1, 2, 3, 4]
+        assert pilot["split_seeds"] == [42, 1, 2, 3, 4]
         assert "mmlu" not in json.dumps(pilot).lower()
     assert len(payloads) == 10
 
 
-def test_builder_adds_60_cells_and_links_all_qwen_checkpoints(tmp_path):
+def test_builder_adds_80_cells_and_links_all_qwen_checkpoints(tmp_path):
     dispatch_root = tmp_path / "dispatch"
     runs_root = tmp_path / "runs"
     _write_qwen_actvit_checkpoints(runs_root)
 
     assert build(
         dispatch_root, project_root=_ROOT, runs_root=runs_root
-    ) == 60
+    ) == 80
     assert build(
         dispatch_root, project_root=_ROOT, runs_root=runs_root
     ) == 0
@@ -102,7 +102,7 @@ def test_builder_adds_60_cells_and_links_all_qwen_checkpoints(tmp_path):
         json.loads(path.read_text(encoding="utf-8"))
         for path in sorted((dispatch_root / "pending").glob("*.json"))
     ]
-    assert len(cells) == 60
+    assert len(cells) == 80
     by_method = {
         method: [cell for cell in cells if cell["method"] == method]
         for method in (
@@ -113,7 +113,7 @@ def test_builder_adds_60_cells_and_links_all_qwen_checkpoints(tmp_path):
         )
     }
     assert len(by_method[_TOKENWISE]) == 5
-    assert len(by_method[_TOKENWISE_INPUTNORM]) == 5
+    assert len(by_method[_TOKENWISE_INPUTNORM]) == 25
     assert len(by_method[_ACTVIT_K1]) == 25
     assert len(by_method[_ACTVIT_EVAL]) == 25
     assert all(
@@ -129,13 +129,41 @@ def test_builder_adds_60_cells_and_links_all_qwen_checkpoints(tmp_path):
         (3, 3),
         (4, 4),
     }
-    assert {(cell["seed"], cell["split_seed"]) for cell in tokenwise_cells} == {
+    assert {(cell["seed"], cell["split_seed"]) for cell in by_method[_TOKENWISE]} == {
         (0, 42)
+    }
+    assert {
+        (cell["seed"], cell["split_seed"])
+        for cell in by_method[_TOKENWISE_INPUTNORM]
+    } == {
+        (0, 42),
+        (1, 1),
+        (2, 2),
+        (3, 3),
+        (4, 4),
     }
     assert all(cell["backbone"] == "Qwen3-8B" for cell in cells)
     assert all(cell["evaluation_prefix_length"] == 1 for cell in cells)
     assert all(cell["priority"] == "normal" for cell in actvit_cells)
-    assert all(cell["priority"] == "high" for cell in tokenwise_cells)
+    assert all(cell["priority"] == "high" for cell in by_method[_TOKENWISE])
+    inputnorm_seed0 = [
+        cell for cell in by_method[_TOKENWISE_INPUTNORM] if cell["seed"] == 0
+    ]
+    inputnorm_expansion = [
+        cell for cell in by_method[_TOKENWISE_INPUTNORM] if cell["seed"] != 0
+    ]
+    assert len(inputnorm_seed0) == 5
+    assert len(inputnorm_expansion) == 20
+    assert all(cell["priority"] == "high" for cell in inputnorm_seed0)
+    assert all(cell["priority"] == "low" for cell in inputnorm_expansion)
+    assert all(
+        cell["cell_id"].startswith("9_low_99_inputnorm_")
+        for cell in inputnorm_expansion
+    )
+    assert all(
+        cell["queue_order"] == "after_all_existing_low_priority_cells"
+        for cell in inputnorm_expansion
+    )
     assert all(cell.get("eval_only") is True for cell in by_method[_ACTVIT_EVAL])
     assert all(
         cell.get("training_prefix_length") == 64
@@ -157,7 +185,12 @@ def test_builder_adds_60_cells_and_links_all_qwen_checkpoints(tmp_path):
         for cell in by_method[_TOKENWISE_INPUTNORM]
     )
     assert all(
-        "expanding_seeds" in cell["decision_gate"] for cell in tokenwise_cells
+        "expanding_seeds" in cell["decision_gate"]
+        for cell in by_method[_TOKENWISE] + inputnorm_seed0
+    )
+    assert all(
+        cell["decision_gate"] == "authorized_lowest_priority_seed_expansion"
+        for cell in inputnorm_expansion
     )
     assert all("mmlu" not in json.dumps(cell).lower() for cell in cells)
 
