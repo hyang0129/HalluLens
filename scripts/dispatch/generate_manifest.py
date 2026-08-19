@@ -13,16 +13,28 @@ Usage:
 Chat-template re-capture: point --dispatch-root and --out-base-dir at a
 separate tree so this never collides with legacy (non-templated) captures,
 and pass --chat-template so every emitted cell carries "chat_template": true
-through to capture_inference.py:
+through to capture_inference.py. --shard-size splits every dataset (test AND
+train) into fixed-size shards emitted upfront, for draining with many
+parallel workers off the shared queue:
 
     python scripts/dispatch/generate_manifest.py \
         --dispatch-root shared/icr_capture_chat/_dispatch \
         --out-base-dir shared/icr_capture_chat \
         --chat-template \
+        --shard-size 5000 \
         [--tasks ...] [--models ...] [--splits ...]
 
 Re-runnable: cells whose output already exists (eval_results.json + full meta.jsonl)
 are skipped. Cells already in pending/claimed/done/failed are not touched.
+
+--cap vs --shard-size (mutually exclusive):
+  --cap N       "give me the next slice of size N" — emits at most ONE
+                incomplete slice per dataset per invocation; a
+                headline-then-appendix workflow for sequential capture.
+  --shard-size N  splits every dataset > N into ALL of its shards, emitted
+                upfront in one call — for load-balancing a drain across many
+                parallel dispatch workers rather than working through slices
+                one at a time.
 """
 
 from __future__ import annotations
@@ -142,6 +154,39 @@ def _slice_ranges_for_dataset(
     return []
 
 
+def _shard_ranges_for_dataset(
+    expected_size: int | None,
+    shard_size: int | None,
+) -> list[tuple[int | None, int | None]]:
+    """Return ALL shard ranges for this dataset, emitted upfront.
+
+    Unlike _slice_ranges_for_dataset (--cap: at most one incomplete slice per
+    call, for a sequential headline-then-appendix workflow), --shard-size
+    splits the WHOLE dataset into fixed-size shards in one shot — every
+    (task, model, split) including test splits — so many parallel dispatch
+    workers can drain the queue concurrently instead of waiting on a single
+    "next slice" cell at a time.
+
+    Semantics:
+      - shard_size is None OR expected_size is None OR expected_size <= shard_size →
+        single cell (None, None) = full dataset, no suffix in cell_id/out_dir
+        (matches --cap's / no-cap's under-threshold behavior — no pointless
+        _0-1000 suffix for a dataset smaller than the shard size).
+      - expected_size > shard_size → every [k*shard_size, min((k+1)*shard_size,
+        expected_size)) shard, in order, regardless of completion state —
+        completion filtering happens per-shard in generate_manifest(), not here.
+    """
+    if shard_size is None or expected_size is None or expected_size <= shard_size:
+        return [(None, None)]
+    ranges: list[tuple[int | None, int | None]] = []
+    start = 0
+    while start < expected_size:
+        end = min(start + shard_size, expected_size)
+        ranges.append((start, end))
+        start = end
+    return ranges
+
+
 def generate_manifest(
     dispatch_root: Path,
     out_base_dir: Path,
@@ -157,7 +202,11 @@ def generate_manifest(
     cap: int | None = None,
     shuffle_seed: int = 0,
     chat_template: bool = False,
+    shard_size: int | None = None,
 ) -> int:
+    if cap is not None and shard_size is not None:
+        raise ValueError("--cap and --shard-size are mutually exclusive")
+
     init_dispatch_dirs(dispatch_root)
     written = 0
 
@@ -174,9 +223,12 @@ def generate_manifest(
                 base_out_dir = out_base_dir / base_cell_id
                 expected_size = _EXPECTED_SIZES.get((task, hf_split))
 
-                ranges = _slice_ranges_for_dataset(
-                    expected_size, cap, out_base_dir, base_cell_id,
-                )
+                if shard_size is not None:
+                    ranges = _shard_ranges_for_dataset(expected_size, shard_size)
+                else:
+                    ranges = _slice_ranges_for_dataset(
+                        expected_size, cap, out_base_dir, base_cell_id,
+                    )
 
                 for (idx_start, idx_end) in ranges:
                     if idx_start is None and idx_end is None:
@@ -191,9 +243,25 @@ def generate_manifest(
                     if _dispatch_has_cell(dispatch_root, cell_id):
                         continue
 
-                    if (n_samples is None and idx_start is None
-                            and _cell_is_done(out_dir, task, hf_split)):
-                        continue
+                    # Why n_samples is None gates both checks: with an explicit
+                    # --n-samples smoketest cap, no out_dir can ever reach the
+                    # full expected_size, so "done" is meaningless and must not
+                    # suppress re-queuing.
+                    if n_samples is None:
+                        if idx_start is None and _cell_is_done(out_dir, task, hf_split):
+                            continue
+                        # Why a simpler eval_results.json-only check for a real
+                        # shard/slice (idx_start is not None): _cell_is_done
+                        # compares against the FULL dataset's expected size,
+                        # which is wrong for a shard — a completed shard's
+                        # meta.jsonl row count matches the shard size, not
+                        # expected_size. --cap's ranges already pre-filter
+                        # completed slices before returning, so this is a
+                        # no-op there; --shard-size returns every shard
+                        # upfront regardless of completion, so this is the
+                        # only place that filters them.
+                        if idx_start is not None and (out_dir / "eval_results.json").exists():
+                            continue
 
                     cell = {
                         "cell_id":         cell_id,
@@ -262,6 +330,18 @@ def main() -> int:
                         help="Seed for the deterministic shuffle when --cap is set. "
                              "Must stay constant across appendix runs of the same "
                              "dataset for the slices to remain non-overlapping.")
+    parser.add_argument("--shard-size", type=int, default=None,
+                        help="Split every dataset (test AND train, including those "
+                             "at or under any --cap threshold you'd otherwise use) into "
+                             "ceil(expected_size / shard_size) shards of "
+                             "[k*shard_size, min((k+1)*shard_size, expected_size)), ALL "
+                             "emitted upfront into pending/ — for load-balancing a drain "
+                             "across many parallel dispatch workers. Datasets whose "
+                             "expected_size <= shard_size still get a single unsuffixed "
+                             "cell (no pointless _0-N suffix). Mutually exclusive with "
+                             "--cap. Re-invocation is idempotent: shards already done "
+                             "(out_dir/eval_results.json exists) or already queued "
+                             "anywhere in the dispatch tree are skipped.")
     parser.add_argument("--chat-template", action="store_true", default=False,
                         help="Set 'chat_template': true on every emitted cell, so worker.sh "
                              "passes --chat-template through to capture_inference.py. Point "
@@ -269,6 +349,9 @@ def main() -> int:
                              "shared/icr_capture_chat) when using this — do not mix with "
                              "legacy non-templated captures.")
     args = parser.parse_args()
+
+    if args.cap is not None and args.shard_size is not None:
+        parser.error("--cap and --shard-size are mutually exclusive")
 
     dispatch_root = Path(args.dispatch_root)
     out_base_dir = Path(args.out_base_dir)
@@ -286,6 +369,7 @@ def main() -> int:
         cap=args.cap,
         shuffle_seed=args.shuffle_seed,
         chat_template=args.chat_template,
+        shard_size=args.shard_size,
     )
     print(f"Done — {total} cells queued in {dispatch_root / 'pending'}")
     return 0
