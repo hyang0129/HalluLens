@@ -21,8 +21,11 @@ parallel workers off the shared queue:
         --dispatch-root shared/icr_capture_chat/_dispatch \
         --out-base-dir shared/icr_capture_chat \
         --chat-template \
-        --shard-size 5000 \
+        --top-k 500 --max-samples 50000 --shard-size 5000 --batch-size 4 \
         [--tasks ...] [--models ...] [--splits ...]
+
+(top_k defaults to 20 — the 500 above is just documenting the intended
+invocation, not a new default.)
 
 Re-runnable: cells whose output already exists (eval_results.json + full meta.jsonl)
 are skipped. Cells already in pending/claimed/done/failed are not touched.
@@ -35,6 +38,17 @@ are skipped. Cells already in pending/claimed/done/failed are not touched.
                 upfront in one call — for load-balancing a drain across many
                 parallel dispatch workers rather than working through slices
                 one at a time.
+
+--max-samples N: composable with --shard-size (errors out with --cap). Caps
+  the effective dataset size to min(expected_size, max_samples) BEFORE
+  sharding, taking the front of the same deterministic shuffle --cap uses
+  (seed=--shuffle-seed). E.g. hotpotqa train (90447) with --max-samples 50000
+  --shard-size 5000 emits exactly 10 shards [0-5000) ... [45000-50000);
+  popqa train (11414) with the same flags emits 3 shards [0-5000),
+  [5000-10000), [10000-11414). A dataset already <= shard-size (before any
+  capping) still emits the single unsuffixed cell. Only takes effect
+  alongside --shard-size — without it, --max-samples has no effect on the
+  default (whole-dataset, unsuffixed) or --cap paths.
 """
 
 from __future__ import annotations
@@ -157,6 +171,7 @@ def _slice_ranges_for_dataset(
 def _shard_ranges_for_dataset(
     expected_size: int | None,
     shard_size: int | None,
+    max_samples: int | None = None,
 ) -> list[tuple[int | None, int | None]]:
     """Return ALL shard ranges for this dataset, emitted upfront.
 
@@ -167,21 +182,45 @@ def _shard_ranges_for_dataset(
     workers can drain the queue concurrently instead of waiting on a single
     "next slice" cell at a time.
 
+    max_samples (--max-samples) caps the effective dataset size to
+    min(expected_size, max_samples) BEFORE sharding — the front of the same
+    deterministic shuffle --cap uses. This must stay distinct from the
+    "under-threshold → unsuffixed cell" shortcut below: if max_samples
+    actually truncates expected_size (effective_size < expected_size), the
+    resulting single shard still needs an explicit (0, effective_size) range
+    to enforce the cap downstream — collapsing it to the unsuffixed (None,
+    None) form would mean "no index range", i.e. capture_inference.py
+    generates the FULL untruncated dataset, silently ignoring --max-samples.
+
     Semantics:
-      - shard_size is None OR expected_size is None OR expected_size <= shard_size →
-        single cell (None, None) = full dataset, no suffix in cell_id/out_dir
-        (matches --cap's / no-cap's under-threshold behavior — no pointless
-        _0-1000 suffix for a dataset smaller than the shard size).
-      - expected_size > shard_size → every [k*shard_size, min((k+1)*shard_size,
-        expected_size)) shard, in order, regardless of completion state —
-        completion filtering happens per-shard in generate_manifest(), not here.
+      - shard_size is None OR expected_size is None → single cell (None, None).
+      - effective_size := expected_size if max_samples is None else
+        min(expected_size, max_samples).
+      - effective_size <= shard_size AND effective_size == expected_size (no
+        truncation occurred) → single cell (None, None) = full dataset, no
+        suffix in cell_id/out_dir (matches --cap's / no-cap's under-threshold
+        behavior — no pointless _0-1000 suffix for a dataset already smaller
+        than the shard size).
+      - effective_size <= shard_size AND effective_size < expected_size
+        (max_samples truncated a dataset that would otherwise exceed
+        shard_size) → single EXPLICIT shard (0, effective_size).
+      - effective_size > shard_size → every [k*shard_size,
+        min((k+1)*shard_size, effective_size)) shard, in order, regardless of
+        completion state — completion filtering happens per-shard in
+        generate_manifest(), not here.
     """
-    if shard_size is None or expected_size is None or expected_size <= shard_size:
+    if shard_size is None or expected_size is None:
         return [(None, None)]
+    effective_size = expected_size if max_samples is None else min(expected_size, max_samples)
+    truncated = effective_size < expected_size
+    if effective_size <= shard_size:
+        if not truncated:
+            return [(None, None)]
+        return [(0, effective_size)]
     ranges: list[tuple[int | None, int | None]] = []
     start = 0
-    while start < expected_size:
-        end = min(start + shard_size, expected_size)
+    while start < effective_size:
+        end = min(start + shard_size, effective_size)
         ranges.append((start, end))
         start = end
     return ranges
@@ -203,9 +242,12 @@ def generate_manifest(
     shuffle_seed: int = 0,
     chat_template: bool = False,
     shard_size: int | None = None,
+    max_samples: int | None = None,
 ) -> int:
     if cap is not None and shard_size is not None:
         raise ValueError("--cap and --shard-size are mutually exclusive")
+    if cap is not None and max_samples is not None:
+        raise ValueError("--cap and --max-samples are mutually exclusive")
 
     init_dispatch_dirs(dispatch_root)
     written = 0
@@ -224,7 +266,7 @@ def generate_manifest(
                 expected_size = _EXPECTED_SIZES.get((task, hf_split))
 
                 if shard_size is not None:
-                    ranges = _shard_ranges_for_dataset(expected_size, shard_size)
+                    ranges = _shard_ranges_for_dataset(expected_size, shard_size, max_samples)
                 else:
                     ranges = _slice_ranges_for_dataset(
                         expected_size, cap, out_base_dir, base_cell_id,
@@ -342,6 +384,14 @@ def main() -> int:
                              "--cap. Re-invocation is idempotent: shards already done "
                              "(out_dir/eval_results.json exists) or already queued "
                              "anywhere in the dispatch tree are skipped.")
+    parser.add_argument("--max-samples", type=int, default=None,
+                        help="Cap the effective dataset size to min(expected_size, "
+                             "max_samples) BEFORE sharding, taken from the front of the "
+                             "deterministic shuffle (seed=--shuffle-seed) — same semantics "
+                             "as --cap's slicing. Only takes effect together with "
+                             "--shard-size (a dataset already <= shard-size still emits "
+                             "the single unsuffixed cell); has no effect on the default or "
+                             "--cap paths. Mutually exclusive with --cap.")
     parser.add_argument("--chat-template", action="store_true", default=False,
                         help="Set 'chat_template': true on every emitted cell, so worker.sh "
                              "passes --chat-template through to capture_inference.py. Point "
@@ -352,6 +402,8 @@ def main() -> int:
 
     if args.cap is not None and args.shard_size is not None:
         parser.error("--cap and --shard-size are mutually exclusive")
+    if args.cap is not None and args.max_samples is not None:
+        parser.error("--cap and --max-samples are mutually exclusive")
 
     dispatch_root = Path(args.dispatch_root)
     out_base_dir = Path(args.out_base_dir)
@@ -370,6 +422,7 @@ def main() -> int:
         shuffle_seed=args.shuffle_seed,
         chat_template=args.chat_template,
         shard_size=args.shard_size,
+        max_samples=args.max_samples,
     )
     print(f"Done — {total} cells queued in {dispatch_root / 'pending'}")
     return 0
