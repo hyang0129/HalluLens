@@ -7,6 +7,7 @@
     "tokenwise_arch_v1_input_norm_only",
     "act_vit",
     "token_zero_mlp_probe",
+    "contrastive_logprob_recon",
     "tokenwise_causal_t0_dropout",
     "tokenwise_arch_t0_input_norm_only",
     "tokenwise_v1_inputnorm_probe21m",

@@ -58,6 +58,10 @@ _LLAMA_METHODS = (
     ("tokenwise_arch_v1_input_norm_only", "0_high", "high"),
     ("act_vit", "5_mid", "normal"),
     ("token_zero_mlp_probe", "5_mid", "normal"),
+    # Legacy CLR (full-response contrastive) — re-ranks CLR vs act_vit on the
+    # chat-templated data; generic across models (layers 14-29, stored top-k
+    # is sliced from 500 down to its requested 20 by the loader).
+    ("contrastive_logprob_recon", "5_mid", "normal"),
     # t0-recipe (first_same, "t0+t0") arms: trained AND evaluated at token
     # zero, closing the recipe gap in the v1-vs-token_zero_mlp comparison.
     ("tokenwise_causal_t0_dropout", "6_t0", "normal"),
@@ -75,6 +79,7 @@ _QWEN_METHODS = (
     ("tokenwise_arch_v1_input_norm_only_qwen3", "0_high", "high"),
     ("act_vit", "5_mid", "normal"),
     ("token_zero_mlp_probe_qwen3", "5_mid", "normal"),
+    ("contrastive_logprob_recon", "5_mid", "normal"),
     ("tokenwise_causal_t0_dropout_qwen3", "6_t0", "normal"),
     ("tokenwise_arch_t0_input_norm_only_qwen3", "6_t0", "normal"),
     ("tokenwise_v1_inputnorm_probe21m_qwen3", "7_small", "normal"),

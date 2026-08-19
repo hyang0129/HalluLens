@@ -16,6 +16,7 @@ _LLAMA_METHODS = [
     "tokenwise_arch_v1_input_norm_only",
     "act_vit",
     "token_zero_mlp_probe",
+    "contrastive_logprob_recon",
     "tokenwise_causal_t0_dropout",
     "tokenwise_arch_t0_input_norm_only",
     "tokenwise_v1_inputnorm_probe21m",
@@ -29,6 +30,7 @@ _QWEN_METHODS = [
     "tokenwise_arch_v1_input_norm_only_qwen3",
     "act_vit",
     "token_zero_mlp_probe_qwen3",
+    "contrastive_logprob_recon",
     "tokenwise_causal_t0_dropout_qwen3",
     "tokenwise_arch_t0_input_norm_only_qwen3",
     "tokenwise_v1_inputnorm_probe21m_qwen3",
@@ -89,7 +91,7 @@ def test_experiment_configs_cover_five_tasks_two_models_without_mmlu():
 def test_builder_writes_60_cells_and_is_idempotent(tmp_path):
     dispatch_root = tmp_path / "dispatch"
 
-    assert build(dispatch_root, project_root=_ROOT) == 110
+    assert build(dispatch_root, project_root=_ROOT) == 120
     # Re-running must not duplicate cells.
     assert build(dispatch_root, project_root=_ROOT) == 0
 
@@ -97,7 +99,7 @@ def test_builder_writes_60_cells_and_is_idempotent(tmp_path):
         json.loads(p.read_text(encoding="utf-8"))
         for p in sorted((dispatch_root / "pending").glob("*.json"))
     ]
-    assert len(cells) == 110
+    assert len(cells) == 120
 
     # cell_id uniqueness.
     ids = [c["cell_id"] for c in cells]
@@ -132,7 +134,7 @@ def test_builder_writes_60_cells_and_is_idempotent(tmp_path):
     for c in cells:
         by_dataset.setdefault(c["dataset"], []).append(c)
     assert len(by_dataset) == 10
-    assert all(len(v) == 11 for v in by_dataset.values())
+    assert all(len(v) == 12 for v in by_dataset.values())
 
     # Tokenwise cells sort first: every tokenwise cell_id must precede every
     # non-tokenwise cell_id lexicographically for the SAME dataset_order
