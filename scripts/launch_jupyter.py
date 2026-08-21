@@ -5,8 +5,8 @@ This is the ONLY sanctioned way for an agent to start a Jupyter node. It
 counts live SLURM jobs *before* submitting and refuses past two hard caps,
 so the limits hold regardless of which agent runs it:
 
-    MAX_ACTIVE_JUPYTER (4)  RUNNING jupyter_* allocations
-    MAX_TOTAL_JOBS     (6)  all of the user's jobs, any state (incl. PENDING)
+    MAX_ACTIVE_JUPYTER (12)  RUNNING jupyter_* allocations
+    MAX_TOTAL_JOBS     (12)  all of the user's jobs, any state (incl. PENDING)
 
 By design it has NO cancel/kill path. It submits exactly the approved
 sbatch line and nothing else.
@@ -37,8 +37,8 @@ from pathlib import Path
 # --- Policy (hard caps) ------------------------------------------------------
 # These encode the autonomy grant: future agents may launch Jupyter nodes
 # without asking, but never past these limits. Change them here, in one place.
-MAX_ACTIVE_JUPYTER = 4   # RUNNING jupyter_* jobs
-MAX_TOTAL_JOBS = 6       # all jobs in any state, including PENDING/queued
+MAX_ACTIVE_JUPYTER = 12  # RUNNING jupyter_* jobs
+MAX_TOTAL_JOBS = 12      # all jobs in any state, including PENDING/queued
 
 # --- Submission shape (matches the approved sbatch line) ---------------------
 JUPYTER_SCRIPT = Path.home() / "rit_rc_scripts" / "empire_jupyter_lab.sh"

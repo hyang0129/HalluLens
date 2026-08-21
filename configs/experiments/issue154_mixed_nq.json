@@ -1,0 +1,15 @@
+{
+  "_comment": "Issue #154 50/50 token-zero augmentation and same-response later-view ablation.",
+  "experiment_name": "issue154_mixed_nq",
+  "dataset": "nq_memmap",
+  "methods": [
+    "tokenwise_causal_mixed_half"
+  ],
+  "split_seed": 42,
+  "split_seeds": [42, 1, 2],
+  "training_seeds": [0, 1, 2],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs"
+}

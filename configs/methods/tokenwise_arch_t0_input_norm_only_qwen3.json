@@ -1,0 +1,8 @@
+{
+  "name": "tokenwise_arch_t0_input_norm_only_qwen3",
+  "extends": "tokenwise_arch_t0_input_norm_only",
+  "_comment": "Qwen3-8B counterpart of the t0-recipe (first_same) arm. Recipe unchanged; relevant_layers widened to all 36 captured post-block layers. expected_total_params is inherited unchanged: the tokenwise encoder's parameter count is layer-count independent (layers are a sequence axis), matching how tokenwise_arch_v1_input_norm_only_qwen3 passes the same guard.",
+  "data": {
+    "relevant_layers": "1-36"
+  }
+}

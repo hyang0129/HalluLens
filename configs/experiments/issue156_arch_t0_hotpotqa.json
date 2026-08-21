@@ -1,0 +1,25 @@
+{
+  "_comment": "Issue #156 seed-0 architecture sweep using two independently dropped-out t0 views.",
+  "experiment_name": "issue156_arch_t0_hotpotqa",
+  "dataset": "hotpotqa_memmap",
+  "methods": [
+    "tokenwise_arch_t0_input_norm_only",
+    "tokenwise_arch_t0_prenorm_only",
+    "tokenwise_arch_t0_attention_pool_only",
+    "tokenwise_arch_t0_projection128_only"
+  ],
+  "split_seed": 42,
+  "split_seeds": [42],
+  "training_seeds": [0],
+  "selection_gate": "issue154_mixed_3x3_complete",
+  "analysis_plan": {
+    "primary_metric": "knn_auroc",
+    "aggregate": "unweighted_macro_across_five_benchmarks",
+    "comparison": "one_factor_delta_from_recipe_matched_baseline",
+    "promotion_threshold": "positive_five_dataset_macro_knn_delta"
+  },
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs"
+}

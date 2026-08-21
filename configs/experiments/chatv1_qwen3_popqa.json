@@ -1,0 +1,30 @@
+{
+  "_comment": "Chat-templated re-capture (issue #151 chat-template capture branch) v1 method matrix, seed 0, Qwen3-8B. Methods: the two headline tokenwise arms (36-layer Qwen variants), act_vit and token_zero_mlp_probe controls (token_zero_mlp_probe_qwen3 also uses all 36 layers), and the cheap logprob/entropy baselines (generic \u2014 relevant_layers='14-29' fits within both models' depth).",
+  "experiment_name": "chatv1_qwen3_popqa",
+  "dataset": "popqa_qwen3_chat_memmap",
+  "methods": [
+    "tokenwise_contrastive_first_anchored_qwen3",
+    "tokenwise_arch_v1_input_norm_only_qwen3",
+    "act_vit",
+    "token_zero_mlp_probe_qwen3",
+    "contrastive_logprob_recon",
+    "tokenwise_causal_t0_dropout_qwen3",
+    "tokenwise_arch_t0_input_norm_only_qwen3",
+    "tokenwise_v1_inputnorm_probe21m_qwen3",
+    "tokenwise_v1_inputnorm_probe6m_qwen3",
+    "tokenwise_v1_inputnorm_probe2m_qwen3",
+    "logprob_baseline",
+    "token_entropy"
+  ],
+  "split_seed": 42,
+  "split_seeds": [
+    42
+  ],
+  "training_seeds": [
+    0
+  ],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs"
+}

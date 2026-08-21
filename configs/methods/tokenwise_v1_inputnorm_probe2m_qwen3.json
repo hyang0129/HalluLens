@@ -1,0 +1,8 @@
+{
+  "name": "tokenwise_v1_inputnorm_probe2m_qwen3",
+  "extends": "tokenwise_v1_inputnorm_probe2m",
+  "_comment": "Qwen3-8B counterpart: relevant_layers widened to 36; params unchanged (layer count is a sequence axis).",
+  "data": {
+    "relevant_layers": "1-36"
+  }
+}

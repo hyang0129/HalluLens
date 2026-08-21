@@ -1,0 +1,12 @@
+{
+  "name": "tokenwise_arch_t0_input_norm_only",
+  "extends": "tokenwise_causal_t0_dropout",
+  "study_issue": 156,
+  "architecture_arm": "input_layernorm_only",
+  "training_recipe": "t0_same_dropout",
+  "model_params": {
+    "normalize_input": true,
+    "expected_total_params": 77546304,
+    "reference_total_params": 77538112
+  }
+}

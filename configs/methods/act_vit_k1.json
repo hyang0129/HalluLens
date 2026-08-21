@@ -1,0 +1,12 @@
+{
+  "name": "act_vit_k1",
+  "extends": "act_vit",
+  "_comment": "Matched first-token ACT-ViT control: every train, validation, and test forward pass is sliced to exactly response token k=1. The best checkpoint is selected by held-out k=1 validation AUROC.",
+  "training": {
+    "fixed_prefix_length": 1
+  },
+  "evaluation": {
+    "metrics": ["auroc"],
+    "eval_prefix_curve": false
+  }
+}

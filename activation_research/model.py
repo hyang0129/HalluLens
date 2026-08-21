@@ -330,11 +330,16 @@ class AttentionPooling(nn.Module):
         else:
             self.proj = None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        token_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         # x: (B, L, d_model) → (B, d_model)
-        attn = torch.softmax(
-            (self.query @ x.transpose(-1, -2)) * self.scale, dim=-1
-        )  # (B, K, L)
+        logits = (self.query @ x.transpose(-1, -2)) * self.scale
+        if token_mask is not None:
+            logits = logits.masked_fill(~token_mask.unsqueeze(1), float("-inf"))
+        attn = torch.softmax(logits, dim=-1)  # (B, K, L)
         pooled = attn @ x  # (B, K, d_model)
         if self.num_queries == 1:
             return pooled.squeeze(1)  # (B, d_model)
@@ -391,7 +396,11 @@ class AttentionPoolProgressiveCompressor(nn.Module):
         self.final_proj = nn.Linear(dims[-1][1], final_dim)
         self.dropout = nn.Dropout(p=input_dropout)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        token_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """x: (B, L, input_dim) → (B, final_dim)."""
         x = x.float()
         if self.normalize_input:
@@ -399,8 +408,8 @@ class AttentionPoolProgressiveCompressor(nn.Module):
         x = self.dropout(x)
         x = self.pos_encodings(x)
         for block in self.blocks:
-            x = block(x)
-        return self.final_proj(self.pool(x))
+            x = block(x, token_mask=token_mask)
+        return self.final_proj(self.pool(x, token_mask=token_mask))
 
 
 class LogprobReconAttentionPoolProgressiveCompressor(LogprobReconProgressiveCompressor):
@@ -449,6 +458,125 @@ class LogprobReconAttentionPoolProgressiveCompressor(LogprobReconProgressiveComp
             nn.GELU(),
             nn.Linear(int(recon_hidden_dim), self.recon_seq_len),
         )
+
+
+class LogprobReconProjectedProgressiveCompressor(
+    LogprobReconProgressiveCompressor
+):
+    """Token-wise v2 trunk with a disposable contrastive projection head.
+
+    ``forward`` and ``forward_with_recon`` retain the ordinary 512-dimensional
+    trunk contract used by KNN, probes, and reconstruction. Training may call
+    :meth:`forward_with_contrastive_recon` to obtain a separately normalized
+    projection for SupCon. The projection head is therefore absent from the
+    token-zero deployment path even though it remains in training checkpoints.
+
+    Depth pooling, input normalization, and transformer pre-norm are explicit
+    independent knobs so the Issue #153 components can be ablated without
+    changing the trainer or scoring surface.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 4096,
+        final_dim: int = 512,
+        projection_hidden_dim: int = 512,
+        projection_dim: int = 128,
+        projection_l2_normalize: bool = True,
+        depth_pooling: str = "attention",
+        pool_num_queries: int = 1,
+        dropout: float = 0.1,
+        input_dropout: float = 0.2,
+        normalize_input: bool = False,
+        block_dims: list | None = None,
+        pre_norm: bool = False,
+        recon_seq_len: int = 64,
+        recon_hidden_dim: int = 256,
+        recon_lambda: float = 1.0,
+        logprob_var_threshold: float = 1e-4,
+    ) -> None:
+        super().__init__(
+            input_dim=int(input_dim),
+            final_dim=int(final_dim),
+            dropout=float(dropout),
+            input_dropout=float(input_dropout),
+            normalize_input=bool(normalize_input),
+            block_dims=block_dims,
+            pre_norm=bool(pre_norm),
+            recon_seq_len=int(recon_seq_len),
+            recon_hidden_dim=int(recon_hidden_dim),
+            recon_lambda=float(recon_lambda),
+            logprob_var_threshold=float(logprob_var_threshold),
+        )
+
+        depth_pooling = str(depth_pooling).strip().lower()
+        if depth_pooling not in {"mean", "attention"}:
+            raise ValueError("depth_pooling must be one of {'mean', 'attention'}")
+        if depth_pooling == "attention":
+            self.encoder = AttentionPoolProgressiveCompressor(
+                input_dim=int(input_dim),
+                final_dim=int(final_dim),
+                dropout=float(dropout),
+                input_dropout=float(input_dropout),
+                normalize_input=bool(normalize_input),
+                block_dims=block_dims,
+                pre_norm=bool(pre_norm),
+                pool_num_queries=int(pool_num_queries),
+            )
+
+        self.final_dim = int(final_dim)
+        self.projection_hidden_dim = int(projection_hidden_dim)
+        self.projection_dim = int(projection_dim)
+        self.projection_l2_normalize = bool(projection_l2_normalize)
+        self.depth_pooling = depth_pooling
+        self.pool_num_queries = int(pool_num_queries)
+        self.normalize_input = bool(normalize_input)
+        self.pre_norm = bool(pre_norm)
+        self.projection_head = nn.Sequential(
+            nn.Linear(self.final_dim, self.projection_hidden_dim),
+            nn.GELU(),
+            nn.Linear(self.projection_hidden_dim, self.projection_dim),
+        )
+
+    def project(self, trunk: torch.Tensor) -> torch.Tensor:
+        projection = self.projection_head(trunk)
+        if self.projection_l2_normalize:
+            projection = F.normalize(projection, dim=-1)
+        return projection
+
+    def forward_contrastive(
+        self,
+        x: torch.Tensor,
+        token_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Return only the training-time contrastive projection."""
+        return self.project(self.encoder(x, token_mask=token_mask))
+
+    def forward_with_contrastive_recon(
+        self,
+        x: torch.Tensor,
+        token_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return ``(deployment_trunk, contrastive_projection, recon)``."""
+        trunk = self.encoder(x, token_mask=token_mask)
+        return trunk, self.project(trunk), self.decoder(trunk)
+
+    def architecture_metadata(self) -> dict[str, int | bool | str]:
+        projection_params = sum(p.numel() for p in self.projection_head.parameters())
+        decoder_params = sum(p.numel() for p in self.decoder.parameters())
+        encoder_params = sum(p.numel() for p in self.encoder.parameters())
+        return {
+            "deployment_embedding_dim": self.final_dim,
+            "contrastive_projection_dim": self.projection_dim,
+            "projection_l2_normalized": self.projection_l2_normalize,
+            "depth_pooling": self.depth_pooling,
+            "pool_num_queries": self.pool_num_queries,
+            "normalize_input": self.normalize_input,
+            "pre_norm": self.pre_norm,
+            "model_projection_params": projection_params,
+            "model_decoder_params": decoder_params,
+            "model_deployment_params": encoder_params,
+        }
 
 
 class _PreNormBlock(nn.Module):
@@ -1997,6 +2125,75 @@ class LinearProbe(nn.Module):
                     torch.arange(x.shape[0], device=x.device), last_idx
                 ]
         return torch.sigmoid(self.linear(pooled))
+
+
+class TokenZeroMLPProbe(nn.Module):
+    """Shallow supervised probe over token zero from every selected layer.
+
+    A shared MLP transforms each layer state independently, learned
+    content-dependent attention pools the depth trajectory, and a binary head
+    predicts hallucination probability.  The probe consumes exactly one
+    response-token position; it has no access to later response tokens,
+    contrastive pairs, or response-logprob reconstruction targets.
+
+    The Issue #151 baseline uses ``4096 -> 2048 -> 1024`` and 32 layers for
+    10,531,842 trainable parameters.  This deliberately clears a 10M-parameter
+    capacity floor while remaining much smaller than the ~77.5M token-wise
+    contrastive encoder.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 4096,
+        num_layers: int = 32,
+        hidden_dim: int = 2048,
+        output_dim: int = 1024,
+        dropout: float = 0.1,
+        normalize_input: bool = True,
+    ) -> None:
+        super().__init__()
+        self.input_dim = int(input_dim)
+        self.num_layers = int(num_layers)
+        self.hidden_dim = int(hidden_dim)
+        self.output_dim = int(output_dim)
+        if min(self.input_dim, self.num_layers, self.hidden_dim, self.output_dim) <= 0:
+            raise ValueError("all dimensions and num_layers must be positive")
+        if not 0.0 <= float(dropout) < 1.0:
+            raise ValueError("dropout must be in [0, 1)")
+
+        self.input_norm = (
+            nn.LayerNorm(self.input_dim) if bool(normalize_input) else nn.Identity()
+        )
+        self.layer_mlp = nn.Sequential(
+            nn.Linear(self.input_dim, self.hidden_dim),
+            nn.GELU(),
+            nn.Dropout(float(dropout)),
+            nn.Linear(self.hidden_dim, self.output_dim),
+            nn.GELU(),
+        )
+        self.layer_embeddings = nn.Parameter(
+            torch.empty(self.num_layers, self.output_dim)
+        )
+        self.layer_attention = nn.Linear(self.output_dim, 1)
+        self.classifier = nn.Linear(self.output_dim, 1)
+        nn.init.normal_(self.layer_embeddings, mean=0.0, std=0.02)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3:
+            raise ValueError(
+                "TokenZeroMLPProbe expects (B, num_layers, input_dim); "
+                f"got {tuple(x.shape)}"
+            )
+        if x.shape[1:] != (self.num_layers, self.input_dim):
+            raise ValueError(
+                "TokenZeroMLPProbe input geometry mismatch: expected "
+                f"(*, {self.num_layers}, {self.input_dim}), got {tuple(x.shape)}"
+            )
+        depth_states = self.layer_mlp(self.input_norm(x.float()))
+        attention_input = depth_states + self.layer_embeddings.unsqueeze(0)
+        attention = torch.softmax(self.layer_attention(attention_input), dim=1)
+        pooled = torch.sum(attention * depth_states, dim=1)
+        return torch.sigmoid(self.classifier(pooled))
 
 
 class MultiLayerLinearProbe(nn.Module):

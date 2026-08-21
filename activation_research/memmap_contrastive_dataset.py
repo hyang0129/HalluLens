@@ -18,7 +18,10 @@ produced by :class:`activation_logging.inference_capture_writer.InferenceCapture
     prompt_len.npy                memmap (N,) int32
 
 Designed as a drop-in source for ``train_contrastive`` / ``train_contrastive_logprob_recon``
-/ ``train_contrastive_logprob_attn_recon`` — same dict keys, same shapes.
+/ ``train_contrastive_logprob_attn_recon`` — same dict keys, same shapes.  The
+default view axis is layers.  ``view_axis="token"`` transposes the experimental
+geometry: each view is one response step and its sequence is the selected model
+depths.
 
 For Mechanism K (Issue #75), the dataset also emits per-layer attention summary
 statistics aligned to the sampled view layers (target layer = view_layer ± offset).
@@ -130,6 +133,27 @@ class MemmapContrastiveDataset(Dataset):
         :meth:`PreloadedActivationDataset._select_view_indices` semantics.
     view_sampling_with_replacement : bool
         Sample views with replacement.
+    view_axis : {"layer", "token"}
+        Axis from which contrastive views are drawn.  ``"layer"`` preserves the
+        original dataset exactly.  ``"token"`` emits tensors shaped
+        ``(num_views, num_selected_layers, hidden_dim)``.
+    token_pair_mode : {"first_anchored", "random_distinct"}
+        Token sampling rule when ``view_axis="token"``.  The first-anchored rule
+        emits token 0 plus later response tokens; the comparison rule samples
+        distinct response tokens uniformly.
+
+        NOTE: token 0 is the hidden state at the FINAL PROMPT TOKEN (the prefill
+        state that produces response token 0), not a response token.  Positions
+        ``>= 1`` are decode states conditioned on earlier response tokens.  See
+        ``activation_research/tokenwise_contrastive_dataset.py`` and
+        ``tests/test_generate_capture_batched.py``.
+    fixed_token : int | None
+        Freeze token-wise views to one response step.  Intended for evaluation;
+        use ``num_views=1`` to obtain a single representation per example.
+    min_response_tokens : int
+        Drop split rows shorter than this many captured response steps.  The
+        token-pair training runner sets this to two while token-0 evaluation sets
+        it to one, retaining one-token generations in the primary KNN surface.
     include_response_logprobs : bool
         Emit per-token logprob fields (for Mechanism F).
     response_logprobs_top_k : int
@@ -163,6 +187,10 @@ class MemmapContrastiveDataset(Dataset):
         relevant_layers: Optional[List[int]] = None,
         fixed_layer: Optional[int] = None,
         view_sampling_with_replacement: bool = False,
+        view_axis: Literal["layer", "token"] = "layer",
+        token_pair_mode: Literal["first_anchored", "random_distinct"] = "first_anchored",
+        fixed_token: Optional[int] = None,
+        min_response_tokens: int = 0,
         # Logprob recon (Mechanism F)
         include_response_logprobs: bool = False,
         response_logprobs_top_k: int = 20,
@@ -180,6 +208,22 @@ class MemmapContrastiveDataset(Dataset):
         if not capture_dir.exists():
             raise FileNotFoundError(f"capture_dir not found: {capture_dir}")
         self._capture_dir = capture_dir
+        self._label_source = str(label_source)
+
+        if view_axis not in ("layer", "token"):
+            raise ValueError("view_axis must be either 'layer' or 'token'")
+        if token_pair_mode not in ("first_anchored", "random_distinct"):
+            raise ValueError(
+                "token_pair_mode must be 'first_anchored' or 'random_distinct'"
+            )
+        if int(min_response_tokens) < 0:
+            raise ValueError("min_response_tokens must be non-negative")
+        if fixed_token is not None and int(fixed_token) < 0:
+            raise ValueError("fixed_token must be non-negative")
+        if view_axis == "layer" and fixed_token is not None:
+            raise ValueError("fixed_token is only valid when view_axis='token'")
+        if view_axis == "token" and fixed_layer is not None:
+            raise ValueError("fixed_layer is only valid when view_axis='layer'")
 
         if attention_summary not in ("stats", "full"):
             # 'coarse' is reserved — no plans to implement it (issue #82 comment).
@@ -228,6 +272,8 @@ class MemmapContrastiveDataset(Dataset):
             self._relevant_layers = list(relevant_layers)
 
         self._num_views = int(num_views)
+        if self._num_views < 1:
+            raise ValueError("num_views must be at least one")
         self._fixed_layer = fixed_layer
         if fixed_layer is not None and fixed_layer not in self._relevant_layers:
             raise ValueError(
@@ -235,6 +281,15 @@ class MemmapContrastiveDataset(Dataset):
                 f"{self._relevant_layers}"
             )
         self._view_with_replacement = bool(view_sampling_with_replacement)
+        self._view_axis = str(view_axis)
+        self._token_pair_mode = str(token_pair_mode)
+        self._fixed_token = int(fixed_token) if fixed_token is not None else None
+        if self._fixed_token is not None and self._fixed_token >= self._max_resp:
+            raise ValueError(
+                f"fixed_token={self._fixed_token} outside captured response width "
+                f"[0, {self._max_resp})"
+            )
+        self._min_response_tokens = int(min_response_tokens)
 
         # --- Logprob options ---
         self._include_lp = bool(include_response_logprobs)
@@ -243,6 +298,11 @@ class MemmapContrastiveDataset(Dataset):
 
         # --- Attention options ---
         self._include_attn = bool(include_response_attention)
+        if self._view_axis == "token" and self._include_attn:
+            raise NotImplementedError(
+                "response-attention reconstruction is layer-view-specific and is "
+                "not supported for token-wise views"
+            )
         self._attn_summary = str(attention_summary)
         self._attn_offset_fwd = (
             int(attention_target_layer_offset_forward)
@@ -322,6 +382,22 @@ class MemmapContrastiveDataset(Dataset):
         # Split name for .df property — prefer explicit override, fall back to the split arg.
         self._split_name: str = _override_split_name if _override_split_name is not None else split
 
+        # Pair training excludes rows that cannot supply two real response
+        # steps.  Fixed-token evaluation applies its own minimum so t=0 keeps
+        # every generation with at least one captured response token.
+        required_tokens = self._min_response_tokens
+        if self._fixed_token is not None:
+            required_tokens = max(required_tokens, self._fixed_token + 1)
+        if required_tokens:
+            sample_rows = self._valid_sample_indices[self._split_indices]
+            keep = np.asarray(self._resp_len[sample_rows] >= required_tokens)
+            self._split_indices = self._split_indices[keep]
+            if len(self._split_indices) == 0:
+                raise ValueError(
+                    f"No {self._split_name} rows have at least "
+                    f"{required_tokens} captured response tokens"
+                )
+
     # ------------------------------------------------------------------ #
     @staticmethod
     def _open_memmap(path: Path, shape: tuple, dtype) -> np.memmap:
@@ -385,6 +461,22 @@ class MemmapContrastiveDataset(Dataset):
         Exposed for _split_view compatibility."""
         return self._valid_sample_indices[self._split_indices]
 
+    def get_auxiliary_fields(self, idx: int) -> Dict[str, Any]:
+        """Return non-activation fields for a logical split row.
+
+        Token-wise adapters use this hook to reuse logprob targets and metadata
+        without calling ``__getitem__`` and triggering layer-view sampling.
+        """
+        meta_idx = int(self._split_indices[idx])
+        sample_row = int(self._valid_sample_indices[meta_idx])
+        fields: Dict[str, Any] = {
+            "input_length": int(self._prompt_len[sample_row]),
+            "response_len": int(self._resp_len[sample_row]),
+        }
+        if self._include_lp:
+            fields.update(self._get_logprob_fields(sample_row))
+        return fields
+
     # ------------------------------------------------------------------ #
     def get_single_layer_dataset(self, layer_id: int):
         """Return a SingleLayerDataset for one fixed layer (for linear_probe / saplma).
@@ -426,7 +518,12 @@ class MemmapContrastiveDataset(Dataset):
                 ``len(layers)`` so all selected layers are used.
         """
         if num_views is None:
-            num_views = len(layers)
+            # Layer-wise evaluation historically averages one view per selected
+            # layer.  In token-wise mode the selected layers are the sequence,
+            # not the view axis, so preserve the caller's token-view count.
+            num_views = (
+                self._num_views if self._view_axis == "token" else len(layers)
+            )
         return MemmapContrastiveDataset(
             self._capture_dir,
             split="all",  # _override_indices below replaces this
@@ -434,6 +531,10 @@ class MemmapContrastiveDataset(Dataset):
             relevant_layers=layers,
             fixed_layer=None,
             view_sampling_with_replacement=self._view_with_replacement,
+            view_axis=self._view_axis,
+            token_pair_mode=self._token_pair_mode,
+            fixed_token=self._fixed_token,
+            min_response_tokens=self._min_response_tokens,
             include_response_logprobs=self._include_lp,
             response_logprobs_top_k=self._target_top_k,
             pad_length=self._pad_length,
@@ -441,6 +542,33 @@ class MemmapContrastiveDataset(Dataset):
             attention_summary=self._attn_summary,
             attention_target_layer_offset_forward=self._attn_offset_fwd,
             attention_target_layer_offset_backward=self._attn_offset_bwd,
+            label_source=self._label_source,
+            _override_indices=self._split_indices,
+            _override_split_name=self._split_name,
+        )
+
+    # ------------------------------------------------------------------ #
+    def fixed_token_view(self, token_index: int) -> "MemmapContrastiveDataset":
+        """Return this split as one token-wise view across selected layers.
+
+        The new dataset shares all memmaps with the caller and filters only
+        rows for which ``token_index`` is a real captured response step.
+        """
+        token_index = int(token_index)
+        return MemmapContrastiveDataset(
+            self._capture_dir,
+            split="all",
+            num_views=1,
+            relevant_layers=self._relevant_layers,
+            view_sampling_with_replacement=False,
+            view_axis="token",
+            token_pair_mode=self._token_pair_mode,
+            fixed_token=token_index,
+            min_response_tokens=token_index + 1,
+            include_response_logprobs=self._include_lp,
+            response_logprobs_top_k=self._target_top_k,
+            pad_length=self._pad_length,
+            label_source=self._label_source,
             _override_indices=self._split_indices,
             _override_split_name=self._split_name,
         )
@@ -478,6 +606,53 @@ class MemmapContrastiveDataset(Dataset):
                 f"(have {len(relevant)})"
             )
         return random.sample(range(len(relevant)), self._num_views)
+
+    # ------------------------------------------------------------------ #
+    def _select_token_positions(self, sample_row: int) -> List[int]:
+        """Return real response-token positions for token-wise views."""
+        response_len = max(0, min(int(self._resp_len[sample_row]), self._max_resp))
+        if self._fixed_token is not None:
+            if self._fixed_token >= response_len:
+                raise ValueError(
+                    f"fixed_token={self._fixed_token} is unavailable for sample row "
+                    f"{sample_row} with response_len={response_len}"
+                )
+            return [self._fixed_token] * self._num_views
+
+        if response_len <= 0:
+            raise ValueError(
+                f"sample row {sample_row} has no captured response tokens"
+            )
+
+        if self._token_pair_mode == "first_anchored":
+            if self._num_views == 1:
+                return [0]
+            later = list(range(1, response_len))
+            need = self._num_views - 1
+            if self._view_with_replacement:
+                if not later:
+                    raise ValueError(
+                        "first_anchored token views require response_len >= 2"
+                    )
+                sampled = random.choices(later, k=need)
+            else:
+                if len(later) < need:
+                    raise ValueError(
+                        f"first_anchored token views require at least "
+                        f"{self._num_views} response tokens; got {response_len}"
+                    )
+                sampled = random.sample(later, need)
+            return [0, *sampled]
+
+        positions = list(range(response_len))
+        if self._view_with_replacement:
+            return random.choices(positions, k=self._num_views)
+        if len(positions) < self._num_views:
+            raise ValueError(
+                f"random_distinct token views require at least {self._num_views} "
+                f"response tokens; got {response_len}"
+            )
+        return random.sample(positions, self._num_views)
 
     # ------------------------------------------------------------------ #
     def _attn_stats_for_layer(self, sample_row: int, model_layer: int) -> np.ndarray:
@@ -597,18 +772,39 @@ class MemmapContrastiveDataset(Dataset):
         sample_row = int(self._valid_sample_indices[meta_idx])
         row_meta = self._meta[meta_idx]
 
-        # --- Layer view sampling ---
-        view_positions = self._select_view_positions()
-        view_model_layers = [self._relevant_layers[p] for p in view_positions]
+        # self._resp_act[sample_row] is
+        # (num_layers+1, max_response_len, hidden_dim). Layer-wise views keep
+        # one layer and its token sequence; token-wise views keep one response
+        # step and its depth sequence.
+        if self._view_axis == "layer":
+            view_positions = self._select_view_positions()
+            view_model_layers = [self._relevant_layers[p] for p in view_positions]
+            acts_slice = np.array(
+                self._resp_act[sample_row, view_model_layers, :, :],
+                dtype=np.float32,
+            )  # (K, max_resp, hidden_dim)
+            view_token_positions = None
+        else:
+            view_token_positions = self._select_token_positions(sample_row)
+            view_model_layers = self._relevant_layers
+            # Stack per token explicitly: NumPy's multi-axis advanced indexing
+            # otherwise changes axis order depending on list shapes.
+            acts_slice = np.stack(
+                [
+                    np.array(
+                        self._resp_act[
+                            sample_row, self._relevant_layers, token_position, :
+                        ],
+                        dtype=np.float32,
+                    )
+                    for token_position in view_token_positions
+                ],
+                axis=0,
+            )  # (K, selected_layers, hidden_dim)
+            view_positions = view_token_positions
 
-        # --- Activations: slice the K view layers out of the memmap row ---
-        # self._resp_act[sample_row] is shape (num_layers+1, max_resp, hidden_dim).
-        # np.array() (not np.asarray) ensures we own writable memory — memmap
-        # views are read-only and torch.from_numpy emits a warning otherwise.
-        acts_slice = np.array(
-            self._resp_act[sample_row, view_model_layers, :, :],
-            dtype=np.float32,
-        )  # (K, max_resp, hidden_dim)
+        # np.array()/np.stack ensure writable owned memory; raw memmap slices
+        # are read-only and torch.from_numpy warns about them.
         views_activations = torch.from_numpy(acts_slice)
 
         sample: Dict[str, Any] = {
@@ -621,6 +817,10 @@ class MemmapContrastiveDataset(Dataset):
             "input_length": int(self._prompt_len[sample_row]),
             "response_len": int(self._resp_len[sample_row]),
         }
+        if view_token_positions is not None:
+            sample["view_token_indices"] = torch.tensor(
+                view_token_positions, dtype=torch.long
+            )
 
         # --- Logprob fields (Mechanism F) ---
         if self._include_lp:

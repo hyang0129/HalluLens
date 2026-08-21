@@ -1,0 +1,17 @@
+{
+  "_comment": "Issue #151 comparison and token-wise full sweep after held-out KNN-AUROC checkpoint-selection consistency fixes.",
+  "experiment_name": "issue151_knnval_sciq",
+  "dataset": "sciq_memmap",
+  "methods": [
+    "dual_convention_contrastive_classifier_prefix_mixed_lowk",
+    "tokenwise_contrastive_first_anchored",
+    "contrastive_logprob_recon_prefix_mixed_lowk"
+  ],
+  "split_seed": 42,
+  "split_seeds": [42, 1, 2, 3, 4],
+  "training_seeds": [0, 1, 2, 3, 4],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs"
+}

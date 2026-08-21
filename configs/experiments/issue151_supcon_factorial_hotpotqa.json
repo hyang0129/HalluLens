@@ -1,0 +1,17 @@
+{
+  "_comment": "Matched standard-SupCon view x reconstruction factorial; existing Issue #151 v1 is the t0+tn/full-reconstruction arm.",
+  "experiment_name": "issue151_supcon_factorial_hotpotqa",
+  "dataset": "hotpotqa_memmap",
+  "methods": [
+    "tokenwise_supcon_t0_full_recon",
+    "tokenwise_supcon_tn_no_recon",
+    "tokenwise_supcon_t0_no_recon"
+  ],
+  "split_seed": 42,
+  "split_seeds": [42],
+  "training_seeds": [0],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs"
+}

@@ -1,6 +1,6 @@
 import json
 import os
-from typing import List
+from typing import Any, List, Mapping
 
 import torch
 import torch.nn.functional as F
@@ -25,6 +25,22 @@ def _call_model(model, x, **kwargs):
         msg = str(e)
         if "unexpected keyword argument" in msg or "got an unexpected keyword" in msg:
             return model(x)
+        raise
+
+
+def _call_contrastive_model(model, x, **kwargs):
+    """Use a disposable training projection when the model exposes one."""
+    forward_contrastive = getattr(model, "forward_contrastive", None)
+    if forward_contrastive is None:
+        return _call_model(model, x, **kwargs)
+    if not kwargs:
+        return forward_contrastive(x)
+    try:
+        return forward_contrastive(x, **kwargs)
+    except TypeError as e:
+        msg = str(e)
+        if "unexpected keyword argument" in msg or "got an unexpected keyword" in msg:
+            return forward_contrastive(x)
         raise
 
 
@@ -119,7 +135,9 @@ def evaluate(
             if view_indices_full is not None:
                 layer_idx_flat = view_indices_full.reshape(bsz * num_views)
 
-            z_flat = _call_model(model, x_flat, layer_idx=layer_idx_flat)
+            z_flat = _call_contrastive_model(
+                model, x_flat, layer_idx=layer_idx_flat
+            )
             z_views = z_flat.reshape(bsz, num_views, -1)
 
             if evaluator_manager is not None:
@@ -383,6 +401,8 @@ def dump_embeddings_to_memmap(
     split_name: str,
     *,
     dtype: str = "float16",
+    split_metadata: Mapping[str, Any] | None = None,
+    preserve_existing: bool = False,
 ) -> dict:
     """Write a list of (`z_views`, `halu`, `hashkey`) records to .npy files.
 
@@ -390,6 +410,7 @@ def dump_embeddings_to_memmap(
       - {split_name}_z.npy        (N, K, D) `dtype`, np.save format → mmap on read
       - {split_name}_labels.npy   (N,) int8
       - {split_name}_hashkeys.json  list of N hashkeys (traceability)
+      - {split_name}_stable_ids.json  deterministic unique row identifiers
       - {split_name}_meta.json    shape, dtype, split_name, n
 
     Callers load via `np.load(path, mmap_mode='r')` to get a memmap view —
@@ -432,30 +453,174 @@ def dump_embeddings_to_memmap(
     z_stack = np.stack([_to_np(r["z_views"]) for r in records]).astype(np.dtype(dtype), copy=False)
     labels = np.array([int(r["halu"]) for r in records], dtype=np.int8)
     hashkeys = [str(r.get("hashkey", "")) for r in records]
+    # Prompt hashes are stable example identifiers but need not be unique when
+    # a capture contains repeated prompts.  A deterministic occurrence suffix
+    # makes every dumped row addressable without discarding the raw join key.
+    occurrences: dict[str, int] = {}
+    stable_ids = []
+    for hashkey in hashkeys:
+        occurrence = occurrences.get(hashkey, 0)
+        occurrences[hashkey] = occurrence + 1
+        stable_ids.append(
+            f"{split_name}::{hashkey}::occurrence_{occurrence}"
+        )
 
     z_path = os.path.join(out_dir, f"{split_name}_z.npy")
     labels_path = os.path.join(out_dir, f"{split_name}_labels.npy")
     hash_path = os.path.join(out_dir, f"{split_name}_hashkeys.json")
+    stable_ids_path = os.path.join(out_dir, f"{split_name}_stable_ids.json")
     meta_path = os.path.join(out_dir, f"{split_name}_meta.json")
 
-    np.save(z_path, z_stack)
-    np.save(labels_path, labels)
-    with open(hash_path, "w") as f:
-        json.dump(hashkeys, f)
+    def _write_npy(path: str, value: np.ndarray, *, compare_values: bool) -> None:
+        if preserve_existing and os.path.lexists(path):
+            if not os.path.isfile(path):
+                raise RuntimeError(f"refusing to replace non-file embedding artifact: {path}")
+            existing = np.load(path, mmap_mode="r")
+            if existing.shape != value.shape or existing.dtype != value.dtype:
+                raise RuntimeError(
+                    "refusing to overwrite incompatible embedding artifact "
+                    f"{path}: existing shape/dtype={existing.shape}/{existing.dtype}, "
+                    f"expected={value.shape}/{value.dtype}"
+                )
+            if compare_values and not np.array_equal(existing, value):
+                raise RuntimeError(
+                    f"refusing to overwrite embedding artifact with different values: {path}"
+                )
+            return
+        mode = "xb" if preserve_existing else "wb"
+        with open(path, mode) as handle:
+            np.save(handle, value)
+
+    def _write_json(path: str, value: Any) -> None:
+        if preserve_existing and os.path.lexists(path):
+            if not os.path.isfile(path):
+                raise RuntimeError(f"refusing to replace non-file embedding artifact: {path}")
+            with open(path) as handle:
+                existing = json.load(handle)
+            if existing != value:
+                raise RuntimeError(
+                    f"refusing to overwrite embedding artifact with different values: {path}"
+                )
+            return
+        mode = "x" if preserve_existing else "w"
+        with open(path, mode) as handle:
+            json.dump(value, handle)
+
+    # In additive backfill mode, pre-existing train/test embeddings are the
+    # original evaluation artifacts. Validate their geometry but never replace
+    # them. Labels and row identifiers are cheap enough to compare exactly.
+    _write_npy(z_path, z_stack, compare_values=False)
+    _write_npy(labels_path, labels, compare_values=True)
+    _write_json(hash_path, hashkeys)
+    _write_json(stable_ids_path, stable_ids)
 
     meta = {
+        "schema_version": 2,
         "split_name": split_name,
         "n": int(z_stack.shape[0]),
         "z_shape": list(z_stack.shape),
         "z_dtype": str(z_stack.dtype),
         "label_dtype": str(labels.dtype),
+        "stable_id_scheme": "split_plus_prompt_hash_plus_occurrence_v1",
+        "split_metadata": dict(split_metadata or {}),
         "files": {
             "z": os.path.basename(z_path),
             "labels": os.path.basename(labels_path),
             "hashkeys": os.path.basename(hash_path),
+            "stable_ids": os.path.basename(stable_ids_path),
         },
     }
-    with open(meta_path, "w") as f:
-        json.dump(meta, f, indent=2)
+    manifest_meta_filename = os.path.basename(meta_path)
+    if preserve_existing and os.path.lexists(meta_path):
+        if not os.path.isfile(meta_path):
+            raise RuntimeError(f"refusing to replace non-file embedding artifact: {meta_path}")
+        with open(meta_path) as handle:
+            existing_meta = json.load(handle)
+        if existing_meta != meta:
+            # Legacy token-wise dumps predate stable IDs and split provenance.
+            # Preserve their metadata byte-for-byte and add a versioned schema-2
+            # companion for the scorer manifest to reference.
+            for key in ("split_name", "n", "z_shape", "z_dtype", "label_dtype"):
+                if existing_meta.get(key) != meta.get(key):
+                    raise RuntimeError(
+                        "refusing incompatible metadata backfill for "
+                        f"{meta_path}: key {key!r} differs"
+                    )
+            legacy_files = existing_meta.get("files", {})
+            for key in ("z", "labels", "hashkeys"):
+                if legacy_files.get(key) != meta["files"][key]:
+                    raise RuntimeError(
+                        "refusing incompatible metadata backfill for "
+                        f"{meta_path}: file mapping {key!r} differs"
+                    )
+            manifest_meta_filename = f"{split_name}_meta.backfill_v2.json"
+            versioned_meta_path = os.path.join(out_dir, manifest_meta_filename)
+            _write_json(versioned_meta_path, meta)
+    else:
+        mode = "x" if preserve_existing else "w"
+        with open(meta_path, mode) as handle:
+            json.dump(meta, handle, indent=2)
+
+    if manifest_meta_filename != os.path.basename(meta_path):
+        meta = {**meta, "_manifest_meta_filename": manifest_meta_filename}
 
     return meta
+
+
+def write_embedding_dump_manifest(
+    out_dir: str,
+    split_metas: Mapping[str, Mapping[str, Any]],
+    *,
+    run_metadata: Mapping[str, Any],
+    preserve_existing: bool = False,
+) -> dict:
+    """Write run-level provenance for independently dumped data splits."""
+    expected = {"train", "val", "test"}
+    if set(split_metas) != expected:
+        raise ValueError(
+            "token-wise embedding manifest requires exactly train/val/test; "
+            f"got {sorted(split_metas)}"
+        )
+    for split_name, meta in split_metas.items():
+        if meta.get("split_name") != split_name:
+            raise ValueError(
+                f"embedding split metadata mismatch for {split_name!r}: "
+                f"{meta.get('split_name')!r}"
+            )
+
+    os.makedirs(out_dir, exist_ok=True)
+    manifest = {
+        "schema_version": 1,
+        "splits": {
+            split_name: {
+                "n": int(meta["n"]),
+                "meta": meta.get(
+                    "_manifest_meta_filename", f"{split_name}_meta.json"
+                ),
+            }
+            for split_name, meta in split_metas.items()
+        },
+        "run_metadata": dict(run_metadata),
+        "label_isolation": {
+            "train": "training_capture_train_rows",
+            "val": "training_capture_validation_rows",
+            "test": "test_capture_rows",
+        },
+    }
+    manifest_path = os.path.join(out_dir, "manifest.json")
+    if preserve_existing and os.path.lexists(manifest_path):
+        if not os.path.isfile(manifest_path):
+            raise RuntimeError(
+                f"refusing to replace non-file embedding manifest: {manifest_path}"
+            )
+        with open(manifest_path) as handle:
+            existing_manifest = json.load(handle)
+        if existing_manifest != manifest:
+            raise RuntimeError(
+                f"refusing to overwrite different embedding manifest: {manifest_path}"
+            )
+    else:
+        mode = "x" if preserve_existing else "w"
+        with open(manifest_path, mode) as handle:
+            json.dump(manifest, handle, indent=2)
+    return manifest

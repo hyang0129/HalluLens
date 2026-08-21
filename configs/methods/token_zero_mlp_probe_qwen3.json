@@ -1,0 +1,11 @@
+{
+  "name": "token_zero_mlp_probe_qwen3",
+  "extends": "token_zero_mlp_probe",
+  "_comment": "Qwen3-8B counterpart of token_zero_mlp_probe. The training/scoring recipe is unchanged; the pooled depth trajectory spans all 36 captured Qwen post-block layers instead of Llama's 32 (relevant_layers='1-32' would silently drop the top 4 layers for Qwen). expected_total_params is raised by 4 x 1024 (one learned-attention weight row per extra layer) \u2014 the guard's job is to catch silent architecture drift, so the 36-layer count is pinned explicitly rather than the guard relaxed.",
+  "data": {
+    "relevant_layers": "1-36"
+  },
+  "model_params": {
+    "expected_total_params": 10535938
+  }
+}

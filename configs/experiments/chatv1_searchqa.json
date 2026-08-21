@@ -1,0 +1,30 @@
+{
+  "_comment": "Chat-templated re-capture (issue #151 chat-template capture branch) v1 method matrix, seed 0. Methods: the two headline tokenwise arms, act_vit and token_zero_mlp_probe controls, and the cheap logprob/entropy baselines.",
+  "experiment_name": "chatv1_searchqa",
+  "dataset": "searchqa_chat_memmap",
+  "methods": [
+    "tokenwise_contrastive_first_anchored",
+    "tokenwise_arch_v1_input_norm_only",
+    "act_vit",
+    "token_zero_mlp_probe",
+    "contrastive_logprob_recon",
+    "tokenwise_causal_t0_dropout",
+    "tokenwise_arch_t0_input_norm_only",
+    "tokenwise_v1_inputnorm_probe21m",
+    "tokenwise_v1_inputnorm_probe6m",
+    "tokenwise_v1_inputnorm_probe2m",
+    "logprob_baseline",
+    "token_entropy"
+  ],
+  "split_seed": 42,
+  "split_seeds": [
+    42
+  ],
+  "training_seeds": [
+    0
+  ],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs"
+}

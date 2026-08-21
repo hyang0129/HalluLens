@@ -202,8 +202,8 @@ python scripts/experiment_status.py --experiment configs/experiments/baseline_co
 
 Agents **may** start a Jupyter Lab allocation **without asking**, but **only** through the guarded launcher `scripts/launch_jupyter.py`. It enforces hard caps in code (no agent can bypass them) and has **no cancel path**:
 
-- Refuses if **≥ 4 jupyter jobs are already RUNNING**.
-- Refuses if **≥ 6 jobs total** (any state, including PENDING/queued).
+- Refuses if **≥ 12 jupyter jobs are already RUNNING**.
+- Refuses if **≥ 12 jobs total** (any state, including PENDING/queued).
 - Refuses if the requested port already serves a running jupyter job.
 
 ```bash
@@ -240,4 +240,3 @@ python scripts/gpu_dispatch.py kill JOB_ID
 **Preference — use the cell-based worker queue for multi-run work.** For anything that fans out into many runs (parameter sweeps, multi-seed / multi-method experiments, per-dataset batches), prefer the cell-based worker queue in `scripts/dispatch/` over a single `gpu_dispatch.py run` of a monolithic runner. Flow: build a manifest of work "cells" (`scripts/dispatch/build_*_cells.py` / `generate_manifest_*.py`), then launch worker(s) (`bash scripts/dispatch/worker_*.sh`, dispatched and approved like any other GPU job) that claim cells from the shared queue (`scripts/dispatch/claim.py`; claimed dirs under `shared/*_dispatch/claimed/`) and drain it. Why: it parallelizes naturally across multiple nodes/workers, is resumable (relaunched workers just pick up the remaining unclaimed cells), and each cell is independently traceable. Track progress with `scripts/dispatch/manifest_status.py`; see `docs/reference/GPU_DISPATCH_STATUS.md` for the worker/cell status model. Reserve a single direct `gpu_dispatch.py run` for genuine one-offs (a single experiment or a smoketest). Launching workers is job submission — same approval rule as `gpu_dispatch.py run`.
 
 Job manifest: `shared/gpu_jobs.json`. Always use `resume=True` for long jobs.
-

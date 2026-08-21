@@ -1,6 +1,7 @@
 import torch
 import numpy as np
-from sklearn.metrics import roc_auc_score
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import average_precision_score, roc_auc_score
 from sklearn.neighbors import NearestNeighbors
 import torch.nn.functional as F
 
@@ -8,6 +9,13 @@ import torch.nn.functional as F
 def _safe_auroc(binary_labels: np.ndarray, scores: np.ndarray) -> float:
     try:
         return float(roc_auc_score(binary_labels, scores))
+    except ValueError:
+        return float("nan")
+
+
+def _safe_auprc(binary_labels: np.ndarray, scores: np.ndarray) -> float:
+    try:
+        return float(average_precision_score(binary_labels, scores))
     except ValueError:
         return float("nan")
 
@@ -390,6 +398,7 @@ def knn_ood_stats(
     outlier_class: int = 1,
     k: int = 50,
     metric: str = "euclidean",
+    l2_normalize: bool = False,
     train_label_filter: str = "all",
     calibrate_k: bool = False,
     k_candidates=None,
@@ -408,6 +417,9 @@ def knn_ood_stats(
         outlier_class: Which class to treat as outlier for ID/OOD summary stats.
         k: Number of neighbors to use.
         metric: Distance metric for NearestNeighbors (e.g. 'euclidean', 'cosine').
+        l2_normalize: Explicitly L2-normalize embeddings before calibration and
+            neighbor lookup. This is useful for making a normalized-cosine
+            scorer's preprocessing contract visible in persisted metrics.
         train_label_filter: Train-set selection policy: 'all', 'id_only', or 'ood_only'.
         calibrate_k: If True and train labels are available, select k from candidates
             by maximizing leave-one-out AUROC on train data.
@@ -475,6 +487,12 @@ def knn_ood_stats(
     test_z = torch.stack([_record_embedding(r) for r in test_records]).detach().cpu().numpy()
     test_labels = torch.tensor([r["halu"] for r in test_records], dtype=torch.int32).squeeze()
 
+    if bool(l2_normalize):
+        train_norm = np.linalg.norm(train_z, axis=1, keepdims=True)
+        test_norm = np.linalg.norm(test_z, axis=1, keepdims=True)
+        train_z = train_z / np.maximum(train_norm, 1e-12)
+        test_z = test_z / np.maximum(test_norm, 1e-12)
+
     # Calibration uses the labeled subset of the train reference. Requiring
     # *every* record to be labeled (old `all(...)`) silently disabled
     # calibration whenever a handful of train hashkeys failed to resolve
@@ -524,6 +542,7 @@ def knn_ood_stats(
     stats = {
         "knn_k": int(k),
         "knn_metric": str(metric),
+        "knn_l2_normalized": bool(l2_normalize),
         "knn_train_label_filter": str(train_label_filter),
         "knn_calibrated_k": bool(calibrate_k and train_labels_binary is not None),
         "knn_train_size_used": int(len(train_records)),
@@ -539,4 +558,103 @@ def knn_ood_stats(
         stats["knn_scores"] = knn_scores.numpy()
         stats["knn_labels"] = np.asarray(binary_outlier_labels, dtype=np.int32)
 
+    return stats
+
+
+def frozen_linear_probe_stats(
+    train_records,
+    test_records,
+    outlier_class: int = 1,
+    C: float = 1.0,
+    max_iter: int = 1000,
+    class_weight=None,
+    sample_seed: int = 0,
+    max_train_size: int = 200000,
+    include_per_sample: bool = False,
+):
+    """Fit a fixed logistic probe on frozen train embeddings and score test.
+
+    The encoder is never updated, the regularization strength is fixed by the
+    caller, and no validation or test labels are used for hyperparameter
+    selection. The positive class is ``outlier_class`` so this scorer follows
+    the same convention as the KNN and Mahalanobis metrics.
+    """
+    labeled_train = [record for record in train_records if "halu" in record]
+    if not labeled_train:
+        raise ValueError("frozen linear probe requires labeled train embeddings")
+    if not test_records or not all("halu" in record for record in test_records):
+        raise ValueError("frozen linear probe requires labeled test embeddings")
+
+    sampled_train = False
+    max_train_size = int(max_train_size)
+    if max_train_size > 0 and len(labeled_train) > max_train_size:
+        sampled_train = True
+        rng = np.random.default_rng(int(sample_seed))
+        labels = np.asarray([int(r["halu"]) for r in labeled_train], dtype=np.int32)
+        sampled_indices = []
+        for label in np.unique(labels):
+            label_indices = np.flatnonzero(labels == label)
+            n_pick = max(1, int(round(len(label_indices) / len(labels) * max_train_size)))
+            n_pick = min(n_pick, len(label_indices))
+            sampled_indices.extend(
+                rng.choice(label_indices, size=n_pick, replace=False).tolist()
+            )
+        if len(sampled_indices) > max_train_size:
+            sampled_indices = rng.choice(
+                np.asarray(sampled_indices), size=max_train_size, replace=False
+            ).tolist()
+        elif len(sampled_indices) < max_train_size:
+            remaining = sorted(set(range(len(labeled_train))) - set(sampled_indices))
+            if remaining:
+                sampled_indices.extend(
+                    rng.choice(
+                        np.asarray(remaining),
+                        size=min(max_train_size - len(sampled_indices), len(remaining)),
+                        replace=False,
+                    ).tolist()
+                )
+        labeled_train = [labeled_train[i] for i in sorted(set(sampled_indices))]
+
+    train_z = torch.stack(
+        [_record_embedding(record) for record in labeled_train]
+    ).detach().cpu().numpy()
+    test_z = torch.stack(
+        [_record_embedding(record) for record in test_records]
+    ).detach().cpu().numpy()
+    train_labels = torch.tensor(
+        [record["halu"] for record in labeled_train], dtype=torch.int32
+    ).squeeze()
+    test_labels = torch.tensor(
+        [record["halu"] for record in test_records], dtype=torch.int32
+    ).squeeze()
+    train_binary = _binary_outlier_labels(train_labels, outlier_class=outlier_class)
+    test_binary = _binary_outlier_labels(test_labels, outlier_class=outlier_class)
+    if len(np.unique(train_binary)) < 2:
+        raise ValueError("frozen linear probe requires both classes in the train set")
+
+    classifier = LogisticRegression(
+        C=float(C),
+        max_iter=int(max_iter),
+        class_weight=class_weight,
+        random_state=int(sample_seed),
+    )
+    classifier.fit(train_z, train_binary)
+    positive_col = list(classifier.classes_).index(1)
+    scores = classifier.predict_proba(test_z)[:, positive_col].astype(np.float32)
+
+    stats = {
+        "linear_probe_auroc": _safe_auroc(test_binary, scores),
+        "linear_probe_auprc": _safe_auprc(test_binary, scores),
+        "linear_probe_C": float(C),
+        "linear_probe_max_iter": int(max_iter),
+        "linear_probe_class_weight": class_weight,
+        "linear_probe_train_size_used": int(len(labeled_train)),
+        "linear_probe_train_sampled": bool(sampled_train),
+        "linear_probe_max_train_size": int(max_train_size),
+        "linear_probe_encoder_frozen": True,
+        "linear_probe_test_tuned": False,
+    }
+    if include_per_sample:
+        stats["linear_probe_scores"] = scores
+        stats["linear_probe_labels"] = np.asarray(test_binary, dtype=np.int32)
     return stats

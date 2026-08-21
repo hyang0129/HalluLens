@@ -1,0 +1,42 @@
+{
+  "name": "token_zero_mlp_probe",
+  "routine": "token_zero_mlp_probe",
+  "model_class": "TokenZeroMLPProbe",
+  "model_params": {
+    "hidden_dim": 2048,
+    "output_dim": 1024,
+    "dropout": 0.1,
+    "normalize_input": true,
+    "pooling": "learned_layer_attention",
+    "parameter_floor": 10000000,
+    "expected_total_params": 10531842,
+    "reference_tokenwise_v1_params": 77546304
+  },
+  "training": {
+    "max_epochs": 100,
+    "batch_size": 512,
+    "eval_batch_size": 512,
+    "lr": 0.0001,
+    "balanced_sampling": true,
+    "use_infinite_index_stream": false,
+    "grad_clip_norm": 1.0,
+    "min_total_steps": 3000,
+    "select_on_val": true,
+    "checkpoint_selection_metric": "validation_auroc"
+  },
+  "data": {
+    "view_adapter": "tokenwise_shared_contrastive_cache",
+    "relevant_layers": "1-32",
+    "num_views": 1,
+    "fixed_token": 0,
+    "min_response_tokens": 1,
+    "pad_length": 64,
+    "preload": true,
+    "include_response_logprobs": false
+  },
+  "evaluation": {
+    "primary_metric": "auroc",
+    "secondary_metrics": ["auprc"],
+    "primary_eval_token": 0
+  }
+}

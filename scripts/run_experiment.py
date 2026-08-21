@@ -53,6 +53,8 @@ def _resolve_shared(rel_path: str) -> str:
 import torch
 from loguru import logger
 
+from scripts.experiment_utils import load_method_config
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -68,6 +70,76 @@ def parse_layer_range(spec: str) -> list[int]:
         return [int(spec)]
     start, end = spec.split("-")
     return list(range(int(start), int(end) + 1))
+
+
+def _make_validation_knn_scorer(
+    *,
+    activation_parser_df,
+    train_dataset,
+    val_dataset,
+    device: str,
+    num_workers: int,
+    eval_batch_size: int,
+    sub_batch_size: int,
+    outlier_class: int,
+    k: int,
+    max_train_size: int,
+    sample_seed: int,
+    prefix_length: int | None = None,
+):
+    """Build a fixed held-out KNN-AUROC checkpoint scorer.
+
+    The reference bank always contains all training examples. ``k`` and the
+    raw-Euclidean metric are fixed before training; validation labels are used
+    only to compute AUROC, never to tune the scorer. A prefix wrapper is used
+    for the layer-wise early-token model so selection matches its k=1 report.
+    """
+    from torch.utils.data import DataLoader
+
+    from activation_research.metric_evaluator import (
+        MultiMetricHallucinationEvaluator,
+    )
+
+    k = int(k)
+    if k <= 0:
+        raise ValueError("validation KNN k must be positive")
+
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
+    metric_spec = {
+        "metric": "knn",
+        "kwargs": {
+            "k": k,
+            "metric": "euclidean",
+            "calibrate_k": False,
+            "max_train_size": int(max_train_size),
+            "sample_seed": int(sample_seed),
+        },
+        "train_selection": "all",
+    }
+
+    def _score(model) -> float:
+        score_model = model
+        if prefix_length is not None:
+            from activation_research.prefix_views import PrefixEvalWrapper
+
+            score_model = PrefixEvalWrapper(model, int(prefix_length)).to(device)
+        evaluator = MultiMetricHallucinationEvaluator(
+            activation_parser_df=activation_parser_df,
+            train_activation_parser_df=activation_parser_df,
+            train_data_loader=train_loader,
+            metrics=[metric_spec],
+            batch_size=int(eval_batch_size),
+            sub_batch_size=int(sub_batch_size),
+            device=device,
+            num_workers=int(num_workers),
+            persistent_workers=False,
+            outlier_class=int(outlier_class),
+        )
+        stats = evaluator.compute(val_loader, score_model)
+        return float(stats["knn_auroc"])
+
+    return _score
 
 
 def write_run_manifest(output_dir: str) -> None:
@@ -480,15 +552,24 @@ def run_contrastive_logprob_recon(
     device: str,
     training_seed: int,
     test_ap=None,
+    *,
+    _tokenwise: bool = False,
+    _preserve_existing_embeddings: bool = False,
 ) -> tuple[dict, list[dict]]:
-    """Train and evaluate a LogprobReconProgressiveCompressor model."""
+    """Train and evaluate a LogprobReconProgressiveCompressor model.
+
+    ``_tokenwise`` is used by the dedicated issue #151 entry point below.  It
+    changes only the memmap view geometry and evaluation surface; model size,
+    SupCon semantics, and full-response logprob reconstruction stay identical
+    to the established layer-wise routine.
+    """
     _p1_expected_train_n = _apply_train_prevalence(ap, experiment_cfg, run_seed=training_seed)  # P1 sweep (#140); no-op otherwise
     data_cfg = method_cfg["data"]
     train_cfg = method_cfg["training"]
     eval_cfg = method_cfg["evaluation"]
 
     relevant_layers = parse_layer_range(data_cfg["relevant_layers"])
-    target_layers = data_cfg["target_layers"]
+    target_layers = data_cfg.get("target_layers", [])
 
     ds_kwargs = dict(
         relevant_layers=relevant_layers,
@@ -500,22 +581,212 @@ def run_contrastive_logprob_recon(
         check_ram=False,
     )
 
-    train_ds = ap.get_dataset("train", **ds_kwargs)
-    if _p1_expected_train_n is not None and len(train_ds) != _p1_expected_train_n:
+    # Build the ordinary contrastive dataset exactly once per split.  In the
+    # token-wise routine, lightweight adapters below only transpose the final
+    # cache slice; they reuse the base cache, labels, hashes, split rows, and
+    # full-response logprob arrays.
+    train_base_ds = ap.get_dataset("train", **ds_kwargs)
+    train_ds = train_base_ds
+    if (
+        _p1_expected_train_n is not None
+        and not _tokenwise
+        and len(train_ds) != _p1_expected_train_n
+    ):
         raise RuntimeError(
             f"[P1 guard] train_prevalence set (expected {_p1_expected_train_n} train rows) "
             f"but get_dataset('train') returned {len(train_ds)} — subsample did not "
             f"propagate to the contrastive train set."
         )
-    eval_ap = test_ap if test_ap is not None else ap
-    test_ds = eval_ap.get_dataset("test", **ds_kwargs)
-
     has_val = ap.split_strategy == "three_way"
-    val_ds = ap.get_dataset("val", **ds_kwargs) if has_val else test_ds
+    eval_ap = test_ap if test_ap is not None else ap
+    if _tokenwise:
+        from activation_research.tokenwise_contrastive_dataset import (
+            TokenwiseContrastiveDataset,
+        )
+
+        view_adapter = data_cfg.get(
+            "view_adapter", "tokenwise_shared_contrastive_cache"
+        )
+        if view_adapter != "tokenwise_shared_contrastive_cache":
+            raise ValueError(
+                "token-wise routine requires "
+                "data.view_adapter='tokenwise_shared_contrastive_cache'; "
+                f"got {view_adapter!r}"
+            )
+
+        # MemmapContrastiveDataset.cache retains the complete model-layer axis,
+        # so model layer IDs are also cache positions. A RAM-preloaded base
+        # cache is already restricted to relevant_layers and uses 0..L-1.
+        layer_positions = (
+            list(relevant_layers)
+            if hasattr(train_base_ds, "_relevant_layers")
+            else list(range(len(relevant_layers)))
+        )
+        pair_mode = data_cfg.get("token_pair_mode", "first_anchored")
+        shuffle_length_bucket_size = int(
+            data_cfg.get("shuffle_length_bucket_size", 8)
+        )
+        later_token_sampling = str(
+            data_cfg.get("later_token_sampling", "uniform")
+        )
+        later_view_probability = float(
+            data_cfg.get("later_view_probability", 0.5)
+        )
+        pair_min_response_tokens = int(
+            data_cfg.get("min_response_tokens", 2)
+        )
+        emit_view_logprob_targets = bool(
+            data_cfg.get("emit_view_logprob_targets", False)
+        )
+
+        train_ds = TokenwiseContrastiveDataset(
+            train_base_ds,
+            layer_positions=layer_positions,
+            num_views=data_cfg.get("num_views", 2),
+            token_pair_mode=pair_mode,
+            min_response_tokens=pair_min_response_tokens,
+            shuffle_length_bucket_size=shuffle_length_bucket_size,
+            later_token_sampling=later_token_sampling,
+            later_view_probability=later_view_probability,
+            emit_view_logprob_targets=emit_view_logprob_targets,
+        )
+        val_base_ds = (
+            ap.get_dataset("val", **ds_kwargs)
+            if has_val
+            else eval_ap.get_dataset("test", **ds_kwargs)
+        )
+        val_ds = TokenwiseContrastiveDataset(
+            val_base_ds,
+            layer_positions=layer_positions,
+            num_views=data_cfg.get("num_views", 2),
+            token_pair_mode=pair_mode,
+            min_response_tokens=pair_min_response_tokens,
+            shuffle_length_bucket_size=shuffle_length_bucket_size,
+            later_token_sampling=later_token_sampling,
+            later_view_probability=later_view_probability,
+            emit_view_logprob_targets=emit_view_logprob_targets,
+        )
+        test_base_ds = eval_ap.get_dataset("test", **ds_kwargs)
+        train_eval_ds = TokenwiseContrastiveDataset(
+            train_base_ds,
+            layer_positions=layer_positions,
+            num_views=1,
+            token_pair_mode=pair_mode,
+            fixed_token=0,
+            min_response_tokens=1,
+            shuffle_length_bucket_size=shuffle_length_bucket_size,
+            later_token_sampling=later_token_sampling,
+            later_view_probability=later_view_probability,
+            emit_view_logprob_targets=False,
+        )
+        val_eval_ds = TokenwiseContrastiveDataset(
+            val_base_ds,
+            layer_positions=layer_positions,
+            num_views=1,
+            token_pair_mode=pair_mode,
+            fixed_token=0,
+            min_response_tokens=1,
+            shuffle_length_bucket_size=shuffle_length_bucket_size,
+            later_token_sampling=later_token_sampling,
+            later_view_probability=later_view_probability,
+            emit_view_logprob_targets=False,
+        )
+        test_ds = TokenwiseContrastiveDataset(
+            test_base_ds,
+            layer_positions=layer_positions,
+            num_views=1,
+            token_pair_mode=pair_mode,
+            fixed_token=0,
+            min_response_tokens=1,
+            shuffle_length_bucket_size=shuffle_length_bucket_size,
+            later_token_sampling=later_token_sampling,
+            later_view_probability=later_view_probability,
+            emit_view_logprob_targets=False,
+        )
+        logger.info(
+            "token-wise cache adapter={} pair_mode={} later_sampling={} "
+            "pair_min_tokens={} causal_objective={} "
+            "source_aligned_recon={} base_cache_id={} "
+            "train_base={} train_pairs={} train_t0={} test_t0={} "
+            "depth_sequence={}",
+            view_adapter,
+            pair_mode,
+            later_token_sampling,
+            pair_min_response_tokens,
+            train_cfg.get("contrastive_objective", "legacy_supcon"),
+            emit_view_logprob_targets,
+            id(train_base_ds.cache),
+            len(train_base_ds),
+            len(train_ds),
+            len(train_eval_ds),
+            len(test_ds),
+            relevant_layers,
+        )
+    else:
+        test_ds = eval_ap.get_dataset("test", **ds_kwargs)
+        val_ds = ap.get_dataset("val", **ds_kwargs) if has_val else test_ds
+        train_eval_ds = None
+        val_eval_ds = None
+
+    contrastive_objective = str(
+        train_cfg.get("contrastive_objective", "legacy_supcon")
+    ).strip().lower()
+    if contrastive_objective == "tokenwise_causal_control":
+        if not _tokenwise:
+            raise ValueError(
+                "tokenwise_causal_control is valid only for the token-wise routine"
+            )
+        if int(data_cfg.get("num_views", 2)) < 2:
+            raise ValueError("tokenwise causal controls require at least two views")
+        if not bool(data_cfg.get("emit_view_logprob_targets", False)):
+            raise ValueError(
+                "tokenwise causal controls require source-aligned per-view "
+                "logprob targets"
+            )
+        if pair_mode not in {
+            "first_anchored",
+            "first_same",
+            "first_mixed",
+            "shuffled_later",
+        }:
+            raise ValueError(
+                "tokenwise causal control pair mode must be one of "
+                "{'first_anchored', 'first_same', 'first_mixed', "
+                "'shuffled_later'}"
+            )
 
     model_params = method_cfg.get("model_params", {})
     model_class = str(method_cfg.get("model_class", "logprob_recon_progressive_compressor")).strip().lower()
-    if model_class == "logprob_recon_adapter_vit_compressor":
+    if model_class == "logprob_recon_projected_progressive_compressor":
+        from activation_research.model import (
+            LogprobReconProjectedProgressiveCompressor,
+        )
+
+        model = LogprobReconProjectedProgressiveCompressor(
+            input_dim=dataset_cfg["input_dim"],
+            final_dim=model_params.get("final_dim", 512),
+            projection_hidden_dim=model_params.get(
+                "projection_hidden_dim", 512
+            ),
+            projection_dim=model_params.get("projection_dim", 128),
+            projection_l2_normalize=model_params.get(
+                "projection_l2_normalize", True
+            ),
+            depth_pooling=model_params.get("depth_pooling", "attention"),
+            pool_num_queries=model_params.get("pool_num_queries", 1),
+            dropout=model_params.get("dropout", 0.1),
+            input_dropout=model_params.get("input_dropout", 0.3),
+            normalize_input=model_params.get("normalize_input", False),
+            block_dims=model_params.get("block_dims"),
+            pre_norm=model_params.get("pre_norm", False),
+            recon_seq_len=model_params.get("recon_seq_len", 64),
+            recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
+            recon_lambda=model_params.get("recon_lambda", 1.0),
+            logprob_var_threshold=model_params.get(
+                "logprob_var_threshold", 1e-4
+            ),
+        )
+    elif model_class == "logprob_recon_adapter_vit_compressor":
         from activation_research.model import LogprobReconAdapterViTCompressor
 
         model = LogprobReconAdapterViTCompressor(
@@ -539,7 +810,9 @@ def run_contrastive_logprob_recon(
         model = LogprobReconAttentionPoolProgressiveCompressor(
             input_dim=dataset_cfg["input_dim"],
             final_dim=model_params.get("final_dim", 512),
+            dropout=model_params.get("dropout", 0.1),
             input_dropout=model_params.get("input_dropout", 0.3),
+            normalize_input=model_params.get("normalize_input", False),
             recon_seq_len=model_params.get("recon_seq_len", 64),
             recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
             recon_lambda=model_params.get("recon_lambda", 1.0),
@@ -570,7 +843,9 @@ def run_contrastive_logprob_recon(
         model = LogprobReconProgressiveCompressor(
             input_dim=dataset_cfg["input_dim"],
             final_dim=model_params.get("final_dim", 512),
+            dropout=model_params.get("dropout", 0.1),
             input_dropout=model_params.get("input_dropout", 0.3),
+            normalize_input=model_params.get("normalize_input", False),
             recon_seq_len=model_params.get("recon_seq_len", 64),
             recon_hidden_dim=model_params.get("recon_hidden_dim", 256),
             recon_lambda=model_params.get("recon_lambda", 1.0),
@@ -578,6 +853,44 @@ def run_contrastive_logprob_recon(
             block_dims=model_params.get("block_dims"),
             pre_norm=model_params.get("pre_norm", False),
         )
+
+    score_projection_surface = bool(
+        eval_cfg.get("score_projection_surface", False)
+    )
+    if score_projection_surface:
+        if not hasattr(model, "project"):
+            raise ValueError(
+                "evaluation.score_projection_surface=true requires a model "
+                "with a projection head"
+            )
+        if not bool(eval_cfg.get("dump_embeddings", False)):
+            raise ValueError(
+                "projection-surface scoring requires evaluation.dump_embeddings=true"
+            )
+
+    model_total_params = sum(p.numel() for p in model.parameters())
+    expected_total_params = model_params.get("expected_total_params")
+    if (
+        expected_total_params is not None
+        and model_total_params != int(expected_total_params)
+    ):
+        raise RuntimeError(
+            f"model parameter guard failed: expected {expected_total_params}, "
+            f"constructed {model_total_params}"
+        )
+    reference_total_params = model_params.get("reference_total_params")
+    model_parameter_delta_pct = None
+    if reference_total_params is not None:
+        model_parameter_delta_pct = 100.0 * (
+            model_total_params - int(reference_total_params)
+        ) / int(reference_total_params)
+    logger.info(
+        "model_class={} total_params={} reference_params={} delta_pct={}",
+        model_class,
+        model_total_params,
+        reference_total_params,
+        model_parameter_delta_pct,
+    )
 
     train_device = device if device != "auto" else (
         "cuda" if torch.cuda.is_available() else "cpu"
@@ -587,10 +900,12 @@ def run_contrastive_logprob_recon(
     checkpoint_dir = os.path.join(output_dir, "artifacts")
     final_weights_path = os.path.join(checkpoint_dir, "final_weights.pt")
     training_skipped = os.path.exists(final_weights_path)
+    training_summary: dict = {}
     if training_skipped:
         logger.info(f"final_weights.pt found — skipping training, loading weights for eval")
         ckpt = torch.load(final_weights_path, map_location=train_device)
         model.load_state_dict(ckpt["model_state_dict"])
+        training_summary = dict(ckpt.get("training_summary", {}))
 
     aug_cfg = data_cfg.get("augmentations", None)
     augment_fn = None
@@ -603,8 +918,63 @@ def run_contrastive_logprob_recon(
 
     from activation_research.training import train_contrastive_logprob_recon
 
+    select_on_val = bool(train_cfg.get("select_on_val", False))
+    checkpoint_selection_metric = str(
+        train_cfg.get("checkpoint_selection_metric", "validation_loss")
+    ).strip().lower()
+    validation_score_fn = None
+    validation_score_name = "validation_score"
+    if select_on_val and checkpoint_selection_metric == "knn_auroc":
+        if not has_val:
+            raise ValueError(
+                "checkpoint_selection_metric='knn_auroc' requires a held-out "
+                "validation split; refusing to select on the test capture"
+            )
+        selection_cfg = dict(train_cfg.get("validation_knn", {}))
+        if str(selection_cfg.get("metric", "euclidean")).lower() != "euclidean":
+            raise ValueError("validation checkpoint KNN must use raw Euclidean distance")
+        if bool(selection_cfg.get("calibrate_k", False)):
+            raise ValueError("validation checkpoint KNN must use a fixed predeclared k")
+        if str(selection_cfg.get("train_selection", "all")).lower() != "all":
+            raise ValueError("validation checkpoint KNN must use the all-example bank")
+
+        if _tokenwise:
+            selection_train_ds = train_eval_ds
+            selection_val_ds = val_eval_ds
+            selection_prefix_length = None
+        else:
+            selection_train_ds = train_ds.slice_layers(target_layers)
+            selection_val_ds = val_ds.slice_layers(target_layers)
+            selection_prefix_length = selection_cfg.get("prefix_length")
+
+        selection_outlier_class = (
+            0
+            if bool(eval_cfg.get("flip_auroc", False))
+            else int(dataset_cfg.get("outlier_class", 1))
+        )
+        validation_score_fn = _make_validation_knn_scorer(
+            activation_parser_df=ap.df,
+            train_dataset=selection_train_ds,
+            val_dataset=selection_val_ds,
+            device=train_device,
+            num_workers=experiment_cfg.get("num_workers", 4),
+            eval_batch_size=eval_cfg.get("eval_batch_size", 256),
+            sub_batch_size=eval_cfg.get("sub_batch_size", 64),
+            outlier_class=selection_outlier_class,
+            k=selection_cfg.get("k", 50),
+            max_train_size=selection_cfg.get("max_train_size", 200000),
+            sample_seed=training_seed,
+            prefix_length=selection_prefix_length,
+        )
+        validation_score_name = "validation_knn_auroc"
+    elif select_on_val and checkpoint_selection_metric != "validation_loss":
+        raise ValueError(
+            "checkpoint_selection_metric must be one of "
+            "{'validation_loss', 'knn_auroc'}"
+        )
+
     if not training_skipped:
-        train_contrastive_logprob_recon(
+        training_summary = train_contrastive_logprob_recon(
             model=model,
             train_dataset=train_ds,
             test_dataset=val_ds,
@@ -621,12 +991,19 @@ def run_contrastive_logprob_recon(
             snapshot_keep_last=3,
             use_labels=train_cfg.get("use_labels", False),
             ignore_label=train_cfg.get("ignore_label", -1),
+            contrastive_objective=contrastive_objective,
+            temporal_loss_weight=train_cfg.get("temporal_loss_weight", 1.0),
+            class_loss_weight=train_cfg.get("class_loss_weight", 1.0),
+            causal_temporal_mode=train_cfg.get(
+                "causal_temporal_mode", "symmetric"
+            ),
             persistent_workers=experiment_cfg.get("persistent_workers", True),
             recon_lambda=model_params.get("recon_lambda", 1.0),
             use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", True),
             infinite_stream_shuffle=True,
             infinite_stream_seed=training_seed,
             steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+            min_total_steps=train_cfg.get("min_total_steps"),
             balanced_sampling=train_cfg.get("balanced_sampling", False),
             grad_clip_norm=train_cfg.get("grad_clip_norm"),
             augment_fn=augment_fn,
@@ -637,20 +1014,32 @@ def run_contrastive_logprob_recon(
             prefix_min_gap=train_cfg.get("prefix_min_gap", 8),
             prefix_sampling_lengths=train_cfg.get("prefix_sampling_lengths"),
             prefix_seed=training_seed,
+            select_on_val=select_on_val,
+            validation_score_fn=validation_score_fn,
+            validation_score_name=validation_score_name,
         )
 
         torch.save(
-            {"model_state_dict": model.state_dict()},
+            {
+                "model_state_dict": model.state_dict(),
+                "training_summary": training_summary,
+            },
             os.path.join(output_dir, "artifacts", "final_weights.pt"),
         )
 
-    # OOD evaluation on target layers
+    # OOD evaluation.  The established routine averages target-layer views.
+    # Token-wise evaluation deliberately exposes exactly one view: token 0
+    # encoded across every selected post-block layer.
     from torch.utils.data import DataLoader
 
     from activation_research.metric_evaluator import MultiMetricHallucinationEvaluator
 
-    train_ds_target = train_ds.slice_layers(target_layers)
-    test_ds_target = test_ds.slice_layers(target_layers)
+    if _tokenwise:
+        train_ds_target = train_eval_ds
+        test_ds_target = test_ds
+    else:
+        train_ds_target = train_ds.slice_layers(target_layers)
+        test_ds_target = test_ds.slice_layers(target_layers)
 
     train_loader = DataLoader(train_ds_target, batch_size=64, shuffle=False)
     eval_loader = DataLoader(test_ds_target, batch_size=64, shuffle=False)
@@ -659,6 +1048,14 @@ def run_contrastive_logprob_recon(
 
     metrics_list: list = []
     for m in eval_cfg["metrics"]:
+        if _tokenwise and m == "cosine":
+            # A token-wise eval item deliberately has one view (t=0), so the
+            # legacy within-sample view-cosine scorer is identically zero.
+            logger.warning(
+                "ignoring invalid intra-view cosine metric for one-view "
+                "token-wise evaluation; use cosine KNN instead"
+            )
+            continue
         if m == "knn":
             knn_params = dict(eval_cfg.get("knn_params", {}))
             knn_params["sample_seed"] = training_seed
@@ -670,14 +1067,61 @@ def run_contrastive_logprob_recon(
                     "train_selection": "all",
                 }
             )
+            if _tokenwise:
+                cosine_knn_params = dict(
+                    eval_cfg.get("cosine_knn_params", knn_params)
+                )
+                cosine_knn_params.update(
+                    {
+                        "metric": "cosine",
+                        "l2_normalize": True,
+                        "sample_seed": training_seed,
+                        "include_per_sample": True,
+                    }
+                )
+                metrics_list.append(
+                    {
+                        "name": "cosine_knn",
+                        "metric": "knn",
+                        "prefix": "cosine",
+                        "kwargs": cosine_knn_params,
+                        "train_selection": "all",
+                    }
+                )
+        elif _tokenwise and m == "linear_probe":
+            linear_probe_params = dict(eval_cfg.get("linear_probe_params", {}))
+            linear_probe_params.update(
+                {
+                    "sample_seed": training_seed,
+                    "include_per_sample": True,
+                }
+            )
+            metrics_list.append(
+                {
+                    "metric": "linear_probe",
+                    "kwargs": linear_probe_params,
+                    "train_selection": "all",
+                }
+            )
         else:
             metrics_list.append(m)
 
     flip_auroc: bool = bool(eval_cfg.get("flip_auroc", False))
     effective_outlier_class = 0 if flip_auroc else dataset_cfg.get("outlier_class", 1)
 
+    train_label_lookup_df = ap.df
+    if _tokenwise and "split" in ap.df.columns:
+        train_label_lookup_df = ap.df.loc[
+            ap.df["split"].astype(str) == "train"
+        ].copy()
+        if train_label_lookup_df.empty:
+            raise RuntimeError(
+                "token-wise evaluation has no isolated training label rows"
+            )
+
     evaluator = MultiMetricHallucinationEvaluator(
         activation_parser_df=eval_ap.df,
+        train_activation_parser_df=train_label_lookup_df,
         train_data_loader=train_loader,
         metrics=metrics_list,
         batch_size=eval_cfg.get("eval_batch_size", 256),
@@ -692,6 +1136,10 @@ def run_contrastive_logprob_recon(
 
     knn_scores_arr = ood_stats.pop("knn_scores", None)
     knn_labels_arr = ood_stats.pop("knn_labels", None)
+    cosine_knn_scores_arr = ood_stats.pop("cosine_knn_scores", None)
+    cosine_knn_labels_arr = ood_stats.pop("cosine_knn_labels", None)
+    linear_probe_scores_arr = ood_stats.pop("linear_probe_scores", None)
+    linear_probe_labels_arr = ood_stats.pop("linear_probe_labels", None)
 
     # ---- Issue #149: AUROC as a function of the response prefix ------------
     # The headline question is whether a hallucination is detectable at token 16,
@@ -718,6 +1166,7 @@ def run_contrastive_logprob_recon(
             _wrapped.eval()
             _evaluator_k = MultiMetricHallucinationEvaluator(
                 activation_parser_df=eval_ap.df,
+                train_activation_parser_df=ap.df,
                 train_data_loader=DataLoader(
                     train_ds_target, batch_size=64, shuffle=False
                 ),
@@ -734,6 +1183,10 @@ def run_contrastive_logprob_recon(
             )
             _stats_k.pop("knn_scores", None)
             _stats_k.pop("knn_labels", None)
+            _stats_k.pop("cosine_knn_scores", None)
+            _stats_k.pop("cosine_knn_labels", None)
+            _stats_k.pop("linear_probe_scores", None)
+            _stats_k.pop("linear_probe_labels", None)
             for _metric_name, _v in _stats_k.items():
                 prefix_curve[f"k{_k}_{_metric_name}"] = _v
             logger.info(
@@ -741,6 +1194,72 @@ def run_contrastive_logprob_recon(
                 f"cosine_auroc={_stats_k.get('cosine_auroc')} "
                 f"mahalanobis_auroc={_stats_k.get('mahalanobis_auroc')}"
             )
+
+    # ---- Issue #151: token-position diagnostic curve --------------------
+    # The primary score above is t=0.  Later-token diagnostics always rebuild
+    # BOTH the KNN reference bank and the test surface at the same token index;
+    # mixing token indices would confound detection with representation shift.
+    token_curve: dict = {}
+    if _tokenwise and eval_cfg.get("eval_token_curve", False):
+        # The requested frozen linear probe is a token-zero scorer. Avoid
+        # fitting six additional probes per run for the later-token diagnostic
+        # curve; distance metrics remain comparable at every position.
+        token_curve_metrics = [
+            spec
+            for spec in metrics_list
+            if not (
+                isinstance(spec, dict)
+                and str(spec.get("metric", "")).lower() == "linear_probe"
+            )
+        ]
+        token_positions = [
+            int(t) for t in eval_cfg.get(
+                "eval_token_positions", [0, 1, 3, 7, 15, 31, 63]
+            )
+        ]
+        for token_index in token_positions:
+            if token_index == 0:
+                token_curve["t0_n_train"] = len(train_ds_target)
+                token_curve["t0_n_test"] = len(test_ds_target)
+                for metric_name, value in ood_stats.items():
+                    token_curve[f"t0_{metric_name}"] = value
+                continue
+            try:
+                train_at_t = train_eval_ds.fixed_token_view(token_index)
+                test_at_t = test_ds.fixed_token_view(token_index)
+            except ValueError as exc:
+                logger.warning(
+                    "token curve t={}: no eligible rows ({})", token_index, exc
+                )
+                token_curve[f"t{token_index}_n_train"] = 0
+                token_curve[f"t{token_index}_n_test"] = 0
+                continue
+
+            evaluator_at_t = MultiMetricHallucinationEvaluator(
+                activation_parser_df=eval_ap.df,
+                train_activation_parser_df=ap.df,
+                train_data_loader=DataLoader(
+                    train_at_t, batch_size=64, shuffle=False
+                ),
+                metrics=token_curve_metrics,
+                batch_size=eval_cfg.get("eval_batch_size", 256),
+                sub_batch_size=eval_cfg.get("sub_batch_size", 64),
+                device=train_device,
+                num_workers=experiment_cfg.get("num_workers", 4),
+                persistent_workers=False,
+                outlier_class=effective_outlier_class,
+            )
+            stats_at_t = evaluator_at_t.compute(
+                DataLoader(test_at_t, batch_size=64, shuffle=False), model
+            )
+            stats_at_t.pop("knn_scores", None)
+            stats_at_t.pop("knn_labels", None)
+            stats_at_t.pop("cosine_knn_scores", None)
+            stats_at_t.pop("cosine_knn_labels", None)
+            token_curve[f"t{token_index}_n_train"] = len(train_at_t)
+            token_curve[f"t{token_index}_n_test"] = len(test_at_t)
+            for metric_name, value in stats_at_t.items():
+                token_curve[f"t{token_index}_{metric_name}"] = value
 
     eval_metrics: dict = {
         "method": method_cfg["name"],
@@ -750,11 +1269,88 @@ def run_contrastive_logprob_recon(
         "split_seed": _resolve_run_split_seed(experiment_cfg, training_seed),
         "n_train": len(train_ds),
         "n_test": len(test_ds),
+        "training_min_total_steps": train_cfg.get("min_total_steps"),
+        "checkpoint_selection": training_summary.get(
+            "checkpoint_selection",
+            "maximum_validation_knn_auroc"
+            if select_on_val and checkpoint_selection_metric == "knn_auroc"
+            else "minimum_validation_loss"
+            if select_on_val
+            else "final_epoch",
+        ),
+        "best_validation_score": training_summary.get(
+            "best_validation_score"
+        ),
+        "best_validation_epoch": training_summary.get(
+            "best_validation_epoch"
+        ),
     }
+    if _tokenwise:
+        eval_metrics.update(
+            {
+                "view_axis": "token",
+                "view_adapter": data_cfg.get(
+                    "view_adapter", "tokenwise_shared_contrastive_cache"
+                ),
+                "token_pair_mode": data_cfg.get(
+                    "token_pair_mode", "first_anchored"
+                ),
+                "contrastive_objective": contrastive_objective,
+                "temporal_loss_weight": float(
+                    train_cfg.get("temporal_loss_weight", 1.0)
+                ),
+                "class_loss_weight": float(
+                    train_cfg.get("class_loss_weight", 1.0)
+                ),
+                "causal_temporal_mode": str(
+                    train_cfg.get("causal_temporal_mode", "symmetric")
+                ),
+                "source_aligned_view_reconstruction": bool(
+                    data_cfg.get("emit_view_logprob_targets", False)
+                ),
+                "shuffle_length_bucket_size": int(
+                    data_cfg.get("shuffle_length_bucket_size", 8)
+                ),
+                "later_token_sampling": str(
+                    data_cfg.get("later_token_sampling", "uniform")
+                ),
+                "later_view_probability": (
+                    float(data_cfg.get("later_view_probability", 0.5))
+                    if pair_mode == "first_mixed"
+                    else None
+                ),
+                "pair_min_response_tokens": int(
+                    data_cfg.get("min_response_tokens", 2)
+                ),
+                "primary_eval_token": 0,
+                "activation_cache_reused": bool(
+                    train_ds.cache is train_eval_ds.cache
+                ),
+                "n_train_base": len(train_base_ds),
+                "n_train_pair_eligible": len(train_ds),
+                "n_train_t0": len(train_ds_target),
+                "n_val_t0": len(val_eval_ds) if has_val else None,
+                "model_class": model_class,
+                "model_total_params": model_total_params,
+                "model_encoder_params": sum(
+                    p.numel() for p in model.encoder.parameters()
+                ),
+                "model_reference_total_params": reference_total_params,
+                "model_parameter_delta_pct": model_parameter_delta_pct,
+                "study_issue": method_cfg.get("study_issue"),
+                "architecture_arm": method_cfg.get("architecture_arm"),
+                "training_recipe": method_cfg.get("training_recipe"),
+                "base_method_config": method_cfg.get("extends"),
+            }
+        )
+        architecture_metadata = getattr(model, "architecture_metadata", None)
+        if architecture_metadata is not None:
+            eval_metrics.update(architecture_metadata())
     eval_metrics.update(ood_stats)
     # Prefix-curve cells are namespaced k{K}_* so they never collide with the
     # full-length metrics above.
     eval_metrics.update(prefix_curve)
+    eval_metrics.update(token_curve)
 
     predictions: list[dict] = []
     if knn_scores_arr is not None and knn_labels_arr is not None:
@@ -774,58 +1370,253 @@ def run_contrastive_logprob_recon(
                 for i, (s, l) in enumerate(zip(knn_scores_arr, knn_labels_arr))
             ]
 
-    # Optional: dump predicted train+test embeddings as memmap-friendly .npy files
-    # for downstream reuse (e.g. KNN-k sweeps, cosine-collapse analysis). Opt-in via
+        def _secondary_halu_scores(scores, labels, *, probability: bool):
+            if scores is None or labels is None:
+                return None
+            if len(scores) != len(predictions) or len(labels) != len(predictions):
+                raise RuntimeError("secondary scorer output is not aligned with KNN predictions")
+            if flip_auroc:
+                # The positive outlier is label 0 under flip_auroc. Probability
+                # scores invert via 1-p; unbounded distance scores via negation.
+                return [
+                    1.0 - float(score) if probability else -float(score)
+                    for score in scores
+                ]
+            return [float(score) for score in scores]
+
+        cosine_halu_scores = _secondary_halu_scores(
+            cosine_knn_scores_arr, cosine_knn_labels_arr, probability=False
+        )
+        linear_halu_scores = _secondary_halu_scores(
+            linear_probe_scores_arr, linear_probe_labels_arr, probability=True
+        )
+        for i, prediction in enumerate(predictions):
+            if cosine_halu_scores is not None:
+                prediction["score_halu_cosine_knn"] = cosine_halu_scores[i]
+            if linear_halu_scores is not None:
+                prediction["score_halu_linear_probe"] = linear_halu_scores[i]
+
+    # Optional: dump predicted embeddings as memmap-friendly .npy files for
+    # downstream reuse (e.g. KNN-k sweeps, cosine-collapse analysis). Opt-in via
     # eval_cfg["dump_embeddings"] — runs only at the final test eval, and downstream
     # callers must explicitly load via np.load(..., mmap_mode='r'); no path in this
-    # codebase reads these files automatically.
+    # codebase reads these files automatically. Token-wise runs additionally
+    # encode the held-out validation set after checkpoint restoration, using
+    # only validation-row labels from the training capture.
     if eval_cfg.get("dump_embeddings", False):
-        # Dump failures must not invalidate the eval — the metrics + predictions
-        # are already in hand. Log the traceback and move on.
+        # Legacy dump failures do not invalidate evaluation. Token-wise runs
+        # are stricter because downstream scorer selection requires a complete,
+        # split-isolated train/val/test artifact set.
         try:
-            from activation_research.evaluation import dump_embeddings_to_memmap
+            from activation_research.evaluation import (
+                dump_embeddings_to_memmap,
+                write_embedding_dump_manifest,
+            )
 
             emb_dir = os.path.join(output_dir, "embeddings")
+            split_seed = _resolve_run_split_seed(
+                experiment_cfg, training_seed
+            )
+            common_dump_metadata = {
+                "dataset": dataset_cfg["name"],
+                "experiment": experiment_cfg.get("experiment_name"),
+                "method": method_cfg["name"],
+                "training_recipe": method_cfg.get(
+                    "training_recipe", method_cfg["name"]
+                ),
+                "architecture_arm": method_cfg.get("architecture_arm"),
+                "training_seed": int(training_seed),
+                "split_seed": int(split_seed),
+                "embedding_surface": "token_zero" if _tokenwise else "target_layers",
+            }
 
             # Test records: the evaluator's labeling used eval_ap.df which is the
             # test parser's df, so test hashkeys resolve and labels are correct.
             test_records = getattr(evaluator, "_labeled_test_embeddings", None)
 
-            # Train records: the evaluator labels baseline embeddings using the
-            # same activation_parser_df (eval_ap.df, the test parser), so train
-            # hashkeys almost never match — _labeled_baseline_embeddings comes
-            # out >99% unlabeled and our dumper filter drops them all. Fix it
-            # here by re-labeling from ap.df (the train parser) before dumping.
-            train_records = None
-            train_records_raw = getattr(evaluator, "_baseline_embeddings", None)
-            if train_records_raw is not None and hasattr(ap, "df") and ap.df is not None:
-                train_hash_to_halu = dict(zip(ap.df["prompt_hash"], ap.df["halu"]))
-                train_records = []
-                for r in train_records_raw:
-                    h = r.get("hashkey")
-                    if h is None:
-                        continue
-                    halu = train_hash_to_halu.get(h)
-                    if halu is None:
-                        continue
-                    rec = dict(r)
-                    rec["halu"] = int(halu)
-                    train_records.append(rec)
+            # Baseline records were resolved against the train parser (ap.df),
+            # independently of the test parser used above.
+            train_records = getattr(evaluator, "_labeled_baseline_embeddings", None)
 
+            split_metas = {}
             if train_records:
-                train_meta = dump_embeddings_to_memmap(train_records, emb_dir, "train")
+                train_meta = dump_embeddings_to_memmap(
+                    train_records,
+                    emb_dir,
+                    "train",
+                    split_metadata={
+                        **common_dump_metadata,
+                        "role": "scorer_reference_bank",
+                        "label_lookup": "training_capture_train_rows",
+                    },
+                    preserve_existing=_preserve_existing_embeddings,
+                )
+                split_metas["train"] = train_meta
                 logger.info(f"dumped train embeddings: {train_meta['n']} × {train_meta['z_shape'][1:]} -> {emb_dir}")
             else:
                 logger.warning("dump_embeddings=true but no labeled train records (check ap.df); skipping train dump")
             if test_records:
-                test_meta = dump_embeddings_to_memmap(test_records, emb_dir, "test")
+                test_meta = dump_embeddings_to_memmap(
+                    test_records,
+                    emb_dir,
+                    "test",
+                    split_metadata={
+                        **common_dump_metadata,
+                        "role": "final_evaluation",
+                        "label_lookup": "test_capture_rows",
+                    },
+                    preserve_existing=_preserve_existing_embeddings,
+                )
+                split_metas["test"] = test_meta
                 logger.info(f"dumped test embeddings: {test_meta['n']} × {test_meta['z_shape'][1:]} -> {emb_dir}")
             else:
                 logger.warning("dump_embeddings=true but evaluator has no _labeled_test_embeddings; skipping test dump")
+
+            if _tokenwise and has_val:
+                val_label_df = ap.df.loc[
+                    ap.df["split"].astype(str) == "val"
+                ].copy()
+                if val_label_df.empty:
+                    raise RuntimeError(
+                        "token-wise validation embedding dump has no isolated "
+                        "validation label rows"
+                    )
+                val_records = evaluator.compute_labeled_split_embeddings(
+                    DataLoader(val_eval_ds, batch_size=64, shuffle=False),
+                    model,
+                    split_name="val",
+                    lookup_df=val_label_df,
+                )
+                val_meta = dump_embeddings_to_memmap(
+                    val_records,
+                    emb_dir,
+                    "val",
+                    split_metadata={
+                        **common_dump_metadata,
+                        "role": "scorer_selection",
+                        "label_lookup": "training_capture_validation_rows",
+                    },
+                    preserve_existing=_preserve_existing_embeddings,
+                )
+                split_metas["val"] = val_meta
+                logger.info(
+                    f"dumped val embeddings: {val_meta['n']} × "
+                    f"{val_meta['z_shape'][1:]} -> {emb_dir}"
+                )
+                if set(split_metas) != {"train", "val", "test"}:
+                    raise RuntimeError(
+                        "token-wise scoring dump requires complete independent "
+                        f"train/val/test artifacts; got {sorted(split_metas)}"
+                    )
+                write_embedding_dump_manifest(
+                    emb_dir,
+                    split_metas,
+                    run_metadata=common_dump_metadata,
+                    preserve_existing=_preserve_existing_embeddings,
+                )
         except Exception:
+            if score_projection_surface or _tokenwise:
+                raise
             logger.exception("dump_embeddings failed; continuing without embeddings dump")
 
+    # Issue #156: the projection-only arm reports both deployment surfaces in
+    # one cell. The encoder has already produced and dumped its token-zero
+    # trunk, so applying the small saved projection MLP avoids a second encoder
+    # pass and prevents a scoring dependency from racing the training cell.
+    if score_projection_surface:
+        from activation_research.projection_scoring import (
+            merge_projection_surface_results,
+            score_saved_projection,
+        )
+
+        projection_metrics, projection_predictions = score_saved_projection(
+            output_dir,
+            evaluation_cfg=eval_cfg,
+            outlier_class=int(effective_outlier_class),
+            sample_seed=int(training_seed),
+            device=train_device,
+        )
+        merge_projection_surface_results(
+            eval_metrics,
+            predictions,
+            projection_metrics,
+            projection_predictions,
+        )
+
     return eval_metrics, predictions
+
+
+def run_tokenwise_contrastive_logprob_recon(
+    ap,
+    dataset_cfg: dict,
+    method_cfg: dict,
+    experiment_cfg: dict,
+    output_dir: str,
+    device: str,
+    training_seed: int,
+    test_ap=None,
+    *,
+    preserve_existing_embeddings: bool = False,
+) -> tuple[dict, list[dict]]:
+    """Issue #151 token-pair contrastive training with token-0 KNN scoring."""
+    return run_contrastive_logprob_recon(
+        ap,
+        dataset_cfg,
+        method_cfg,
+        experiment_cfg,
+        output_dir,
+        device,
+        training_seed,
+        test_ap=test_ap,
+        _tokenwise=True,
+        _preserve_existing_embeddings=preserve_existing_embeddings,
+    )
+
+
+def run_tokenwise_projection_rescore(
+    ap,
+    dataset_cfg: dict,
+    method_cfg: dict,
+    experiment_cfg: dict,
+    output_dir: str,
+    device: str,
+    training_seed: int,
+    test_ap=None,
+) -> tuple[dict, list[dict]]:
+    """Score a trained token-wise projection head without encoder retraining.
+
+    The source run is the sibling method directory named by ``source_method``.
+    Its dumped 512-d token-zero trunk embeddings are passed through the saved
+    projection MLP, then evaluated with the same KNN/probe implementations used
+    by the ordinary token-wise evaluation path.
+    """
+    del ap, test_ap
+    from pathlib import Path
+
+    from activation_research.projection_scoring import score_saved_projection
+
+    source_method = str(method_cfg["source_method"])
+    source_run_dir = (
+        Path(output_dir).parent.parent / source_method / f"seed_{training_seed}"
+    )
+    metrics, predictions = score_saved_projection(
+        source_run_dir,
+        evaluation_cfg=method_cfg["evaluation"],
+        outlier_class=int(dataset_cfg.get("outlier_class", 1)),
+        sample_seed=int(training_seed),
+        device=device,
+    )
+    metrics.update(
+        {
+            "method": method_cfg["name"],
+            "dataset": dataset_cfg["name"],
+            "seed": int(training_seed),
+            "split_seed": _resolve_run_split_seed(experiment_cfg, training_seed),
+            "source_method": source_method,
+            "training_performed": False,
+        }
+    )
+    return metrics, predictions
 
 
 def run_contrastive_logprob_recon_shared_trunk(
@@ -1229,6 +2020,7 @@ def run_contrastive_logprob_recon_dualhead_fusion(
             head_model = PrefixEvalWrapper(head_model, int(prefix_len))
         evaluator = MultiMetricHallucinationEvaluator(
             activation_parser_df=eval_ap.df,
+            train_activation_parser_df=ap.df,
             train_data_loader=train_loader,
             metrics=[{"metric": "knn", "kwargs": knn_params, "train_selection": "all"}],
             batch_size=eval_cfg.get("eval_batch_size", 256),
@@ -2012,6 +2804,215 @@ def run_multi_layer_linear_probe(
         for i, (s, l) in enumerate(zip(all_preds_np, all_labels_np))
     ]
 
+    return eval_metrics, predictions
+
+
+def run_token_zero_mlp_probe(
+    ap,
+    dataset_cfg: dict,
+    method_cfg: dict,
+    experiment_cfg: dict,
+    output_dir: str,
+    device: str,
+    training_seed: int,
+    test_ap=None,
+) -> tuple[dict, list[dict]]:
+    """Train a supervised >=10M-parameter MLP on the token-zero depth trace.
+
+    This is the direct supervised-capacity baseline for Issue #151.  It sees
+    all configured post-block layers but exactly one response token (t=0), and
+    is selected only by AUROC on the held-out validation split.
+    """
+    from sklearn.metrics import average_precision_score, roc_auc_score
+    from torch.utils.data import DataLoader
+
+    from activation_research.model import TokenZeroMLPProbe
+    from activation_research.tokenwise_contrastive_dataset import (
+        TokenwiseContrastiveDataset,
+    )
+    from activation_research.trainer import (
+        LinearProbeTrainer,
+        LinearProbeTrainerConfig,
+    )
+
+    data_cfg = method_cfg["data"]
+    model_cfg = method_cfg["model_params"]
+    train_cfg = method_cfg["training"]
+    relevant_layers = parse_layer_range(data_cfg["relevant_layers"])
+    if int(data_cfg.get("fixed_token", 0)) != 0:
+        raise ValueError("token-zero MLP probe requires data.fixed_token=0")
+    if ap.split_strategy != "three_way":
+        raise ValueError(
+            "token-zero MLP validation selection requires a held-out validation "
+            "split; refusing to select a checkpoint on test data"
+        )
+
+    ds_kwargs = dict(
+        relevant_layers=relevant_layers,
+        num_views=1,
+        pad_length=data_cfg.get("pad_length", 64),
+        preload=data_cfg.get("preload", True),
+        include_response_logprobs=False,
+        check_ram=False,
+    )
+    train_base = ap.get_dataset("train", **ds_kwargs)
+    val_base = ap.get_dataset("val", **ds_kwargs)
+    eval_ap = test_ap if test_ap is not None else ap
+    test_base = eval_ap.get_dataset("test", **ds_kwargs)
+    layer_positions = (
+        list(relevant_layers)
+        if hasattr(train_base, "_relevant_layers")
+        else list(range(len(relevant_layers)))
+    )
+
+    def _token_zero_view(base_dataset):
+        return TokenwiseContrastiveDataset(
+            base_dataset,
+            layer_positions=layer_positions,
+            num_views=1,
+            token_pair_mode="first_anchored",
+            fixed_token=0,
+            min_response_tokens=1,
+            emit_view_logprob_targets=False,
+        )
+
+    train_ds = _token_zero_view(train_base)
+    val_ds = _token_zero_view(val_base)
+    test_ds = _token_zero_view(test_base)
+
+    model = TokenZeroMLPProbe(
+        input_dim=int(dataset_cfg["input_dim"]),
+        num_layers=len(relevant_layers),
+        hidden_dim=int(model_cfg.get("hidden_dim", 2048)),
+        output_dim=int(model_cfg.get("output_dim", 1024)),
+        dropout=float(model_cfg.get("dropout", 0.1)),
+        normalize_input=bool(model_cfg.get("normalize_input", True)),
+    )
+    total_params = sum(parameter.numel() for parameter in model.parameters())
+    parameter_floor = int(model_cfg.get("parameter_floor", 10_000_000))
+    expected_total_params = model_cfg.get("expected_total_params")
+    if total_params < parameter_floor:
+        raise RuntimeError(
+            f"token-zero MLP parameter floor failed: {total_params} < "
+            f"{parameter_floor}"
+        )
+    if expected_total_params is not None and total_params != int(expected_total_params):
+        raise RuntimeError(
+            "token-zero MLP parameter guard failed: expected "
+            f"{expected_total_params}, constructed {total_params}"
+        )
+
+    checkpoint_dir = os.path.join(output_dir, "artifacts")
+    trainer_config = LinearProbeTrainerConfig(
+        max_epochs=int(train_cfg["max_epochs"]),
+        batch_size=int(train_cfg["batch_size"]),
+        lr=float(train_cfg["lr"]),
+        steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+        min_total_steps=train_cfg.get("min_total_steps"),
+        grad_clip_norm=train_cfg.get("grad_clip_norm"),
+        balanced_sampling=bool(train_cfg.get("balanced_sampling", True)),
+        use_infinite_index_stream=bool(
+            train_cfg.get("use_infinite_index_stream", False)
+        ),
+        infinite_stream_seed=int(training_seed),
+        select_on_val=True,
+        device=device,
+        num_workers=int(experiment_cfg.get("num_workers", 4)),
+        persistent_workers=bool(experiment_cfg.get("persistent_workers", True)),
+        checkpoint_dir=checkpoint_dir,
+        save_every=1,
+    )
+    trainer = LinearProbeTrainer(model, config=trainer_config)
+    final_weights_path = os.path.join(checkpoint_dir, "final_weights.pt")
+    training_summary: dict = {}
+    if os.path.exists(final_weights_path):
+        logger.info(
+            "[token_zero_mlp_probe] final_weights.pt found; loading the "
+            "validation-selected checkpoint and skipping training"
+        )
+        checkpoint = torch.load(
+            final_weights_path, map_location=trainer.device, weights_only=True
+        )
+        model.load_state_dict(checkpoint["model_state_dict"])
+        training_summary = dict(checkpoint.get("training_summary", {}))
+    else:
+        trainer.fit(train_dataset=train_ds, val_dataset=val_ds)
+        training_summary = {
+            "checkpoint_selection_metric": "validation_auroc",
+            "selected_epoch": int(trainer.selected_epoch) + 1,
+            "selected_validation_auroc": float(trainer.selected_val_auroc),
+        }
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "training_summary": training_summary,
+            },
+            final_weights_path,
+        )
+
+    eval_device = trainer.device
+    model.eval()
+    model.to(eval_device)
+    eval_loader = DataLoader(
+        test_ds,
+        batch_size=int(train_cfg.get("eval_batch_size", train_cfg["batch_size"])),
+        shuffle=False,
+        num_workers=int(experiment_cfg.get("num_workers", 4)),
+        pin_memory=True,
+        persistent_workers=bool(
+            experiment_cfg.get("persistent_workers", True)
+            and int(experiment_cfg.get("num_workers", 4)) > 0
+        ),
+    )
+    scores: list[float] = []
+    labels: list[int] = []
+    example_ids: list[str] = []
+    with torch.no_grad():
+        for batch in eval_loader:
+            activations = batch["views_activations"].to(
+                eval_device, non_blocking=True
+            )
+            if activations.dim() == 4:
+                activations = activations.squeeze(1)
+            probabilities = model(activations).view(-1).cpu().tolist()
+            scores.extend(float(value) for value in probabilities)
+            labels.extend(int(value) for value in batch["halu"].view(-1).tolist())
+            example_ids.extend(str(value) for value in batch["hashkey"])
+
+    auroc = float(roc_auc_score(labels, scores))
+    auprc = float(average_precision_score(labels, scores))
+    eval_metrics = {
+        "method": method_cfg["name"],
+        "dataset": dataset_cfg["name"],
+        "seed": training_seed,
+        "split_seed": _resolve_run_split_seed(experiment_cfg, training_seed),
+        "n_train": len(train_ds),
+        "n_val": len(val_ds),
+        "n_test": len(test_ds),
+        "auroc": auroc,
+        "auprc": auprc,
+        "primary_eval_token": 0,
+        "relevant_layers": relevant_layers,
+        "model_class": "TokenZeroMLPProbe",
+        "model_total_params": int(total_params),
+        "parameter_floor": parameter_floor,
+        "checkpoint_selection_metric": "validation_auroc",
+        "selected_epoch": training_summary.get("selected_epoch"),
+        "selected_validation_auroc": training_summary.get(
+            "selected_validation_auroc"
+        ),
+        "future_response_tokens_used": False,
+        "contrastive_training": False,
+        "response_logprob_reconstruction": False,
+    }
+    predictions = [
+        {
+            "example_id": example_id,
+            "score_halu": score,
+            "label_halu": label,
+        }
+        for example_id, score, label in zip(example_ids, scores, labels)
+    ]
     return eval_metrics, predictions
 
 
@@ -3255,6 +4256,7 @@ def run_contrastive_actvit(
         use_infinite_index_stream=train_cfg.get("use_infinite_index_stream", True),
         infinite_stream_shuffle=True, infinite_stream_seed=training_seed,
         steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+        min_total_steps=train_cfg.get("min_total_steps"),
         balanced_sampling=train_cfg.get("balanced_sampling", False),
         grad_clip_norm=train_cfg.get("grad_clip_norm"),
         augment_fn=augment_fn,
@@ -3342,6 +4344,16 @@ def run_act_vit(
     model_params = method_cfg.get("model_params", {})
     eval_cfg = method_cfg.get("evaluation", {})
     prefix_training = bool(train_cfg.get("prefix_training", False))
+    fixed_prefix_length_cfg = train_cfg.get("fixed_prefix_length")
+    fixed_prefix_length = (
+        None
+        if fixed_prefix_length_cfg is None
+        else int(fixed_prefix_length_cfg)
+    )
+    if prefix_training and fixed_prefix_length is not None:
+        raise ValueError(
+            "ACT-ViT cannot combine prefix_training with fixed_prefix_length"
+        )
 
     icr_cfg = dataset_cfg["icr_capture"]
     split_seed = _resolve_run_split_seed(experiment_cfg, training_seed)
@@ -3386,6 +4398,13 @@ def run_act_vit(
     train_ds = ACTViTDataset(icr_cfg["train_dir"], train_idx, label_source=label_source)
     val_ds = ACTViTDataset(icr_cfg["train_dir"], val_idx, label_source=label_source)
     test_ds = ACTViTDataset(icr_cfg["test_dir"], test_idx, label_source=label_source)
+    if fixed_prefix_length is not None and not (
+        1 <= fixed_prefix_length <= int(train_ds.max_response_len)
+    ):
+        raise ValueError(
+            "ACT-ViT fixed_prefix_length must be between 1 and "
+            f"{train_ds.max_response_len}; got {fixed_prefix_length}"
+        )
 
     prefix_sampler = None
     if prefix_training:
@@ -3407,6 +4426,11 @@ def run_act_vit(
             f"max={train_ds.max_response_len} "
             f"support={train_cfg.get('prefix_sampling_lengths', 'continuous')} "
             f"seed={training_seed}"
+        )
+    elif fixed_prefix_length is not None:
+        logger.info(
+            "[act_vit] fixed-prefix training enabled: "
+            f"k={fixed_prefix_length} seed={training_seed}"
         )
 
     num_workers = experiment_cfg.get("num_workers", 4)
@@ -3498,6 +4522,7 @@ def run_act_vit(
     # after a mid-epoch crash.
     best_ckpt_path = os.path.join(artifact_dir, "best_checkpoint.pt")
     final_weights_path = os.path.join(artifact_dir, "final_weights.pt")
+    training_skipped_from_complete_checkpoint = False
     if os.path.exists(final_weights_path) and os.path.exists(best_ckpt_path):
         logger.info(
             "[act_vit] final_weights.pt found — training already complete, "
@@ -3506,7 +4531,9 @@ def run_act_vit(
         ckpt = torch.load(best_ckpt_path, map_location=eval_device, weights_only=True)
         model.load_state_dict(ckpt["model_state_dict"])
         best_epoch = int(ckpt.get("epoch", -1))
+        best_val_auroc = float(ckpt.get("selection_auroc", -1.0))
         max_epochs = 0
+        training_skipped_from_complete_checkpoint = True
 
     log_every = 50
     for epoch in range(max_epochs):
@@ -3516,7 +4543,15 @@ def run_act_vit(
         for step_idx, batch in enumerate(train_loader):
             x = batch["activations"].to(eval_device, non_blocking=True)       # (B, L, N, D)
             labels_b = batch["label"].float().to(eval_device, non_blocking=True)  # (B,)
-            if prefix_sampler is None:
+            if fixed_prefix_length is not None:
+                logits = _act_vit_logits_at_prefix(
+                    model,
+                    x,
+                    batch["response_len"].to(eval_device, non_blocking=True),
+                    fixed_prefix_length,
+                )
+                loss = loss_fn(logits, labels_b)
+            elif prefix_sampler is None:
                 logits = model(x).squeeze(1)               # (B,)
                 loss = loss_fn(logits, labels_b)
             else:
@@ -3548,7 +4583,9 @@ def run_act_vit(
 
         # Validation AUROC
         model.eval()
-        if prefix_training:
+        if fixed_prefix_length is not None:
+            val_ks = [fixed_prefix_length]
+        elif prefix_training:
             from activation_research.prefix_views import resolve_eval_prefixes
 
             val_ks = resolve_eval_prefixes(
@@ -3563,7 +4600,7 @@ def run_act_vit(
             with torch.no_grad():
                 for batch in val_loader:
                     x = batch["activations"].to(eval_device, non_blocking=True)
-                    if prefix_training:
+                    if prefix_training or fixed_prefix_length is not None:
                         logits = _act_vit_logits_at_prefix(
                             model,
                             x,
@@ -3619,10 +4656,11 @@ def run_act_vit(
         ckpt = torch.load(best_ckpt, map_location=eval_device, weights_only=True)
         model.load_state_dict(ckpt["model_state_dict"])
 
-    torch.save(
-        {"model_state_dict": model.state_dict()},
-        os.path.join(artifact_dir, "final_weights.pt"),
-    )
+    if not training_skipped_from_complete_checkpoint:
+        torch.save(
+            {"model_state_dict": model.state_dict()},
+            os.path.join(artifact_dir, "final_weights.pt"),
+        )
 
     # Test evaluation
     test_loader = DataLoader(
@@ -3637,12 +4675,16 @@ def run_act_vit(
     with torch.no_grad():
         for batch in test_loader:
             x = batch["activations"].to(eval_device)
-            if prefix_training:
+            if prefix_training or fixed_prefix_length is not None:
                 logits = _act_vit_logits_at_prefix(
                     model,
                     x,
                     batch["response_len"].to(eval_device),
-                    int(test_ds.max_response_len),
+                    (
+                        fixed_prefix_length
+                        if fixed_prefix_length is not None
+                        else int(test_ds.max_response_len)
+                    ),
                 )
             else:
                 logits = model(x).squeeze(1)
@@ -3698,6 +4740,12 @@ def run_act_vit(
             act_vit_prefix_scores[int(_k)] = _sn
             logger.info(f"  [act_vit] k={_k}: auroc={_a}")
 
+    if fixed_prefix_length is not None:
+        act_vit_prefix_curve.setdefault(
+            f"k{fixed_prefix_length}_auroc", auroc
+        )
+        act_vit_prefix_scores.setdefault(fixed_prefix_length, scores_np)
+
     eval_metrics = {
         **act_vit_prefix_curve,
         "method": method_cfg["name"],
@@ -3710,7 +4758,12 @@ def run_act_vit(
         "auroc": auroc,
         "best_val_auroc": best_val_auroc,
         "best_epoch": best_epoch,
-        "training_regime": "multi_k" if prefix_training else "full_length",
+        "training_regime": (
+            f"fixed_k{fixed_prefix_length}"
+            if fixed_prefix_length is not None
+            else ("multi_k" if prefix_training else "full_length")
+        ),
+        "training_prefix_length": fixed_prefix_length,
     }
     predictions = [
         {
@@ -3789,6 +4842,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--embedding-backfill",
+        action="store_true",
+        help=(
+            "Add a missing token-wise train/validation/test embedding manifest "
+            "without replacing existing evaluation or embedding artifacts. "
+            "Requires --eval-only and is incompatible with --force."
+        ),
+    )
+    parser.add_argument(
         "--max-epochs",
         type=int,
         default=None,
@@ -3827,7 +4889,12 @@ def parse_args() -> argparse.Namespace:
             "seed-0 cache rather than rebuilding it (which can take many hours)."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.embedding_backfill and not args.eval_only:
+        parser.error("--embedding-backfill requires --eval-only")
+    if args.embedding_backfill and args.force:
+        parser.error("--embedding-backfill refuses --force to protect prior results")
+    return args
 
 
 def run_contrastive_logprob_recon_twin(
@@ -3950,9 +5017,11 @@ def run_contrastive_logprob_recon_twin(
             infinite_stream_shuffle=True,
             infinite_stream_seed=training_seed,
             steps_per_epoch_override=train_cfg.get("steps_per_epoch_override"),
+            min_total_steps=train_cfg.get("min_total_steps"),
             balanced_sampling=train_cfg.get("balanced_sampling", False),
             grad_clip_norm=train_cfg.get("grad_clip_norm"),
             augment_fn=augment_fn,
+            select_on_val=train_cfg.get("select_on_val", False),
         )
         torch.save(
             {"model_state_dict": head.state_dict()},
@@ -4267,8 +5336,9 @@ def main() -> None:
     elif args.dataset and args.method:
         with open(args.dataset) as f:
             single_dataset_cfg = json.load(f)
-        with open(args.method) as f:
-            single_method_cfg = json.load(f)
+        single_method_cfg = load_method_config(
+            args.method, project_root=str(project_root)
+        )
 
         datasets = [single_dataset_cfg["name"]]
         methods = [single_method_cfg["name"]]
@@ -4344,8 +5414,9 @@ def main() -> None:
                         str(project_root), "configs", "methods", f"{m}.json"
                     )
                     if os.path.exists(mcfg_path):
-                        with open(mcfg_path) as f:
-                            method_configs[m] = json.load(f)
+                        method_configs[m] = load_method_config(
+                            m, project_root=str(project_root)
+                        )
             exp_cfg_loaded["method_configs"] = method_configs
 
         run_specs = enumerate_runs(
@@ -4401,8 +5472,7 @@ def main() -> None:
                 )
                 if not os.path.exists(mcfg_path):
                     continue
-                with open(mcfg_path) as f:
-                    mcfg = json.load(f)
+                mcfg = load_method_config(m, project_root=str(project_root))
             if mcfg.get("training") is None:
                 continue  # non-learned method — doesn't preload
             data = mcfg.get("data", {})
@@ -4680,11 +5750,9 @@ def main() -> None:
                 if method_name in _preloaded_method_cfgs:
                     method_cfg = _preloaded_method_cfgs[method_name]
                 else:
-                    method_cfg_path = os.path.join(
-                        str(project_root), "configs", "methods", f"{method_name}.json"
+                    method_cfg = load_method_config(
+                        method_name, project_root=str(project_root)
                     )
-                    with open(method_cfg_path) as f:
-                        method_cfg = json.load(f)
 
                 # Apply max_epochs / steps_per_epoch overrides
                 if (max_epochs_override is not None or steps_per_epoch_override is not None) and method_cfg.get("training"):
@@ -4725,9 +5793,52 @@ def main() -> None:
                     "contrastive_logprob_recon",
                     "contrastive_logprob_recon_twin",
                     "contrastive_logprob_recon_dualhead_fusion",
+                    "tokenwise_projection_rescore",
+                    "token_zero_mlp_probe",
                 }
                 have_predictions = (not needs_predictions) or os.path.exists(pred_path)
-                if os.path.exists(eval_metrics_path) and have_predictions and not args.force:
+                embedding_manifest_path = os.path.join(
+                    run_dir, "embeddings", "manifest.json"
+                )
+                implicit_embedding_backfill = bool(
+                    args.eval_only
+                    and routine_for_skip
+                    == "tokenwise_contrastive_logprob_recon"
+                    and method_cfg.get("evaluation", {}).get(
+                        "dump_embeddings", False
+                    )
+                    and not os.path.isfile(embedding_manifest_path)
+                )
+                embedding_backfill_requested = bool(
+                    args.embedding_backfill or implicit_embedding_backfill
+                )
+                if embedding_backfill_requested:
+                    if routine_for_skip != "tokenwise_contrastive_logprob_recon":
+                        raise ValueError(
+                            "--embedding-backfill is valid only for the token-wise "
+                            "contrastive routine"
+                        )
+                    if not method_cfg.get("evaluation", {}).get(
+                        "dump_embeddings", False
+                    ):
+                        raise ValueError(
+                            "--embedding-backfill requires evaluation.dump_embeddings=true"
+                        )
+                needs_eval_only_embedding_backfill = bool(
+                    embedding_backfill_requested
+                    and not os.path.isfile(embedding_manifest_path)
+                )
+                if needs_eval_only_embedding_backfill:
+                    logger.info(
+                        f"{method_name} seed={effective_seed}: missing embedding "
+                        "manifest; running protected additive backfill"
+                    )
+                if (
+                    os.path.exists(eval_metrics_path)
+                    and have_predictions
+                    and not args.force
+                    and not needs_eval_only_embedding_backfill
+                ):
                     if prior_error:
                         logger.warning(
                             f"Found both eval_metrics.json and run_error.json for "
@@ -4778,11 +5889,23 @@ def main() -> None:
                         "training_seed": effective_seed,
                         "split_seed": actual_split_seed,
                     }
-                    with open(os.path.join(run_dir, "config.json"), "w") as f:
-                        json.dump(merged_config, f, indent=2)
+                    config_output_path = os.path.join(run_dir, "config.json")
+                    if not (
+                        args.eval_only
+                        and os.path.exists(config_output_path)
+                        and not args.force
+                    ):
+                        with open(config_output_path, "w") as f:
+                            json.dump(merged_config, f, indent=2)
 
                     # Write manifest
-                    write_run_manifest(run_dir)
+                    run_manifest_path = os.path.join(run_dir, "run_manifest.json")
+                    if not (
+                        args.eval_only
+                        and os.path.exists(run_manifest_path)
+                        and not args.force
+                    ):
+                        write_run_manifest(run_dir)
 
                     # Dispatch to method runner
                     routine = method_cfg.get("routine", method_cfg["name"])
@@ -4793,6 +5916,17 @@ def main() -> None:
                         )
                     elif routine == "contrastive_logprob_recon":
                         eval_metrics, predictions = run_contrastive_logprob_recon(
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
+                            test_ap=test_ap,
+                        )
+                    elif routine == "tokenwise_contrastive_logprob_recon":
+                        eval_metrics, predictions = run_tokenwise_contrastive_logprob_recon(
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
+                            test_ap=test_ap,
+                            preserve_existing_embeddings=needs_eval_only_embedding_backfill,
+                        )
+                    elif routine == "tokenwise_projection_rescore":
+                        eval_metrics, predictions = run_tokenwise_projection_rescore(
                             ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
                         )
@@ -4818,6 +5952,11 @@ def main() -> None:
                         )
                     elif routine == "multi_layer_linear_probe":
                         eval_metrics, predictions = run_multi_layer_linear_probe(
+                            ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
+                            test_ap=test_ap,
+                        )
+                    elif routine == "token_zero_mlp_probe":
+                        eval_metrics, predictions = run_token_zero_mlp_probe(
                             ap, dataset_cfg, method_cfg, experiment_cfg, run_dir, device, effective_seed,
                             test_ap=test_ap,
                         )
@@ -4887,7 +6026,9 @@ def main() -> None:
                             json.dump(eval_metrics, f, indent=2)
 
                     # Write predictions.csv
-                    if predictions:
+                    if predictions and not (
+                        args.eval_only and os.path.exists(pred_path) and not args.force
+                    ):
                         pred_path = os.path.join(run_dir, "predictions.csv")
                         with open(pred_path, "w", newline="") as f:
                             writer = csv.DictWriter(f, fieldnames=predictions[0].keys())
@@ -4897,7 +6038,10 @@ def main() -> None:
                     # A successful recovery supersedes a previous per-seed error.
                     # Leaving this marker behind makes status tooling classify valid
                     # eval outputs as failed and causes subsequent runs to repeat.
-                    if _clear_stale_run_error(run_error_path):
+                    if (
+                        not needs_eval_only_embedding_backfill
+                        and _clear_stale_run_error(run_error_path)
+                    ):
                         logger.info(
                             f"Removed stale run_error.json after successful {method_name} recovery"
                         )
@@ -4923,14 +6067,24 @@ def main() -> None:
                     logger.error(
                         f"Failed {method_name} seed={effective_seed}: {tb}"
                     )
-                    # Write error record so we know this run failed
-                    error_path = os.path.join(run_dir, "run_error.json")
-                    with open(error_path, "w") as f:
-                        json.dump(
-                            {"method": method_name, "seed": effective_seed, "error": tb},
-                            f,
-                            indent=2,
+                    if needs_eval_only_embedding_backfill:
+                        # The dispatch queue retains the failure log. Keep the
+                        # scientific run directory strictly additive even when
+                        # backfill fails; in particular, never replace a prior
+                        # run_error.json from the original experiment.
+                        logger.error(
+                            "Embedding backfill failed; preserving the existing "
+                            "run directory without writing run_error.json"
                         )
+                    else:
+                        # Write error record so we know this run failed.
+                        error_path = os.path.join(run_dir, "run_error.json")
+                        with open(error_path, "w") as f:
+                            json.dump(
+                                {"method": method_name, "seed": effective_seed, "error": tb},
+                                f,
+                                indent=2,
+                            )
                     had_failures += 1
 
     if args.smoketest_memmap_cache:

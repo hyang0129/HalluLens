@@ -1,0 +1,13 @@
+{
+  "_comment": "Issue #156 Stage 2: v1 input-LayerNorm confirmation seeds 1-4; seed 0 and matched no-norm baselines already exist.",
+  "experiment_name": "issue156_arch_v1_hotpotqa",
+  "dataset": "hotpotqa_memmap",
+  "methods": ["tokenwise_arch_v1_input_norm_only"],
+  "split_seed": 1,
+  "split_seeds": [1, 2, 3, 4],
+  "training_seeds": [1, 2, 3, 4],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs"
+}

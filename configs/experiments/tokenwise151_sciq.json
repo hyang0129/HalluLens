@@ -1,0 +1,15 @@
+{
+  "_comment": "Issue #151 token-wise contrastive pilot. MMLU is excluded from this experiment matrix.",
+  "experiment_name": "tokenwise151_sciq",
+  "dataset": "sciq_memmap",
+  "methods": [
+    "tokenwise_contrastive_first_anchored"
+  ],
+  "split_seed": 42,
+  "training_seeds": [0, 1, 2, 3, 4],
+  "split_seeds": [42, 1, 2, 3, 4],
+  "device": "auto",
+  "num_workers": 4,
+  "persistent_workers": true,
+  "output_dir": "runs"
+}

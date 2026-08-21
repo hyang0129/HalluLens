@@ -39,3 +39,67 @@ def test_knn_metric_downsamples_large_train_set():
     assert stats["knn_train_size_used"] <= 100
     assert stats["knn_k"] in {50, 100, 200, 500, 1000} or stats["knn_k"] <= stats["knn_train_size_used"]
     assert "knn_auroc" in stats
+
+
+def test_knn_metric_reports_explicit_l2_normalized_cosine_contract():
+    from activation_research.metrics import knn_ood_stats
+
+    train_records = [
+        {"z1": torch.tensor([1.0, 0.0]), "halu": 0},
+        {"z1": torch.tensor([2.0, 0.0]), "halu": 0},
+        {"z1": torch.tensor([0.0, 1.0]), "halu": 1},
+        {"z1": torch.tensor([0.0, 3.0]), "halu": 1},
+    ]
+    test_records = [
+        {"z1": torch.tensor([4.0, 0.1]), "halu": 0},
+        {"z1": torch.tensor([3.0, 0.2]), "halu": 0},
+        {"z1": torch.tensor([0.1, 4.0]), "halu": 1},
+        {"z1": torch.tensor([0.2, 3.0]), "halu": 1},
+    ]
+
+    stats = knn_ood_stats(
+        train_records,
+        test_records,
+        k=1,
+        metric="cosine",
+        l2_normalize=True,
+        include_per_sample=True,
+    )
+
+    assert stats["knn_metric"] == "cosine"
+    assert stats["knn_l2_normalized"] is True
+    assert len(stats["knn_scores"]) == len(test_records)
+
+
+def test_frozen_linear_probe_uses_fixed_train_only_classifier():
+    from activation_research.metrics import frozen_linear_probe_stats
+
+    train_records = [
+        {"z1": torch.tensor([-3.0, -0.2]), "halu": 0},
+        {"z1": torch.tensor([-2.0, 0.1]), "halu": 0},
+        {"z1": torch.tensor([-1.0, -0.1]), "halu": 0},
+        {"z1": torch.tensor([1.0, 0.2]), "halu": 1},
+        {"z1": torch.tensor([2.0, -0.1]), "halu": 1},
+        {"z1": torch.tensor([3.0, 0.1]), "halu": 1},
+    ]
+    test_records = [
+        {"z1": torch.tensor([-2.5, 0.0]), "halu": 0},
+        {"z1": torch.tensor([-0.5, 0.0]), "halu": 0},
+        {"z1": torch.tensor([0.5, 0.0]), "halu": 1},
+        {"z1": torch.tensor([2.5, 0.0]), "halu": 1},
+    ]
+
+    stats = frozen_linear_probe_stats(
+        train_records,
+        test_records,
+        C=1.0,
+        max_iter=1000,
+        include_per_sample=True,
+    )
+
+    assert stats["linear_probe_auroc"] == 1.0
+    assert stats["linear_probe_auprc"] == 1.0
+    assert stats["linear_probe_C"] == 1.0
+    assert stats["linear_probe_encoder_frozen"] is True
+    assert stats["linear_probe_test_tuned"] is False
+    assert len(stats["linear_probe_scores"]) == len(test_records)
